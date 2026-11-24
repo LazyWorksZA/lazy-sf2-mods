@@ -21,7 +21,7 @@ bool hooks_disabled() {
 void log_host() {
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    LOG("lazysf2 " __DATE__ " " __TIME__ " loaded into %ls", exe);
+    LOG("lazysf2 " __DATE__ " " __TIME__ " loaded into %ls", lazysf2::log::log_path(exe).c_str());
 }
 
 // The exe is DPI-unaware. At display scaling other than 100% Windows gives it a virtual desktop

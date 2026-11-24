@@ -327,7 +327,7 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
     }
     const int mouse_id = splice_controls(out);
     const size_t need = wide ? 2 + out.size() * 2 : out.size();
-    if (need >= bytes) {
+    if (need + 2 > bytes) {  // keep room for a 2-byte terminator
         LOG("menu: no room to add Display Mode (%zu of %u bytes)", need, bytes);
         return n;
     }
@@ -611,6 +611,23 @@ void hook_options_screen(HMODULE opts) {
                       reinterpret_cast<void**>(&o_CtlExit), "OptionsScreen Controls Exit");
 }
 
+// True if base is still the loaded OptionsScreen.dll image (not freed, not replaced by another DLL).
+bool old_opts_still_loaded(HMODULE base) {
+    HMODULE h = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(base), &h) ||
+        h != base) {
+        return false;
+    }
+    wchar_t path[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameW(base, path, MAX_PATH);
+    static constexpr wchar_t kName[] = L"\\OptionsScreen.dll";
+    constexpr DWORD kLen = static_cast<DWORD>(_countof(kName) - 1);
+    if (n < kLen || n >= MAX_PATH) return false;
+    return CompareStringOrdinal(path + n - kLen, static_cast<int>(kLen), kName, static_cast<int>(kLen), TRUE) ==
+           CSTR_EQUAL;
+}
+
 }  // namespace
 
 bool install_menu_hooks() {
@@ -640,11 +657,16 @@ void menu_on_modules_loaded() {
     AcquireSRWLockExclusive(&g_opts_lock);
     if (!(opts == g_opts && *init == 0xE9)) {
         if (g_opts) {
-            // Forget the hooks on the previous image. If it was mapped at the same address, this just
-            // writes back the original bytes; if it is gone, MinHook reports an error and we move on.
-            for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva, kCtlInitRva, kCtlRefreshRva,
-                              kCtlChangedRva, kCtlExitRva}) {
-                MH_RemoveHook(at_rva(g_opts, rva));
+            // Forget the hooks on the previous image. MinHook restores the original bytes on removal,
+            // so only do that while the old base is still our OptionsScreen.dll; otherwise those
+            // bytes would be written into whatever is mapped there now.
+            if (old_opts_still_loaded(g_opts)) {
+                for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva, kCtlInitRva,
+                                  kCtlRefreshRva, kCtlChangedRva, kCtlExitRva}) {
+                    MH_RemoveHook(at_rva(g_opts, rva));
+                }
+            } else {
+                LOG("menu: old OptionsScreen.dll image gone, dropping its hooks without restoring");
             }
             g_opts = nullptr;
         }

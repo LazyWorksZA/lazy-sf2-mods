@@ -43,7 +43,7 @@ BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
 
     const int v = read_int(path, L"GraphicsOptions", L"DisplayMode", -1);
     g_display = (v == static_cast<int>(DisplayMode::Borderless)) ? DisplayMode::Borderless : DisplayMode::Fullscreen;
-    LOG("config: %ls [GraphicsOptions] DisplayMode=%d -> %s", path.c_str(), v,
+    LOG("config: %ls [GraphicsOptions] DisplayMode=%d -> %s", log::log_path(path).c_str(), v,
         g_display.load() == DisplayMode::Borderless ? "Borderless" : "Fullscreen (stock)");
 
     const int m = read_int(path, L"GraphicsOptions", L"DisplayMonitor", 0);
