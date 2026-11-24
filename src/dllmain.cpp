@@ -6,6 +6,7 @@
 
 #include <MinHook.h>
 
+#include "config.h"
 #include "hooks/hooks.h"
 #include "log.h"
 #include "proxy/proxy.h"
@@ -42,8 +43,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 LOG("MH_Initialize failed: %s", MH_StatusToString(s));
                 return TRUE;  // keep the proxy working even if hooking is impossible
             }
-            bool ok = lazysf2::hooks::install_window_hooks();
-            ok &= lazysf2::hooks::install_dxgi_hooks();
+            lazysf2::config::load();
+            bool ok = true;
+            if (lazysf2::config::get().borderless) ok &= lazysf2::hooks::install_window_hooks();
+            ok &= lazysf2::hooks::install_module_watch();
             s = MH_EnableHook(MH_ALL_HOOKS);
             LOG("hooks installed: %s, enable: %s", ok ? "ok" : "PARTIAL", MH_StatusToString(s));
             break;

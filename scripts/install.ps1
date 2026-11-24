@@ -6,10 +6,13 @@
 .EXAMPLE
   .\scripts\install.ps1                       # game folder from the registry, Release build
   .\scripts\install.ps1 -GameDir 'D:\SF2' -Config Debug
+  .\scripts\install.ps1 -MouseMode Cursor     # game cursor follows the Windows cursor (remote control)
 #>
 param(
     [string]$GameDir,
-    [ValidateSet('Release', 'Debug')] [string]$Config = 'Release'
+    [ValidateSet('Release', 'Debug')] [string]$Config = 'Release',
+    # Writes lazysf2.ini. Omit to keep an existing lazysf2.ini unchanged.
+    [ValidateSet('Stock', 'Cursor')] [string]$MouseMode
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -25,7 +28,11 @@ if ((Test-Path $dst) -and -not (Test-Path $manifest)) {
 }
 
 Copy-Item $src $dst -Force
+if ($MouseMode) {
+    @('[Mouse]', "Mode=$MouseMode") | Set-Content -Path (Join-Path $GameDir 'lazysf2.ini') -Encoding ascii
+    Write-Host "lazysf2.ini: [Mouse] Mode=$MouseMode"
+}
 # Everything the mod may create in the game folder; lazysf2.log is written by the DLL at runtime.
-@('winmm.dll', 'lazysf2.log', $ManifestName) | Set-Content -Path $manifest -Encoding utf8
+@('winmm.dll', 'lazysf2.ini', 'lazysf2.log', $ManifestName) | Set-Content -Path $manifest -Encoding utf8
 Write-Host "Installed $Config build to $GameDir"
 Write-Host "Log after a run: $(Join-Path $GameDir 'lazysf2.log')"

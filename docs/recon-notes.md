@@ -189,7 +189,35 @@ The implementation is in `src/`. It's a `winmm.dll` proxy (193/193 exports forwa
 
 **Uninstall:** `scripts/uninstall.ps1` removed the 3 added files, and the game folder matched the pre-install snapshot exactly.
 
-## 10. Open questions
+## 10. Mouse input (DirectInput.dll) and Cursor mode
+
+The game's input manager keeps a mouse-state block at `this+0x118`, laid out as `int` fields:
+
+| Field | Content |
+|---|---|
+| `[0]` | `IDirectInputDevice8*` |
+| `[4..7]` | cursor range: left, top, right and bottom, inclusive |
+| `[8]`, `[9]` | x, y |
+| `[10]` | wheel |
+| `[0x11]` | movement threshold before a "moved" event is sent (10) |
+| `[0x12]` | "position was set" flag |
+
+**Functions** (DirectInput.dll RVAs):
+- `+0x5580` is setup. It does `CreateDevice(GUID_SysMouse)`, `SetDataFormat(c_dfDIMouse)`, then **`SetCooperativeLevel(hwnd, EXCLUSIVE|FOREGROUND)`** (flags `0x5`) and a buffer size of 256. The range starts as the primary screen size, and the cursor starts at the centre (`+0x5390`).
+- `+0x51b0` is the per-frame read. It calls `GetDeviceData`, then adds the `DIMOFS_X/Y/Z` deltas to `[8]`, `[9]` and `[10]`. It turns the button records into button events, clamps x and y to the range, then sends a "moved" event for each axis through `+0x50f0`. The event carries no coordinate; consumers ask for the position.
+- `+0x2840` (manager) is **SetRange**. **The menu system sets the range to (0,0)–(1007,751)**: its 1024×768 virtual space (`MenuSystem.ini` `Width/Height`) minus the 16-pixel cursor image.
+- Accessors: GetPos (`+0x4ed0`, raw `[8]`/`[9]`), SetPos (`+0x4ef0`), the centre of the range (`+0x4f20`), Recenter (`+0x5180`), GetAxis(i) (`+0x4f50`) and GetButton(i) (`+0x4f80`).
+- The game creates **two** system-mouse devices. Only the first one is read.
+
+**Cursor mode** (`lazysf2.ini` `[Mouse] Mode=Cursor`) is for remote-control tools that inject absolute mouse positions. DirectInput turns those into bogus relative movement, so the stock cursor drifts. That happens in stock too, without the mod.
+- The mouse is made **non-exclusive** (`0x5` → `0x6`), and its X/Y records are removed from `GetDeviceData`.
+- Before each `+0x51b0` read, `[8]` and `[9]` are set to the Windows cursor's client position scaled to 1024×768. The game's clamp then applies as usual.
+- The game window is subclassed so `WM_SETCURSOR` hides the Windows cursor over the client area.
+- The read hook is installed only when DirectInput.dll's timestamp is `0x51d21fcc` and its image size is `0x30000`.
+- **Checked over RustDesk:** the cursor lines up across the screen, and clicks land on the right items.
+- **Not checked yet:** mouse use in flight, where the range may differ.
+
+## 11. Open questions
 
 1. Where does the display block's fullscreen flag (`+0x789e8`) come from? This is the Phase 3 trace.
 2. Does `MakeWindowAssociation` get called anywhere, for example in DisplayManagerDX10? Check DisplayManager's vtable calls on the factory.

@@ -6,11 +6,12 @@ This is a borderless fullscreen mod for Strike Fighters 2 (July 2013 patch). The
 
 ## What it adds
 
-These three files go in the game folder, next to `StrikeFighters2.exe`:
+These files go in the game folder, next to `StrikeFighters2.exe`:
 
 | File | Purpose |
 |---|---|
 | `winmm.dll` | The mod. It passes all calls through to the real Windows `winmm.dll`. |
+| `lazysf2.ini` | Optional settings, only written if you choose a mouse mode. |
 | `lazysf2.log` | A log written on each start. |
 | `lazysf2.manifest.txt` | The list of files to remove when uninstalling. |
 
@@ -33,6 +34,15 @@ You need Visual Studio 2026 (or 2022) with the **Desktop development with C++** 
 
 The script refuses to overwrite a `winmm.dll` that it did not install.
 
+### Playing over remote control (RustDesk, Parsec, ...)
+
+Remote-control tools send absolute mouse positions, which the game's DirectInput mouse misreads, so the menu cursor drifts. That happens without the mod too. Cursor mode makes the game's cursor follow the Windows cursor instead:
+
+```powershell
+.\scripts\install.ps1 -MouseMode Cursor   # writes lazysf2.ini: [Mouse] Mode=Cursor
+.\scripts\install.ps1 -MouseMode Stock    # back to stock mouse handling
+```
+
 ## How to tell it's working
 
 - The game starts on the desktop and covers the monitor, without a screen-mode switch.
@@ -47,4 +57,4 @@ To compare with stock behaviour without uninstalling, start the game with the en
 .\scripts\uninstall.ps1
 ```
 
-This removes exactly the files listed in `lazysf2.manifest.txt`, which returns the game folder to stock. To uninstall by hand, delete the three files listed above.
+This removes exactly the files listed in `lazysf2.manifest.txt`, which returns the game folder to stock. To uninstall by hand, delete the files listed above.

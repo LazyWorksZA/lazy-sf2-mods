@@ -26,13 +26,11 @@ constexpr int kSwapSetFullscreenState = 10;
 constexpr int kSwapResizeTarget = 14;
 
 using CreateDXGIFactory_t = HRESULT(WINAPI*)(REFIID, void**);
-using LoadLibraryExW_t = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 using CreateSwapChain_t = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*,
                                                      IDXGISwapChain**);
 using SetFullscreenState_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, BOOL, IDXGIOutput*);
 using ResizeTarget_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, const DXGI_MODE_DESC*);
 
-LoadLibraryExW_t o_LoadLibraryExW = nullptr;
 CreateDXGIFactory_t o_CreateDXGIFactory = nullptr;
 CreateSwapChain_t o_CreateSwapChain = nullptr;
 SetFullscreenState_t o_SetFullscreenState = nullptr;
@@ -41,7 +39,7 @@ ResizeTarget_t o_ResizeTarget = nullptr;
 std::atomic<bool> g_dxgi_hooked{false};
 std::atomic<bool> g_factory_hooked{false};
 std::atomic<bool> g_swapchain_hooked{false};
-CRITICAL_SECTION g_install_lock;
+SRWLOCK g_install_lock = SRWLOCK_INIT;
 
 void* vtable_slot(void* com_object, int slot) { return (*static_cast<void***>(com_object))[slot]; }
 
@@ -134,14 +132,16 @@ HRESULT WINAPI h_CreateDXGIFactory(REFIID riid, void** out) {
     return hr;
 }
 
+}  // namespace
+
 // --- dxgi.dll load watch ----------------------------------------------------------------------
 
-void try_hook_dxgi() {
+void dxgi_on_modules_loaded() {
     if (g_dxgi_hooked.load()) return;
     HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
     if (!dxgi) return;
 
-    EnterCriticalSection(&g_install_lock);
+    AcquireSRWLockExclusive(&g_install_lock);
     if (!g_dxgi_hooked.load()) {
         wchar_t path[MAX_PATH] = {};
         GetModuleFileNameW(dxgi, path, MAX_PATH);
@@ -153,27 +153,7 @@ void try_hook_dxgi() {
         }
         g_dxgi_hooked = true;
     }
-    LeaveCriticalSection(&g_install_lock);
-}
-
-HMODULE WINAPI h_LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
-    HMODULE h = o_LoadLibraryExW(name, file, flags);
-    try_hook_dxgi();
-    return h;
-}
-
-}  // namespace
-
-bool install_dxgi_hooks() {
-    InitializeCriticalSection(&g_install_lock);
-    // kernel32!LoadLibraryW/A and LoadLibraryExA all end up in kernelbase!LoadLibraryExW.
-    MH_STATUS s = MH_CreateHookApi(L"kernelbase", "LoadLibraryExW", reinterpret_cast<LPVOID>(&h_LoadLibraryExW),
-                                   reinterpret_cast<LPVOID*>(&o_LoadLibraryExW));
-    if (s != MH_OK) {
-        LOG("dxgi: hooking LoadLibraryExW failed: %s", MH_StatusToString(s));
-        return false;
-    }
-    return true;
+    ReleaseSRWLockExclusive(&g_install_lock);
 }
 
 }  // namespace lazysf2::hooks
