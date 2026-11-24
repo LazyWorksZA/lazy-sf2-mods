@@ -97,9 +97,10 @@ inline void missile_spawn_on_present() {
 // The game clock adds dt on each step of the player's aircraft (LiveAircraft::is_player: the first aircraft constructed since the probe table was last empty).
 // sim_game_time() and sim_step_count() may be read from the game thread only (inside a step callback).
 void sim_on_modules_loaded();
-// True once the player was seen and has since been destroyed. Stays true until a new player is chosen (the table
-// empties and refills). Game thread; updated on any aircraft's step.
-bool sim_player_lost();
+// Game thread; updated on any aircraft's step. The player is known while sim has a cached one.
+bool sim_player_known();
+// Incremented on every player loss and every change of player. A run stores it at its start and ends when it differs.
+uint32_t sim_player_epoch();
 double sim_game_time();
 uint64_t sim_step_count();
 // "After an aircraft's Update" callback: called on the game thread, after the original returns and after the

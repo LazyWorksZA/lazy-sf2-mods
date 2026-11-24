@@ -55,6 +55,7 @@ uint64_t g_steps = 0;
 void* g_player = nullptr;  // cached player aircraft, or null
 uint64_t g_player_seq = 0;  // construction seq of the cached player; 0 = none cached
 bool g_player_lost = false;  // a player was cached and has been destroyed; cleared when a new one is found
+uint32_t g_player_epoch = 0;  // bumped on every loss and every change of player
 ULONGLONG g_last_player_tick = 0;  // tick of the last player step
 ULONGLONG g_last_validate = 0;     // tick of the last refresh or validation
 uint32_t g_player_gen = 0;         // g_aircraft_generation when the cache was last refreshed or validated
@@ -93,6 +94,12 @@ void player_cb(const LiveAircraft* list, size_t n, void* vctx) {
 // Applies the result of a table lookup to the cache. Outside the lock, so it may log.
 void apply_player(const PlayerCtx& c) {
     if (c.found) {
+        if (g_player_seq != 0 && c.seq != g_player_seq) {
+            // The table emptied and refilled while no step noticed (mission end, then a new load): a loss, then a
+            // new player.
+            ++g_player_epoch;
+            LOG("sim: player lost (destroyed); a new player was chosen");
+        }
         g_player = c.obj;
         g_player_seq = c.seq;
         g_player_lost = false;  // the probe logs "player chosen"
@@ -103,6 +110,7 @@ void apply_player(const PlayerCtx& c) {
     g_player_seq = 0;
     if (had) {
         g_player_lost = true;
+        ++g_player_epoch;
         LOG("sim: player lost (destroyed); unknown until the aircraft table empties and a new one is constructed");
     }
 }
@@ -151,7 +159,10 @@ void __fastcall h_Update(void* self, void* edx, float dt) {
         // destroyed since the last check (the cached player may be the one that went: it never steps again).
         const ULONGLONG now = GetTickCount64();
         const bool changed = g_aircraft_generation.load(std::memory_order_acquire) != g_player_gen;
-        if ((!g_player || changed || now - g_last_player_tick >= kStaleMs) && now - g_last_validate >= kRetryMs) {
+        // After a loss, look again only when the generation changed: a new player needs the table to empty and
+        // refill, and both bump it.
+        const bool need = g_player ? (changed || now - g_last_player_tick >= kStaleMs) : (!g_player_lost || changed);
+        if (need && now - g_last_validate >= kRetryMs) {
             refresh_player(now);
             is_player = self == g_player && self;
         }
@@ -179,7 +190,8 @@ void __fastcall h_Update(void* self, void* edx, float dt) {
 
 }  // namespace
 
-bool sim_player_lost() { return g_player_lost; }
+bool sim_player_known() { return g_player != nullptr; }
+uint32_t sim_player_epoch() { return g_player_epoch; }
 double sim_game_time() { return g_game_time; }
 uint64_t sim_step_count() { return g_steps; }
 
