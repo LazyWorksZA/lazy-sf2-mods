@@ -61,7 +61,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 LOG("MH_Initialize failed: %s", MH_StatusToString(s));
                 return TRUE;  // keep the proxy working even if hooking is impossible
             }
-            lazysf2::config::load();  // lazysf2.ini; the display mode is read later, outside DllMain
+            // Settings come from Options.ini and are read later, on first use outside DllMain.
             bool ok = lazysf2::hooks::install_window_hooks();
             ok &= lazysf2::hooks::install_menu_hooks();
             ok &= lazysf2::hooks::install_module_watch();

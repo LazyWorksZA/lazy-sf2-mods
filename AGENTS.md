@@ -22,7 +22,8 @@ This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a
    - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `docs/recon-notes.md` §15).
 5. **Stop at each phase checkpoint** listed in the brief, report, and wait for review. If something contradicts the brief, stop and say so; don't work around it.
 6. **Write findings down as you go** in `docs/recon-notes.md`: addresses as RVAs (offsets from the module base), function roles, file formats and open questions.
-7. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
+7. **Third-party notices.** Every third-party component we *distribute* (statically linked libraries such as MinHook; shipped assemblies and binaries such as Velopack's) must be listed in `THIRD_PARTY_NOTICES.md` with its full license text, taken from the package itself rather than from memory. The installer ships that file with `LICENSE`. When you add, upgrade or remove a dependency, update the file in the same change.
+8. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
 
 ## Fixed-address hooks
 
@@ -43,6 +44,13 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 - **MSVC `C1083 Cannot open compiler generated file: ''`** is the long-path limit. Keep build directories short.
 - **Runtime log:** `lazysf2.log` in the game folder. Use it to check that hooks were installed and what they did.
 - **`LAZYSF2_DISABLE=1`** runs the mod as a pure pass-through proxy.
+- **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the headless C# helper (`installer/LazySF2.Manager`, framework-dependent .NET 10, no WinForms), and runs `vpk pack --msi`.
+  - The player-facing artefact is `LazySF2-win.msi`: a wizard (welcome, license with third-party notices, finish), per machine, elevated, with no shortcuts. Velopack's `Setup.exe` is built as well.
+  - It needs the .NET 10 SDK and `vpk`, installed with `dotnet tool install -g vpk --version 1.2.161`. Keep that version in step with the `Velopack` package version in the csproj.
+  - The output in `installer\Releases` and `installer\publish*` is ignored by git.
+  - The helper's install, update and uninstall hooks use the same manifest rules as `scripts/install.ps1`. Hooks have 15–30 s and no UI. The MSI runs them elevated. The per-user `Setup.exe` falls back to a UAC prompt on the next normal start, and its uninstall falls back to an elevated `cmd /c del`.
+  - Velopack's MSI doesn't start the helper after installing and has no "launch" checkbox. The finish page tells players how to start the game.
+- **Settings** live in the player's `Options.ini`, written by the game's own Options menu (rows the mod adds): `[GraphicsOptions] DisplayMode/DisplayMonitor` and `[ControlOptions] MouseMode`. They take effect when the player leaves the Options screen. There is no mod settings file.
 
 ## Reverse-engineering tools
 

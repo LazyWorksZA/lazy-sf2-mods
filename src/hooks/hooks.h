@@ -29,8 +29,9 @@ void dxgi_on_modules_loaded();
 // DirectInput: Windows key in Borderless, and mouse "Cursor" mode (the game's cursor follows the
 // Windows cursor). Called by the module watch.
 void input_on_modules_loaded();
-// Re-applies the keyboard's cooperative level for config::display_mode(). Window thread only.
-void input_apply_display_mode();
+// Re-applies the keyboard's and mouse's cooperative levels for the current display mode and mouse
+// setting (live switches). Window thread only.
+void input_apply_settings();
 
 // Options menu "Display Mode" list (Graphics page), saved as Options.ini [GraphicsOptions]
 // DisplayMode. install_menu_hooks() hooks the exe's file service (call from DllMain);

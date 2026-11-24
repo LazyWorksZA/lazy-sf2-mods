@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- LazySF2 helper: installed by Velopack (MSI or Setup.exe). Headless: its hooks copy the mod
+       (winmm.dll, shipped in payload\) into the Strike Fighters 2 folder and remove it again. All
+       settings are in the game's Options. WinExe so no console window appears. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LazySF2</AssemblyName>
+    <RootNamespace>LazySF2.Manager</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Version>0.1.0</Version>
+    <Product>LazySF2</Product>
+    <Company>Lazy Works</Company>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+
+</Project>

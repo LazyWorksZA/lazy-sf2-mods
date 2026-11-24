@@ -10,15 +10,13 @@
 
 #include "log.h"
 
-extern "C" IMAGE_DOS_HEADER __ImageBase;
-
 namespace lazysf2::config {
 namespace {
 
-Config g_config;
-INIT_ONCE g_display_once = INIT_ONCE_STATIC_INIT;
+INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 std::atomic<DisplayMode> g_display{DisplayMode::Fullscreen};
 std::atomic<int> g_monitor{0};
+std::atomic<MouseMode> g_mouse{MouseMode::Cursor};
 
 // Saved Games\ThirdWire\<exe name>\Options.ini, e.g. ...\StrikeFighters2\Options.ini.
 std::wstring options_ini_path() {
@@ -36,57 +34,61 @@ std::wstring options_ini_path() {
     return path + L"\\ThirdWire\\" + name + L"\\Options.ini";
 }
 
-BOOL CALLBACK load_display_mode(PINIT_ONCE, PVOID, PVOID*) {
+int read_int(const std::wstring& path, const wchar_t* section, const wchar_t* key, int def) {
+    return path.empty() ? def : static_cast<int>(GetPrivateProfileIntW(section, key, def, path.c_str()));
+}
+
+BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
     const std::wstring path = options_ini_path();
-    const int v = path.empty() ? -1 : static_cast<int>(GetPrivateProfileIntW(L"GraphicsOptions", L"DisplayMode", -1, path.c_str()));
+
+    const int v = read_int(path, L"GraphicsOptions", L"DisplayMode", -1);
     g_display = (v == static_cast<int>(DisplayMode::Borderless)) ? DisplayMode::Borderless : DisplayMode::Fullscreen;
     LOG("config: %ls [GraphicsOptions] DisplayMode=%d -> %s", path.c_str(), v,
         g_display.load() == DisplayMode::Borderless ? "Borderless" : "Fullscreen (stock)");
-    const int m = path.empty() ? 0 : static_cast<int>(GetPrivateProfileIntW(L"GraphicsOptions", L"DisplayMonitor", 0, path.c_str()));
+
+    const int m = read_int(path, L"GraphicsOptions", L"DisplayMonitor", 0);
     g_monitor = m > 0 ? m : 0;
     LOG("config: [GraphicsOptions] DisplayMonitor=%d%s", m, m > 0 ? "" : " (stock monitor choice)");
+
+    const int mouse = read_int(path, L"ControlOptions", L"MouseMode", static_cast<int>(MouseMode::Cursor));
+    g_mouse = mouse == static_cast<int>(MouseMode::Stock) ? MouseMode::Stock : MouseMode::Cursor;
+    LOG("config: [ControlOptions] MouseMode=%d -> %s", mouse,
+        g_mouse.load() == MouseMode::Cursor ? "match the Windows cursor" : "stock");
     return TRUE;
 }
 
+void ensure_loaded() { InitOnceExecuteOnce(&g_once, &load, nullptr, nullptr); }
+
 }  // namespace
 
-void load() {
-    wchar_t path[MAX_PATH] = {};
-    DWORD n = GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase), path, MAX_PATH);
-    wchar_t* slash = (n && n < MAX_PATH) ? wcsrchr(path, L'\\') : nullptr;
-    if (!slash) return;
-    wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"lazysf2.ini");
-
-    wchar_t mode[32] = {};
-    GetPrivateProfileStringW(L"Mouse", L"Mode", L"Stock", mode, 32, path);
-    if (_wcsicmp(mode, L"Cursor") == 0) {
-        g_config.mouse = MouseMode::Cursor;
-    } else if (_wcsicmp(mode, L"Stock") != 0) {
-        LOG("config: unknown [Mouse] Mode=%ls, using Stock", mode);
-    }
-    LOG("config: mouse=%s", g_config.mouse == MouseMode::Cursor ? "Cursor" : "Stock");
-}
-
-const Config& get() { return g_config; }
-
 DisplayMode display_mode() {
-    InitOnceExecuteOnce(&g_display_once, &load_display_mode, nullptr, nullptr);
+    ensure_loaded();
     return g_display.load();
 }
 
 void set_display_mode(DisplayMode mode) {
-    InitOnceExecuteOnce(&g_display_once, &load_display_mode, nullptr, nullptr);  // don't let a later load overwrite it
+    ensure_loaded();  // so a later first load can't overwrite it
     g_display = mode;
 }
 
 int display_monitor() {
-    InitOnceExecuteOnce(&g_display_once, &load_display_mode, nullptr, nullptr);
+    ensure_loaded();
     return g_monitor.load();
 }
 
 void set_display_monitor(int number) {
-    InitOnceExecuteOnce(&g_display_once, &load_display_mode, nullptr, nullptr);
+    ensure_loaded();
     g_monitor = number > 0 ? number : 0;
+}
+
+MouseMode mouse_mode() {
+    ensure_loaded();
+    return g_mouse.load();
+}
+
+void set_mouse_mode(MouseMode mode) {
+    ensure_loaded();
+    g_mouse = mode;
 }
 
 }  // namespace lazysf2::config

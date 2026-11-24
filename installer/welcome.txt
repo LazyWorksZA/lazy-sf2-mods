@@ -1,0 +1,11 @@
+LazySF2 adds display and mouse options to Strike Fighters 2 (July 2013 patch):
+
+- Display Mode: Fullscreen or Borderless (Options > Graphics)
+- Screen: which monitor the game runs on (Options > Graphics)
+- Mouse Pointer: match the Windows cursor, or the stock game pointer (Options > Controls)
+
+It also fixes Alt-Tab back into Fullscreen, display scaling above 100%, and the Windows key in Borderless.
+
+Setup copies one file (winmm.dll) into your Strike Fighters 2 folder. No game files are changed, and uninstalling removes it again.
+
+LazySF2 is a fan-made mod, not affiliated with Third Wire Productions. You need your own copy of the game.
