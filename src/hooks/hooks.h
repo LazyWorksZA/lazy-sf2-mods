@@ -94,7 +94,7 @@ struct LiveAircraft {
                              // Every "which one is the player" decision uses this flag, nothing else.
     AircraftSide side;       // the object's FRIENDLY/ENEMY/NEUTRAL flag bit (see aircraft_side.h), read from the object's flag word when sampled; Unknown if the masks are not known
     unsigned long long created_ms;  // GetTickCount64() at construction: coarse, only for diagnostics, never identity
-    // There is no aircraft type name field: no cheap, certain source in the object was found.
+    const char* type_name;   // the aircraft type (the data record's name, e.g. "F-100D") as ASCII, at most 31 characters; empty when unknown. Read once at construction.
 };
 // The tracker's sequence number of the live aircraft whose object is at obj, or 0 if there is none (or tracking is
 // off). Takes the table's lock shared; the caller must not hold the weapon table's lock.

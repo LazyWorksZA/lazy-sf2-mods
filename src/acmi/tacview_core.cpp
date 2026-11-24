@@ -72,6 +72,9 @@ void TacviewCore::add(const TacviewRec& r) {
         char name[kRecNameChars + 1];
         std::copy(r.name, r.name + kRecNameChars, name);
         name[kRecNameChars] = '\0';
+        char type[kRecTypeChars + 1];  // outlives p: p.name may point at it
+        std::copy(r.type, r.type + kRecTypeChars, type);
+        type[kRecTypeChars] = '\0';
         ObjectProps p;
         p.name = name;
         char parent_id[16] = {};
@@ -93,7 +96,12 @@ void TacviewCore::add(const TacviewRec& r) {
                 p.parent = parent_id;
             }
         } else {
-            p.pilot = r.is_player ? "Player" : name;
+            if (type[0]) {  // type known: the model key is the Name, the callsign is the Pilot (the player too)
+                p.name = type;
+                p.pilot = name;
+            } else {
+                p.pilot = r.is_player ? "Player" : name;
+            }
             p.type = "Air+FixedWing";
         }
         switch (side) {

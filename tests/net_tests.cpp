@@ -1568,6 +1568,39 @@ void tacview_tests() {
         expect(ls[4].find("T=0.008983112|0.017966223|3000|") != std::string::npos, "tacview: local lon/lat mapping");
     }
 
+    // Aircraft type name: Name=type, Pilot=callsign (the player too); unknown type keeps the old output.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.header(out, "2026-11-25T00:00:00Z");
+        auto with_type = [](TacviewRec r, const char* type) {
+            strncpy_s(r.type, sizeof(r.type), type, _TRUNCATE);
+            return r;
+        };
+        core.add(with_type(make_rec(1, true, AircraftSide::Friendly, "GUNSLINGER", 1.0, 1, 2, 3, 0, 0, 0), "F-100D"));
+        core.add(with_type(make_rec(2, false, AircraftSide::Enemy, "CRAB 12", 1.0, 1, 2, 3, 0, 0, 0), "MiG-17,F"));
+        core.add(make_rec(3, false, AircraftSide::Enemy, "MiG-21", 1.0, 1, 2, 3, 0, 0, 0));  // type unknown
+        core.add(with_type(make_rec(4, false, AircraftSide::Friendly, "", 1.0, 1, 2, 3, 0, 0, 0), "A-4E"));  // empty callsign
+        core.end_frame(1.0, out);
+        const auto ls = lines_of(out);
+        expect(ls.size() >= 7 && ls[4].find(",Name=F-100D,Pilot=GUNSLINGER,Type=Air+FixedWing,") != std::string::npos,
+               "tacview type: player with a known type gets Name=type, Pilot=callsign");
+        expect(ls[4].rfind("1,T=", 0) == 0, "tacview type: the player keeps id 1");
+        expect(ls[5].find(",Name=MiG-17\\,F,Pilot=CRAB 12,") != std::string::npos,
+               "tacview type: the type name is escaped like any property");
+        expect(ls[6].find(",Name=MiG-21,Pilot=MiG-21,Type=Air+FixedWing,") != std::string::npos,
+               "tacview type: unknown type keeps Name=callsign, Pilot=callsign");
+        expect(ls[7].find("Name=A-4E,") != std::string::npos && ls[7].find("Pilot") == std::string::npos,
+               "tacview type: an empty callsign writes no Pilot");
+    }
+    {  // a player whose type is unknown keeps Pilot=Player (unchanged output)
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "GUNSLINGER", 1.0, 1, 2, 3, 0, 0, 0));
+        core.end_frame(1.0, out);
+        expect(out.find("Name=GUNSLINGER,Pilot=Player,") != std::string::npos, "tacview type: unknown type, player keeps Pilot=Player");
+    }
+
     // 10 Hz limit, monotonic frames, removal, non-finite input, seeded continuation.
     {
         TacviewCore core{TacviewCoreConfig{}};
@@ -1708,7 +1741,7 @@ void tacview_tests() {
                    classify_weapon_type(7) == WeaponClass::Missile && classify_weapon_type(2) == WeaponClass::Rocket &&
                    classify_weapon_type(-5) == WeaponClass::Missile,
                "weapon class: 0 bomb, 1 and 7 missile, 2 rocket, anything else a missile");
-        expect(sizeof(TacviewRec) == 136, "tacview: ring slot is 136 bytes");
+        expect(sizeof(TacviewRec) == 168, "tacview: ring slot is 168 bytes");
     }
 
     // The writer, into a temp folder: folder creation, the file name, the name clash, content, drop and cap.

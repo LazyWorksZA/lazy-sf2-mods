@@ -126,6 +126,9 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.seq = list[i].seq;
         r.t = c.t;
         copy_name(r.name, list[i].name);
+        size_t t = 0;
+        for (; t < acmi::kRecTypeChars && list[i].type_name[t]; ++t) r.type[t] = list[i].type_name[t];
+        r.type[t] = '\0';
         ++used;
     }
     for (size_t i = 0; i < nw; ++i) {
@@ -133,6 +136,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.obj_class = wl[i].weapon_class;
         r.kind = acmi::TacviewRec::kObject;
         r.is_player = 0;
+        r.type[0] = '\0';  // weapons have no type field (ring slots are reused)
         r.seq = wl[i].seq;
         r.parent_seq = wl[i].parent_seq;
         r.t = c.t;

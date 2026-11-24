@@ -27,6 +27,7 @@ constexpr uint32_t kPlayerId = 1;
 constexpr uint32_t kOtherIdBase = 0x10000;
 constexpr uint32_t kWeaponIdBase = 0x1000000;
 constexpr size_t kRecNameChars = 63;
+constexpr size_t kRecTypeChars = 31;  // aircraft type name (Tacview model key), e.g. "F-100D"
 
 // One object's state in a frame, as copied by the game thread: plain data.
 struct TacviewRec {
@@ -42,8 +43,9 @@ struct TacviewRec {
     double pos[3] = {};
     float ang[3] = {};  // pitch, heading, roll in radians
     char name[kRecNameChars + 1] = {};
+    char type[kRecTypeChars + 1] = {};  // aircraft only: the type name, empty when unknown (always empty for weapons)
 };
-static_assert(sizeof(TacviewRec) == 136, "TacviewRec is copied through the ring: keep it 136 bytes");
+static_assert(sizeof(TacviewRec) == 168, "TacviewRec is copied through the ring: keep it 168 bytes");
 
 struct TacviewCoreConfig {
     double ref_lat = 0;    // degrees; origin of the local flat mapping

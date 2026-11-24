@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <cwchar>
 
 #include "config.h"
@@ -51,10 +52,14 @@ constexpr DWORD kNeutralMaskRva = 0xac468;
 constexpr size_t kFlagsOffset = 0x0c;
 constexpr size_t kMaxTracked = 256;
 constexpr size_t kNameChars = 63;
+constexpr size_t kTypeChars = 31;
+constexpr size_t kDataPtrOffset = 0x380;  // object -> pointer to the aircraft data record (set by the constructor)
+constexpr size_t kDataTypeNameOffset = 0x04;  // record: type name, UTF-16, up to 64 characters
 
 struct Entry {
     void* obj;
     wchar_t name[kNameChars + 1];
+    char type[kTypeChars + 1];  // ASCII; empty when unknown
     ULONGLONG created;  // GetTickCount64(): coarse, ties: never identity
     uint64_t seq;       // construction sequence number, from 1; unique and increasing
 };
@@ -82,8 +87,25 @@ using Dtor_t = void(__fastcall*)(void* self, void* edx);
 Ctor_t o_Ctor = nullptr;
 Dtor_t o_Dtor = nullptr;
 
+// The aircraft type name from the object's data record, ASCII-narrowed. Empty on any failure. No C++ objects (SEH).
+void read_type_name(const void* obj, char* out) {
+    out[0] = '\0';
+    __try {
+        const char* rec = *reinterpret_cast<const char* const*>(static_cast<const char*>(obj) + kDataPtrOffset);
+        if (!rec) return;
+        const wchar_t* w = reinterpret_cast<const wchar_t*>(rec + kDataTypeNameOffset);
+        size_t k = 0;
+        for (; k < kTypeChars && w[k]; ++k) out[k] = (w[k] >= 0x20 && w[k] < 0x7f) ? static_cast<char>(w[k]) : '?';
+        out[k] = '\0';
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '\0';
+    }
+}
+
 void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
     void* r = o_Ctor(self, edx, name);
+    char type[kTypeChars + 1];
+    read_type_name(self, type);  // before the lock: the constructor has set the data record pointer
     bool full = false, became_player = false;
     uint64_t seq = 0;
     wchar_t shown[kNameChars + 1] = {};  // the truncated copy, for the log line
@@ -108,6 +130,7 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
                 e.name[i + 1] = L'\0';
             }
         }
+        std::memcpy(e.type, type, sizeof(e.type));
         e.created = GetTickCount64();
         e.seq = seq = g_next_seq++;
         if (table_empty) {
@@ -124,8 +147,8 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
     // Per-aircraft lines only in probe mode; a player build logs the player, a full table and the table emptying.
     if (full) LOG("track: aircraft table full (%zu); further aircraft are not tracked", kMaxTracked);
     if (g_for_probe.load()) {
-        LOG("track: aircraft + %p \"%ls\" seq %llu (%zu live)", self, shown, static_cast<unsigned long long>(seq),
-            live);
+        LOG("track: aircraft + %p \"%ls\" type \"%s\" seq %llu (%zu live)", self, shown, type,
+            static_cast<unsigned long long>(seq), live);
     }
     if (became_player) {
         LOG("track: player chosen: %p \"%ls\" seq %llu (first constructed since the table was empty)", self, shown,
@@ -386,7 +409,8 @@ void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count
                    e.seq,
                    e.seq == g_player_seq,
                    have ? classify_side(flags, masks.friendly, masks.enemy, masks.neutral) : AircraftSide::Unknown,
-                   e.created};
+                   e.created,
+                   e.type};
     }
     callback(list, n, ctx);  // the callback must not log or touch files
     ReleaseSRWLockShared(&g_lock);
