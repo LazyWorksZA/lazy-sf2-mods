@@ -10,7 +10,7 @@ All numbers are little-endian. Structures are packed. A reader is in `src/net/st
 - It is closed (flushed) when the last client leaves, when the player changes, or when the mod shuts down.
 - It stops at 512 MB. The mod logs this once and records nothing more.
 - If a write fails, the mod logs it once and the partial file stays. A file that ends in the middle of a record is therefore valid: a reader keeps the records before it (`StreamStatus::Truncated`).
-- On process exit (the player closes the game with a client still connected) the writer thread is already gone. The mod writes the records still in its queue, but the last moments (up to about 200 ms) may be missing. The file stays readable: it ends cleanly or the reader reports `Truncated`.
+- On process exit (the player closes the game with a client still connected) the writer thread is already gone. The mod writes the records still in its queue, but the last moments (up to about 200 ms) may be missing. The file is normally readable: it ends cleanly or the reader reports `Truncated`. If the writer thread was killed in the middle of a write, the reader may report `BadLength` at the tail, and the records the dead thread held in its own buffer can leave a gap before the ring records the mod appends.
 - The host writes records in host game-time order, because every record is made on the game thread.
 
 ## Header (48 bytes)

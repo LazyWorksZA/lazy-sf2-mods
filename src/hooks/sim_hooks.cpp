@@ -15,11 +15,12 @@
 //
 // Finding the player: the probe marks it (LiveAircraft::is_player: the first aircraft constructed since the
 // table was last empty). The hook caches its pointer and construction seq. When the player is destroyed it is
-// unknown (sim_player_lost()) until the table empties and a new one is constructed; the hook never falls back
-// to another aircraft. A step of the cached player costs one pointer compare, plus one tick read;
+// unknown (sim_player_known() is false) until the table empties and a new one is constructed; the hook never falls
+// back to another aircraft. A step of the cached player costs one pointer compare, plus one tick read;
 // once per second, and whenever the probe's destroy generation changed, it re-checks the cache under the
-// probe lock (this catches an address reused by another aircraft). Other aircraft take the lock only when no player is cached, or none has stepped for
-// 250 ms, and then at most once per 50 ms.
+// probe lock (this catches an address reused by another aircraft). The step of another aircraft takes the lock only
+// when no player is cached and none was lost (or the destroy generation changed), when the destroy generation changed
+// while a player is cached, or when the cached player has not stepped for 250 ms; and then at most once per 50 ms.
 #include <windows.h>
 
 #include <atomic>

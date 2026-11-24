@@ -73,7 +73,11 @@ public:
     // The thread binds, logs "net: host on udp <addr>:<port>" (or the failure) through log, and sets state().
     bool start(const char* address, uint16_t port, LogFn log);
     // Ends the thread: sockets closed, ENet shut down. With in_loader_lock the thread is not joined (a join
-    // can deadlock there), it is waited for until it has cleaned up, for at most 1 s, and then detached.
+    // can deadlock there): stop() waits at most 1 s for it to report that it has cleaned up, and then detaches it.
+    // Residual risk: that report comes just before the thread returns, so on a real FreeLibrary the thread may still
+    // be running its last instructions (in this DLL's code) when the DLL is unmapped, and a thread that did not
+    // finish within 1 s is still running ENet code. Either is a crash at unload. Accepted: developer tool, and
+    // the game never unloads the DLL except at process exit.
     void stop(bool in_loader_lock);
 
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -117,8 +121,8 @@ private:
     static constexpr size_t kControlReserve = 64;
     // At most this many States per slot in the ring at once; the quotas of all slots together fit outside the reserve.
     static constexpr size_t kStateQuota = (kInCap - kControlReserve) / kMaxClients;
-    // The reserve covers every kind of control event for every client (4 each), twice over for a reconnect the game
-    // has not seen yet.
+    // The reserve covers every kind of control event for every client (4 each), twice over: enough for clients that
+    // do not reconnect faster than the game drains the ring.
     static_assert(kControlReserve >= 4 * kMaxClients * 2, "the control reserve is too small");
     static_assert(kStateQuota * kMaxClients <= kInCap - kControlReserve, "the State quotas must fit outside the reserve");
 

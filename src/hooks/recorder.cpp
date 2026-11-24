@@ -131,6 +131,10 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
     // The destroyed player never steps again, so any aircraft's step is where we notice.
     if (g_recording && sim_player_epoch() != g_start_epoch) {
         stop_recording("player lost");
+        // A hotkey press that arrived in the same moment was most likely meant to stop it: it is spent, and must not
+        // be answered later with "not started, player unknown".
+        if (g_toggle_request.exchange(false, std::memory_order_relaxed))
+            LOG("recorder: hotkey ignored, the recording had just ended (player lost)");
         return;
     }
     if (!is_player) {
