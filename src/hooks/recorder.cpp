@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <string>
 
 #include "hooks/hooks.h"
 #include "log.h"
@@ -58,28 +59,39 @@ void write_recording() {
     const wchar_t* dir = probe_output_dir();
     if (!dir) return;
     for (unsigned n = 1; n < 1000; ++n) {
-        wchar_t path[MAX_PATH];
-        if (swprintf_s(path, L"%ls\\rec_%03u.bin", dir, n) < 0) {
-            LOG("recorder: output path too long");
+        wchar_t name[16];
+        swprintf_s(name, L"rec_%03u.bin", n);  // at most 11 characters: cannot truncate
+        const std::wstring path = std::wstring(dir) + L"\\" + name;
+        if (path.size() >= MAX_PATH) {  // CreateFileW without the \?\ prefix is limited to MAX_PATH
+            LOG("recorder: output path too long (%zu characters, limit %d)", path.size(), static_cast<int>(MAX_PATH) - 1);
             return;
         }
-        HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (f == INVALID_HANDLE_VALUE) {
             if (GetLastError() == ERROR_FILE_EXISTS) continue;
-            LOG("recorder: could not create %ls (error %lu)", path, GetLastError());
+            LOG("recorder: could not create %ls (error %lu)", path.c_str(), GetLastError());
             return;
         }
         const uint32_t header[3] = {kMagic, kVersion, g_count};
-        DWORD w1 = 0, w2 = 0;
         const DWORD body = static_cast<DWORD>(g_count * sizeof(RecSample));
-        const BOOL ok = WriteFile(f, header, sizeof(header), &w1, nullptr) &&
-                        WriteFile(f, g_buf, body, &w2, nullptr) && w1 == sizeof(header) && w2 == body;
-        const DWORD err = GetLastError();
+        DWORD w1 = 0, w2 = 0;
+        bool ok = false;
+        if (!WriteFile(f, header, sizeof(header), &w1, nullptr)) {
+            LOG("recorder: writing the header to %ls failed (error %lu)", path.c_str(), GetLastError());
+        } else if (w1 != sizeof(header)) {
+            LOG("recorder: short write of the header to %ls: %lu of %zu bytes", path.c_str(), w1, sizeof(header));
+        } else if (!WriteFile(f, g_buf, body, &w2, nullptr)) {
+            LOG("recorder: writing the samples to %ls failed (error %lu)", path.c_str(), GetLastError());
+        } else if (w2 != body) {
+            LOG("recorder: short write of the samples to %ls: %lu of %lu bytes", path.c_str(), w2, body);
+        } else {
+            ok = true;
+        }
         CloseHandle(f);
         if (ok) {
-            LOG("recorder: wrote %ls (%u samples)", path, g_count);
+            LOG("recorder: wrote %ls (%u samples)", path.c_str(), g_count);
         } else {
-            LOG("recorder: write to %ls failed (error %lu)", path, err);
+            DeleteFileW(path.c_str());  // never leave a partial recording behind
         }
         return;
     }

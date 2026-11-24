@@ -105,7 +105,7 @@ bool sim_register_step_callback(SimStepCallback cb);
 void sim_set_run_active(bool active);
 
 // Recorder (developer tool, part of the probe): Ctrl+Shift+R records the player's aircraft state on every
-// player step (game time), for at most 180 s, and writes <probe dir>ec_NNN.bin when it stops.
+// player step (game time), for at most 180 s, and writes <probe dir>\rec_NNN.bin when it stops.
 // recorder_toggle() is called by the probe's hotkey thread and only sets a request; the game thread acts on it.
 // File format (little endian, no padding): "LZRC", uint32 version (1), uint32 count, then count RecSample.
 #pragma pack(push, 1)
