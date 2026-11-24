@@ -58,6 +58,7 @@ constexpr GUID kGuidSysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44
 
 // vtable slots (identical for the A and W interfaces)
 constexpr int kDiCreateDevice = 3;
+constexpr int kDevRelease = 2;
 constexpr int kDevAcquire = 7;
 constexpr int kDevUnacquire = 8;
 constexpr int kDevGetDeviceData = 10;
@@ -74,6 +75,8 @@ DirectInput8Create_t o_DirectInput8Create = nullptr;
 CreateDevice_t o_CreateDevice = nullptr;
 GetDeviceData_t o_GetDeviceData = nullptr;
 SetCooperativeLevel_t o_SetCooperativeLevel = nullptr;
+using Release_t = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
+Release_t o_Release = nullptr;
 MouseRead_t o_MouseRead = nullptr;
 
 std::atomic<bool> g_dinput_hooked{false};
@@ -161,6 +164,17 @@ HRESULT STDMETHODCALLTYPE h_GetDeviceData(IUnknown* self, DWORD cb, DIDEVICEOBJE
     return hr;
 }
 
+// When the game's last reference to a device goes, drop our pointer (no locks: Release can run on
+// any thread). After the original returns 0 `self` is only compared, never used.
+ULONG STDMETHODCALLTYPE h_Release(IUnknown* self) {
+    const ULONG refs = o_Release(self);
+    if (refs == 0 && (is(g_keyboard, self) || is(g_mouse, self))) {
+        forget(self);
+        LOG("input: game released a device; forgetting it");
+    }
+    return refs;
+}
+
 void hook_device(IUnknown* dev) {
     if (g_device_hooked.exchange(true)) return;
     // Keyboard, mouse and joystick devices share these vtables; the detours check which one it is.
@@ -168,6 +182,8 @@ void hook_device(IUnknown* dev) {
                       reinterpret_cast<void**>(&o_SetCooperativeLevel), "IDirectInputDevice8::SetCooperativeLevel");
     create_and_enable(vtable_slot(dev, kDevGetDeviceData), reinterpret_cast<void*>(&h_GetDeviceData),
                       reinterpret_cast<void**>(&o_GetDeviceData), "IDirectInputDevice8::GetDeviceData");
+    create_and_enable(vtable_slot(dev, kDevRelease), reinterpret_cast<void*>(&h_Release),
+                      reinterpret_cast<void**>(&o_Release), "IDirectInputDevice8::Release");
 }
 
 // --- IDirectInput8 -------------------------------------------------------------------------------

@@ -17,6 +17,19 @@ FILE* g_file = nullptr;
 
 }  // namespace
 
+std::wstring log_path(const std::wstring& path) {
+    wchar_t profile[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return path;
+    while (n > 0 && profile[n - 1] == L'\\') profile[--n] = 0;
+    if (n == 0 || path.size() < n) return path;
+    if (CompareStringOrdinal(path.c_str(), static_cast<int>(n), profile, static_cast<int>(n), TRUE) != CSTR_EQUAL) {
+        return path;
+    }
+    if (path.size() > n && path[n] != L'\\') return path;  // a sibling like <profile>2 is not under the profile
+    return L"%USERPROFILE%" + path.substr(n);
+}
+
 void open() {
     InitializeCriticalSection(&g_lock);
 

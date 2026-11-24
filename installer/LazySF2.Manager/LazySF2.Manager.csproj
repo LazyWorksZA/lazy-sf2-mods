@@ -20,5 +20,8 @@
   <ItemGroup>
     <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="LazySF2.Manager.Tests" />
+  </ItemGroup>
 
 </Project>
