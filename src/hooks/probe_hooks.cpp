@@ -55,6 +55,7 @@ Dtor_t o_Dtor = nullptr;
 void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
     void* r = o_Ctor(self, edx, name);
     bool full = false;
+    wchar_t shown[kNameChars + 1] = {};  // the truncated copy, for the log line
     AcquireSRWLockExclusive(&g_lock);
     size_t slot = g_count;
     for (size_t i = 0; i < g_count; ++i) {
@@ -75,6 +76,7 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
             }
         }
         e.created = GetTickCount64();
+        wcscpy_s(shown, e.name);
         if (slot == g_count) ++g_count;
     } else if (!g_full_logged) {
         g_full_logged = full = true;
@@ -82,7 +84,7 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
     const size_t live = g_count;
     ReleaseSRWLockExclusive(&g_lock);
     if (full) LOG("probe: aircraft table full (%zu); further aircraft are not tracked", kMaxTracked);
-    LOG("probe: aircraft + %p \"%ls\" (%zu live)", self, name ? name : L"", live);
+    LOG("probe: aircraft + %p \"%ls\" (%zu live)", self, shown, live);
     return r;
 }
 
@@ -150,57 +152,96 @@ size_t dumpable_bytes(const void* p) {
 
 unsigned g_snapshot = 0;  // hotkey thread only
 
+struct Block {
+    size_t offset;
+    std::vector<BYTE> bytes;
+};
+struct Copy {
+    unsigned id = 0;
+    wchar_t name[kNameChars + 1] = {};
+    ULONGLONG created = 0;
+    std::vector<BYTE> object;
+    std::vector<Block> blocks;
+};
+
 void take_snapshot() {
     const unsigned number = ++g_snapshot;
-    std::string index = std::to_string(number) + " " + std::to_string(GetTickCount64()) + "\n";
-    unsigned aircraft = 0, dumps = 0;
+    std::vector<Copy> copies;
 
-    // The lock is held (shared) across every copy: the destructor hook needs it exclusively to
-    // remove an object, so no tracked object can be freed while we read it.
+    // Under the shared lock we only copy memory (ReadProcessMemory, VirtualQuery) into heap
+    // buffers. The destructor hook needs the lock exclusively to remove an object, so no tracked
+    // object can be freed while we read it. Files are written after the lock is released.
     AcquireSRWLockShared(&g_lock);
     for (size_t i = 0; i < g_count; ++i) {
         const Entry& e = g_table[i];
-        std::vector<BYTE> bytes(kObjectSize);
-        if (!read_mem(e.obj, bytes.data(), kObjectSize)) continue;
+        Copy c;
+        c.object.resize(kObjectSize);
+        if (!read_mem(e.obj, c.object.data(), kObjectSize)) continue;
         const auto obj = reinterpret_cast<uintptr_t>(e.obj);
-        const unsigned id = static_cast<unsigned>(obj);
-        write_file(g_dir + fmt(L"\\snap%03u_%08x.bin", number, id), bytes.data(), bytes.size());
-        ++aircraft;
-
-        std::string offsets;
-        size_t per_object = 0;
-        for (size_t off = 0; off + 4 <= kObjectSize && per_object < kMaxPointerDumps; off += 4) {
+        c.id = static_cast<unsigned>(obj);
+        wcscpy_s(c.name, e.name);
+        c.created = e.created;
+        for (size_t off = 0; off + 4 <= kObjectSize && c.blocks.size() < kMaxPointerDumps; off += 4) {
             uint32_t value;
-            memcpy(&value, bytes.data() + off, 4);
+            memcpy(&value, c.object.data() + off, 4);
             if (value < 0x10000) continue;
             if (value >= obj && value < obj + kObjectSize) continue;  // the object itself or inside it
             const void* target = reinterpret_cast<const void*>(static_cast<uintptr_t>(value));
             const size_t n = dumpable_bytes(target);
             if (!n) continue;
-            std::vector<BYTE> block(n);
-            if (!read_mem(target, block.data(), n)) continue;
-            write_file(g_dir + fmt(L"\\snap%03u_%08x_f%04zx.bin", number, id, off), block.data(), n);
-            char tag[16];
-            sprintf_s(tag, "%s%zx", offsets.empty() ? "" : ",", off);
-            offsets += tag;
-            ++per_object;
-            ++dumps;
+            Block b{off, std::vector<BYTE>(n)};
+            if (!read_mem(target, b.bytes.data(), n)) continue;
+            c.blocks.push_back(std::move(b));
         }
-        uint32_t vtable;
-        memcpy(&vtable, bytes.data(), 4);
-        char head[16], tail[48];
-        sprintf_s(head, "%08x ", id);
-        sprintf_s(tail, " %llu %08x ", e.created, vtable);
-        index += head;
-        index += to_utf8(e.name);
-        index += tail;
-        index += offsets;
-        index += "\n";
+        copies.push_back(std::move(c));
     }
     ReleaseSRWLockShared(&g_lock);
 
-    write_file(g_dir + fmt(L"\\snap%03u.txt", number), index.data(), index.size());
-    LOG("probe: snapshot %u: %u aircraft, %u pointer dumps -> %ls", number, aircraft, dumps, g_dir.c_str());
+    std::string index = std::to_string(number) + " " + std::to_string(GetTickCount64()) + "\n";
+    unsigned aircraft = 0, dumps = 0, errors = 0;
+    DWORD last_error = 0;
+    auto put = [&](const std::wstring& path, const void* data, size_t n) {
+        if (write_file(path, data, n)) return true;
+        ++errors;
+        last_error = GetLastError();
+        return false;
+    };
+    for (const Copy& c : copies) {
+        if (put(g_dir + fmt(L"\\snap%03u_%08x.bin", number, c.id), c.object.data(), c.object.size())) ++aircraft;
+        std::string offsets;
+        for (const Block& b : c.blocks) {
+            if (!put(g_dir + fmt(L"\\snap%03u_%08x_f%04zx.bin", number, c.id, b.offset), b.bytes.data(),
+                     b.bytes.size())) {
+                continue;
+            }
+            char tag[16];
+            sprintf_s(tag, "%s%zx", offsets.empty() ? "" : ",", b.offset);
+            offsets += tag;
+            ++dumps;
+        }
+        // ptr created_tick vtable offsets name  (the name is last: it may contain spaces)
+        uint32_t vtable;
+        memcpy(&vtable, c.object.data(), 4);
+        char line[96];
+        sprintf_s(line, "%08x %llu %08x %s ", c.id, c.created, vtable, offsets.empty() ? "-" : offsets.c_str());
+        index += line;
+        index += to_utf8(c.name);
+        index += "\n";
+    }
+
+    put(g_dir + fmt(L"\\snap%03u.txt", number), index.data(), index.size());
+    if (errors) {
+        LOG("probe: snapshot %u: %u aircraft, %u pointer dumps -> %ls, %u write errors (last error %lu)", number,
+            aircraft, dumps, g_dir.c_str(), errors, last_error);
+    } else {
+        LOG("probe: snapshot %u: %u aircraft, %u pointer dumps -> %ls", number, aircraft, dumps, g_dir.c_str());
+    }
+}
+
+bool game_in_front() {
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    return fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
 }
 
 DWORD WINAPI hotkey_thread(LPVOID) {
@@ -208,7 +249,7 @@ DWORD WINAPI hotkey_thread(LPVOID) {
     for (;;) {
         Sleep(50);
         const bool down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
-                          (GetAsyncKeyState('D') & 0x8000);
+                          (GetAsyncKeyState('D') & 0x8000) && game_in_front();
         if (down && !was_down) take_snapshot();
         was_down = down;
     }
@@ -216,16 +257,60 @@ DWORD WINAPI hotkey_thread(LPVOID) {
 
 }  // namespace
 
+namespace {
+
+// True if path is dir itself or inside it (case-insensitive, separator boundary).
+bool inside_folder(const std::wstring& path, std::wstring dir) {
+    while (dir.size() > 1 && dir.back() == L'\\') dir.pop_back();
+    if (path.size() < dir.size()) return false;
+    if (CompareStringOrdinal(path.c_str(), static_cast<int>(dir.size()), dir.c_str(), static_cast<int>(dir.size()),
+                             TRUE) != CSTR_EQUAL) {
+        return false;
+    }
+    return path.size() == dir.size() || path[dir.size()] == L'\\' || dir.back() == L'\\';
+}
+
+bool is_absolute(const wchar_t* p) {
+    const bool drive = ((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) && p[1] == L':' &&
+                       (p[2] == L'\\' || p[2] == L'/');
+    const bool unc = (p[0] == L'\\' && p[1] == L'\\') || (p[0] == L'/' && p[1] == L'/');
+    return drive || unc;
+}
+
+// Absolute path of an existing directory that is not the game folder or inside it.
+bool valid_probe_dir(const wchar_t* value, std::wstring& out) {
+    if (!is_absolute(value)) return false;
+    wchar_t full[MAX_PATH];
+    const DWORD n = GetFullPathNameW(value, MAX_PATH, full, nullptr);
+    if (n == 0 || n >= MAX_PATH) return false;
+    const DWORD attrs = GetFileAttributesW(full);
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    wchar_t exe[MAX_PATH];
+    const DWORD en = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (en == 0 || en >= MAX_PATH) return false;
+    wchar_t* slash = wcsrchr(exe, L'\\');
+    if (!slash) return false;
+    *slash = L'\0';
+    if (inside_folder(full, exe)) return false;
+    out = full;
+    while (out.size() > 3 && out.back() == L'\\') out.pop_back();
+    return true;
+}
+
+}  // namespace
+
 void install_probe_hooks() {
     wchar_t dir[MAX_PATH] = {};
     const DWORD n = GetEnvironmentVariableW(L"LAZYSF2_PROBE_DIR", dir, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
+    if (n == 0) {
         LOG("probe: off (LAZYSF2_PROBE_DIR not set)");
         return;
     }
-    g_dir = dir;
-    while (g_dir.size() > 1 && (g_dir.back() == L'\\' || g_dir.back() == L'/')) g_dir.pop_back();
-    CreateDirectoryW(g_dir.c_str(), nullptr);  // fine if it exists
+    if (n >= MAX_PATH || !valid_probe_dir(dir, g_dir)) {
+        g_dir.clear();
+        LOG("probe: off (LAZYSF2_PROBE_DIR is not an existing directory outside the game folder)");
+        return;
+    }
     LOG("probe: on, dumping to %ls (Ctrl+Shift+D takes a snapshot)", g_dir.c_str());
 }
 
