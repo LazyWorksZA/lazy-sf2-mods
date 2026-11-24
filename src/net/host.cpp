@@ -38,6 +38,8 @@
 #include "net/host_core.h"
 #include "net/protocol.h"
 #include "net/receiver_math.h"
+#include "net/stream_format.h"
+#include "net/stream_record.h"
 
 namespace lazysf2::hooks {
 
@@ -78,6 +80,9 @@ char g_addr[48] = {};
 uint16_t g_port = 0;
 
 net::HostCore g_core;
+net::StreamWriter g_stream;  // the recording of the session (stream_record.h): written by its own thread
+double g_now = 0;            // host game time at the latest step, for records made outside a step
+uint32_t g_host_seq = 0;
 std::atomic<bool> g_running{false};      // the step callback is registered and the thread started
 std::atomic<bool> g_has_clients{false};  // mirrors g_nclients for other threads (puppet runs on the render thread)
 
@@ -137,6 +142,33 @@ void sanitize(char* dst, size_t cap, const char* src) {
 
 void core_log(const char* line) { LOG("%s", line); }
 
+// Hands a record to the writer thread: a copy into a ring, no I/O. A no-op while no stream is open.
+void rec(net::StreamKind kind, double t, const void* payload, size_t len) { g_stream.record(kind, t, payload, len); }
+
+// The host player's own state, as a State with client_id 0, once per player step.
+void record_host_state(void* player, double now) {
+    if (!g_stream.is_open()) return;
+    net::StateMsg s{};
+    double pos[3];
+    float vel[3], ang[3], rates[3];
+    read_at(player, kOffPos, pos, 3);
+    read_at(player, kOffVel, vel, 3);
+    read_at(player, kOffAngles, ang, 3);
+    read_at(player, kOffRates, rates, 3);
+    s.client_id = 0;
+    s.seq = ++g_host_seq;
+    s.game_time = now;
+    for (int i = 0; i < 3; ++i) {
+        s.pos[i] = pos[i];
+        s.vel[i] = vel[i];
+        s.ang[i] = ang[i];
+        s.rates[i] = rates[i];
+    }
+    uint8_t buf[96];
+    const size_t n = net::encode(s, buf, sizeof(buf));
+    if (n) rec(net::StreamKind::HostState, now, buf, n);
+}
+
 void flush_send_fail() {
     if (!g_send_fail) return;
     LOG("net: %u message(s) to clients could not be queued for the network thread (out queue full)", g_send_fail);
@@ -183,7 +215,7 @@ void check_live(bool live[net::kMaxClients]) {
 }
 
 // Frees a slot's avatar. If the aircraft is still live its flags are restored (the AI takes it back).
-void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason) {
+void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, net::LeaveReason leave) {
     Avatar& a = g_av[slot];
     if (!a.active) return;
     if (aircraft_live) {
@@ -197,12 +229,19 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason) 
         request_disconnect(slot, a.gen);
     }
     g_core.set_welcomed(static_cast<uint8_t>(slot), a.gen, false);
+    {
+        net::ClientLeftPayload p{};
+        p.client_id = static_cast<uint16_t>(slot + 1);
+        p.reason = static_cast<uint8_t>(leave);
+        rec(net::StreamKind::ClientLeft, g_now, &p, sizeof(p));
+    }
     LOG("net: client %d \"%s\" left (%s); avatar %p %s", slot + 1, a.callsign, why, a.obj,
         aircraft_live ? "given back to the AI" : "is gone, flags not restored");
     a = Avatar{};
     set_clients(g_nclients - 1);
     if (g_nclients == 0) {
         sim_set_run_active(false);
+        g_stream.close(false);  // the writer thread drains, flushes and closes the file
         g_core.reset_host_time();  // the session is over: no Pong from a stale clock
         flush_send_fail();
         LOG("net: no clients left");
@@ -216,7 +255,7 @@ void release_dead() {
     check_live(live);
     g_checked_gen = gen;
     for (int s = 0; s < net::kMaxClients; ++s) {
-        if (g_av[s].active && !live[s]) release(s, "avatar destroyed", false, kByeAvatarLost);
+        if (g_av[s].active && !live[s]) release(s, "avatar destroyed", false, kByeAvatarLost, net::LeaveReason::HostEnded);
     }
 }
 
@@ -331,6 +370,10 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         g_checked_gen = air_gen;
         sim_set_run_active(true);
         g_next_report = now + 1.0;
+        g_host_seq = 0;
+        g_now = now;
+        // Theatre name: not read; the header field stays empty (see docs/stream-format.md).
+        g_stream.open(probe_output_dir(), now, nullptr, core_log);
     }
     Avatar& a = g_av[slot];
     a = Avatar{};
@@ -348,6 +391,13 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     a.win_start = now;
     set_clients(g_nclients + 1);
 
+    {
+        net::ClientJoinedPayload p{};
+        p.client_id = static_cast<uint16_t>(slot + 1);
+        std::memcpy(p.callsign, a.callsign, sizeof(p.callsign) - 1);  // sanitized and NUL-terminated by sanitize()
+        std::memcpy(p.aircraft, a.aircraft, sizeof(p.aircraft) - 1);
+        rec(net::StreamKind::ClientJoined, now, &p, sizeof(p));
+    }
     // The slot may now pass State packets, and only then does the client learn it may send them.
     g_core.set_welcomed(static_cast<uint8_t>(slot), gen, true);
     net::WelcomeMsg w{};
@@ -360,10 +410,11 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     const bool welcomed = n && g_core.send(static_cast<uint8_t>(slot), gen, buf, n, net::kChannelReliable, true);
     if (!welcomed) {
         LOG("net: client %d: the Welcome could not be queued (out queue full); client refused", slot + 1);
-        release(slot, "welcome not sent", true, kByeNone);
+        release(slot, "welcome not sent", true, kByeNone, net::LeaveReason::NoWelcome);
         request_disconnect(slot, gen);
         return;
     }
+    rec(net::StreamKind::WelcomeSent, now, buf, n);
     LOG("net: client %d \"%s\" (%s) joined: avatar %p \"%ls\" (was %.0f m from the player at (%.0f, %.0f, %.0f)), "
         "spawn (%.0f, %.0f, %.0f) heading %.1f deg",
         slot + 1, a.callsign, a.aircraft, c.obj, c.name, c.distance, c.from[0], c.from[1], c.from[2], c.spawn[0],
@@ -523,15 +574,18 @@ void handle_message(const HostEvent& e, void* player, double now) {
         }
         case net::MsgType::State: {
             net::StateMsg s;
-            if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok)
+            if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok) {
+                rec(net::StreamKind::StateReceived, now, e.data, e.len);
                 accept_state(g_av[slot], s);
+            }
             break;
         }
         case net::MsgType::Bye: {
             if (!g_av[slot].active || g_av[slot].gen != e.gen) break;
+            rec(net::StreamKind::ByeReceived, now, e.data, e.len);
             bool live[net::kMaxClients];
             check_live(live);
-            release(slot, "bye", live[slot], kByeNone);
+            release(slot, "bye", live[slot], kByeNone, net::LeaveReason::Left);
             request_disconnect(slot, e.gen);
             break;
         }
@@ -554,7 +608,7 @@ void pump(void* player, double now) {
             if (g_av[slot].active && static_cast<int32_t>(ev[i].gen - g_av[slot].gen) > 0) {
                 bool live[net::kMaxClients];
                 check_live(live);
-                release(slot, "disconnected (missed)", live[slot], kByeNone);
+                release(slot, "disconnected (missed)", live[slot], kByeNone, net::LeaveReason::Left);
             }
             switch (ev[i].kind) {
                 case HostEvent::Connect:
@@ -565,7 +619,7 @@ void pump(void* player, double now) {
                         bool live[net::kMaxClients];
                         check_live(live);
                         release(slot, ev[i].reason == 1 ? "timeout, no packets for 5 s" : "disconnected", live[slot],
-                                kByeNone);
+                                kByeNone, ev[i].reason == 1 ? net::LeaveReason::Timeout : net::LeaveReason::Left);
                     } else {
                         LOG("net: peer %d gone", slot + 1);
                     }
@@ -609,15 +663,17 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
             bool live[net::kMaxClients];
             check_live(live);
             for (int s = 0; s < net::kMaxClients; ++s)
-                if (g_av[s].active) release(s, "the player changed", live[s], kByeSessionEnded);
+                if (g_av[s].active) release(s, "the player changed", live[s], kByeSessionEnded, net::LeaveReason::HostEnded);
         }
         g_core.reset_host_time();  // no Pongs, and no States passed, until the new player's first step
     } else if (g_nclients > 0 && g_aircraft_generation.load(std::memory_order_acquire) != g_checked_gen) {
         release_dead();  // an aircraft was destroyed since the last check: is one of ours gone?
     }
     const double now = sim_game_time();
+    g_now = now;
     if (is_player) {
         pump(aircraft, now);
+        if (g_nclients > 0) record_host_state(aircraft, now);
         if (g_nclients > 0 && now >= g_next_report) {
             report(aircraft, now);
             g_next_report = std::floor(now) + 1.0;
@@ -681,7 +737,8 @@ void host_shutdown() {
     bool live[net::kMaxClients] = {};
     if (g_nclients > 0) check_live(live);
     for (int s = 0; s < net::kMaxClients; ++s)
-        if (g_av[s].active) release(s, "host shut down", live[s], kByeNone);
+        if (g_av[s].active) release(s, "host shut down", live[s], kByeNone, net::LeaveReason::HostEnded);
+    g_stream.close(true);  // waits at most 1 s for the writer to flush, then detaches it
 }
 
 bool host_has_clients() { return g_has_clients.load(std::memory_order_relaxed); }

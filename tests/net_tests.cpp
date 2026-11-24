@@ -2,6 +2,7 @@
 #include <enet/enet.h>
 
 #include <atomic>
+#include <memory>
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -15,6 +16,8 @@
 #include "bot_core.h"
 #include "net/host_core.h"
 #include "net/protocol.h"
+#include "net/stream_format.h"
+#include "net/stream_record.h"
 
 using namespace lazysf2::net;
 
@@ -900,6 +903,288 @@ void bot_loopback_tests() {
     }
 }
 
+// --- Stream recording -------------------------------------------------------------------------------
+
+void stream_log(const char* line) { std::printf("    log: %s\n", line); }
+
+std::vector<uint8_t> read_file(const std::wstring& path) {
+    std::vector<uint8_t> out;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return out;
+    uint8_t tmp[4096];
+    size_t n;
+    while ((n = std::fread(tmp, 1, sizeof(tmp), f)) > 0) out.insert(out.end(), tmp, tmp + n);
+    std::fclose(f);
+    return out;
+}
+
+std::wstring make_temp_dir() {
+    wchar_t base[MAX_PATH];
+    GetTempPathW(MAX_PATH, base);
+    for (unsigned n = GetTickCount() ^ GetCurrentProcessId();; ++n) {
+        wchar_t name[MAX_PATH];
+        swprintf_s(name, L"%slzst_test_%08x", base, n);
+        if (CreateDirectoryW(name, nullptr)) return name;
+        if (GetLastError() != ERROR_ALREADY_EXISTS) return L"";
+    }
+}
+
+void remove_dir(const std::wstring& dir) {
+    for (unsigned n = 1; n < 20; ++n) {
+        wchar_t f[16];
+        swprintf_s(f, L"stream_%03u.lzst", n);
+        DeleteFileW((dir + L"\\" + f).c_str());
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+
+StateMsg make_state(uint16_t id, uint32_t seq, double t) {
+    StateMsg s{};
+    s.client_id = id;
+    s.seq = seq;
+    s.game_time = t;
+    s.pos[0] = 100.0 + seq;
+    s.pos[2] = 1500.0;
+    s.vel[1] = 200.0f;
+    s.ang[1] = 0.5f;
+    return s;
+}
+
+void stream_tests() {
+    std::printf("stream format and writer\n");
+    const std::wstring dir = make_temp_dir();
+    expect(!dir.empty(), "temp dir");
+    if (dir.empty()) return;
+
+    // Write through the writer: every kind, with timestamps.
+    auto w = std::make_unique<StreamWriter>();
+    expect(w->open(dir.c_str(), 12.5, "Europe", stream_log), "open");
+    expect(w->is_open(), "is_open");
+    uint8_t buf[96];
+    ClientJoinedPayload jp{};
+    jp.client_id = 1;
+    set_str(jp.callsign, "Bot");
+    set_str(jp.aircraft, "F-4E");
+    w->record(StreamKind::ClientJoined, 12.5, &jp, sizeof(jp));
+    WelcomeMsg wm{};
+    wm.client_id = 1;
+    wm.host_game_time = 12.5;
+    w->record(StreamKind::WelcomeSent, 12.5, buf, encode(wm, buf, sizeof(buf)));
+    const int kStates = 3000;  // more than a flush buffer's worth, so the writer flushes more than once
+    for (int i = 1; i <= kStates; ++i) {
+        const StateMsg hs = make_state(0, static_cast<uint32_t>(i), 13.0 + 0.01 * i);
+        w->record(StreamKind::HostState, 13.0 + 0.01 * i, buf, encode(hs, buf, sizeof(buf)));
+        const StateMsg cs = make_state(1, static_cast<uint32_t>(i), 13.0 + 0.01 * i - 0.05);
+        w->record(StreamKind::StateReceived, 13.0 + 0.01 * i, buf, encode(cs, buf, sizeof(buf)));
+        if (i % 500 == 0) Sleep(30);  // let the writer keep up: nothing may be dropped
+    }
+    ByeMsg bm{};
+    bm.client_id = 1;
+    w->record(StreamKind::ByeReceived, 99.0, buf, encode(bm, buf, sizeof(buf)));
+    ClientLeftPayload lp{1, static_cast<uint8_t>(LeaveReason::Left)};
+    w->record(StreamKind::ClientLeft, 99.0, &lp, sizeof(lp));
+    expect(w->dropped() == 0, "no records dropped");
+    w->close(false);
+    w.reset();  // the destructor waits for the writer thread (up to 1 s) and detaches it
+
+    const std::vector<uint8_t> file = read_file(dir + L"\\stream_001.lzst");
+    expect(file.size() > sizeof(StreamHeader), "stream_001.lzst written");
+
+    StreamReader r(file.data(), file.size());
+    StreamHeader h{};
+    expect(r.read_header(h) == StreamStatus::Ok, "header parses");
+    expect(std::memcmp(h.magic, "LZST", 4) == 0 && h.version == 1 && h.header_len == 48, "magic, version, header length");
+    expect(h.start_game_time == 12.5 && std::strcmp(h.theatre, "Europe") == 0, "start time and theatre round-trip");
+    int counts[8] = {};
+    int bad = 0;
+    bool times_ok = true, states_ok = true;
+    double last_time = 0;
+    StreamRecord rec;
+    StreamStatus st;
+    while ((st = r.next(rec)) == StreamStatus::Ok) {
+        if (rec.kind < 8) ++counts[rec.kind];
+        if (rec.time < last_time) times_ok = false;  // written in host-time order
+        last_time = rec.time;
+        if (rec.kind == 1 || rec.kind == 2) {
+            StateMsg s{};
+            if (decode(rec.payload, rec.payload_len, s) != Status::Ok) {
+                ++bad;
+            } else if (s.client_id != (rec.kind == 1 ? 1 : 0) || s.pos[0] != 100.0 + s.seq ||
+                       std::fabs(rec.time - (13.0 + 0.01 * s.seq)) > 1e-9) {
+                states_ok = false;
+            }
+        } else if (rec.kind == 3) {
+            WelcomeMsg m{};
+            if (decode(rec.payload, rec.payload_len, m) != Status::Ok || m.host_game_time != 12.5) ++bad;
+        } else if (rec.kind == 4) {
+            ByeMsg m{};
+            if (decode(rec.payload, rec.payload_len, m) != Status::Ok || m.client_id != 1 || rec.time != 99.0) ++bad;
+        } else if (rec.kind == 5) {
+            ClientJoinedPayload p;
+            if (rec.payload_len != sizeof(p)) {
+                ++bad;
+            } else {
+                std::memcpy(&p, rec.payload, sizeof(p));
+                if (p.client_id != 1 || std::strcmp(p.callsign, "Bot") != 0 || std::strcmp(p.aircraft, "F-4E") != 0) ++bad;
+            }
+        } else if (rec.kind == 6) {
+            ClientLeftPayload p;
+            if (rec.payload_len != sizeof(p)) {
+                ++bad;
+            } else {
+                std::memcpy(&p, rec.payload, sizeof(p));
+                if (p.client_id != 1 || p.reason != 0 || rec.time != 99.0) ++bad;
+            }
+        }
+    }
+    expect(st == StreamStatus::End, "the file ends at a record boundary");
+    expect(counts[1] == kStates && counts[2] == kStates && counts[3] == 1 && counts[4] == 1 && counts[5] == 1 &&
+               counts[6] == 1,
+           "every kind round-trips with its count");
+    expect(bad == 0 && states_ok, "payloads and timestamps round-trip");
+    expect(times_ok, "timestamps are non-decreasing");
+
+    // The next stream gets the next number, and a size cap stops it cleanly.
+    {
+        auto w2 = std::make_unique<StreamWriter>();
+        expect(w2->open(dir.c_str(), 1.0, nullptr, stream_log, 1000), "second open (1000 byte cap)");
+        for (int i = 1; i <= 100; ++i) {
+            const StateMsg s = make_state(1, static_cast<uint32_t>(i), i);
+            w2->record(StreamKind::StateReceived, i, buf, encode(s, buf, sizeof(buf)));
+            if (i % 10 == 0) Sleep(30);
+        }
+        w2->close(false);
+        w2.reset();
+        const std::vector<uint8_t> f2 = read_file(dir + L"\\stream_002.lzst");
+        expect(!f2.empty() && f2.size() <= 1000, "the cap holds");
+        StreamReader r2(f2.data(), f2.size());
+        StreamHeader h2{};
+        int n = 0;
+        StreamRecord rc;
+        const bool ok2 = r2.read_header(h2) == StreamStatus::Ok && h2.theatre[0] == '\0';
+        while (r2.next(rc) == StreamStatus::Ok) ++n;
+        expect(ok2 && n > 0 && n < 100, "a capped file is still a valid stream with a prefix of the records");
+    }
+
+    // Reader defences, on the good file.
+    {
+        // Every truncation point near the start: the heap copy is exactly the prefix, so an over-read would be
+        // a crash or garbage under a debugger; here we check that the statuses are right and only whole records come out.
+        bool prefix_ok = true;
+        for (size_t cut = 0; cut < 400 && cut < file.size(); ++cut) {
+            std::vector<uint8_t> part(file.begin(), file.begin() + static_cast<std::ptrdiff_t>(cut));
+            StreamReader tr(part.data(), part.size());
+            StreamHeader th{};
+            const StreamStatus hs = tr.read_header(th);
+            if (cut < sizeof(StreamHeader)) {
+                if (hs != StreamStatus::Truncated) prefix_ok = false;
+                continue;
+            }
+            if (hs != StreamStatus::Ok) {
+                prefix_ok = false;
+                continue;
+            }
+            StreamRecord tc;
+            StreamStatus ts;
+            while ((ts = tr.next(tc)) == StreamStatus::Ok) {
+            }
+            if (ts != StreamStatus::End && ts != StreamStatus::Truncated) prefix_ok = false;
+        }
+        expect(prefix_ok, "every truncation ends as Truncated or End");
+    }
+    {
+        StreamHeader hh{};
+        std::vector<uint8_t> bad_magic = file;
+        bad_magic[0] = 'X';
+        StreamReader a(bad_magic.data(), bad_magic.size());
+        expect(a.read_header(hh) == StreamStatus::BadMagic, "bad magic rejected");
+        std::vector<uint8_t> bad_ver = file;
+        bad_ver[4] = 2;
+        StreamReader b(bad_ver.data(), bad_ver.size());
+        expect(b.read_header(hh) == StreamStatus::BadVersion, "bad version rejected");
+        std::vector<uint8_t> bad_hlen = file;
+        bad_hlen[6] = 8;
+        StreamReader c(bad_hlen.data(), bad_hlen.size());
+        expect(c.read_header(hh) == StreamStatus::BadHeader, "short header_len rejected");
+        std::vector<uint8_t> big_hlen(file.begin(), file.begin() + 100);
+        big_hlen[6] = 0xff;
+        big_hlen[7] = 0xff;
+        StreamReader d(big_hlen.data(), big_hlen.size());  // 0xffff claimed, 100 bytes present
+        expect(d.read_header(hh) == StreamStatus::Truncated, "header_len beyond the data is Truncated, not an over-read");
+
+        // A record length that is too small, too large or wild stops the reader, and it stays stopped.
+        const uint32_t lens[] = {0, 8, kStreamRecordMax + 1, 0x7fffffffu, 0xffffffffu};
+        bool all_bad = true, sticky = true;
+        for (const uint32_t len : lens) {
+            std::vector<uint8_t> f = file;
+            std::memcpy(&f[sizeof(StreamHeader)], &len, 4);
+            StreamReader e(f.data(), f.size());
+            StreamHeader eh{};
+            StreamRecord er;
+            if (e.read_header(eh) != StreamStatus::Ok || e.next(er) != StreamStatus::BadLength) all_bad = false;
+            if (e.next(er) != StreamStatus::BadLength) sticky = false;
+        }
+        expect(all_bad, "record lengths below 9 and above 105 are rejected");
+        expect(sticky, "a failed reader keeps failing");
+        // A valid length that claims more than the file holds.
+        std::vector<uint8_t> f(file.begin(), file.begin() + sizeof(StreamHeader) + 4 + 20);
+        const uint32_t claim = 100;
+        std::memcpy(&f[sizeof(StreamHeader)], &claim, 4);
+        StreamReader g(f.data(), f.size());
+        StreamHeader gh{};
+        StreamRecord gr;
+        expect(g.read_header(gh) == StreamStatus::Ok && g.next(gr) == StreamStatus::Truncated,
+               "a record longer than the data is Truncated");
+        StreamReader hdrless(file.data(), file.size());
+        expect(hdrless.next(gr) == StreamStatus::BadHeader, "next() before read_header() fails");
+        StreamReader empty(nullptr, 0);
+        expect(empty.read_header(gh) == StreamStatus::Truncated, "an empty file is Truncated");
+        // Unknown kinds are passed through, for forward compatibility.
+        uint8_t rbuf[kStreamRecordTotalMax];
+        std::vector<uint8_t> u(file.begin(), file.begin() + sizeof(StreamHeader));
+        const uint8_t pl[2] = {1, 2};
+        const size_t rn = encode_stream_record(static_cast<StreamKind>(200), 5.0, pl, 2, rbuf, sizeof(rbuf));
+        u.insert(u.end(), rbuf, rbuf + rn);
+        StreamReader ur(u.data(), u.size());
+        expect(ur.read_header(gh) == StreamStatus::Ok && ur.next(gr) == StreamStatus::Ok && gr.kind == 200 &&
+                   gr.payload_len == 2 && ur.next(gr) == StreamStatus::End,
+               "an unknown kind is returned, not an error");
+        uint8_t big[kStreamMaxPayload + 1] = {};
+        expect(encode_stream_record(StreamKind::HostState, 0, big, sizeof(big), rbuf, sizeof(rbuf)) == 0,
+               "an oversized payload is refused by the encoder");
+    }
+
+    // A file that cannot be created (the folder is missing) fails cleanly.
+    {
+        StreamWriter wbad;
+        expect(!wbad.open((dir + L"\\missing").c_str(), 0, nullptr, stream_log), "open in a missing folder fails");
+        wbad.record(StreamKind::HostState, 0, buf, 10);  // a no-op, not a crash
+        expect(!wbad.is_open(), "and stays closed");
+    }
+    // A full ring drops and counts instead of blocking.
+    {
+        auto w3 = std::make_unique<StreamWriter>();
+        expect(w3->open(dir.c_str(), 0, nullptr, stream_log), "third open");
+        const StateMsg s = make_state(0, 1, 1);
+        const size_t n = encode(s, buf, sizeof(buf));
+        for (int i = 0; i < 200000; ++i) w3->record(StreamKind::HostState, i, buf, n);
+        w3->close(false);
+        const uint32_t dropped = w3->dropped();
+        w3.reset();
+        std::printf("    200000 records in a tight loop: %u dropped\n", dropped);
+        const std::vector<uint8_t> f3 = read_file(dir + L"\\stream_003.lzst");
+        StreamReader r3(f3.data(), f3.size());
+        StreamHeader h3{};
+        StreamRecord rc3;
+        uint32_t n3 = 0;
+        const bool ok3 = r3.read_header(h3) == StreamStatus::Ok;
+        StreamStatus end3 = StreamStatus::Ok;
+        while ((end3 = r3.next(rc3)) == StreamStatus::Ok) ++n3;
+        expect(ok3 && end3 == StreamStatus::End && n3 + dropped == 200000, "written + dropped = recorded; the file is valid");
+    }
+    remove_dir(dir);
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -917,6 +1202,7 @@ int main() {
     }
 
     bot_loopback_tests();
+    stream_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;
