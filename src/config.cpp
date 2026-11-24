@@ -5,6 +5,7 @@
 #include <knownfolders.h>
 #include <shlobj.h>
 
+#include <atomic>
 #include <string>
 
 #include "log.h"
@@ -16,7 +17,7 @@ namespace {
 
 Config g_config;
 INIT_ONCE g_display_once = INIT_ONCE_STATIC_INIT;
-DisplayMode g_display = DisplayMode::Fullscreen;
+std::atomic<DisplayMode> g_display{DisplayMode::Fullscreen};
 
 // Saved Games\ThirdWire\<exe name>\Options.ini, e.g. ...\StrikeFighters2\Options.ini.
 std::wstring options_ini_path() {
@@ -39,7 +40,7 @@ BOOL CALLBACK load_display_mode(PINIT_ONCE, PVOID, PVOID*) {
     const int v = path.empty() ? -1 : static_cast<int>(GetPrivateProfileIntW(L"GraphicsOptions", L"DisplayMode", -1, path.c_str()));
     g_display = (v == static_cast<int>(DisplayMode::Borderless)) ? DisplayMode::Borderless : DisplayMode::Fullscreen;
     LOG("config: %ls [GraphicsOptions] DisplayMode=%d -> %s", path.c_str(), v,
-        g_display == DisplayMode::Borderless ? "Borderless" : "Fullscreen (stock)");
+        g_display.load() == DisplayMode::Borderless ? "Borderless" : "Fullscreen (stock)");
     return TRUE;
 }
 
@@ -66,7 +67,12 @@ const Config& get() { return g_config; }
 
 DisplayMode display_mode() {
     InitOnceExecuteOnce(&g_display_once, &load_display_mode, nullptr, nullptr);
-    return g_display;
+    return g_display.load();
+}
+
+void set_display_mode(DisplayMode mode) {
+    InitOnceExecuteOnce(&g_display_once, &load_display_mode, nullptr, nullptr);  // don't let a later load overwrite it
+    g_display = mode;
 }
 
 }  // namespace lazysf2::config

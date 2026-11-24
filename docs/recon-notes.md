@@ -217,7 +217,16 @@ The game's input manager keeps a mouse-state block at `this+0x118`, laid out as 
 - **Checked over RustDesk:** the cursor lines up across the screen, and clicks land on the right items.
 - **Not checked yet:** mouse use in flight, where the range may differ.
 
-## 11. Open questions
+## 11. Phase 5 backlog
+
+- **Alt-Tab in exclusive Fullscreen (stock bug).** After Alt-Tab away from stock exclusive fullscreen, you can't Alt-Tab back into the game. This is what started the project. Borderless avoids it. To investigate:
+  - the exe's focus handling (`+0x5800` minimises with `SW_SHOWMINNOACTIVE`, `+0x5c80` restores);
+  - the DXGI default Alt+Enter and Alt-Tab handling (in Fullscreen we restore `MakeWindowAssociation(0)`);
+  - `WS_EX_TOPMOST` together with a minimised exclusive swap chain.
+- Mouse Cursor mode in flight.
+- Multi-monitor (`[Window] WindowPosX/Y` picks the monitor), DXVK, device lost/reset.
+
+## 12. Open questions
 
 1. Where does the display block's fullscreen flag (`+0x789e8`) come from? This is the Phase 3 trace.
 2. Does `MakeWindowAssociation` get called anywhere, for example in DisplayManagerDX10? Check DisplayManager's vtable calls on the factory.

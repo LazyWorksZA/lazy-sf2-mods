@@ -2,7 +2,7 @@
 
 This is a borderless fullscreen mod for Strike Fighters 2 (July 2013 patch). The project is not affiliated with ThirdWire, and you need your own copy of the game.
 
-> Status: **Phase 4.** You choose the display mode in the game, under **Options → Graphics → Display Mode** (Fullscreen or Borderless). The choice is saved as `DisplayMode` in `[GraphicsOptions]` of `Saved Games\ThirdWire\StrikeFighters2\Options.ini`, and **applies the next time you start the game**. If the key is missing or invalid, the game runs in stock exclusive fullscreen.
+> Status: **Phase 4.** You choose the display mode in the game, under **Options → Graphics → Display Mode** (Fullscreen or Borderless). The change **applies as soon as you leave the Graphics page**. It's saved as `DisplayMode` in `[GraphicsOptions]` of `Saved Games\ThirdWire\StrikeFighters2\Options.ini`, and is used again at the next start. If the key is missing or invalid, the game runs in stock exclusive fullscreen.
 
 ## What it adds
 
@@ -46,7 +46,7 @@ Remote-control tools send absolute mouse positions, which the game's DirectInput
 ## How to tell it's working
 
 - **Options → Graphics** has a **Display Mode** list below Aspect Ratio.
-- With **Borderless** chosen and the game restarted:
+- With **Borderless** chosen (live, or at the next start):
   - the game starts on the desktop and covers the monitor, without a screen-mode switch;
   - Alt-Tab switches to other windows instantly, and back again;
   - `lazysf2.log` contains `DisplayMode=1 -> Borderless` and `SetFullscreenState(TRUE) suppressed (borderless)`.

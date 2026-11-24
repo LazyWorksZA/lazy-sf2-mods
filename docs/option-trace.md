@@ -114,10 +114,22 @@ The code is in `src/hooks/menu_hooks.cpp`. It differs from the recipe above in f
 - **The `AddItem` signature** is `AddItem(const wchar_t* text, int value)`. The third value seen in the decompiled `GetText` call is really `AddItem`'s second argument, which the compiler pushed first.
 - **Layout.** The new row goes directly below Aspect Ratio, at `Position=200,120` and `TextPosition=0,123`, styled like Aspect Ratio. Every Graphics-page item at y≥120 moves down 40, so the lowest row now ends at y≈407 of 460. The control IDs are the next free `MenuItemNNN` numbers, which is 37 and 38 in stock.
 - **Saving.** On Exit, before the stock save, we call `WriteInt(ini, L"GraphicsOptions", L"DisplayMode", v)` (`OptionsScreen.dll +0xa0e0`, a `__thiscall` with the ini object at `+0x26a90` as `this`). The game rewrites `Options.ini` straight away, and the key lands at the end of `[GraphicsOptions]`.
-- **Startup.** `config::display_mode()` reads the key once, through `GetPrivateProfileIntW`, from `Saved Games\ThirdWire\<exe name>\Options.ini`. Only the value 1 means Borderless.
+- **Startup.** `config::display_mode()` reads the key once, through `GetPrivateProfileIntW`, from `Saved Games\ThirdWire\<exe name>\Options.ini`. Only the value 1 means Borderless. After that, the Options page can change it while the game runs (see live switching below).
   - **It must not run under the loader lock.** A first version called it from the module-load watch, and `SHGetKnownFolderPath` deadlocked the game at startup. Now the window and DXGI hooks are always installed, and they check the mode when they're called.
 
-**Checked on the machine** (over RustDesk): the control shows below Aspect Ratio, and the rows below it move neatly. Choosing Borderless saved `DisplayMode=1`, and the next start came up borderless. With the key missing, the game started in stock exclusive fullscreen.
+- **Live switching** goes beyond the brief's v1 scope; the user asked for it.
+  - On Exit with a changed value, `config::set_display_mode()` is called, and a registered message is posted to the game window. A permanent subclass of the window handles it on the **window thread**, through `dxgi_apply_display_mode()`. DXGI fullscreen changes send messages to the window, so they must not run on another thread.
+  - **To Borderless:** the real `SetFullscreenState(FALSE)` if the swap chain is exclusive, then `MakeWindowAssociation(NO_ALT_ENTER|NO_WINDOW_CHANGES)`, then `HWND_NOTOPMOST`.
+  - **To Fullscreen:** `MakeWindowAssociation(0)` (stock), then `HWND_TOPMOST`. Then, if the game's own fullscreen flag is set (it is in stock), the game's `_DoFullScreen` sequence: `ResizeTarget(mode)`, `SetFullscreenState(TRUE)`, then `ResizeTarget` with refresh 0. `ResizeBuffers` is left out, because the game holds its back-buffer view and the size already matches. `mode` is the one recorded from the game's first `ResizeTarget` call.
+  - The swap-chain hooks are always installed. The game's own `_DoFullScreen` on focus regain is suppressed or passed through according to the *current* mode, so the two stay consistent.
+- **`OptionsScreen.dll` is unloaded when the Options screen closes, and loaded again when it opens**, sometimes at a different base address. On every module-load notification, the hooks check whether Init still starts with MinHook's `JMP` and hook again if not.
+- **Hint text:** keep it about as long as the stock hints (~55 characters). Longer text is cut off.
+
+**Checked on the machine** (over RustDesk):
+- The control shows below Aspect Ratio, and the rows below it move neatly.
+- Choosing a mode saves `DisplayMode`, and the next start uses it. With the key missing, the game started in stock exclusive fullscreen.
+- **Live:** Borderless → Fullscreen and Fullscreen → Borderless both switch as soon as you leave the page, with no black screen.
+- The list is filled again after leaving and reopening Options.
 
 ## Open items
 
