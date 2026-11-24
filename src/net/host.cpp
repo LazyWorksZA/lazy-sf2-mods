@@ -373,6 +373,8 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         g_host_seq = 0;
         g_now = now;
         // Theatre name: not read; the header field stays empty (see docs/stream-format.md).
+        // open() does one CreateFileW and may wait in join_previous() for an earlier writer that is still flushing:
+        // bounded (a drain of at most 1 MB), and only at the start of a session.
         g_stream.open(probe_output_dir(), now, nullptr, core_log);
     }
     Avatar& a = g_av[slot];
@@ -738,6 +740,8 @@ void host_shutdown() {
     if (g_nclients > 0) check_live(live);
     for (int s = 0; s < net::kMaxClients; ++s)
         if (g_av[s].active) release(s, "host shut down", live[s], kByeNone, net::LeaveReason::HostEnded);
+    // release() above ran on the DllMain thread, not the game thread: that breaks the writer's single-producer rule,
+    // but only here, at FreeLibrary, when the game has stopped stepping.
     g_stream.close(true);  // waits at most 1 s for the writer to flush, then detaches it
 }
 

@@ -98,8 +98,38 @@ void StreamWriter::close(bool wait_and_detach) {
     open_.store(false, std::memory_order_release);
     stop_.store(true, std::memory_order_release);
     if (!wait_and_detach) return;
+    // On process exit ExitProcess has already killed the writer thread: it will never set finished_. Do not wait
+    // for it; write what is still in the ring from this thread, which is safe because the writer is gone.
+    HANDLE th = static_cast<HANDLE>(thread_.native_handle());
+    if (WaitForSingleObject(th, 0) == WAIT_OBJECT_0) {
+        if (!finished_.load(std::memory_order_acquire)) flush_orphaned();
+        thread_.join();  // already ended: returns at once, takes no loader-lock-dependent wait
+        return;
+    }
     for (int i = 0; i < 100 && !finished_.load(std::memory_order_acquire); ++i) Sleep(10);
     thread_.detach();
+}
+
+// The writer thread was killed (process exit). Appends the ring's records, up to the cap, and closes the file.
+// Bounded: the ring holds at most kRingCap records (about 1 MB). Whatever the dead thread had in its own buffer
+// (at most 32 KB, or 200 ms of records) is lost.
+void StreamWriter::flush_orphaned() {
+    HANDLE f = static_cast<HANDLE>(file_);
+    if (!f) return;
+    std::vector<uint8_t> buf;
+    uint32_t tail = tail_.load(std::memory_order_relaxed);
+    const uint32_t head = head_.load(std::memory_order_acquire);
+    uint64_t total = written_.load(std::memory_order_relaxed);
+    if (total == 0) buf.insert(buf.end(), header_, header_ + sizeof(header_));  // nothing was ever written
+    for (; tail != head; ++tail) {
+        const Slot& s = ring_[tail & (kRingCap - 1)];
+        if (total + buf.size() + s.n > max_bytes_) break;
+        buf.insert(buf.end(), s.data, s.data + s.n);
+    }
+    DWORD w = 0;
+    if (!buf.empty()) WriteFile(f, buf.data(), static_cast<DWORD>(buf.size()), &w, nullptr);
+    CloseHandle(f);
+    file_ = nullptr;
 }
 
 void StreamWriter::run() {

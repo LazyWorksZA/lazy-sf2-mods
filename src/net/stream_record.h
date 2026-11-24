@@ -6,6 +6,12 @@
 // open() creates the file (one CreateFileW) and starts the thread; close() only signals it, so the game thread
 // never waits for the disk. The thread flushes, closes the file and logs a summary. A later open() waits for the
 // previous thread. Needs the Windows file API, but nothing of the game.
+//
+// Shutdown: close(true) waits at most 1 s for the writer and then detaches it. On a real FreeLibrary with a disk
+// that stalls for longer than that, the detached thread could still run after the DLL is unloaded (a crash). That
+// risk is accepted: it is a developer tool, the wait is bounded, and a join under the loader lock could deadlock.
+// On process exit the thread has already been killed by ExitProcess: close(true) sees that, does not wait, and
+// writes the ring's records itself. Only what the dead thread held in its own buffer (up to 32 KB, or 200 ms) is lost.
 #pragma once
 
 #include <atomic>
@@ -55,6 +61,7 @@ private:
 
     void run();
     void join_previous();
+    void flush_orphaned();
 
     std::thread thread_;
     void* file_ = nullptr;  // HANDLE, owned by the thread once started

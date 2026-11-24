@@ -6,10 +6,11 @@ All numbers are little-endian. Structures are packed. A reader is in `src/net/st
 
 ## When a file exists
 
-- It is created when the first client is welcomed. The first record is that client's `ClientJoined`.
+- It is created when the first client's Hello is accepted, before its Welcome is queued. The first record is that client's `ClientJoined`. If the Welcome cannot be queued, the file holds only `ClientJoined` and `ClientLeft` (reason 3).
 - It is closed (flushed) when the last client leaves, when the player changes, or when the mod shuts down.
 - It stops at 512 MB. The mod logs this once and records nothing more.
 - If a write fails, the mod logs it once and the partial file stays. A file that ends in the middle of a record is therefore valid: a reader keeps the records before it (`StreamStatus::Truncated`).
+- On process exit (the player closes the game with a client still connected) the writer thread is already gone. The mod writes the records still in its queue, but the last moments (up to about 200 ms) may be missing. The file stays readable: it ends cleanly or the reader reports `Truncated`.
 - The host writes records in host game-time order, because every record is made on the game thread.
 
 ## Header (48 bytes)
