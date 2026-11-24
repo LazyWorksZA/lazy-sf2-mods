@@ -20,7 +20,7 @@ LoadLibraryExW_t o_LoadLibraryExW = nullptr;
 // config::display_mode(); hooks that depend on it check it when they are called instead.
 void notify() {
     dxgi_on_modules_loaded();  // behaves as stock unless the display mode is Borderless
-    if (config::get().mouse == config::MouseMode::Cursor) mouse_on_modules_loaded();
+    input_on_modules_loaded();  // keyboard Windows key always; mouse only in Cursor mode
     menu_on_modules_loaded();  // the Display Mode option is offered in every mode
 }
 

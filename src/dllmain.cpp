@@ -24,6 +24,23 @@ void log_host() {
     LOG("lazysf2 " __DATE__ " " __TIME__ " loaded into %ls", exe);
 }
 
+// The exe is DPI-unaware. At display scaling other than 100% Windows gives it a virtual desktop
+// (e.g. 2048x1152 for 2560x1440 at 125%), and a scaling change while it runs leaves the game in
+// part of the screen. Declaring the process per-monitor DPI aware before the game creates its
+// window makes it always see real pixels. Applies in every display mode (stock is broken there).
+void make_dpi_aware() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    using SetCtx_t = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    auto set_ctx = user32 ? reinterpret_cast<SetCtx_t>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")) : nullptr;
+    if (set_ctx && set_ctx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+        LOG("dpi: process is per-monitor DPI aware (v2)");
+    } else if (SetProcessDPIAware()) {
+        LOG("dpi: process is system DPI aware (fallback, error %lu)", GetLastError());
+    } else {
+        LOG("dpi: could not make the process DPI aware (error %lu)", GetLastError());
+    }
+}
+
 }  // namespace
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
@@ -38,6 +55,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 LOG("LAZYSF2_DISABLE=1: hooks not installed");
                 return TRUE;
             }
+            make_dpi_aware();  // before the game creates any window
             MH_STATUS s = MH_Initialize();
             if (s != MH_OK) {
                 LOG("MH_Initialize failed: %s", MH_StatusToString(s));

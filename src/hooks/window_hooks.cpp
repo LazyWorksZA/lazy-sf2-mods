@@ -58,8 +58,14 @@ LRESULT CALLBACK game_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         dxgi_apply_display_mode();
         return 0;
     }
+    if (msg == WM_DISPLAYCHANGE) {
+        LOG("window: WM_DISPLAYCHANGE %ux%u @ %u bpp", LOWORD(lp), HIWORD(lp), static_cast<unsigned>(wp));
+    } else if (msg == WM_POWERBROADCAST) {
+        LOG("window: WM_POWERBROADCAST 0x%lx", static_cast<unsigned long>(wp));
+    }
     LRESULT r = CallWindowProcW(g_game_wndproc, hwnd, msg, wp, lp);
     if (msg == WM_ACTIVATEAPP) log_window_state(wp ? "after activate" : "after deactivate", hwnd);
+    if (msg == WM_DISPLAYCHANGE) log_window_state("after display change", hwnd);
     return r;
 }
 
@@ -100,6 +106,14 @@ BOOL WINAPI h_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy, 
 // forever, and the player can't get back into the game. SW_SHOWNORMAL gives the same full-monitor
 // window without the maximized flag, so later restores work (recon-notes.md, Alt-Tab section).
 BOOL WINAPI h_ShowWindow(HWND hwnd, int cmd) {
+    // Borderless: on focus loss the exe minimizes itself (+0x5819, SW_SHOWMINNOACTIVE). Keep the
+    // window visible behind the Start menu / other windows instead; the game still pauses as stock.
+    // (Minimizing via the taskbar or Win+D doesn't go through this call and still works.)
+    if (hwnd && hwnd == g_game_hwnd.load() && cmd == SW_SHOWMINNOACTIVE && config::borderless()) {
+        static std::atomic<int> logged{0};
+        if (logged++ < 3) LOG("window: self-minimize on focus loss skipped (borderless)");
+        return IsWindowVisible(hwnd);
+    }
     if (hwnd && hwnd == g_game_hwnd.load() && cmd == SW_MAXIMIZE) {
         static std::atomic<bool> logged{false};
         if (!logged.exchange(true)) {

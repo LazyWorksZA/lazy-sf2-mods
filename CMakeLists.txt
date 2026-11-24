@@ -20,7 +20,7 @@ add_library(lazysf2 SHARED
     src/hooks/module_watch.cpp
     src/hooks/window_hooks.cpp
     src/hooks/dxgi_hooks.cpp
-    src/hooks/mouse_hooks.cpp
+    src/hooks/input_hooks.cpp
     src/hooks/menu_hooks.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)

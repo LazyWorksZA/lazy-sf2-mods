@@ -22,8 +22,11 @@ bool install_module_watch();
 // never enters exclusive fullscreen. Called by the module watch.
 void dxgi_on_modules_loaded();
 
-// Mouse "Cursor" mode: the game's cursor follows the Windows cursor. Called by the module watch.
-void mouse_on_modules_loaded();
+// DirectInput: Windows key in Borderless, and mouse "Cursor" mode (the game's cursor follows the
+// Windows cursor). Called by the module watch.
+void input_on_modules_loaded();
+// Re-applies the keyboard's cooperative level for config::display_mode(). Window thread only.
+void input_apply_display_mode();
 
 // Options menu "Display Mode" list (Graphics page), saved as Options.ini [GraphicsOptions]
 // DisplayMode. install_menu_hooks() hooks the exe's file service (call from DllMain);
