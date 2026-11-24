@@ -19,6 +19,7 @@ constexpr double absd(double x) { return x < 0 ? -x : x; }
 
 // Wraps an angle into (-pi, pi].
 constexpr double wrap_pi(double a) {
+    if (!(absd(a) < 1e6)) return a;  // inf or NaN (or absurdly large): never loop on it
     while (a > kPi) a -= 2.0 * kPi;
     while (a <= -kPi) a += 2.0 * kPi;
     return a;
@@ -79,27 +80,41 @@ constexpr void interpolate(const Samp& a, const Samp& b, double t, Kin* out) {
     }
 }
 
-// Dead reckoning from the newest state: position + velocity * dt, angles + rates * dt, dt in [0, 1 s].
-constexpr void extrapolate(const Samp& s, double t, Kin* out) {
-    const double dt = clampd(t - s.t, 0.0, kMaxExtrapolate);
+// Angle rate (radians per second) between two states, component-wise along the shortest way, 0 if they
+// share a time. The recorded rates at +0xd0 are probably body-axis rotation rates, not rates of pitch,
+// heading and roll, so extrapolating angles uses this estimate instead.
+constexpr void angle_rate(const Samp& a, const Samp& b, double out[3]) {
+    const double h = b.t - a.t;
+    for (int i = 0; i < 3; ++i) out[i] = h > 1e-9 ? angle_diff(b.k.a[i], a.k.a[i]) / h : 0.0;
+}
+
+// Dead reckoning from a state: position + velocity * dt, angles + rate * dt, dt in [-1 s, 1 s]. A negative dt
+// runs backwards (used before the oldest sample). Velocity and the recorded rates are held.
+constexpr void extrapolate(const Samp& s, double t, const double rate[3], Kin* out) {
+    const double dt = clampd(t - s.t, -kMaxExtrapolate, kMaxExtrapolate);
     for (int i = 0; i < 3; ++i) {
         out->p[i] = s.k.p[i] + s.k.v[i] * dt;
         out->v[i] = s.k.v[i];
-        out->a[i] = s.k.a[i] + s.k.w[i] * dt;
+        out->a[i] = s.k.a[i] + rate[i] * dt;
         out->w[i] = s.k.w[i];
     }
 }
 
-// State at render time t from n samples ordered by time (oldest first). Before the oldest: holds the oldest.
-// Between two: interpolates. After the newest: dead reckoning. Returns false if n == 0.
+// State at render time t from n samples ordered by time (oldest first).
+// Between two: interpolates. After the newest: dead reckoning forward from it, with the angle rate taken from
+// the two newest samples. Before the oldest: the same, backwards from the oldest, with the rate from the two
+// oldest. Returns false if n == 0.
 constexpr bool sample_at(const Samp* s, int n, double t, Kin* out) {
     if (n <= 0) return false;
     int i = n - 1;
     while (i >= 0 && s[i].t > t) --i;
+    double rate[3] = {0.0, 0.0, 0.0};
     if (i < 0) {
-        *out = s[0].k;
+        if (n >= 2) angle_rate(s[0], s[1], rate);
+        extrapolate(s[0], t, rate, out);
     } else if (i == n - 1) {
-        extrapolate(s[i], t, out);
+        if (n >= 2) angle_rate(s[n - 2], s[n - 1], rate);
+        extrapolate(s[i], t, rate, out);
     } else {
         interpolate(s[i], s[i + 1], t, out);
     }
@@ -115,11 +130,14 @@ static_assert(approx(hermite(3.0, 7.0, 11.0, -2.0, 0.5, 0.0), 3.0));
 static_assert(approx(hermite(3.0, 7.0, 11.0, -2.0, 0.5, 1.0), 11.0));
 static_assert(approx(hermite(0.0, 10.0, 10.0, 10.0, 1.0, 0.5), 5.0));
 static_assert(approx(hermite(0.0, 10.0, 10.0, 10.0, 1.0, 0.25), 2.5));
+// Slope scaling: 20 m/s over a 0.5 s interval is 10 m, so the path is a straight line (fails without "* h").
+static_assert(approx(hermite(0.0, 20.0, 10.0, 20.0, 0.5, 0.25), 2.5));
 // Shortest angle difference: 350 deg from 0 is -10 deg, 10 from 350 is +20, and 180 stays +180.
 static_assert(approx(angle_diff(350.0 * kPi / 180.0, 0.0), -10.0 * kPi / 180.0));
 static_assert(approx(angle_diff(10.0 * kPi / 180.0, 350.0 * kPi / 180.0), 20.0 * kPi / 180.0));
 static_assert(approx(angle_diff(kPi, 0.0), kPi));
 static_assert(approx(wrap_pi(3.0 * kPi), kPi));
+static_assert(wrap_pi(1e300) == 1e300);  // absurd input is returned, not looped on
 static_assert(approx(lerp_angle(350.0 * kPi / 180.0, 10.0 * kPi / 180.0, 0.5), 360.0 * kPi / 180.0));
 // Blend weight: 1 at the start, 0 at 200 ms and after, 0.5 half way.
 static_assert(approx(blend_weight(0.0, kBlendSeconds), 1.0));
@@ -139,12 +157,14 @@ constexpr bool check_sample_at() {
     s[1].t = 1.0;
     s[1].k.p[0] = 10.0;
     s[1].k.v[0] = 10.0;
-    s[1].k.w[1] = 1.0;
+    s[1].k.a[1] = 1.0;  // heading turns 1 rad in 1 s: the angle rate from the two samples is 1 rad/s
     Kin k = {};
     if (!sample_at(s, 2, 0.5, &k) || !approx(k.p[0], 5.0)) return false;   // between the two
     if (!sample_at(s, 2, 3.0, &k) || !approx(k.p[0], 20.0)) return false;  // 1 s of dead reckoning, not 2 s
-    if (!approx(k.a[1], 1.0)) return false;
-    if (!sample_at(s, 2, -1.0, &k) || !approx(k.p[0], 0.0)) return false;  // before the oldest: hold
+    if (!approx(k.a[1], 2.0)) return false;  // heading 1 rad + 1 s at 1 rad/s
+    if (!sample_at(s, 2, -0.5, &k) || !approx(k.p[0], -5.0)) return false;  // before the oldest: backwards
+    if (!approx(k.a[1], -0.5)) return false;
+    if (!sample_at(s, 2, -5.0, &k) || !approx(k.p[0], -10.0)) return false;  // ... for at most 1 s
     return !sample_at(s, 0, 0.0, &k);
 }
 static_assert(check_sample_at());

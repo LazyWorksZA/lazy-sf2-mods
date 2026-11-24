@@ -67,13 +67,12 @@ Samp place(const RecSample& r, const Placement& pl) {
     o.k.a[0] = r.ang[0];
     o.k.a[1] = r.ang[1] + pl.d;
     o.k.a[2] = r.ang[2];
-    for (int i = 0; i < 3; ++i) o.k.w[i] = r.rate[i];
+    for (int i = 0; i < 3; ++i) o.k.w[i] = r.rate[i];  // body-axis rates (probably): written, not integrated
     return o;
 }
 
-// Rotation matrix rows (right, forward, up) from pitch, heading, roll. Heading is from north toward east,
-// positive pitch is nose up, positive roll is right wing down (assumed; the game rebuilds the matrix from
-// the angles anyway, this only keeps the frame we write consistent).
+// Rotation matrix rows (right, forward, up) from pitch, heading, roll. Verified from live dumps: pitch nose-up
+// positive, roll right-wing-down positive, heading in (-pi, pi]. Heading is from north toward east.
 void build_matrix(const double a[3], float m[9]) {
     const double cp = std::cos(a[0]), sp = std::sin(a[0]), ch = std::cos(a[1]), sh = std::sin(a[1]);
     const double cr = std::cos(a[2]), sr = std::sin(a[2]);
@@ -375,6 +374,8 @@ void receive_step() {
     const double t_rec = now - g_run.t_start;
     const int rate = kRates[g_rate_idx.load(std::memory_order_relaxed)];
     const double period = 1.0 / rate, delay = feed_delay(rate);
+    // Angles past the newest sample extrapolate with a rate estimated from the two newest received samples
+    // (the recorded +0xd0 values are probably body-axis rates); those are still interpolated and written as is.
 
     // The state we show now, under the old feed and delay, so that a change can be turned into an offset.
     bool have_before = false;
@@ -408,9 +409,18 @@ void receive_step() {
     if (!sample_at(g_run.ring, g_run.ring_n, t_render, &raw)) return;
 
     // Correction blending: carry what we showed before the change minus what we would show now, and let it
-    // decay, so the jump never reaches the screen.
+    // decay, so the jump never reaches the screen. Re-base only when the change really moved the computed
+    // state; otherwise the running decay must not restart.
     const double w_now = blend_weight(now - g_run.off_t, kBlendSeconds);
+    bool jumped = false;
     if (have_before) {
+        for (int i = 0; i < 3; ++i) {
+            if (std::fabs(before.p[i] - raw.p[i]) >= 1e-6 || std::fabs(angle_diff(before.a[i], raw.a[i])) >= 1e-9) {
+                jumped = true;
+            }
+        }
+    }
+    if (jumped) {
         for (int i = 0; i < 3; ++i) {
             g_run.off_p[i] = g_run.off_p[i] * w_now + (before.p[i] - raw.p[i]);
             g_run.off_a[i] = wrap_pi(g_run.off_a[i] * w_now + angle_diff(before.a[i], raw.a[i]));
@@ -439,7 +449,7 @@ void receive_step() {
     // Metrics against the ground truth at the same render time.
     Kin truth;
     truth_at(t_render, &truth);
-    if (t_render >= 0) {  // before that we only hold the first sample; nothing to compare
+    if (t_render >= 0) {  // before that we show the first sample dead-reckoned backwards; nothing to compare
         const double e = dist(shown.p, truth.p);
         ++g_run.n;
         g_run.err_sum += e;
@@ -451,14 +461,16 @@ void receive_step() {
                 std::fmax(g_run.truth_acc_max, accel_g(truth.p, now, g_run.tp[0], g_run.tt[0], g_run.tp[1], g_run.tt[1]));
         }
     }
-    std::memcpy(g_run.wp[1], g_run.wp[0], sizeof(g_run.wp[0]));
-    std::memcpy(g_run.tp[1], g_run.tp[0], sizeof(g_run.tp[0]));
-    std::memcpy(g_run.wp[0], shown.p, sizeof(g_run.wp[0]));
-    std::memcpy(g_run.tp[0], truth.p, sizeof(g_run.tp[0]));
-    g_run.wt[1] = g_run.wt[0];
-    g_run.tt[1] = g_run.tt[0];
-    g_run.wt[0] = g_run.tt[0] = now;
-    if (g_run.hist < 2) ++g_run.hist;
+    if (t_render >= 0) {  // the acceleration history starts with the first real sample time
+        std::memcpy(g_run.wp[1], g_run.wp[0], sizeof(g_run.wp[0]));
+        std::memcpy(g_run.tp[1], g_run.tp[0], sizeof(g_run.tp[0]));
+        std::memcpy(g_run.wp[0], shown.p, sizeof(g_run.wp[0]));
+        std::memcpy(g_run.tp[0], truth.p, sizeof(g_run.tp[0]));
+        g_run.wt[1] = g_run.wt[0];
+        g_run.tt[1] = g_run.tt[0];
+        g_run.wt[0] = g_run.tt[0] = now;
+        if (g_run.hist < 2) ++g_run.hist;
+    }
     if (g_run.n > 0 && t_rec >= g_run.next_log) flush_metrics(t_rec);
 
     if (t_render >= rec_time(g_run.count - 1)) stop_run("end of recording", true);
@@ -502,6 +514,10 @@ bool self_check() {
     build_matrix(a, m);
     const float want[9] = {0, -1, 0, 1, 0, 0, 0, 0, 1};
     for (int i = 0; i < 9; ++i) ok = ok && std::fabs(m[i] - want[i]) < 1e-6f;
+    // Pitch 0.3, roll 0.4, heading 0: forward.z = sin P, right.z = -sin R cos P.
+    const double b[3] = {0.3, 0.0, 0.4};
+    build_matrix(b, m);
+    ok = ok && std::fabs(m[5] - std::sin(0.3)) < 1e-6 && std::fabs(m[2] + std::sin(0.4) * std::cos(0.3)) < 1e-6;
     return ok;
 }
 

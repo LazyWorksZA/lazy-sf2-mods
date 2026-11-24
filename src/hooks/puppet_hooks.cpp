@@ -146,6 +146,11 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
 }
 
 void start_run() {
+    if (replay_active()) {
+        LOG("puppet: not started, a replay is running");
+        g_puppet_state.store(kIdle);
+        return;
+    }
     if (!g_freq.QuadPart) QueryPerformanceFrequency(&g_freq);
     StartCtx c;
     if (kCoast) {
