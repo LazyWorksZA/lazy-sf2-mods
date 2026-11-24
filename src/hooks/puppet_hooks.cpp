@@ -41,6 +41,7 @@ struct Run {
     void* target = nullptr;
     unsigned long long created = 0;  // identifies the object, in case its address is reused
     double last_alt = 0;
+    bool first_frame_done = false;  // frame 1 is the teleport; its drift is not a measurement
     Vec3d p0{}, v{};
     float r0[9] = {};
     float a0[3] = {};  // pitch, heading, roll
@@ -60,10 +61,10 @@ void read_pos(const void* obj, Vec3d* p) { memcpy(p, static_cast<const char*>(ob
 // --- Start (callback runs under the shared lock) --------------------------------------------------
 
 struct StartCtx {
-    int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 target too slow, 3 too steep
+    int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 player too slow
     void* player = nullptr;
     wchar_t name[64] = {};
-    double distance = 0, speed = 0;
+    double distance = 0, speed = 0, heading_deg = 0;
     Run run;
 };
 
@@ -92,27 +93,30 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
             best_d = d;
         }
     }
-    const char* obj = static_cast<const char*>(list[best].obj);
-    float v0[3];
-    memcpy(v0, obj + kVelOffset, sizeof(v0));
-    const double speed = std::sqrt(double(v0[0]) * v0[0] + double(v0[1]) * v0[1] + double(v0[2]) * v0[2]);
-    const double horiz = std::sqrt(double(v0[0]) * v0[0] + double(v0[1]) * v0[1]);
+    const char* pobj = static_cast<const char*>(list[player].obj);
+    float pv[3], hp_f;
+    memcpy(pv, pobj + kVelOffset, sizeof(pv));
+    memcpy(&hp_f, pobj + kAngleOffset + 4, sizeof(hp_f));  // heading, radians from north toward east
+    const double speed = std::sqrt(double(pv[0]) * pv[0] + double(pv[1]) * pv[1] + double(pv[2]) * pv[2]);
     c.speed = speed;
     if (speed < 1.0) {
         c.result = 2;
         return;
     }
-    if (horiz < 0.1 * speed) {
-        c.result = 3;
-        return;
-    }
+    // Place the puppet 150 m ahead of the player, 20 m to the right and 10 m up, flying level on
+    // the player's heading at the player's speed.
+    const double hp = hp_f, sh = std::sin(hp), ch = std::cos(hp);
     Run& r = c.run;
     r.target = list[best].obj;
     r.created = list[best].created;
-    read_pos(obj, &r.p0);
-    r.v = {v0[0] * speed / horiz, v0[1] * speed / horiz, 0.0};  // level, same speed
-    memcpy(r.r0, obj + kRotOffset, sizeof(r.r0));
-    memcpy(r.a0, obj + kAngleOffset, sizeof(r.a0));
+    r.p0 = {pp.x + 150.0 * sh + 20.0 * ch, pp.y + 150.0 * ch - 20.0 * sh, pp.z + 10.0};
+    r.v = {speed * sh, speed * ch, 0.0};
+    const float rows[9] = {float(ch), float(-sh), 0.f, float(sh), float(ch), 0.f, 0.f, 0.f, 1.f};
+    memcpy(r.r0, rows, sizeof(rows));
+    r.a0[0] = 0.f;
+    r.a0[1] = hp_f;
+    r.a0[2] = 0.f;
+    c.heading_deg = hp * 180.0 / 3.14159265358979323846;
     c.player = list[player].obj;
     wcsncpy_s(c.name, list[best].name, _TRUNCATE);
     c.distance = best_d;
@@ -127,20 +131,16 @@ void start_run() {
         g_puppet_state.store(kIdle);
         return;
     }
-    if (c.result == 3) {
-        LOG("puppet: target is climbing or diving too steeply for a level path");
-        g_puppet_state.store(kIdle);
-        return;
-    }
     if (c.result == 2) {
-        LOG("puppet: target speed %.1f m/s is below 1 m/s; not starting", c.speed);
+        LOG("puppet: player speed %.1f m/s is below 1 m/s; not starting", c.speed);
         g_puppet_state.store(kIdle);
         return;
     }
     g_run = c.run;
     QueryPerformanceCounter(&g_run.start);
-    LOG("puppet: start target %p \"%ls\" at (%.0f, %.0f, %.0f) speed %.1f m/s, player %p, distance %.0f m",
-        g_run.target, c.name, g_run.p0.x, g_run.p0.y, g_run.p0.z, c.speed, c.player, c.distance);
+    LOG("puppet: start target %p \"%ls\" placed 150 m ahead of player %p at (%.0f, %.0f, %.0f) heading %.1f deg speed "
+        "%.1f m/s (was %.0f m away)",
+        g_run.target, c.name, c.player, g_run.p0.x, g_run.p0.y, g_run.p0.z, c.heading_deg, c.speed, c.distance);
     // A stop request that arrived while starting wins and is handled next frame.
     int expected = kStartRequested;
     g_puppet_state.compare_exchange_strong(expected, kRunning);
@@ -255,6 +255,10 @@ void puppet_run_frame() {
     if (c.destroyed) {
         LOG("puppet: target destroyed");
         stop_run("target destroyed", t);
+        return;
+    }
+    if (!g_run.first_frame_done) {
+        g_run.first_frame_done = true;
         return;
     }
     ++g_run.frames;
