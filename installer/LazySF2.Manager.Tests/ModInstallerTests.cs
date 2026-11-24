@@ -95,4 +95,50 @@ public sealed class ModInstallerTests : IDisposable
         Assert.Equal(ModInstaller.Result.Ok, ModInstaller.Install(dir, payload));
         Assert.Equal("new", File.ReadAllText(Path.Combine(dir, "winmm.dll")));
     }
+
+    [Fact]
+    public void Install_replaces_an_older_dll()
+    {
+        string dir = MakeGameDir();
+        string payload = Path.Combine(_root, "payload.dll");
+        File.WriteAllText(payload, "newer");
+        Assert.Equal(ModInstaller.Result.Ok, ModInstaller.Install(dir, payload));
+        Assert.Equal("newer", File.ReadAllText(Path.Combine(dir, "winmm.dll")));
+        Assert.Contains("winmm.dll", File.ReadAllLines(Path.Combine(dir, ModInstaller.ManifestName)));
+    }
+
+    [Fact]
+    public void Install_with_dll_held_open_fails_without_asking_for_admin()
+    {
+        string dir = MakeGameDir();
+        string payload = Path.Combine(_root, "payload.dll");
+        File.WriteAllText(payload, "newer");
+        using (new FileStream(Path.Combine(dir, "winmm.dll"), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Equal(ModInstaller.Result.Failed, ModInstaller.Install(dir, payload));
+        }
+    }
+
+    [Fact]
+    public void ElevatedDeleteArgs_refuses_a_percent_in_the_path()
+    {
+        string dir = Path.Combine(_root, "g%PATH%ame");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "winmm.dll"), "dll");
+        File.WriteAllLines(Path.Combine(dir, ModInstaller.ManifestName), ["winmm.dll"]);
+        Assert.Null(Program.ElevatedDeleteArgs(dir));
+    }
+
+    [Fact]
+    public void ElevatedDeleteArgs_quotes_each_full_path()
+    {
+        string dir = MakeGameDir();
+        File.WriteAllLines(Path.Combine(dir, ModInstaller.ManifestName), ["winmm.dll", "lazysf2.log", ModInstaller.ManifestName]);
+        string? args = Program.ElevatedDeleteArgs(dir);
+        Assert.NotNull(args);
+        Assert.StartsWith("/c del /f /q ", args);
+        Assert.Contains($"\"{Path.Combine(dir, "winmm.dll")}\"", args);
+        Assert.Contains($"\"{Path.Combine(dir, ModInstaller.ManifestName)}\"", args);
+        Assert.Contains($"\"{Path.Combine(dir, "lazysf2.log")}\"", args);
+    }
 }

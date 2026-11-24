@@ -611,8 +611,20 @@ void hook_options_screen(HMODULE opts) {
                       reinterpret_cast<void**>(&o_CtlExit), "OptionsScreen Controls Exit");
 }
 
+// Removes the 8 OptionsScreen hooks at this base; entries that don't exist are fine.
+void remove_options_hooks(HMODULE base) {
+    for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva, kCtlInitRva, kCtlRefreshRva,
+                      kCtlChangedRva, kCtlExitRva}) {
+        MH_STATUS s = MH_RemoveHook(at_rva(base, rva));
+        (void)s;  // MH_ERROR_NOT_CREATED is expected
+    }
+}
+
+bool g_path_too_long = false;  // set by old_opts_still_loaded when the module path was truncated
+
 // True if base is still the loaded OptionsScreen.dll image (not freed, not replaced by another DLL).
 bool old_opts_still_loaded(HMODULE base) {
+    g_path_too_long = false;
     HMODULE h = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(base), &h) ||
@@ -623,7 +635,17 @@ bool old_opts_still_loaded(HMODULE base) {
     DWORD n = GetModuleFileNameW(base, path, MAX_PATH);
     static constexpr wchar_t kName[] = L"\\OptionsScreen.dll";
     constexpr DWORD kLen = static_cast<DWORD>(_countof(kName) - 1);
-    if (n < kLen || n >= MAX_PATH) return false;
+    if (n >= MAX_PATH) {
+        // Truncated: the name can't be verified, so don't touch that image.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG("menu: OptionsScreen.dll path too long to verify; dropping its hooks without restoring");
+        }
+        g_path_too_long = true;
+        return false;
+    }
+    if (n < kLen) return false;
     return CompareStringOrdinal(path + n - kLen, static_cast<int>(kLen), kName, static_cast<int>(kLen), TRUE) ==
            CSTR_EQUAL;
 }
@@ -656,21 +678,27 @@ void menu_on_modules_loaded() {
 
     AcquireSRWLockExclusive(&g_opts_lock);
     if (!(opts == g_opts && *init == 0xE9)) {
+        // Verify the new image first: every MH_RemoveHook below restores original bytes, which is
+        // only safe on an OptionsScreen.dll of the build we analysed.
+        const bool build_ok = is_expected_build(opts, kOptsTimestamp, kOptsImageSize, "OptionsScreen.dll");
         if (g_opts) {
             // Forget the hooks on the previous image. MinHook restores the original bytes on removal,
             // so only do that while the old base is still our OptionsScreen.dll; otherwise those
             // bytes would be written into whatever is mapped there now.
-            if (old_opts_still_loaded(g_opts)) {
-                for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva, kCtlInitRva,
-                                  kCtlRefreshRva, kCtlChangedRva, kCtlExitRva}) {
-                    MH_RemoveHook(at_rva(g_opts, rva));
-                }
-            } else {
+            if (build_ok && old_opts_still_loaded(g_opts)) {
+                remove_options_hooks(g_opts);
+            } else if (!build_ok) {
+                LOG("menu: new OptionsScreen.dll image unverified; not removing any hooks");
+            } else if (!g_path_too_long) {
                 LOG("menu: old OptionsScreen.dll image gone, dropping its hooks without restoring");
             }
             g_opts = nullptr;
         }
-        if (is_expected_build(opts, kOptsTimestamp, kOptsImageSize, "OptionsScreen.dll")) {
+        if (build_ok) {
+            // A previous load at this base may have left entries in MinHook (its image was freed while
+            // they were registered); remove them so MH_CreateHook doesn't fail with ALREADY_CREATED.
+            // Safe: this is a verified OptionsScreen.dll, so the restored bytes are identical.
+            remove_options_hooks(opts);
             g_opts = opts;
             hook_options_screen(opts);
         }

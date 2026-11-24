@@ -98,6 +98,7 @@ static class Program
     static void HookInstall(string what)
     {
         string? game = ModInstaller.FindGameDir();
+        if (game != null && ModInstaller.HasReparsePoint(game)) Log("install hook: refused, reparse point in game path");
         var r = ModInstaller.Install(game);
         Log($"{what} hook: game={game ?? "(not found)"} -> {r}");
         // Per-user installs can't write a game folder under Program Files: finish on the next normal
@@ -108,6 +109,7 @@ static class Program
     static void HookUninstall()
     {
         string? game = ModInstaller.FindGameDir();
+        if (game != null && ModInstaller.HasReparsePoint(game)) Log("uninstall hook: refused, reparse point in game path");
         var r = ModInstaller.Uninstall(game);
         Log($"uninstall hook: game={game ?? "(not found)"} -> {r}");
         if (r != ModInstaller.Result.AccessDenied || game == null) return;
@@ -115,17 +117,15 @@ static class Program
         // No UI is allowed here, but Windows' own UAC prompt is: delete exactly the manifest's files
         // with an elevated cmd that doesn't depend on our files (Velopack removes them next).
         // Only allow-listed absolute paths go in, and nothing that cmd would interpret.
-        var paths = ModInstaller.InstalledFiles(game);
-        if (paths.Count == 0) return;
-        if (paths.Any(p => p.IndexOfAny(['%', '^', '!', '&', '"', '<', '>', '|']) >= 0) || ModInstaller.HasReparsePoint(game))
+        string? args = ElevatedDeleteArgs(game);
+        if (args == null)
         {
-            Log("uninstall hook: elevated removal refused (unsafe path or reparse point); the mod files remain in the game folder");
+            Log("uninstall hook: elevated removal refused (nothing to delete, unsafe path or reparse point); the mod files remain in the game folder");
             return;
         }
-        var files = paths.Select(f => $"\"{f}\"");
         try
         {
-            Process.Start(new ProcessStartInfo("cmd.exe", "/c del /f /q " + string.Join(' ', files))
+            Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), args)
             {
                 UseShellExecute = true,
                 Verb = "runas",
@@ -134,6 +134,18 @@ static class Program
             Log("uninstall hook: started elevated removal");
         }
         catch (Win32Exception) { Log("uninstall hook: elevated removal declined; the mod files remain in the game folder"); }
+    }
+
+    /// <summary>
+    /// Arguments for the elevated "cmd /c del", or null to refuse: no files, a character cmd would
+    /// interpret in any path, or a reparse point in the game path.
+    /// </summary>
+    internal static string? ElevatedDeleteArgs(string game)
+    {
+        var paths = ModInstaller.InstalledFiles(game);
+        if (paths.Count == 0) return null;
+        if (paths.Any(p => p.IndexOfAny(['%', '^', '!', '&', '"', '<', '>', '|']) >= 0) || ModInstaller.HasReparsePoint(game)) return null;
+        return "/c del /f /q " + string.Join(' ', paths.Select(f => $"\"{f}\""));
     }
 
     static void Log(string line)

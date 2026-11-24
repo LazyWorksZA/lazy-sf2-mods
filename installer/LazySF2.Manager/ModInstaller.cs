@@ -54,12 +54,43 @@ public static class ModInstaller
         {
             string dll = Path.Combine(gameDir, DllName);
             if (File.Exists(dll) && !File.Exists(Path.Combine(gameDir, ManifestName))) return Result.Foreign;
-            File.Copy(payloadDll, dll, overwrite: true);
-            File.WriteAllLines(Path.Combine(gameDir, ManifestName), ManagedFiles, new UTF8Encoding(false));
+            string manifest = Path.Combine(gameDir, ManifestName);
+            byte[] payload = File.ReadAllBytes(payloadDll);
+            byte[] manifestBytes = new UTF8Encoding(false).GetBytes(string.Join(Environment.NewLine, ManagedFiles) + Environment.NewLine);
+            // Never write through an existing name: a link swapped in after the check is deleted
+            // (not followed), and CreateNew refuses to open anything that exists.
+            if (!ReplaceFile(dll, payload, gameDir) || !ReplaceFile(manifest, manifestBytes, gameDir)) return Result.Failed;
             return Result.Ok;
         }
         catch (UnauthorizedAccessException) { return Result.AccessDenied; }
-        catch (IOException) { return Result.Failed; }  // e.g. the game is running and has winmm.dll loaded
+        catch (IOException) { return Result.Failed; }  // e.g. someone recreated the name, or the game holds the file
+    }
+
+    /// <summary>
+    /// Deletes <paramref name="path"/> if present, then creates it fresh with the given bytes. False if
+    /// the delete was denied although the folder itself is writable: that is how a winmm.dll the running
+    /// game has loaded fails, so the caller reports "failed", not "needs admin".
+    /// </summary>
+    static bool ReplaceFile(string path, byte[] content, string gameDir)
+    {
+        try { File.Delete(path); }
+        catch (UnauthorizedAccessException) when (FolderIsWritable(gameDir)) { return false; }
+        using var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        fs.Write(content);
+        return true;
+    }
+
+    // Folder-level write access, probed by creating and deleting a uniquely named file.
+    static bool FolderIsWritable(string dir)
+    {
+        string probe = Path.Combine(dir, ".lazysf2-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>

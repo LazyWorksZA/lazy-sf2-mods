@@ -37,7 +37,10 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 .\build.ps1                    # enters the VS dev shell (x86) and runs the CMake preset; output build\Release\winmm.dll
 .\scripts\install.ps1 [-MouseMode Cursor|Stock]
 .\scripts\uninstall.ps1
+dotnet test installer\LazySF2.Manager.Tests   # xUnit tests for the installer helper
 ```
+
+The test project is only for development: it is not published or shipped.
 
 - **Toolchain:** VS 2026 (v18), generator `"Visual Studio 18 2026" -A Win32`, triplet `x86-windows-static`, with a static CRT (`CMAKE_MSVC_RUNTIME_LIBRARY`).
 - **vcpkg:** use the copy bundled with VS. It requires `builtin-baseline` in `vcpkg.json`.
