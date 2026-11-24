@@ -37,7 +37,7 @@ if ($LASTEXITCODE) { throw "dotnet publish failed ($LASTEXITCODE)" }
 Remove-Item (Join-Path $publish '*.pdb') -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force (Join-Path $publish 'payload') | Out-Null
 Copy-Item (Join-Path $root 'build\Release\winmm.dll') (Join-Path $publish 'payload\winmm.dll')
-# Our license and the third-party notices (MinHook in winmm.dll, Velopack) travel with the install.
+# Our license and the third-party notices (MinHook and ENet in winmm.dll, Velopack) travel with the install.
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $publish 'LICENSE.txt')
 Copy-Item (Join-Path $root 'THIRD_PARTY_NOTICES.md') (Join-Path $publish 'THIRD_PARTY_NOTICES.md')
 
