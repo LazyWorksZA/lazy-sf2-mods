@@ -70,4 +70,15 @@ inline void puppet_on_present() {
     if (g_puppet_state.load(std::memory_order_relaxed) != 0) puppet_run_frame();
 }
 
+// Missile spawn test (developer tool, part of the probe): Ctrl+Shift+M creates one missile 200 m ahead of
+// the player through the game's object manager, on the next Present, and follows it for 20 s.
+// missile_spawn_on_modules_loaded() hooks MissileObject's constructor (to learn weapon ids); the probe calls it.
+void missile_spawn_request();
+void missile_spawn_run_frame();
+void missile_spawn_on_modules_loaded();
+extern std::atomic<int> g_missile_state;
+inline void missile_spawn_on_present() {
+    if (g_missile_state.load(std::memory_order_relaxed) != 0) missile_spawn_run_frame();
+}
+
 }  // namespace lazysf2::hooks

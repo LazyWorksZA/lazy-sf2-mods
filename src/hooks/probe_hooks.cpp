@@ -252,7 +252,7 @@ bool game_in_front() {
 }
 
 DWORD WINAPI hotkey_thread(LPVOID) {
-    bool was_down = false, puppet_was_down = false;
+    bool was_down = false, puppet_was_down = false, missile_was_down = false;
     for (;;) {
         Sleep(50);
         const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
@@ -263,6 +263,9 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         const bool puppet_down = mods && (GetAsyncKeyState('P') & 0x8000);
         if (puppet_down && !puppet_was_down) puppet_toggle();
         puppet_was_down = puppet_down;
+        const bool missile_down = mods && (GetAsyncKeyState('M') & 0x8000);
+        if (missile_down && !missile_was_down) missile_spawn_request();
+        missile_was_down = missile_down;
     }
 }
 
@@ -335,7 +338,9 @@ void install_probe_hooks() {
 }
 
 void probe_on_modules_loaded() {
-    if (g_dir.empty() || g_hook_tried.load()) return;
+    if (g_dir.empty()) return;
+    missile_spawn_on_modules_loaded();  // own build check and once-flag
+    if (g_hook_tried.load()) return;
     HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
     if (!m || g_hook_tried.exchange(true)) return;
     if (!is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll")) return;
