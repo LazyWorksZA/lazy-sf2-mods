@@ -19,8 +19,8 @@ std::atomic<int> g_monitor{0};
 std::atomic<MouseMode> g_mouse{MouseMode::Cursor};
 std::atomic<int> g_tacview{-1};  // -1 = not loaded yet
 
-// Saved Games\ThirdWire\<exe name>\Options.ini, e.g. ...\StrikeFighters2\Options.ini.
-std::wstring options_ini_path() {
+// Saved Games\ThirdWire\<exe name>, e.g. ...\StrikeFighters2 (the game's own per-user folder), or empty.
+std::wstring game_data_path() {
     PWSTR saved = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_SavedGames, 0, nullptr, &saved))) return {};
     std::wstring path = saved;
@@ -32,7 +32,13 @@ std::wstring options_ini_path() {
     name = name.substr(name.find_last_of(L'\\') + 1);
     if (size_t dot = name.find_last_of(L'.'); dot != std::wstring::npos) name.resize(dot);
 
-    return path + L"\\ThirdWire\\" + name + L"\\Options.ini";
+    return path + L"\\ThirdWire\\" + name;
+}
+
+// ...\StrikeFighters2\Options.ini
+std::wstring options_ini_path() {
+    std::wstring dir = game_data_path();
+    return dir.empty() ? dir : dir + L"\\Options.ini";
 }
 
 int read_int(const std::wstring& path, const wchar_t* section, const wchar_t* key, int def) {
@@ -95,6 +101,8 @@ void set_tacview_recording(bool on) {
 }
 
 int tacview_recording_peek() { return g_tacview.load(); }
+
+std::wstring game_data_dir() { return game_data_path(); }
 
 MouseMode mouse_mode() {
     ensure_loaded();

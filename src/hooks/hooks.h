@@ -66,6 +66,15 @@ bool aircraft_track_active();
 // Why the hooks are installed: the probe, the setting, or both. Meaningful only while active.
 bool aircraft_track_for_probe();
 bool aircraft_track_for_tacview();
+// Tacview recorder (src/hooks/tacview_recorder.cpp, player-facing): with Options > Other > Tacview Recording On it
+// writes each flight's aircraft to Saved Games\ThirdWire\<exe>\Tacview\SF2 <date time>.acmi from a writer thread.
+// tacview_recorder_on_modules_loaded() registers the sim step callback (once; it only ever runs while the aircraft
+// tracker is hooked, which needs the setting or the probe). tacview_recorder_menu_moment() (game thread, an Options
+// page was left) closes a recording of a flight that has ended. tacview_recorder_shutdown() (DllMain detach, both
+// FreeLibrary and process exit) closes the file; at process exit it writes what the dead writer left in its ring.
+void tacview_recorder_on_modules_loaded();
+void tacview_recorder_menu_moment();
+void tacview_recorder_shutdown();
 // Hooks of the sim step (sim_hooks.cpp); the tracker calls these, after its own build check.
 bool sim_install(HMODULE aircraft_dll);
 void sim_remove(HMODULE aircraft_dll);

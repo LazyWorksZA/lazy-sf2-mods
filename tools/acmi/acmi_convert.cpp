@@ -6,6 +6,7 @@
 #include <cstring>
 #include <vector>
 
+#include "acmi/acmi_format.h"
 #include "net/protocol.h"
 
 namespace lazysf2::acmi {
@@ -13,9 +14,6 @@ namespace {
 
 using net::StreamKind;
 
-constexpr double kMetresPerDegree = 111320.0;
-constexpr double kPi = 3.14159265358979323846;
-constexpr double kRadToDeg = 180.0 / kPi;
 constexpr uint32_t kHostId = 1;
 constexpr uint32_t kClientIdBase = 0x100;
 
@@ -38,40 +36,10 @@ std::string fixed_str(const char* s, size_t cap) {
     return r;
 }
 
-// A comma inside a text value is escaped with a backslash (spec, "Escaping"). fixed_str removed any newline.
-std::string esc(const std::string& s) {
-    std::string r;
-    for (char c : s) {
-        if (c == ',') r += '\\';
-        r += c;
-    }
-    return r;
-}
-
 bool finite_all(const double* p, int n) {
     for (int i = 0; i < n; ++i)
         if (!std::isfinite(p[i])) return false;
     return true;
-}
-
-double norm_deg(double d) {
-    d = std::fmod(d, 360.0);
-    if (d < 0) d += 360.0;
-    if (d >= 359.995) return 0.0;  // prints as 360.00 with two decimals: the same direction as 0
-    return d + 0.0;                // -0.0 becomes +0.0
-}
-
-// Fixed decimals with trailing zeros trimmed (smaller files).
-std::string num(double v, int decimals) {
-    char b[64];
-    std::snprintf(b, sizeof(b), "%.*f", decimals, v);
-    std::string r = b;
-    if (r.find('.') != std::string::npos) {
-        while (!r.empty() && r.back() == '0') r.pop_back();
-        if (!r.empty() && r.back() == '.') r.pop_back();
-    }
-    if (r == "-0" || r.empty()) r = "0";
-    return r;
 }
 
 struct Presence {
@@ -188,14 +156,9 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
     std::stable_sort(ev.begin(), ev.end(), [](const Event& a, const Event& b) { return a.t < b.t; });
 
     const double t0 = ev.empty() ? 0.0 : ev.front().t;
-    out += "FileType=text/acmi/tacview\nFileVersion=2.2\n";
-    // ReferenceLongitude/Latitude are added to each object's Longitude/Latitude (spec, "Global properties"),
-    // so the T= values below are offsets from the reference point.
-    out += "0,ReferenceTime=2000-01-01T00:00:00Z,ReferenceLongitude=" + num(opt.ref_lon, 9) +
-           ",ReferenceLatitude=" + num(opt.ref_lat, 9) + ",Title=Strike Fighters 2 host stream\n";
+    append_header(out, "2000-01-01T00:00:00Z", opt.ref_lon, opt.ref_lat, "Strike Fighters 2 host stream");
 
-    const double lon_scale = 1.0 / (kMetresPerDegree * std::cos(opt.ref_lat / kRadToDeg));
-    const double lat_scale = 1.0 / kMetresPerDegree;
+    const Mapping map = make_mapping(opt.ref_lat);
     const double min_dt = opt.max_rate > 0 ? 1.0 / opt.max_rate : 0.0;
 
     std::vector<std::pair<uint32_t, Obj>> objs;
@@ -210,21 +173,15 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
         const long long ms = std::llround((t - t0) * 1000.0);
         if (ms == last_frame) return;
         last_frame = ms;
-        char b[48];
-        std::snprintf(b, sizeof(b), "#%lld.%03lld\n", ms / 1000, ms % 1000);
-        out += b;
+        append_frame(out, ms);
     };
 
     for (const Event& e : ev) {
-        char idbuf[16];
-        std::snprintf(idbuf, sizeof(idbuf), "%x", e.id);
         Obj& o = find(e.id);
         if (e.type == EvType::Join) {
             if (o.alive && o.described) {  // the old object is still shown (its Leave was lost): remove it first
                 frame(e.t);
-                out += "-";
-                out += idbuf;
-                out += '\n';
+                append_removal(out, e.id);
             }
             o = Obj{};  // a new aircraft in a reused slot starts afresh
             o.alive = true;
@@ -236,9 +193,7 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
             o.alive = false;
             if (!o.described) continue;  // never shown, nothing to remove
             frame(e.t);
-            out += "-";
-            out += idbuf;
-            out += "\n";
+            append_removal(out, e.id);
         } else {
             if (e.id == kHostId && !o.alive && !o.described) {
                 o.alive = true;
@@ -251,23 +206,22 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
             // thinned to the cap rather than to a lower one; after a gap, restart from this sample.
             o.last_t = (o.described && e.t - o.last_t < 2.0 * min_dt) ? o.last_t + min_dt : e.t;
             frame(e.t);
-            // T=Lon|Lat|Alt|Roll|Pitch|Yaw|U|V|Heading (spec, "Object transform"). Roll is positive right wing
-            // down, pitch positive nose-up and yaw clockwise from north, as in SF2. Yaw and heading are equal
-            // because the flat world is aligned with north.
-            const double heading = norm_deg(e.ang[1] * kRadToDeg);
-            out += idbuf;
-            out += ",T=" + num(e.pos[0] * lon_scale, 9) + "|" + num(e.pos[1] * lat_scale, 9) + "|" +
-                   num(e.pos[2], 2) + "|" + num(e.ang[2] * kRadToDeg, 2) + "|" + num(e.ang[0] * kRadToDeg, 2) +
-                   "|" + num(heading, 2) + "|" + num(e.pos[0], 2) + "|" + num(e.pos[1], 2) + "|" + num(heading, 2);
+            // Roll is positive right wing down, pitch positive nose-up and yaw clockwise from north, as in SF2
+            // (the transform's layout is documented at append_transform).
+            const double pos[3] = {e.pos[0], e.pos[1], e.pos[2]};
+            append_transform(out, e.id, pos, e.ang, map);
             if (!o.described) {
                 o.described = true;
                 const bool host = e.id == kHostId;
-                if (!o.name.empty()) out += ",Name=" + esc(o.name);
-                out += ",Pilot=" + esc(o.pilot);
-                out += ",Type=Air+FixedWing";
-                out += host ? ",Coalition=Allies,Color=Blue" : ",Coalition=Enemies,Color=Red";
+                ObjectProps pr;
+                pr.name = o.name.c_str();
+                pr.pilot = o.pilot.c_str();
+                pr.type = "Air+FixedWing";
+                pr.coalition = host ? "Allies" : "Enemies";
+                pr.color = host ? "Blue" : "Red";
+                append_props(out, pr);
             }
-            out += "\n";
+            out += '\n';
             ++info.samples_out;
         }
     }

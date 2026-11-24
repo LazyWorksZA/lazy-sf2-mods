@@ -25,6 +25,10 @@ add_library(lazysf2 SHARED
     src/hooks/input_hooks.cpp
     src/hooks/menu_hooks.cpp
     src/hooks/aircraft_track.cpp
+    src/hooks/tacview_recorder.cpp
+    src/acmi/acmi_format.cpp
+    src/acmi/tacview_core.cpp
+    src/acmi/tacview_writer.cpp
     src/hooks/probe_hooks.cpp
     src/hooks/puppet_hooks.cpp
     src/hooks/missile_spawn.cpp
@@ -59,6 +63,9 @@ add_executable(lazysf2-net-tests
     src/net/stream_record.cpp
     tools/bot/bot_client.cpp
     tools/acmi/acmi_convert.cpp
+    src/acmi/acmi_format.cpp
+    src/acmi/tacview_core.cpp
+    src/acmi/tacview_writer.cpp
 )
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
 target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)
@@ -83,6 +90,7 @@ set_target_properties(lazysf2-bot PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_B
 add_executable(lazysf2-acmi
     tools/acmi/main.cpp
     tools/acmi/acmi_convert.cpp
+    src/acmi/acmi_format.cpp
     src/net/stream_format.cpp
     src/net/protocol.cpp
 )

@@ -14,6 +14,9 @@
 #include <vector>
 
 #include "acmi/acmi_convert.h"
+#include "acmi/acmi_format.h"
+#include "acmi/tacview_core.h"
+#include "acmi/tacview_writer.h"
 #include "hooks/aircraft_side.h"
 #include "bot_client.h"
 #include "bot_core.h"
@@ -1473,6 +1476,261 @@ void tracker_logic_tests() {
     expect(decide_on_options_exit(true, false, false) == OptionsExitAction::Nothing, "options exit: not wanted, not hooked -> nothing");
 }
 
+// ---- Tacview recorder core and writer (no game) ----
+lazysf2::acmi::TacviewRec make_rec(uint64_t seq, bool player, lazysf2::hooks::AircraftSide side, const char* name,
+                                   double t, double x, double y, double z, float pitch, float heading, float roll) {
+    lazysf2::acmi::TacviewRec r;
+    r.kind = lazysf2::acmi::TacviewRec::kObject;
+    r.seq = seq;
+    r.is_player = player ? 1 : 0;
+    r.side = static_cast<uint8_t>(side);
+    r.t = t;
+    r.pos[0] = x;
+    r.pos[1] = y;
+    r.pos[2] = z;
+    r.ang[0] = pitch;
+    r.ang[1] = heading;
+    r.ang[2] = roll;
+    strncpy_s(r.name, sizeof(r.name), name, _TRUNCATE);
+    return r;
+}
+
+size_t count_of(const std::string& s, const std::string& what) {
+    size_t n = 0;
+    for (size_t p = s.find(what); p != std::string::npos; p = s.find(what, p + 1)) ++n;
+    return n;
+}
+
+std::vector<std::string> lines_of(const std::string& s) {
+    std::vector<std::string> v;
+    size_t a = 0;
+    while (a < s.size()) {
+        size_t b = s.find('\n', a);
+        if (b == std::string::npos) b = s.size();
+        v.push_back(s.substr(a, b - a));
+        a = b + 1;
+    }
+    return v;
+}
+
+std::string tv_logged;
+void tv_log(const char* l) {
+    tv_logged += l;
+    tv_logged += '\n';
+}
+
+std::string read_whole(const std::wstring& p) {
+    std::string s;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, p.c_str(), L"rb") != 0 || !f) return s;
+    char b[4096];
+    size_t n;
+    while ((n = std::fread(b, 1, sizeof(b), f)) > 0) s.append(b, n);
+    std::fclose(f);
+    return s;
+}
+
+void tacview_tests() {
+    using namespace lazysf2::acmi;
+    using lazysf2::hooks::AircraftSide;
+    std::printf("tacview recorder\n");
+
+    // Header, ids, properties, sides, angles.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.header(out, "2026-11-24T20:15:00Z");
+        expect(out == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
+                      "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2\n",
+               "tacview: header");
+        core.add(make_rec(1, true, AircraftSide::Friendly, "F-4E,lead", 100.0, 1000, 2000, 3000, 0.1f, -1.5707964f, 0.2f));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "MiG-21", 100.0, 5, 6, 7, 0, 0, 0));
+        core.add(make_rec(3, false, AircraftSide::Neutral, "Cessna", 100.0, 5, 6, 7, 0, 0, 0));
+        core.add(make_rec(4, false, AircraftSide::Unknown, "Mystery", 100.0, 5, 6, 7, 0, 0, 0));
+        core.end_frame(100.0, out);
+        const auto ls = lines_of(out);
+        expect(ls.size() == 8 && ls[3] == "#0.000", "tacview: frame 0 starts at #0.000");
+        expect(ls[4].rfind("1,T=", 0) == 0 &&
+                   ls[4].find("|11.46|5.73|270|1000|2000|270,Name=F-4E\\,lead,Pilot=Player,"
+                              "Type=Air+FixedWing,Coalition=Allies,Color=Blue") != std::string::npos,
+               "tacview: player id 1, Pilot=Player, escaped name, Allies/Blue, angles in degrees");
+        expect(ls[5].rfind("10002,T=", 0) == 0 &&
+                   ls[5].find(",Name=MiG-21,Pilot=MiG-21,Type=Air+FixedWing,Coalition=Enemies,Color=Red") !=
+                       std::string::npos,
+               "tacview: other id 0x10000+seq, Pilot=name, Enemies/Red");
+        expect(ls[6].find("Coalition=Neutrals,Color=Grey") != std::string::npos, "tacview: neutral is Neutrals/Grey");
+        expect(ls[7].rfind("10004,T=", 0) == 0 && ls[7].find("Coalition") == std::string::npos &&
+                   ls[7].find("Color") == std::string::npos,
+               "tacview: unknown side leaves coalition and colour unset");
+        // Lat/lon from the flat mapping at reference 0/0: 1000 m east is 1000/111320 degrees, 2000 m north 2000/111320.
+        expect(ls[4].find("T=0.008983112|0.017966223|3000|") != std::string::npos, "tacview: local lon/lat mapping");
+    }
+
+    // 10 Hz limit, monotonic frames, removal, non-finite input, seeded continuation.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.header(out, "2026-11-24T20:15:00Z");
+        // 60 Hz for 2 s; object 2 is there until t = 51.0 and then gone; one frame whose time goes back.
+        for (int i = 0; i <= 120; ++i) {
+            const double t = 50.0 + i / 60.0;
+            core.add(make_rec(1, true, AircraftSide::Friendly, "P", t, i, 0, 100, 0, 0, 0));
+            if (t < 51.0) core.add(make_rec(2, false, AircraftSide::Enemy, "E", t, 0, i, 100, 0, 0, 0));
+            core.end_frame(i == 90 ? t - 5.0 : t, out);
+        }
+        const size_t player_lines = count_of(out, "\n1,T=");
+        expect(player_lines >= 20 && player_lines <= 21, "tacview: player limited to 10 Hz over 2 s");
+        expect(count_of(out, "\n-10002\n") == 1, "tacview: removal written once, when the object leaves");
+        expect(count_of(out, "10002,T=") >= 9 && count_of(out, "10002,T=") <= 11,
+               "tacview: other object also limited to 10 Hz");
+        double prev = -1;
+        bool mono = true, any = false;
+        for (const std::string& l : lines_of(out)) {
+            if (l.empty() || l[0] != '#') continue;
+            any = true;
+            const double v = std::atof(l.c_str() + 1);
+            if (v < prev) mono = false;
+            prev = v;
+        }
+        expect(any && mono, "tacview: frame times never go backwards (clamped)");
+        expect(core.stats().rate_limited > 100 && core.live_objects() == 1, "tacview: rate-limited count, one object left");
+
+        // Non-finite input never reaches the file.
+        std::string o2;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 60.0, std::nan(""), 0, 0, 0, 0, 0));
+        core.end_frame(60.0, o2);
+        expect(core.stats().bad_samples == 1 && o2.find("nan") == std::string::npos, "tacview: NaN sample skipped");
+
+        // A fresh core seeded with the origin continues without going back and without a header.
+        const double last_t = core.origin() + static_cast<double>(core.last_ms()) / 1000.0;
+        TacviewCore b{TacviewCoreConfig{}};
+        b.seed_time(core.origin(), core.last_ms());
+        std::string o3, o4;
+        b.add(make_rec(1, true, AircraftSide::Friendly, "P", last_t - 1.0, 0, 0, 0, 0, 0, 0));  // earlier than the last frame
+        b.end_frame(last_t - 1.0, o3);
+        expect(o3.rfind("1,T=", 0) == 0, "tacview: a seeded core clamps an earlier frame to the last one (no # line)");
+        b.add(make_rec(1, true, AircraftSide::Friendly, "P", last_t + 0.5, 0, 0, 0, 0, 0, 0));
+        b.end_frame(last_t + 0.5, o4);
+        expect(o4.rfind("#", 0) == 0 && std::atof(o4.c_str() + 1) > static_cast<double>(core.last_ms()) / 1000.0 + 0.49 &&
+                   o4.find("FileType") == std::string::npos,
+               "tacview: a seeded core continues the time line");
+    }
+
+    // The writer, into a temp folder: folder creation, the file name, the name clash, content, drop and cap.
+    {
+        wchar_t base[MAX_PATH];
+        GetTempPathW(MAX_PATH, base);
+        const std::wstring root = std::wstring(base) + L"lzsf2_tv_" + std::to_wstring(GetCurrentProcessId());
+        const std::wstring dir = root + L"\\Tacview";  // the writer creates this one (root must exist)
+        CreateDirectoryW(root.c_str(), nullptr);
+        SYSTEMTIME st{};
+        st.wYear = 2026;
+        st.wMonth = 11;
+        st.wDay = 24;
+        st.wHour = 10;
+        st.wMinute = 11;
+        st.wSecond = 12;
+        tv_logged.clear();
+        TacviewWriter w(64);
+        expect(w.ready(), "tacview writer: ring allocated");
+        TacviewCoreConfig cfg;
+        expect(w.open(dir, st, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview writer: opens");
+        for (int i = 0; i < 30; ++i) {
+            if (!w.begin_frame(2)) {  // the thread is still draining the small ring
+                Sleep(5);
+                --i;
+                continue;
+            }
+            w.slot(0) = make_rec(1, true, AircraftSide::Friendly, "P", i * 0.1, i, 0, 100, 0, 0, 0);
+            w.slot(1) = make_rec(2, false, AircraftSide::Enemy, "E", i * 0.1, 0, i, 100, 0, 0, 0);
+            w.commit_frame(i < 20 ? 2 : 1, i * 0.1);
+        }
+        const uint32_t dropped_before = w.dropped_frames();
+        expect(!w.begin_frame(100) && w.dropped_frames() == dropped_before + 1,
+               "tacview writer: a frame that cannot fit is dropped and counted");
+        w.close(true, "test");
+        const std::string c1 = read_whole(dir + L"\\SF2 2026-11-24 10-11-12.acmi");
+        {
+            char* dump = nullptr;
+            size_t dump_len = 0;
+            FILE* df = nullptr;
+            if (_dupenv_s(&dump, &dump_len, "LAZYSF2_TACVIEW_TEST_DUMP") == 0 && dump && _wfopen_s(&df, std::wstring(dump, dump + std::strlen(dump)).c_str(), L"wb") == 0 && df) {
+                std::fwrite(c1.data(), 1, c1.size(), df);  // for looking at the output by hand
+                std::fclose(df);
+            }
+            std::free(dump);
+        }
+        expect(c1.rfind("FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z", 0) == 0,
+               "tacview writer: the file is named SF2 <date time>.acmi and starts with the header");
+        expect(count_of(c1, "\n1,T=") == 30 && count_of(c1, "\n10002,T=") == 20 && count_of(c1, "\n-10002\n") == 1,
+               "tacview writer: all frames and the removal reach the file");
+        expect(tv_logged.find("tacview: recording to ") != std::string::npos &&
+                   count_of(tv_logged, "tacview: stopped (test)") == 1 && tv_logged.find("50 transforms") != std::string::npos,
+               "tacview writer: one start line and one stop line with the counts");
+
+        // Same second again: " (2)".
+        tv_logged.clear();
+        TacviewWriter w2(64);
+        expect(w2.open(dir, st, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview writer: second open");
+        w2.close(true, "test");
+        expect(GetFileAttributesW((dir + L"\\SF2 2026-11-24 10-11-12 (2).acmi").c_str()) != INVALID_FILE_ATTRIBUTES,
+               "tacview writer: a name clash appends (2)");
+
+        // Size cap: stops, keeps a whole-line prefix, accepting() turns false.
+        tv_logged.clear();
+        SYSTEMTIME st3 = st;
+        st3.wSecond = 40;
+        TacviewWriter w3(64);
+        expect(w3.open(dir, st3, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr, 600), "tacview writer: opens with a small cap");
+        for (int i = 0; i < 40 && w3.accepting(); ++i) {
+            if (!w3.begin_frame(1)) {
+                Sleep(5);
+                continue;
+            }
+            w3.slot(0) = make_rec(1, true, AircraftSide::Friendly, "P", i * 0.1, i, 0, 100, 0, 0, 0);
+            w3.commit_frame(1, i * 0.1);
+            Sleep(2);
+        }
+        for (int i = 0; i < 100 && w3.accepting(); ++i) Sleep(10);
+        expect(!w3.accepting(), "tacview writer: the size cap stops the recording");
+        w3.close(true, "cap test");
+        const std::string c3 = read_whole(dir + L"\\SF2 2026-11-24 10-11-40.acmi");
+        expect(!c3.empty() && c3.size() <= 600 && c3.back() == '\n' && count_of(tv_logged, "byte cap") == 1,
+               "tacview writer: capped file is a whole-line prefix, logged once");
+
+        // A folder that cannot be created: the failure is logged once and accepting() is false.
+        tv_logged.clear();
+        TacviewWriter w4(64);
+        expect(w4.open(root + L"\\no\\such\\parent\\Tacview", st, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr),
+               "tacview writer: open returns (the thread reports the failure)");
+        for (int i = 0; i < 100 && w4.accepting(); ++i) Sleep(10);
+        expect(!w4.accepting() && count_of(tv_logged, "not recording") == 1,
+               "tacview writer: folder failure logged once, recording off");
+        w4.close(true, "test");
+
+        // Clean up.
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        RemoveDirectoryW(dir.c_str());
+        RemoveDirectoryW(root.c_str());
+    }
+
+    // The shared formatter: escaping and heading normalisation.
+    {
+        std::string s;
+        append_escaped(s, "a,b\nc\xE9");
+        expect(s == "a\\,b?c?", "acmi format: comma escaped, control and non-ASCII bytes replaced");
+        expect(norm_deg(-90.0) == 270.0 && norm_deg(360.0) == 0.0 && norm_deg(359.999) == 0.0,
+               "acmi format: heading normalised");
+    }
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -1493,6 +1751,7 @@ int main() {
     stream_tests();
     acmi_tests();
     tracker_logic_tests();
+    tacview_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

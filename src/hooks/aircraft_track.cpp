@@ -323,6 +323,7 @@ void aircraft_track_on_modules_loaded() {
 }
 
 void aircraft_track_reevaluate() {
+    tacview_recorder_menu_moment();  // game thread, menus: closes the recording of a flight that has ended
     HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
     const auto mu = reinterpret_cast<uintptr_t>(m);
     const bool probe = probe_output_dir() != nullptr;
