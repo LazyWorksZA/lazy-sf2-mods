@@ -8,6 +8,9 @@
 //  - The game thread (any single caller thread, in the tests) talks to the core only through poll(), send(),
 //    disconnect(), set_welcomed() and set_host_time(). Each takes a mutex for a few copies of a few dozen
 //    bytes, or is an atomic. The queues are fixed rings, allocated with the object.
+//  - Hello and Bye (once per connection each) and States are ordinary messages: they are refused when the ring is
+//    within kControlReserve of full (a Hello or Bye that cannot be queued ends that connection). Only Connect and
+//    Disconnect may use the reserve, so no client can crowd another client's arrival or departure out.
 //  - The network thread answers Pings itself (a Pong with the host game time the game thread last published), so
 //    clock sync works while the game is paused or in a menu.
 //  - The network thread decodes and checks every received packet before it queues it (length, magic, version,
@@ -45,8 +48,8 @@ struct HostCounters {
     uint32_t dropped_format = 0;  // wrong size, magic, version, type or channel, or the wrong sender
     uint32_t dropped_range = 0;   // a State with a number out of range
     uint32_t dropped_state = 0;   // a State, or a repeated Hello, in the wrong phase
-    uint32_t dropped_queue = 0;   // States refused because the queue to the game thread was nearly full
-    uint32_t dropped_control = 0; // control events (Connect, Disconnect, Hello, Bye) lost: the queue was completely full
+    uint32_t dropped_queue = 0;   // States, Hellos and Byes refused: the ring was nearly full
+    uint32_t dropped_control = 0; // Connect or Disconnect events lost: the ring was completely full
 };
 
 // Parses LAZYSF2_HOST: "port" or "address:port", the address a numeric IPv4 one (default 127.0.0.1) and the port
@@ -88,7 +91,13 @@ public:
     // Ignored if gen is no longer the slot's current connection.
     void set_welcomed(uint8_t slot, uint32_t gen, bool welcomed);
     // The host's game clock, for the range check of State times. The game thread updates it every step.
-    void set_host_time(double t) { host_time_.store(t, std::memory_order_relaxed); }
+    void set_host_time(double t) {
+        host_time_.store(t, std::memory_order_relaxed);
+        host_time_valid_.store(true, std::memory_order_release);
+    }
+    // The session is over (the last client left, or the player changed): the published time is stale. Pings are
+    // not answered, and States are not passed, until set_host_time is called again.
+    void reset_host_time() { host_time_valid_.store(false, std::memory_order_release); }
     uint32_t rtt_ms(uint8_t slot) const;  // ENet's smoothed round trip time, 0 for a bad slot
     HostCounters counters() const;
 
@@ -117,8 +126,10 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> finished_{false};  // the network thread has cleaned up and is about to return
     std::atomic<double> host_time_{0.0};
-    std::atomic<bool> welcomed_[kMaxClients] = {};
-    std::atomic<uint32_t> slot_gen_[kMaxClients] = {};  // current connection generation per slot, 0 = free
+    std::atomic<bool> host_time_valid_{false};
+    // Per slot, one word: (connection generation << 1) | welcomed. 0 = the slot is free. One word, so that
+    // set_welcomed's generation check and its store are a single compare-and-swap.
+    std::atomic<uint64_t> slot_state_[kMaxClients] = {};
     std::atomic<uint32_t> rtt_[kMaxClients] = {};
 
     std::mutex in_mx_;

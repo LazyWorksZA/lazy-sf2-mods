@@ -151,8 +151,13 @@ bool HostCore::disconnect(uint8_t slot, uint32_t gen) {
 }
 
 void HostCore::set_welcomed(uint8_t slot, uint32_t gen, bool welcomed) {
-    if (slot < kMaxClients && slot_gen_[slot].load(std::memory_order_acquire) == gen)
-        welcomed_[slot].store(welcomed, std::memory_order_release);
+    if (slot >= kMaxClients || gen == 0) return;
+    uint64_t cur = slot_state_[slot].load(std::memory_order_acquire);
+    const uint64_t want = (static_cast<uint64_t>(gen) << 1) | (welcomed ? 1u : 0u);
+    // Only while the slot still belongs to this generation; the check and the store are one atomic step.
+    while (static_cast<uint32_t>(cur >> 1) == gen && cur != 0) {
+        if (slot_state_[slot].compare_exchange_weak(cur, want, std::memory_order_acq_rel)) return;
+    }
 }
 
 uint32_t HostCore::rtt_ms(uint8_t slot) const {
@@ -206,6 +211,7 @@ void HostCore::run() {
 
     ENetPeer* peers[kMaxClients] = {};
     bool hello_seen[kMaxClients] = {};
+    bool bye_seen[kMaxClients] = {};
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
     uint32_t gens[kMaxClients] = {};
@@ -216,9 +222,9 @@ void HostCore::run() {
     auto free_slot = [&](int slot) {
         peers[slot] = nullptr;
         gens[slot] = 0;
-        slot_gen_[slot].store(0, std::memory_order_release);  // commands for this connection are void from now on
+        slot_state_[slot].store(0, std::memory_order_release);  // commands for this connection are void from now on
         hello_seen[slot] = false;
-        welcomed_[slot].store(false, std::memory_order_release);
+        bye_seen[slot] = false;
         rtt_[slot].store(0, std::memory_order_relaxed);
     };
     auto drop = [&](std::atomic<uint32_t>& counter) { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -246,6 +252,7 @@ void HostCore::run() {
                 // while the game is paused, which is the truth for a clock the clients stamp States in).
                 PongMsg pong{};
                 pong.client_send_time = m.client_send_time;
+                if (!host_time_valid_.load(std::memory_order_acquire)) return drop(n_state_);  // no time to give yet
                 pong.host_game_time = host_time_.load(std::memory_order_relaxed);
                 uint8_t out[sizeof(PongMsg)];
                 const size_t n = encode(pong, out, sizeof(out));
@@ -260,7 +267,9 @@ void HostCore::run() {
                 StateMsg m;
                 if (channel != kChannelUnreliable || decode(data, len, m) != Status::Ok || m.client_id != id)
                     return drop(n_format_);
-                if (!welcomed_[slot].load(std::memory_order_acquire)) return drop(n_state_);
+                if (!(slot_state_[slot].load(std::memory_order_acquire) & 1) ||
+                    !host_time_valid_.load(std::memory_order_acquire))
+                    return drop(n_state_);
                 if (!state_in_range(m, host_time_.load(std::memory_order_relaxed))) return drop(n_range_);
                 break;
             }
@@ -268,6 +277,8 @@ void HostCore::run() {
                 ByeMsg m;
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.client_id != id)
                     return drop(n_format_);
+                if (bye_seen[slot]) return drop(n_state_);
+                bye_seen[slot] = true;
                 break;
             }
             default:  // Welcome and Pong only travel from the host to a client
@@ -280,7 +291,9 @@ void HostCore::run() {
         e.channel = channel;
         e.len = static_cast<uint16_t>(len);
         std::memcpy(e.data, data, len);
-        push_in(e, type != MsgType::State);
+        // Control events (Connect, Disconnect) may use the reserve; messages may not. A Hello or Bye that cannot be
+        // queued would leave a connection the game never hears about, so that connection is ended.
+        if (!push_in(e, false) && type != MsgType::State && peers[slot]) enet_peer_disconnect(peers[slot], 0);
     };
 
     auto handle_event = [&](ENetEvent& ev) {
@@ -296,10 +309,10 @@ void HostCore::run() {
                 peers[slot] = ev.peer;
                 gens[slot] = next_gen++;
                 if (next_gen == 0) next_gen = 1;
-                slot_gen_[slot].store(gens[slot], std::memory_order_release);
+                slot_state_[slot].store(static_cast<uint64_t>(gens[slot]) << 1, std::memory_order_release);
                 ev.peer->data = reinterpret_cast<void*>(static_cast<uintptr_t>(slot + 1));
                 hello_seen[slot] = false;
-                welcomed_[slot].store(false, std::memory_order_release);
+                bye_seen[slot] = false;
                 last_rx[slot] = now_ms();
                 pings[slot] = 0;
                 HostEvent e;

@@ -137,6 +137,12 @@ void sanitize(char* dst, size_t cap, const char* src) {
 
 void core_log(const char* line) { LOG("%s", line); }
 
+void flush_send_fail() {
+    if (!g_send_fail) return;
+    LOG("net: %u message(s) to clients could not be queued for the network thread (out queue full)", g_send_fail);
+    g_send_fail = 0;
+}
+
 // Queue helpers: a refusal (the out queue is full) is counted and reported once a second.
 void send_bye(int slot, uint32_t gen, uint8_t reason) {
     net::ByeMsg b{};
@@ -197,6 +203,8 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason) 
     set_clients(g_nclients - 1);
     if (g_nclients == 0) {
         sim_set_run_active(false);
+        g_core.reset_host_time();  // the session is over: no Pong from a stale clock
+        flush_send_fail();
         LOG("net: no clients left");
     }
 }
@@ -280,6 +288,7 @@ void reject(int slot, uint32_t gen, uint8_t reason, const char* why) {
     LOG("net: client %d refused: %s", slot + 1, why);
     send_bye(slot, gen, reason);
     request_disconnect(slot, gen);
+    if (g_nclients == 0) flush_send_fail();
 }
 
 void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, double now) {
@@ -319,7 +328,6 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         return;
     }
     if (g_nclients == 0) {
-        g_epoch = sim_player_epoch();
         g_checked_gen = air_gen;
         sim_set_run_active(true);
         g_next_report = now + 1.0;
@@ -541,6 +549,13 @@ void pump(void* player, double now) {
         for (size_t i = 0; i < n; ++i) {
             const int slot = ev[i].slot;
             if (slot >= net::kMaxClients) continue;
+            // An event of a newer connection than the avatar's: this slot's Disconnect never reached us (it was
+            // lost, or the avatar was never told). Give the old avatar back before handling the new event.
+            if (g_av[slot].active && static_cast<int32_t>(ev[i].gen - g_av[slot].gen) > 0) {
+                bool live[net::kMaxClients];
+                check_live(live);
+                release(slot, "disconnected (missed)", live[slot], kByeNone);
+            }
             switch (ev[i].kind) {
                 case HostEvent::Connect:
                     LOG("net: peer %d connected", slot + 1);
@@ -581,25 +596,24 @@ void report(void* player, double now) {
         a.flag_clears = 0;
         a.err_max = 0;
     }
-    if (g_send_fail) {
-        LOG("net: %u message(s) to clients could not be queued for the network thread (out queue full)", g_send_fail);
-        g_send_fail = 0;
-    }
+    flush_send_fail();
 }
 
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
     if (!g_running.load(std::memory_order_relaxed)) return;
-    if (g_nclients > 0) {
-        // The player changed (mission end, new flight): the session is over. Check liveness first, so that
-        // only aircraft that still exist get their flags written.
-        if (sim_player_epoch() != g_epoch) {
+    // The player changed (mission end, new flight): the session is over, and the published host time is stale.
+    // Check liveness first, so that only aircraft that still exist get their flags written.
+    if (sim_player_epoch() != g_epoch) {
+        g_epoch = sim_player_epoch();
+        if (g_nclients > 0) {
             bool live[net::kMaxClients];
             check_live(live);
             for (int s = 0; s < net::kMaxClients; ++s)
                 if (g_av[s].active) release(s, "the player changed", live[s], kByeSessionEnded);
-        } else if (g_aircraft_generation.load(std::memory_order_acquire) != g_checked_gen) {
-            release_dead();  // an aircraft was destroyed since the last check: is one of ours gone?
         }
+        g_core.reset_host_time();  // no Pongs, and no States passed, until the new player's first step
+    } else if (g_nclients > 0 && g_aircraft_generation.load(std::memory_order_acquire) != g_checked_gen) {
+        release_dead();  // an aircraft was destroyed since the last check: is one of ours gone?
     }
     const double now = sim_game_time();
     if (is_player) {
@@ -651,6 +665,7 @@ void host_on_modules_loaded() {
         return;
     }
     g_checked_gen = g_aircraft_generation.load(std::memory_order_acquire);
+    g_epoch = sim_player_epoch();
     g_running.store(true);
     // Returns at once; the thread binds and logs "net: host on udp <addr>:<port>" (or why it could not).
     if (!g_core.start(g_addr, g_port, core_log)) {
