@@ -2,6 +2,9 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <cstddef>
+
 namespace lazysf2::hooks {
 
 // Game window: strip WS_EX_TOPMOST at creation and keep it non-topmost afterwards (Borderless).
@@ -43,5 +46,28 @@ void menu_on_modules_loaded();
 // reads it once (call from DllMain); probe_on_modules_loaded() hooks AircraftObject.dll when it loads.
 void install_probe_hooks();
 void probe_on_modules_loaded();
+
+// One live aircraft object, as seen by probe_with_aircraft(). name points into a copy that is valid
+// only inside the callback.
+struct LiveAircraft {
+    void* obj;
+    const wchar_t* name;
+    unsigned long long created;  // GetTickCount64() at construction
+};
+// Runs callback while holding the aircraft table's lock shared: no listed object can be destroyed
+// until it returns (the destructor hook needs the lock exclusively). The callback must not log or
+// do file I/O. The table is empty unless the probe is on.
+void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx);
+
+// Puppet mode (developer tool, part of the probe): drives one AI aircraft along a level path from
+// the render thread, to see whether the game lets us hold it there. Ctrl+Shift+P toggles a run of
+// at most 30 s. puppet_toggle() is called by the probe's hotkey thread; puppet_on_present() from
+// IDXGISwapChain::Present, and costs one relaxed atomic load while no run is requested.
+void puppet_toggle();
+void puppet_run_frame();
+extern std::atomic<int> g_puppet_state;
+inline void puppet_on_present() {
+    if (g_puppet_state.load(std::memory_order_relaxed) != 0) puppet_run_frame();
+}
 
 }  // namespace lazysf2::hooks

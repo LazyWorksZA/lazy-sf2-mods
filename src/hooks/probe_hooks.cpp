@@ -252,13 +252,17 @@ bool game_in_front() {
 }
 
 DWORD WINAPI hotkey_thread(LPVOID) {
-    bool was_down = false;
+    bool was_down = false, puppet_was_down = false;
     for (;;) {
         Sleep(50);
-        const bool down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
-                          (GetAsyncKeyState('D') & 0x8000) && game_in_front();
+        const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+                          game_in_front();
+        const bool down = mods && (GetAsyncKeyState('D') & 0x8000);
         if (down && !was_down) take_snapshot();
         was_down = down;
+        const bool puppet_down = mods && (GetAsyncKeyState('P') & 0x8000);
+        if (puppet_down && !puppet_was_down) puppet_toggle();
+        puppet_was_down = puppet_down;
     }
 }
 
@@ -305,6 +309,15 @@ bool valid_probe_dir(const wchar_t* value, std::wstring& out) {
 }
 
 }  // namespace
+
+void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx) {
+    LiveAircraft list[kMaxTracked];  // a copy of the table, so the callback never sees Entry
+    AcquireSRWLockShared(&g_lock);
+    const size_t n = g_count;
+    for (size_t i = 0; i < n; ++i) list[i] = {g_table[i].obj, g_table[i].name, g_table[i].created};
+    callback(list, n, ctx);  // the callback must not log or touch files
+    ReleaseSRWLockShared(&g_lock);
+}
 
 void install_probe_hooks() {
     wchar_t dir[MAX_PATH] = {};
