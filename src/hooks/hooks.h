@@ -47,7 +47,7 @@ void menu_on_modules_loaded();
 void install_probe_hooks();
 void probe_on_modules_loaded();
 
-// One live aircraft object, as seen by probe_with_aircraft(). name points into a copy that is valid
+// One live aircraft object, as seen by probe_with_aircraft(). name points into the probe table and is valid
 // only inside the callback.
 struct LiveAircraft {
     void* obj;

@@ -38,6 +38,8 @@ struct Vec3d {
 // The run. Present thread only.
 struct Run {
     void* target = nullptr;
+    unsigned long long created = 0;  // identifies the object, in case its address is reused
+    double last_alt = 0;
     Vec3d p0{}, v{};
     float r0[9] = {};
     LARGE_INTEGER start{};
@@ -54,7 +56,7 @@ void read_pos(const void* obj, Vec3d* p) { memcpy(p, static_cast<const char*>(ob
 // --- Start (callback runs under the shared lock) --------------------------------------------------
 
 struct StartCtx {
-    int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 target too slow
+    int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 target too slow, 3 too steep
     void* player = nullptr;
     wchar_t name[64] = {};
     double distance = 0, speed = 0;
@@ -92,12 +94,17 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
     const double speed = std::sqrt(double(v0[0]) * v0[0] + double(v0[1]) * v0[1] + double(v0[2]) * v0[2]);
     const double horiz = std::sqrt(double(v0[0]) * v0[0] + double(v0[1]) * v0[1]);
     c.speed = speed;
-    if (speed < 1.0 || horiz < 1e-6) {
+    if (speed < 1.0) {
         c.result = 2;
+        return;
+    }
+    if (horiz < 0.1 * speed) {
+        c.result = 3;
         return;
     }
     Run& r = c.run;
     r.target = list[best].obj;
+    r.created = list[best].created;
     read_pos(obj, &r.p0);
     r.v = {v0[0] * speed / horiz, v0[1] * speed / horiz, 0.0};  // level, same speed
     memcpy(r.r0, obj + kRotOffset, sizeof(r.r0));
@@ -115,8 +122,13 @@ void start_run() {
         g_puppet_state.store(kIdle);
         return;
     }
+    if (c.result == 3) {
+        LOG("puppet: target is climbing or diving too steeply for a level path");
+        g_puppet_state.store(kIdle);
+        return;
+    }
     if (c.result == 2) {
-        LOG("puppet: target speed %.1f m/s is below 1 m/s (or has no horizontal part); not starting", c.speed);
+        LOG("puppet: target speed %.1f m/s is below 1 m/s; not starting", c.speed);
         g_puppet_state.store(kIdle);
         return;
     }
@@ -142,7 +154,7 @@ void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
     auto& c = *static_cast<FrameCtx*>(vctx);
     bool live = false;
     for (size_t i = 0; i < n; ++i) {
-        if (list[i].obj == g_run.target) {
+        if (list[i].obj == g_run.target && list[i].created == g_run.created) {
             live = true;
             break;
         }
@@ -158,6 +170,7 @@ void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
     c.drift = std::sqrt((cur.x - want.x) * (cur.x - want.x) + (cur.y - want.y) * (cur.y - want.y) +
                         (cur.z - want.z) * (cur.z - want.z));
     c.alt = cur.z;
+    g_run.last_alt = cur.z;
     const float v[3] = {static_cast<float>(g_run.v.x), static_cast<float>(g_run.v.y), static_cast<float>(g_run.v.z)};
     memcpy(obj + kPosOffset, &want, sizeof(want));
     memcpy(obj + kVelOffset, v, sizeof(v));
@@ -165,6 +178,10 @@ void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
 }
 
 void stop_run(const char* reason, double t) {
+    if (g_run.frames > 0) {  // the last, partial second
+        LOG("puppet: t=%.0fs frames=%u drift max %.2f m mean %.2f m (alt %.0f m)", t, g_run.frames, g_run.drift_max,
+            g_run.drift_sum / g_run.frames, g_run.last_alt);
+    }
     g_puppet_state.store(kIdle);
     g_run.target = nullptr;
     LOG("puppet: stop (%s) after %.1f s", reason, t);
