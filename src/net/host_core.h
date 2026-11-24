@@ -8,9 +8,9 @@
 //  - The game thread (any single caller thread, in the tests) talks to the core only through poll(), send(),
 //    disconnect(), set_welcomed() and set_host_time(). Each takes a mutex for a few copies of a few dozen
 //    bytes, or is an atomic. The queues are fixed rings, allocated with the object.
-//  - Hello and Bye (once per connection each) and States are ordinary messages: they are refused when the ring is
-//    within kControlReserve of full (a Hello or Bye that cannot be queued ends that connection). Only Connect and
-//    Disconnect may use the reserve, so no client can crowd another client's arrival or departure out.
+//  - The in ring has a reserve for control events (Connect, Disconnect, Hello, Bye: at most 4 per connection, because
+//    Hello and Bye are accepted once each). States may use only the rest of the ring, and each slot only its share of
+//    that (kStateQuota), so one client's States can never fill the ring and crowd another client's join or leave out.
 //  - The network thread answers Pings itself (a Pong with the host game time the game thread last published), so
 //    clock sync works while the game is paused or in a menu.
 //  - The network thread decodes and checks every received packet before it queues it (length, magic, version,
@@ -37,6 +37,7 @@ struct HostEvent {
     uint8_t slot = 0;     // 0..kMaxClients-1; the client_id on the wire is slot + 1
     uint32_t gen = 0;     // the connection that holds the slot: bumped on every connect, never 0. Commands for a
                           // slot carry it, and the network thread ignores one whose generation is no longer current
+    uint8_t is_state = 0;  // Message: a State (counted against its slot's quota until it is polled)
     uint8_t reason = 0;   // Disconnect: 0 the peer left (or ENet's own timeout), 1 no packets for kTimeoutMs
     uint8_t channel = 0;  // Message
     uint16_t len = 0;     // Message: bytes in data
@@ -48,7 +49,8 @@ struct HostCounters {
     uint32_t dropped_format = 0;  // wrong size, magic, version, type or channel, or the wrong sender
     uint32_t dropped_range = 0;   // a State with a number out of range
     uint32_t dropped_state = 0;   // a State, or a repeated Hello, in the wrong phase
-    uint32_t dropped_queue = 0;   // States, Hellos and Byes refused: the ring was nearly full
+    uint32_t dropped_queue = 0;   // States refused: a slot was over its quota, or the ring was nearly full
+    uint32_t dropped_quota[kMaxClients] = {};  // ... of which refused because that slot was over its quota
     uint32_t dropped_control = 0; // Connect or Disconnect events lost: the ring was completely full
 };
 
@@ -113,6 +115,12 @@ private:
     // Entries of the in ring that only control events may use: States are refused once the ring is this close to
     // full, so a client that floods States while the game is paused or in a menu cannot hide a Disconnect.
     static constexpr size_t kControlReserve = 64;
+    // At most this many States per slot in the ring at once; the quotas of all slots together fit outside the reserve.
+    static constexpr size_t kStateQuota = (kInCap - kControlReserve) / kMaxClients;
+    // The reserve covers every kind of control event for every client (4 each), twice over for a reconnect the game
+    // has not seen yet.
+    static_assert(kControlReserve >= 4 * kMaxClients * 2, "the control reserve is too small");
+    static_assert(kStateQuota * kMaxClients <= kInCap - kControlReserve, "the State quotas must fit outside the reserve");
 
     void run();
     bool push_in(const HostEvent& e, bool control);
@@ -135,13 +143,14 @@ private:
     std::mutex in_mx_;
     HostEvent in_[kInCap];
     size_t in_head_ = 0, in_n_ = 0;
+    size_t in_states_[kMaxClients] = {};  // States per slot currently in the ring (under in_mx_)
     std::atomic<uint32_t> in_count_{0};  // mirrors in_n_ for the lock-free emptiness check
 
     std::mutex out_mx_;
     OutMsg out_[kOutCap];
     size_t out_head_ = 0, out_n_ = 0;
 
-    std::atomic<uint32_t> n_received_{0}, n_format_{0}, n_range_{0}, n_state_{0}, n_queue_{0}, n_control_{0};
+    std::atomic<uint32_t> n_received_{0}, n_format_{0}, n_range_{0}, n_state_{0}, n_queue_{0}, n_control_{0}, n_quota_[kMaxClients] = {};
 };
 
 }  // namespace lazysf2::net

@@ -451,25 +451,28 @@ void host_core_tests() {
     const HostCounters post_flood = core.counters();
     std::printf("  flood: %u sent, %zu States queued, %u refused; Hello %zu, Bye %zu, Disconnect %zu\n", sent, states,
                 post_flood.dropped_queue - pre_flood.dropped_queue, hellos, byes, discs);
-    expect(post_flood.dropped_queue > pre_flood.dropped_queue && states < 500, "States are refused when the queue is nearly full");
-    // The Bye arrived when only the reserve was left: it is refused, the core ends that connection itself, and the
-    // Disconnect (a control event) still gets through.
-    expect(hellos == 1 && byes == 0 && discs == 1 && post_flood.dropped_control == 0,
-           "after the flood: Hello and Disconnect arrive, the refused Bye ended the connection, no control event lost");
+    expect(post_flood.dropped_queue > pre_flood.dropped_queue && states == (512 - 64) / kMaxClients,
+           "one client's States are held to its quota");
+    expect(hellos == 1 && byes == 1 && discs == 1 && post_flood.dropped_control == 0,
+           "after the flood: Hello, Bye and Disconnect all arrive, no control event lost");
 
-    // A client that repeats Byes while the game does not drain cannot crowd out another client's Connect and Disconnect.
+    // One client's flood cannot crowd out another client's join: Client A floods States and repeats Byes while the game
+    // does not drain; client B then connects, sends its Hello and leaves. B's Connect, Hello and Disconnect all arrive,
+    // B is not kicked, and A's States are held to its quota.
     {
+        constexpr size_t kQuota = (512 - 64) / kMaxClients;  // HostCore's per-slot State quota
         TestClient x;
         x.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
         x.peer = enet_host_connect(x.host, &addr, kChannelCount, 0);
         ev = collect(core, x, 1, 2000);
-        expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "flooding client connects");
+        expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "flooding client A connects");
         const uint8_t xslot = ev.empty() ? 0 : ev[0].slot;
         core.set_welcomed(xslot, ev.empty() ? 0 : ev[0].gen, true);
         ByeMsg xb{};
         xb.client_id = static_cast<uint16_t>(xslot + 1);
+        const HostCounters pre = core.counters();
         uint32_t xs = 100000;
-        for (int round = 0; round < 40; ++round) {  // fill the ring up to the reserve with States
+        for (int round = 0; round < 40; ++round) {  // 800 States
             for (int k = 0; k < 20; ++k) {
                 StateMsg fs = good_state(++xs, 100.5);
                 fs.client_id = xb.client_id;
@@ -477,12 +480,13 @@ void host_core_tests() {
             }
             x.idle(5);
         }
-        for (int k = 0; k < 500; ++k) {  // 500 Byes on the reliable channel
+        for (int k = 0; k < 500; ++k) {  // and 500 Byes on the reliable channel
             x.send(buf, enc(xb, buf), kChannelReliable);
             if (k % 25 == 0) x.idle(2);
         }
         x.idle(200);
-        const HostCounters pre = core.counters();
+        const HostCounters mid = core.counters();
+
         TestClient y;
         y.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
         y.peer = enet_host_connect(y.host, &addr, kChannelCount, 0);
@@ -491,13 +495,21 @@ void host_core_tests() {
             y.service(0);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        y.send(buf, enc(h, buf), kChannelReliable);  // B's Hello
+        for (int i = 0; i < 200; ++i) {
+            x.service(0);
+            y.service(0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool y_kicked = y.disconnected;
         enet_peer_disconnect(y.peer, 0);
+        enet_peer_disconnect(x.peer, 0);
         for (int i = 0; i < 300; ++i) {
             x.service(0);
             y.service(0);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        size_t connects = 0, disconnects = 0, xbyes = 0;
+        size_t connects = 0, disconnects = 0, a_states = 0, bye_count = 0, hello_count = 0;
         for (;;) {
             HostEvent e4[64];
             const size_t n = core.poll(e4, 64);
@@ -505,17 +517,25 @@ void host_core_tests() {
             for (size_t i = 0; i < n; ++i) {
                 if (e4[i].kind == HostEvent::Connect) ++connects;
                 if (e4[i].kind == HostEvent::Disconnect) ++disconnects;
-                if (e4[i].kind == HostEvent::Message) ++xbyes;
+                if (e4[i].kind != HostEvent::Message) continue;
+                MsgType t{};
+                peek_type(e4[i].data, e4[i].len, t);
+                if (t == MsgType::State && e4[i].slot == xslot) ++a_states;
+                if (t == MsgType::Bye) ++bye_count;
+                if (t == MsgType::Hello) ++hello_count;
             }
         }
         const HostCounters post = core.counters();
-        std::printf("  bye flood: second client Connect %zu, Disconnect events %zu (flooder and second), Bye/other messages %zu, "
-                    "wrong-phase drops %u, control lost %u\n", connects, disconnects, xbyes,
-                    post.dropped_state - pre.dropped_state, post.dropped_control);
-        expect(connects == 1 && disconnects == 2 && post.dropped_control == 0,
-               "another client's Connect and Disconnect arrive during a Bye flood");
+        std::printf("  flood: A's States queued %zu (quota %zu), refused over quota %u; Bye %zu; B: Connect %zu, "
+                    "Hello %zu, kicked %d; Disconnects %zu; wrong-phase drops %u; control lost %u\n",
+                    a_states, kQuota, mid.dropped_quota[xslot] - pre.dropped_quota[xslot], bye_count, connects, hello_count,
+                    y_kicked ? 1 : 0, disconnects, mid.dropped_state - pre.dropped_state, post.dropped_control);
+        expect(a_states == kQuota && mid.dropped_quota[xslot] - pre.dropped_quota[xslot] == 800 - kQuota,
+               "A's States are held to its quota, and the rest are counted as refused for A's slot");
+        expect(connects == 1 && hello_count == 1 && !y_kicked, "B's Connect and Hello arrive and B is not kicked");
+        expect(bye_count == 1 && mid.dropped_state - pre.dropped_state == 499 && disconnects == 2 && post.dropped_control == 0,
+               "one Bye queued, 499 repeats dropped, both Disconnects arrive, no control event lost");
     }
-
 
     // Silence: a client that is serviced (so ENet itself is happy) but sends no application packets is dropped by
     // the core after 5 s, with reason 1.

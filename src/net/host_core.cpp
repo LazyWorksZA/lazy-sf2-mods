@@ -95,16 +95,20 @@ void HostCore::stop(bool in_loader_lock) {
 }
 
 bool HostCore::push_in(const HostEvent& e, bool control) {
+    bool over_quota = false;
     {
         std::lock_guard<std::mutex> lock(in_mx_);
-        if (in_n_ < (control ? kInCap : kInCap - kControlReserve)) {
+        over_quota = !control && in_states_[e.slot] >= kStateQuota;
+        if (!over_quota && in_n_ < (control ? kInCap : kInCap - kControlReserve)) {
             in_[(in_head_ + in_n_) % kInCap] = e;
             ++in_n_;
+            if (!control) ++in_states_[e.slot];
             in_count_.store(static_cast<uint32_t>(in_n_), std::memory_order_release);
             return true;
         }
     }
     (control ? n_control_ : n_queue_).fetch_add(1, std::memory_order_relaxed);
+    if (over_quota) n_quota_[e.slot].fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -113,6 +117,7 @@ size_t HostCore::poll(HostEvent* out, size_t max) {
     std::lock_guard<std::mutex> lock(in_mx_);
     size_t n = 0;
     while (n < max && in_n_ > 0) {
+        if (in_[in_head_].is_state && in_states_[in_[in_head_].slot] > 0) --in_states_[in_[in_head_].slot];
         out[n++] = in_[in_head_];
         in_head_ = (in_head_ + 1) % kInCap;
         --in_n_;
@@ -172,12 +177,13 @@ HostCounters HostCore::counters() const {
     c.dropped_state = n_state_.load(std::memory_order_relaxed);
     c.dropped_queue = n_queue_.load(std::memory_order_relaxed);
     c.dropped_control = n_control_.load(std::memory_order_relaxed);
+    for (int i = 0; i < kMaxClients; ++i) c.dropped_quota[i] = n_quota_[i].load(std::memory_order_relaxed);
     return c;
 }
 
 // The network thread. Everything below runs on it, and only it touches ENet.
 void HostCore::run() {
-    char line[200];
+    char line[320];
     auto say = [&](const char* fmt, auto... args) {
         std::snprintf(line, sizeof(line), fmt, args...);
         if (log_) log_(line);  // never under a lock
@@ -289,11 +295,17 @@ void HostCore::run() {
         e.slot = static_cast<uint8_t>(slot);
         e.gen = gens[slot];
         e.channel = channel;
+        e.is_state = type == MsgType::State ? 1 : 0;
         e.len = static_cast<uint16_t>(len);
         std::memcpy(e.data, data, len);
-        // Control events (Connect, Disconnect) may use the reserve; messages may not. A Hello or Bye that cannot be
-        // queued would leave a connection the game never hears about, so that connection is ended.
-        if (!push_in(e, false) && type != MsgType::State && peers[slot]) enet_peer_disconnect(peers[slot], 0);
+        // Control events (Hello and Bye included: once per connection each) may use the reserve; States may not, and
+        // each slot has a quota of them. A Hello or Bye that still cannot be queued (practically unreachable: the
+        // reserve is sized for all of them) would leave a connection the game never hears about, so it is ended.
+        if (!push_in(e, type != MsgType::State) && type != MsgType::State && peers[slot]) {
+            say("net: client %u connection ended: %s could not be queued", static_cast<unsigned>(slot + 1),
+                type == MsgType::Hello ? "Hello" : "Bye");
+            enet_peer_disconnect(peers[slot], 0);
+        }
     };
 
     auto handle_event = [&](ENetEvent& ev) {
@@ -408,13 +420,18 @@ void HostCore::run() {
             next_report = now + 1000;
             for (uint32_t& p : pings) p = 0;
             const HostCounters c = counters();
+            uint32_t quota_now = 0, quota_before = 0;
+            for (int i = 0; i < kMaxClients; ++i) {
+                quota_now += c.dropped_quota[i];
+                quota_before += reported.dropped_quota[i];
+            }
             if (c.dropped_format != reported.dropped_format || c.dropped_range != reported.dropped_range ||
                 c.dropped_state != reported.dropped_state || c.dropped_queue != reported.dropped_queue ||
                 c.dropped_control != reported.dropped_control) {
                 say("net: dropped packets in the last second: %u malformed, %u out of range, %u wrong phase or rate, "
-                    "%u States while the game is not draining (queue nearly full), %u control events (queue full)",
+                    "%u States refused (%u of them over a slot's quota; the game is not draining), %u control events lost (queue full)",
                     c.dropped_format - reported.dropped_format, c.dropped_range - reported.dropped_range,
-                    c.dropped_state - reported.dropped_state, c.dropped_queue - reported.dropped_queue,
+                    c.dropped_state - reported.dropped_state, c.dropped_queue - reported.dropped_queue, quota_now - quota_before,
                     c.dropped_control - reported.dropped_control);
                 reported = c;
             }
