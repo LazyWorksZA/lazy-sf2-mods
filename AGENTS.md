@@ -51,6 +51,7 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 | `tools/ghidra/*.java` | Cross-references from strings, wide tags, imports and addresses; vtable dump; decompile everything. Write output to `G:\SF2-recon\decomp`. |
 | `tools/catx.py` | Lists and extracts `.cat` archives. It refuses to extract into the repo. |
 | `tools/recon/` | Inventory of PE imports and exports, a Process Monitor filter generator, and a capture summariser. |
+| `tools/test/sf2drive.ps1` | Unattended game checks: start (optionally with DXVK logs and HUD), focus, screenshot, switch away and back, stop. It sends input to the desktop, so use it only with the user's OK. |
 | `tools/gen_winmm_proxy.py` | Regenerates `src/proxy/winmm.def` and `winmm_exports.inc` from the system `winmm.dll`. |
 
 **Gotcha:** Ghidra's `.bat` breaks on `(x86)` in a path, so import the game through the junction `G:\SF2-game`.
