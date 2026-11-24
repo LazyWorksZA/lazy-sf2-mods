@@ -13,6 +13,7 @@
 
 #include <atomic>
 
+#include "config.h"
 #include "hooks/hooks.h"
 #include "log.h"
 
@@ -57,14 +58,15 @@ bool create_and_enable(void* target, void* detour, void** original, const char* 
 // --- IDXGISwapChain ---------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
-    if (fullscreen) {
+    if (fullscreen && config::borderless()) {
         LOG("dxgi: SetFullscreenState(TRUE) suppressed (borderless)");
         return S_OK;
     }
     return o_SetFullscreenState(self, fullscreen, target);
 }
 
-HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* /*self*/, const DXGI_MODE_DESC* mode) {
+HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* mode) {
+    if (!config::borderless()) return o_ResizeTarget(self, mode);
     if (mode) {
         LOG("dxgi: ResizeTarget(%ux%u @ %u/%u) suppressed (borderless)", mode->Width, mode->Height,
             mode->RefreshRate.Numerator, mode->RefreshRate.Denominator);
@@ -89,7 +91,7 @@ HRESULT STDMETHODCALLTYPE h_CreateSwapChain(IDXGIFactory* self, IUnknown* device
             desc->BufferDesc.Width, desc->BufferDesc.Height, desc->BufferDesc.Format,
             desc->BufferDesc.RefreshRate.Numerator, desc->BufferDesc.RefreshRate.Denominator, desc->SampleDesc.Count,
             desc->BufferCount, desc->Windowed, desc->Flags, static_cast<void*>(desc->OutputWindow));
-        if (!desc->Windowed) {
+        if (!desc->Windowed && config::borderless()) {
             LOG("dxgi: forcing Windowed=TRUE");
             desc->Windowed = TRUE;
         }
@@ -104,7 +106,7 @@ HRESULT STDMETHODCALLTYPE h_CreateSwapChain(IDXGIFactory* self, IUnknown* device
 
     HRESULT hr = o_CreateSwapChain(self, device, desc, out);
     LOG("dxgi: CreateSwapChain -> 0x%08lx", hr);
-    if (SUCCEEDED(hr) && out && *out) {
+    if (SUCCEEDED(hr) && out && *out && config::borderless()) {
         if (desc && desc->OutputWindow) {
             HRESULT mwa = self->MakeWindowAssociation(desc->OutputWindow, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
             LOG("dxgi: MakeWindowAssociation(NO_ALT_ENTER|NO_WINDOW_CHANGES) -> 0x%08lx", mwa);

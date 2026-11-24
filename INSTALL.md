@@ -2,7 +2,7 @@
 
 This is a borderless fullscreen mod for Strike Fighters 2 (July 2013 patch). The project is not affiliated with ThirdWire, and you need your own copy of the game.
 
-> Status: **Phase 2 spike.** Borderless mode is always on while the mod is installed. The Options menu setting comes in Phase 4.
+> Status: **Phase 4.** You choose the display mode in the game, under **Options → Graphics → Display Mode** (Fullscreen or Borderless). The choice is saved as `DisplayMode` in `[GraphicsOptions]` of `Saved Games\ThirdWire\StrikeFighters2\Options.ini`, and **applies the next time you start the game**. If the key is missing or invalid, the game runs in stock exclusive fullscreen.
 
 ## What it adds
 
@@ -15,7 +15,7 @@ These files go in the game folder, next to `StrikeFighters2.exe`:
 | `lazysf2.log` | A log written on each start. |
 | `lazysf2.manifest.txt` | The list of files to remove when uninstalling. |
 
-The mod changes no game files, ini files or registry keys.
+The mod changes no game files and no registry keys. The Options menu stores your Display Mode choice in your own `Options.ini`.
 
 ## Build
 
@@ -45,9 +45,14 @@ Remote-control tools send absolute mouse positions, which the game's DirectInput
 
 ## How to tell it's working
 
-- The game starts on the desktop and covers the monitor, without a screen-mode switch.
-- Alt-Tab switches to other windows instantly, and back again.
-- `lazysf2.log` contains `SetFullscreenState(TRUE) suppressed (borderless)`.
+- **Options → Graphics** has a **Display Mode** list below Aspect Ratio.
+- With **Borderless** chosen and the game restarted:
+  - the game starts on the desktop and covers the monitor, without a screen-mode switch;
+  - Alt-Tab switches to other windows instantly, and back again;
+  - `lazysf2.log` contains `DisplayMode=1 -> Borderless` and `SetFullscreenState(TRUE) suppressed (borderless)`.
+- With **Fullscreen**, the game behaves exactly like stock.
+
+The mod's only change to `Options.ini` is the `DisplayMode` key, which the game itself writes when you leave the Graphics page. A leftover `DisplayMode` key does nothing once the mod is uninstalled.
 
 To compare with stock behaviour without uninstalling, start the game with the environment variable `LAZYSF2_DISABLE=1`. The DLL then passes calls through and installs no hooks.
 

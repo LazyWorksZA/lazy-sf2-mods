@@ -15,10 +15,13 @@ namespace {
 using LoadLibraryExW_t = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 LoadLibraryExW_t o_LoadLibraryExW = nullptr;
 
+// May run under the loader lock (DLLs loading other DLLs during start-up), so handlers must not
+// call into the shell, COM or anything else that can block. In particular they must not call
+// config::display_mode(); hooks that depend on it check it when they are called instead.
 void notify() {
-    const config::Config& c = config::get();
-    if (c.borderless) dxgi_on_modules_loaded();
-    if (c.mouse == config::MouseMode::Cursor) mouse_on_modules_loaded();
+    dxgi_on_modules_loaded();  // behaves as stock unless the display mode is Borderless
+    if (config::get().mouse == config::MouseMode::Cursor) mouse_on_modules_loaded();
+    menu_on_modules_loaded();  // the Display Mode option is offered in every mode
 }
 
 HMODULE WINAPI h_LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {

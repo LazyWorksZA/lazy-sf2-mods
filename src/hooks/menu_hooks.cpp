@@ -1,0 +1,362 @@
+// Options menu "Display Mode" list (borderless brief, Phase 4). See docs/option-trace.md.
+//
+// 1. Menu data. When the exe's file service reads OptionsScreen.ini (from the mod folder, the game
+//    folder or MenuData.cat), we splice two items into [GraphicsOptionsSubMenu] and append their
+//    sections before the game parses the text. Nothing of the game's data is shipped or written.
+//    The control ID of a sub-menu item is its MenuItemNNN number, so we take the next free ones.
+//    The new row sits directly below Aspect Ratio; the rows below it move down one row.
+//    Labels use literal text as the string ID: the text service returns the ID itself when it is
+//    not a known key, so no string-table changes are needed.
+// 2. Screen logic. The Graphics sub-menu class in OptionsScreen.dll has Init/Refresh/Changed/Exit
+//    methods; after the stock work we fill, select, read and save our list like the stock ones.
+// 3. The value is saved through the game's own Options.ini helper and read at the next start by
+//    config::display_mode(). The new mode applies after a restart (v1 scope).
+//
+// All hooks are at fixed RVAs and only installed on the July 2013 builds.
+#include <windows.h>
+
+#include <atomic>
+#include <cstring>
+#include <cwchar>
+#include <string>
+#include <vector>
+
+#include "config.h"
+#include "hooks/hook_util.h"
+#include "hooks/hooks.h"
+#include "log.h"
+
+namespace lazysf2::hooks {
+namespace {
+
+// --- Fingerprints and RVAs (docs/option-trace.md, recon-notes.md) -----------------------------
+
+constexpr DWORD kExeTimestamp = 0x51d22110, kExeImageSize = 0x62000;
+constexpr DWORD kFileOpenRva = 0x94e0;   // int  __thiscall Open(svc, const wchar_t* name, int mode)
+constexpr DWORD kFileCloseRva = 0x9590;  // void __thiscall Close(svc, int handle)
+constexpr DWORD kFileReadRva = 0x8270;   // int  __thiscall Read(svc, int handle, char* buf, unsigned bytes)
+
+constexpr DWORD kOptsTimestamp = 0x51d220d6, kOptsImageSize = 0x2c000;
+constexpr DWORD kGfxInitRva = 0x58f0;     // void __thiscall Init(this, int*, int*)   (ret 8)
+constexpr DWORD kGfxRefreshRva = 0x5dd0;  // void __thiscall Refresh(this)
+constexpr DWORD kGfxChangedRva = 0x4e20;  // void __thiscall Changed(this)
+constexpr DWORD kGfxExitRva = 0x5da0;     // void __thiscall Exit(this)  (saves, then tears down)
+constexpr DWORD kIniReadIntRva = 0xa790;  // int  __thiscall ReadInt(ini, section, key, default)
+constexpr DWORD kIniWriteIntRva = 0xa0e0; // void __thiscall WriteInt(ini, section, key, value)
+constexpr DWORD kIniGlobalRva = 0x26a90;  // Options.ini object used by the screen
+
+// Menu and control interfaces (vtable byte offsets / 4).
+constexpr int kMenuGetItem = 0x28 / 4;   // int GetItem(int id, int type, Control** out)
+constexpr int kListAddItem = 0x20 / 4;   // void AddItem(const wchar_t* text, int value)
+constexpr int kListSetSel = 0x30 / 4;    // void SetSelection(int index)
+constexpr int kListGetSel = 0x34 / 4;    // int GetSelection()  (-1 = none)
+constexpr int kItemTypeList = 8;
+
+constexpr wchar_t kSection[] = L"GraphicsOptions";
+constexpr wchar_t kKey[] = L"DisplayMode";
+
+// --- State ------------------------------------------------------------------------------------
+
+std::atomic<int> g_list_id{0};       // control ID assigned to our list (0 = not injected)
+int g_selected = 0;                  // current selection on the Graphics page (UI thread)
+constexpr int kMaxTracked = 8;
+std::atomic<int> g_tracked[kMaxTracked] = {};  // open handles of OptionsScreen.ini (+1, 0 = free)
+
+// --- 1. Splice the menu data -----------------------------------------------------------------
+
+bool ends_with_options_screen_ini(const wchar_t* name) {
+    if (!name) return false;
+    constexpr wchar_t kName[] = L"OptionsScreen.ini";
+    const size_t n = wcslen(name), k = wcslen(kName);
+    if (n < k || _wcsicmp(name + n - k, kName) != 0) return false;
+    return n == k || name[n - k - 1] == L'\\' || name[n - k - 1] == L'/';
+}
+
+void track(int handle) {
+    for (auto& t : g_tracked) {
+        int expected = 0;
+        if (t.compare_exchange_strong(expected, handle + 1)) return;
+    }
+}
+
+bool untrack(int handle) {
+    for (auto& t : g_tracked) {
+        int expected = handle + 1;
+        if (t.compare_exchange_strong(expected, 0)) return true;
+    }
+    return false;
+}
+
+// Our row goes where Detail is now (directly below Aspect Ratio); the top block uses 40-unit rows.
+constexpr int kInsertY = 120;
+constexpr int kRowStep = 40;
+
+// Names listed as MenuItemNNN=<name> in the section body [body, end).
+std::vector<std::wstring> item_names(const std::wstring& text, size_t body, size_t end) {
+    std::vector<std::wstring> names;
+    for (size_t p = body; p < end;) {
+        size_t eol = text.find(L'\n', p);
+        if (eol == std::wstring::npos || eol > end) eol = end;
+        std::wstring line = text.substr(p, eol - p);
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        if (line.rfind(L"MenuItem", 0) == 0 && line.find(L"MenuItemType") != 0) {
+            if (size_t eq = line.find(L'='); eq != std::wstring::npos) names.push_back(line.substr(eq + 1));
+        }
+        p = eol + 1;
+    }
+    return names;
+}
+
+// Moves every listed item whose Position/TextPosition y is at or below kInsertY down one row.
+void shift_rows(std::wstring& text, const std::vector<std::wstring>& names) {
+    int moved = 0;
+    for (const std::wstring& name : names) {
+        size_t sec = text.find(L"[" + name + L"]");
+        if (sec == std::wstring::npos) continue;
+        size_t p = text.find(L'\n', sec);
+        while (p != std::wstring::npos && p + 1 < text.size() && text[p + 1] != L'[') {
+            const size_t line = p + 1;
+            size_t eol = text.find(L'\n', line);
+            if (eol == std::wstring::npos) eol = text.size();
+            for (const wchar_t* key : {L"Position=", L"TextPosition="}) {
+                const size_t klen = wcslen(key);
+                if (text.compare(line, klen, key) != 0) continue;
+                int x = 0, y = 0;
+                if (swscanf_s(text.c_str() + line + klen, L"%d,%d", &x, &y) != 2 || y < kInsertY) break;
+                size_t vend = text.find_first_of(L"\r\n", line + klen);
+                if (vend == std::wstring::npos) vend = text.size();
+                text.replace(line + klen, vend - (line + klen), std::to_wstring(x) + L"," + std::to_wstring(y + kRowStep));
+                eol = text.find(L'\n', line);
+                if (eol == std::wstring::npos) eol = text.size();
+                ++moved;
+                break;
+            }
+            p = eol;
+        }
+    }
+    LOG("menu: moved %d Graphics page positions down one row", moved);
+}
+
+// Returns the spliced text, or an empty string if the text is not what we expect.
+std::wstring splice(const std::wstring& text, int& list_id) {
+    if (text.find(L"[DisplayModeList]") != std::wstring::npos) {
+        LOG("menu: OptionsScreen.ini already defines [DisplayModeList]; leaving it unchanged");
+        return {};
+    }
+    constexpr wchar_t kHeader[] = L"[GraphicsOptionsSubMenu]";
+    size_t sec = text.find(kHeader);
+    if (sec == std::wstring::npos) return {};
+    size_t body = text.find(L'\n', sec);
+    if (body == std::wstring::npos) return {};
+    ++body;
+    size_t end = text.find(L"\n[", body);  // start of the next section's line
+    end = (end == std::wstring::npos) ? text.size() : end + 1;
+
+    // Highest MenuItemNNN in the section.
+    int max_id = 0;
+    for (size_t p = text.find(L"MenuItem", body); p != std::wstring::npos && p < end; p = text.find(L"MenuItem", p + 8)) {
+        if (p > 0 && text[p - 1] != L'\n') continue;
+        int id = 0;
+        if (swscanf_s(text.c_str() + p, L"MenuItem%d=", &id) == 1 && id > max_id) max_id = id;
+    }
+    if (max_id <= 0 || max_id > 997) return {};
+    list_id = max_id + 1;
+
+    wchar_t items[128];
+    swprintf_s(items, L"MenuItem%03d=DisplayModeList\r\nMenuItem%03d=DisplayModeText\r\n", list_id, list_id + 1);
+
+    // A new row in the top block, directly below Aspect Ratio (y=80), styled like Aspect Ratio.
+    // Everything on the Graphics page at or below that row moves down by one row (see shift_rows).
+    constexpr wchar_t kSections[] =
+        L"\r\n"
+        L"[DisplayModeList]\r\n"
+        L"MenuItemType=LIST\r\n"
+        L"Position=200,120\r\n"
+        L"Width=240\r\n"
+        L"Height=22\r\n"
+        L"ListFieldSetting=MediumListField\r\n"
+        L"DropDownListSize=10\r\n"
+        L"InfoTextSetting=InfoTextSetting\r\n"
+        L"InfoTextStringID=Fullscreen changes the screen mode. Borderless runs in a window covering the desktop, for instant Alt-Tab. Applies after a restart.\r\n"
+        L"\r\n"
+        L"[DisplayModeText]\r\n"
+        L"MenuItemType=TEXT\r\n"
+        L"TextSetting=MediumTextLeft\r\n"
+        L"TextStringID=Display Mode\r\n"
+        L"TextPosition=0,123\r\n";
+
+    std::wstring out = text.substr(0, end);
+    if (!out.empty() && out.back() != L'\n') out += L"\r\n";
+    out += items;
+    out += text.substr(end);
+    shift_rows(out, item_names(out, body, end));
+    if (!out.empty() && out.back() != L'\n') out += L"\r\n";
+    out += kSections;
+    return out;
+}
+
+using FileOpen_t = int(__fastcall*)(void*, void*, const wchar_t*, int);
+using FileClose_t = void(__fastcall*)(void*, void*, int);
+using FileRead_t = int(__fastcall*)(void*, void*, int, char*, unsigned);
+FileOpen_t o_FileOpen = nullptr;
+FileClose_t o_FileClose = nullptr;
+FileRead_t o_FileRead = nullptr;
+
+int __fastcall h_FileOpen(void* svc, void* edx, const wchar_t* name, int mode) {
+    int h = o_FileOpen(svc, edx, name, mode);
+    if (h != -1 && ends_with_options_screen_ini(name)) {
+        LOG("menu: opened %ls (mode %d) as handle %d", name, mode, h);
+        track(h);
+    }
+    return h;
+}
+
+void __fastcall h_FileClose(void* svc, void* edx, int handle) {
+    untrack(handle);
+    o_FileClose(svc, edx, handle);
+}
+
+int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned bytes) {
+    int n = o_FileRead(svc, edx, handle, buf, bytes);
+    if (!untrack(handle)) return n;  // not ours, or already spliced
+    if (n <= 0 || static_cast<unsigned>(n) >= bytes) {
+        LOG("menu: OptionsScreen.ini read of %d/%u bytes is not a whole-file read; not modified", n, bytes);
+        return n;
+    }
+
+    // UTF-16 LE with BOM (stock), or 8-bit text.
+    const bool wide = n >= 2 && static_cast<unsigned char>(buf[0]) == 0xFF && static_cast<unsigned char>(buf[1]) == 0xFE;
+    std::wstring text;
+    if (wide) {
+        text.assign(reinterpret_cast<const wchar_t*>(buf + 2), (n - 2) / 2);
+    } else {
+        for (int i = 0; i < n; ++i) text += static_cast<wchar_t>(static_cast<unsigned char>(buf[i]));
+    }
+
+    int list_id = 0;
+    std::wstring out = splice(text, list_id);
+    if (out.empty()) {
+        LOG("menu: OptionsScreen.ini has no usable [GraphicsOptionsSubMenu]; Display Mode not added");
+        return n;
+    }
+    const size_t need = wide ? 2 + out.size() * 2 : out.size();
+    if (need >= bytes) {
+        LOG("menu: no room to add Display Mode (%zu of %u bytes)", need, bytes);
+        return n;
+    }
+    if (wide) {
+        memcpy(buf + 2, out.data(), out.size() * 2);
+    } else {
+        for (size_t i = 0; i < out.size(); ++i) buf[i] = static_cast<char>(out[i]);
+    }
+    g_list_id = list_id;
+    LOG("menu: added Display Mode list as MenuItem%03d (%d -> %zu bytes)", list_id, n, need);
+    return static_cast<int>(need);
+}
+
+// --- 2. Graphics sub-menu logic --------------------------------------------------------------
+
+HMODULE g_opts = nullptr;
+using Method_t = void(__fastcall*)(void* self, void* edx);
+using Init_t = void(__fastcall*)(void* self, void* edx, int* a, int* b);
+using IniReadInt_t = int(__fastcall*)(void* ini, void* edx, const wchar_t* section, const wchar_t* key, int def);
+using IniWriteInt_t = void(__fastcall*)(void* ini, void* edx, const wchar_t* section, const wchar_t* key, int value);
+Init_t o_Init = nullptr;
+Method_t o_Refresh = nullptr;
+Method_t o_Changed = nullptr;
+Method_t o_Exit = nullptr;
+
+void* options_ini() { return *static_cast<void**>(at_rva(g_opts, kIniGlobalRva)); }
+
+// Our list control on the current Graphics page, or nullptr.
+void* our_list(void* self) {
+    const int id = g_list_id.load();
+    void* menu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);
+    if (!id || !menu) return nullptr;
+    void* ctrl = nullptr;
+    using GetItem_t = int(__fastcall*)(void*, void*, int, int, void**);
+    reinterpret_cast<GetItem_t>(vtable_slot(menu, kMenuGetItem))(menu, nullptr, id, kItemTypeList, &ctrl);
+    return ctrl;
+}
+
+void __fastcall h_Init(void* self, void* edx, int* a, int* b) {
+    o_Init(self, edx, a, b);
+    void* list = our_list(self);
+    if (!list) {
+        if (g_list_id.load()) LOG("menu: Display Mode list control %d not found", g_list_id.load());
+        return;
+    }
+    using AddItem_t = void(__fastcall*)(void*, void*, const wchar_t*, int);
+    auto add = reinterpret_cast<AddItem_t>(vtable_slot(list, kListAddItem));
+    add(list, nullptr, L"Fullscreen", static_cast<int>(config::DisplayMode::Fullscreen));
+    add(list, nullptr, L"Borderless", static_cast<int>(config::DisplayMode::Borderless));
+
+    void* ini = options_ini();
+    const int v = ini ? reinterpret_cast<IniReadInt_t>(at_rva(g_opts, kIniReadIntRva))(ini, nullptr, kSection, kKey, 0) : 0;
+    g_selected = (v == static_cast<int>(config::DisplayMode::Borderless)) ? v : 0;
+    LOG("menu: Graphics page opened, DisplayMode=%d", g_selected);
+}
+
+void __fastcall h_Refresh(void* self, void* edx) {
+    o_Refresh(self, edx);
+    if (void* list = our_list(self)) {
+        using SetSel_t = void(__fastcall*)(void*, void*, int);
+        reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_selected);
+    }
+}
+
+void __fastcall h_Changed(void* self, void* edx) {
+    o_Changed(self, edx);
+    if (void* list = our_list(self)) {
+        using GetSel_t = int(__fastcall*)(void*, void*);
+        const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
+        if (sel == 0 || sel == 1) g_selected = sel;
+    }
+}
+
+void __fastcall h_Exit(void* self, void* edx) {
+    // Write before the stock Exit (which saves the stock keys and tears the page down).
+    if (g_list_id.load()) {
+        if (void* ini = options_ini()) {
+            reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva))(ini, nullptr, kSection, kKey, g_selected);
+            LOG("menu: saved [GraphicsOptions] DisplayMode=%d (applies after a restart)", g_selected);
+        }
+    }
+    o_Exit(self, edx);
+}
+
+std::atomic<bool> g_opts_done{false};
+
+}  // namespace
+
+bool install_menu_hooks() {
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (!is_expected_build(exe, kExeTimestamp, kExeImageSize, "StrikeFighters2.exe")) return false;
+    // Created here, enabled with MH_ALL_HOOKS by DllMain.
+    bool ok = MH_CreateHook(at_rva(exe, kFileOpenRva), reinterpret_cast<void*>(&h_FileOpen),
+                            reinterpret_cast<void**>(&o_FileOpen)) == MH_OK;
+    ok &= MH_CreateHook(at_rva(exe, kFileCloseRva), reinterpret_cast<void*>(&h_FileClose),
+                        reinterpret_cast<void**>(&o_FileClose)) == MH_OK;
+    ok &= MH_CreateHook(at_rva(exe, kFileReadRva), reinterpret_cast<void*>(&h_FileRead),
+                        reinterpret_cast<void**>(&o_FileRead)) == MH_OK;
+    LOG("menu: file service hooks %s", ok ? "created" : "FAILED");
+    return ok;
+}
+
+void menu_on_modules_loaded() {
+    if (g_opts_done.load()) return;
+    HMODULE opts = GetModuleHandleW(L"OptionsScreen.dll");
+    if (!opts || g_opts_done.exchange(true)) return;
+    if (!is_expected_build(opts, kOptsTimestamp, kOptsImageSize, "OptionsScreen.dll")) return;
+    g_opts = opts;
+    create_and_enable(at_rva(opts, kGfxInitRva), reinterpret_cast<void*>(&h_Init), reinterpret_cast<void**>(&o_Init),
+                      "OptionsScreen Graphics Init");
+    create_and_enable(at_rva(opts, kGfxRefreshRva), reinterpret_cast<void*>(&h_Refresh),
+                      reinterpret_cast<void**>(&o_Refresh), "OptionsScreen Graphics Refresh");
+    create_and_enable(at_rva(opts, kGfxChangedRva), reinterpret_cast<void*>(&h_Changed),
+                      reinterpret_cast<void**>(&o_Changed), "OptionsScreen Graphics Changed");
+    create_and_enable(at_rva(opts, kGfxExitRva), reinterpret_cast<void*>(&h_Exit), reinterpret_cast<void**>(&o_Exit),
+                      "OptionsScreen Graphics Exit");
+}
+
+}  // namespace lazysf2::hooks
