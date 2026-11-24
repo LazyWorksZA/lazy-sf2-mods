@@ -479,6 +479,7 @@ void __fastcall h_Exit(void* self, void* edx) {
         if (changed) request_display_mode_apply();  // applied on the window thread once this page has closed
     }
     o_Exit(self, edx);
+    aircraft_track_reevaluate();  // leaving an Options page: no aircraft exist; apply a changed Tacview setting
 }
 
 // --- 2b. Controls sub-menu: Mouse Pointer --------------------------------------------------------
@@ -544,6 +545,7 @@ void __fastcall h_CtlExit(void* self, void* edx) {
         }
     }
     o_CtlExit(self, edx);
+    aircraft_track_reevaluate();  // as in h_Exit
 }
 
 SRWLOCK g_opts_lock = SRWLOCK_INIT;

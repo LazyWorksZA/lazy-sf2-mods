@@ -17,6 +17,7 @@ INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 std::atomic<DisplayMode> g_display{DisplayMode::Fullscreen};
 std::atomic<int> g_monitor{0};
 std::atomic<MouseMode> g_mouse{MouseMode::Cursor};
+std::atomic<int> g_tacview{-1};  // -1 = not loaded yet
 
 // Saved Games\ThirdWire\<exe name>\Options.ini, e.g. ...\StrikeFighters2\Options.ini.
 std::wstring options_ini_path() {
@@ -54,29 +55,14 @@ BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
     g_mouse = mouse == static_cast<int>(MouseMode::Stock) ? MouseMode::Stock : MouseMode::Cursor;
     LOG("config: [ControlOptions] MouseMode=%d -> %s", mouse,
         g_mouse.load() == MouseMode::Cursor ? "match the Windows cursor" : "stock");
+
+    g_tacview = read_int(path, L"OtherOptions", L"TacviewRecording", 0) == 1 ? 1 : 0;
     return TRUE;
 }
 
 void ensure_loaded() { InitOnceExecuteOnce(&g_once, &load, nullptr, nullptr); }
 
-INIT_ONCE g_path_once = INIT_ONCE_STATIC_INIT;
-std::wstring g_options_path;  // written once under g_path_once
-BOOL CALLBACK load_path(PINIT_ONCE, PVOID, PVOID*) {
-    g_options_path = options_ini_path();
-    return TRUE;
-}
-
 }  // namespace
-
-bool tacview_recording() {
-    InitOnceExecuteOnce(&g_path_once, &load_path, nullptr, nullptr);
-    const bool on = read_int(g_options_path, L"OtherOptions", L"TacviewRecording", 0) == 1;
-    static std::atomic<int> logged{-1};
-    if (logged.exchange(on ? 1 : 0) != (on ? 1 : 0)) {
-        LOG("config: [OtherOptions] TacviewRecording -> %s", on ? "on" : "off");
-    }
-    return on;
-}
 
 DisplayMode display_mode() {
     ensure_loaded();
@@ -97,6 +83,18 @@ void set_display_monitor(int number) {
     ensure_loaded();
     g_monitor = number > 0 ? number : 0;
 }
+
+bool tacview_recording() {
+    ensure_loaded();
+    return g_tacview.load() == 1;
+}
+
+void set_tacview_recording(bool on) {
+    ensure_loaded();
+    if (g_tacview.exchange(on ? 1 : 0) != (on ? 1 : 0)) LOG("config: Tacview Recording -> %s", on ? "on" : "off");
+}
+
+int tacview_recording_peek() { return g_tacview.load(); }
 
 MouseMode mouse_mode() {
     ensure_loaded();

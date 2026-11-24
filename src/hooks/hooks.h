@@ -54,9 +54,13 @@ void probe_on_modules_loaded();
 // Aircraft tracker (src/hooks/aircraft_track.cpp), the production base of the probe and of the Tacview recorder.
 // aircraft_track_on_modules_loaded() runs on every module load. Each time a (new) AircraftObject.dll image
 // appears it installs the constructor, destructor and Update hooks, but only if a client needs them: the probe is
-// on, or Options.ini [OtherOptions] TacviewRecording is 1 (read fresh at that moment, so a change applies from
-// the next flight). When neither applies nothing is hooked. It also re-hooks after the DLL is unloaded and loaded again.
+// on, or the Tacview Recording setting is on (config peek; it never loads anything). When neither applies nothing is
+// hooked. It also re-hooks after the DLL is unloaded and loaded again.
 void aircraft_track_on_modules_loaded();
+// Called on the game thread when an Options page is left (menus, no live aircraft): installs the hooks if the
+// setting or the probe now needs them, and removes them if nothing does. A change of the setting applies here, or
+// at the next AircraftObject.dll load, never mid-flight.
+void aircraft_track_reevaluate();
 // True while the tracking hooks are installed on the loaded AircraftObject.dll.
 bool aircraft_track_active();
 // Why the hooks are installed: the probe, the setting, or both. Meaningful only while active.

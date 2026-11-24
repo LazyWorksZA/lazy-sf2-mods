@@ -3,10 +3,14 @@
 // It follows the live aircraft objects (AircraftObject.dll: constructor and destructor hooks) in a small table
 // and, through sim_hooks.cpp, the per-step Update hook, the game clock and the after-step callbacks.
 //
-// Nothing here runs unless a client needs it. Every time a new AircraftObject.dll image appears (the module
-// watch tells us), the hooks are installed only if the probe is on (LAZYSF2_PROBE_DIR) or the Tacview Recording
-// setting is on in Options.ini. The setting is read fresh at that moment, so a change applies from the next
-// flight. When neither applies, nothing is hooked and the game behaves as stock.
+// Nothing here runs unless a client needs it: the probe is on (LAZYSF2_PROBE_DIR) or the Tacview Recording
+// setting is on. The decision is taken only at two moments when no aircraft can exist: when a new
+// AircraftObject.dll image appears (module watch), and when an Options page is left (aircraft_track_reevaluate,
+// which also removes the hooks if nothing needs them any more). Never mid-flight: with aircraft already live, an
+// empty table would make an AI aircraft the player. The module watch may run under the loader lock, so it only
+// peeks at the setting (config::tacview_recording_peek); it never reads a file. When nothing needs tracking,
+// nothing is hooked and the game behaves as stock. Whether AircraftObject.dll is really freed and loaded again
+// between flights is not verified yet; both paths are handled.
 //
 // The game can free AircraftObject.dll and load it again (possibly at the same address); every load is a fresh,
 // unpatched image. As the menu hooks do for OptionsScreen.dll, we re-hook whenever the loaded image does not carry
@@ -47,7 +51,6 @@ constexpr DWORD kNeutralMaskRva = 0xac468;
 constexpr size_t kFlagsOffset = 0x0c;
 constexpr size_t kMaxTracked = 256;
 constexpr size_t kNameChars = 63;
-constexpr ULONGLONG kSkipRecheckMs = 2000;  // while nothing is hooked, look at the setting again at most this often
 
 struct Entry {
     void* obj;
@@ -72,7 +75,6 @@ std::atomic<uintptr_t> g_base{0};       // the AircraftObject.dll image our hook
 std::atomic<bool> g_for_probe{false};
 std::atomic<bool> g_for_tacview{false};
 std::atomic<uintptr_t> g_skip_base{0};  // the image we looked at and did not hook (nothing needs it), or 0
-std::atomic<ULONGLONG> g_skip_tick{0};
 std::atomic<uintptr_t> g_bad_base{0};   // an image of an unexpected build
 
 using Ctor_t = void*(__fastcall*)(void* self, void* edx, const wchar_t* name);
@@ -119,8 +121,12 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
     }
     const size_t live = g_count;
     ReleaseSRWLockExclusive(&g_lock);
+    // Per-aircraft lines only in probe mode; a player build logs the player, a full table and the table emptying.
     if (full) LOG("track: aircraft table full (%zu); further aircraft are not tracked", kMaxTracked);
-    LOG("track: aircraft + %p \"%ls\" seq %llu (%zu live)", self, shown, static_cast<unsigned long long>(seq), live);
+    if (g_for_probe.load()) {
+        LOG("track: aircraft + %p \"%ls\" seq %llu (%zu live)", self, shown, static_cast<unsigned long long>(seq),
+            live);
+    }
     if (became_player) {
         LOG("track: player chosen: %p \"%ls\" seq %llu (first constructed since the table was empty)", self, shown,
             static_cast<unsigned long long>(seq));
@@ -131,9 +137,11 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
 void __fastcall h_Dtor(void* self, void* edx) {
     // Remove first, so a sampler (which holds the lock while it reads) never sees an object whose
     // destructor has started, and the object is never freed while listed.
+    bool removed = false;
     AcquireSRWLockExclusive(&g_lock);
     for (size_t i = 0; i < g_count; ++i) {
         if (g_table[i].obj == self) {
+            removed = true;
             g_table[i] = g_table[--g_count];
             g_aircraft_generation.fetch_add(1, std::memory_order_release);
             break;
@@ -141,7 +149,11 @@ void __fastcall h_Dtor(void* self, void* edx) {
     }
     const size_t live = g_count;
     ReleaseSRWLockExclusive(&g_lock);
-    LOG("track: aircraft - %p (%zu live)", self, live);
+    if (g_for_probe.load()) {
+        LOG("track: aircraft - %p (%zu live)", self, live);
+    } else if (live == 0 && removed) {
+        LOG("track: table empty (the flight's aircraft are gone)");
+    }
     o_Dtor(self, edx);
 }
 
@@ -167,6 +179,15 @@ SideMasks read_side_masks() {
     safe_read_u32(reinterpret_cast<const void*>(base + kEnemyMaskRva), &m.enemy);
     safe_read_u32(reinterpret_cast<const void*>(base + kNeutralMaskRva), &m.neutral);
     return m;
+}
+
+void clear_table() {
+    AcquireSRWLockExclusive(&g_lock);
+    g_count = 0;
+    g_player_seq = 0;
+    g_full_logged = false;
+    g_aircraft_generation.fetch_add(1, std::memory_order_release);
+    ReleaseSRWLockExclusive(&g_lock);
 }
 
 // --- Install and re-hook -------------------------------------------------------------------------
@@ -206,12 +227,7 @@ bool install_for(HMODULE m) {
     // A previous load at this base may have left entries in MinHook (its image was freed while they were
     // registered); remove them so MH_CreateHook doesn't fail with ALREADY_CREATED. Safe: m is a verified image.
     remove_track_hooks(m);
-    AcquireSRWLockExclusive(&g_lock);  // a new image has no live aircraft: start from an empty table
-    g_count = 0;
-    g_player_seq = 0;
-    g_full_logged = false;
-    g_aircraft_generation.fetch_add(1, std::memory_order_release);
-    ReleaseSRWLockExclusive(&g_lock);
+    clear_table();  // a new image, or the menus: no live aircraft; start from an empty table
     bool ok = create_and_enable(at_rva(m, kCtorRva), reinterpret_cast<void*>(&h_Ctor),
                                 reinterpret_cast<void**>(&o_Ctor), "AircraftObject ctor");
     ok = ok && create_and_enable(at_rva(m, kDtorRva), reinterpret_cast<void*>(&h_Dtor),
@@ -219,6 +235,34 @@ bool install_for(HMODULE m) {
     ok = ok && sim_install(m);
     if (!ok) remove_track_hooks(m);
     return ok;
+}
+
+// The Tacview Recording setting as the module watch may see it: the loaded value only, never loads anything.
+bool tacview_setting_peek() {
+    const int v = config::tacview_recording_peek();
+    if (v < 0) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) LOG("track: settings not loaded yet; Tacview Recording treated as off");
+        return false;
+    }
+    return v == 1;
+}
+
+// Hooks m (verified build) for the given clients and publishes the state. g_install_lock held.
+void install_and_publish(HMODULE m, bool probe, bool tacview) {
+    const auto mu = reinterpret_cast<uintptr_t>(m);
+    g_skip_base = 0;
+    g_for_probe = probe;  // before the hooks can run: they gate their log lines on it
+    g_for_tacview = tacview;
+    if (install_for(m)) {
+        g_base.store(mu, std::memory_order_release);
+        LOG("track: aircraft tracking on (reason: %s%s%s)", probe ? "probe" : "", probe && tacview ? " and " : "",
+            tacview ? "Tacview Recording setting" : "");
+    } else {
+        g_for_probe = g_for_tacview = false;
+        g_skip_base = mu;  // don't retry at every module load
+        LOG("track: installing the aircraft hooks failed; tracking stays off");
+    }
 }
 
 }  // namespace
@@ -231,60 +275,81 @@ void aircraft_track_on_modules_loaded() {
     HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
     if (!m) return;
     const auto mu = reinterpret_cast<uintptr_t>(m);
-    // Fast paths, with no lock: already hooked, a known-bad build, or a recent decision not to hook.
+    // Fast paths, with no lock: already hooked, a known-bad build, or an image already decided on (not hooked).
     if (mu == g_base.load(std::memory_order_acquire) && hooks_carry_patch(m)) return;
-    if (mu == g_bad_base.load()) return;
-    if (mu == g_skip_base.load() && GetTickCount64() - g_skip_tick.load() < kSkipRecheckMs) return;
+    if (mu == g_bad_base.load() || mu == g_skip_base.load()) return;
 
     AcquireSRWLockExclusive(&g_install_lock);
     do {
         const uintptr_t old = g_base.load();
-        if (mu == old && hooks_carry_patch(m)) break;  // another thread got here first
-        const bool first_look = mu != g_skip_base.load();
-        if (!first_look && GetTickCount64() - g_skip_tick.load() < kSkipRecheckMs) break;
-
-        // Verify the new image first: removing hooks restores original bytes, which is only safe on an
-        // AircraftObject.dll of the build we analysed.
-        if (!is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll")) {
+        const bool probe = probe_output_dir() != nullptr;
+        const bool tacview = tacview_setting_peek();
+        LoadInput in{};
+        in.hooked_patched = mu == old && hooks_carry_patch(m);
+        in.build_ok = in.hooked_patched ||
+                      is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll");
+        in.wanted = tracking_wanted(probe, tacview);
+        in.had_old = old != 0;
+        const LoadDecision d = decide_on_image(in);
+        if (d.kind == LoadKind::Keep) break;  // another thread got here first
+        if (d.kind == LoadKind::BadBuild) {
             g_bad_base = mu;
             g_base = 0;
             g_for_probe = g_for_tacview = false;
             break;
         }
-        if (old) {
+        if (in.had_old) {
             // Forget the hooks on the previous image. MinHook restores the original bytes on removal, so only do
             // that while the old base is still our AircraftObject.dll; otherwise those bytes would be written
             // into whatever is mapped there now.
             g_base = 0;
             g_for_probe = g_for_tacview = false;
-            if (old_image_still_loaded(reinterpret_cast<HMODULE>(old))) {
-                remove_track_hooks(reinterpret_cast<HMODULE>(old));
-            } else {
-                LOG("track: old AircraftObject.dll image gone, dropping its hooks without restoring");
+            if (d.drop_old) {
+                if (old_image_still_loaded(reinterpret_cast<HMODULE>(old))) {
+                    remove_track_hooks(reinterpret_cast<HMODULE>(old));
+                } else {
+                    LOG("track: old AircraftObject.dll image gone, dropping its hooks without restoring");
+                }
             }
         }
-
-        const bool probe = probe_output_dir() != nullptr;
-        const bool tacview = config::tacview_recording();  // fresh read of Options.ini
-        if (!tracking_wanted(probe, tacview)) {
+        if (d.kind == LoadKind::Skip) {
             g_skip_base = mu;
-            g_skip_tick = GetTickCount64();
-            if (first_look || old) {
-                LOG("track: not needed (probe off, Tacview Recording off); AircraftObject.dll left unhooked");
-            }
+            LOG("track: not needed (probe off, Tacview Recording off); AircraftObject.dll left unhooked");
             break;
         }
-        g_skip_base = 0;
-        if (install_for(m)) {
-            g_for_probe = probe;
-            g_for_tacview = tacview;
-            g_base.store(mu, std::memory_order_release);
-            LOG("track: aircraft tracking on (reason: %s%s%s)", probe ? "probe" : "",
-                probe && tacview ? " and " : "", tacview ? "Tacview Recording setting" : "");
-        } else {
-            LOG("track: installing the aircraft hooks failed; tracking stays off");
-            g_skip_base = mu;  // don't retry at every module load
-            g_skip_tick = GetTickCount64();
+        install_and_publish(m, probe, tacview);
+    } while (false);
+    ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+void aircraft_track_reevaluate() {
+    HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
+    const auto mu = reinterpret_cast<uintptr_t>(m);
+    const bool probe = probe_output_dir() != nullptr;
+    const bool tacview = config::tacview_recording_peek() == 1;
+    AcquireSRWLockExclusive(&g_install_lock);
+    do {
+        const bool hooked = m && mu == g_base.load() && hooks_carry_patch(m);
+        const bool wanted = tracking_wanted(probe, tacview);
+        switch (decide_on_options_exit(m != nullptr && mu != g_bad_base.load(), hooked, wanted)) {
+            case OptionsExitAction::Nothing:
+                break;
+            case OptionsExitAction::Install:
+                if (!is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll")) {
+                    g_bad_base = mu;
+                    break;
+                }
+                install_and_publish(m, probe, tacview);
+                break;
+            case OptionsExitAction::Remove:
+                // Same safety as at a reload: only touch the image while it is still our verified DLL.
+                g_base = 0;
+                g_for_probe = g_for_tacview = false;
+                g_skip_base = mu;
+                if (old_image_still_loaded(m)) remove_track_hooks(m);
+                clear_table();
+                LOG("track: no longer needed (Tacview Recording off, probe off); aircraft hooks removed");
+                break;
         }
     } while (false);
     ReleaseSRWLockExclusive(&g_install_lock);

@@ -4,9 +4,8 @@
 
 namespace lazysf2::hooks {
 
-// An aircraft's side as the game shows it to the player. The object manager hands out one flag bit each for
-// FRIENDLY, ENEMY and NEUTRAL; the game keeps them in the object's flag word and treats them as the local view
-// (it keeps them when it loads a saved state, and leaves them out of the state it saves).
+// An aircraft's side, from the object's side flag bits (FRIENDLY, ENEMY, NEUTRAL): the object manager hands out
+// one flag bit for each, and they live in the object's flag word.
 enum class AircraftSide : uint8_t {
     Unknown = 0,  // none of the three bits is set, or the masks are not known yet
     Friendly,
@@ -24,5 +23,36 @@ inline AircraftSide classify_side(uint32_t flags, uint32_t friendly, uint32_t en
 
 // The enable rule: the tracking hooks are installed only if a client needs them.
 inline bool tracking_wanted(bool probe_on, bool tacview_recording_on) { return probe_on || tacview_recording_on; }
+
+// What the tracker does when a (new) AircraftObject.dll image appears. No aircraft can exist yet then.
+struct LoadInput {
+    bool hooked_patched;  // our hooks are on this very image and it still carries the patch
+    bool build_ok;        // the image is the expected build
+    bool wanted;          // tracking_wanted(...)
+    bool had_old;         // hooks from an earlier image are registered
+};
+enum class LoadKind : uint8_t {
+    Keep,      // already hooked here: nothing to do
+    BadBuild,  // unexpected build: remember it, touch nothing
+    Skip,      // nothing needs tracking: leave the image unhooked
+    Install,   // hook the image
+};
+struct LoadDecision {
+    LoadKind kind;
+    bool drop_old;  // remove the earlier image's hooks first (only if that image is still the verified DLL)
+};
+inline LoadDecision decide_on_image(const LoadInput& in) {
+    if (in.hooked_patched) return {LoadKind::Keep, false};
+    if (!in.build_ok) return {LoadKind::BadBuild, false};
+    return {in.wanted ? LoadKind::Install : LoadKind::Skip, in.had_old};
+}
+
+// What the tracker does when the Options screen is left (menus: no aircraft exist, so changing the hooks is safe).
+enum class OptionsExitAction : uint8_t { Nothing, Install, Remove };
+inline OptionsExitAction decide_on_options_exit(bool dll_loaded, bool hooked, bool wanted) {
+    if (wanted && !hooked && dll_loaded) return OptionsExitAction::Install;
+    if (!wanted && hooked) return OptionsExitAction::Remove;
+    return OptionsExitAction::Nothing;
+}
 
 }  // namespace lazysf2::hooks

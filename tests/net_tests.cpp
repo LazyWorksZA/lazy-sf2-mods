@@ -1441,6 +1441,36 @@ void tracker_logic_tests() {
     expect(classify_side(0xfffff0ff, fr, en, ne) == AircraftSide::Unknown, "side: no side bit -> unknown");
     expect(classify_side(0xffffffff, 0, 0, 0) == AircraftSide::Unknown, "side: masks not filled in yet -> unknown");
     expect(classify_side(en, 0, en, ne) == AircraftSide::Enemy, "side: a zero mask never matches, others still do");
+
+    // The decision when a new AircraftObject.dll image appears.
+    using lazysf2::hooks::LoadInput;
+    using lazysf2::hooks::LoadKind;
+    using lazysf2::hooks::decide_on_image;
+    auto dec = [](bool hooked, bool build, bool wanted, bool old) {
+        return decide_on_image(LoadInput{hooked, build, wanted, old});
+    };
+    expect(dec(true, true, true, true).kind == LoadKind::Keep && !dec(true, true, true, true).drop_old,
+           "image: already hooked and patched -> keep");
+    expect(dec(true, true, false, true).kind == LoadKind::Keep, "image: hooked image is kept even if no longer wanted");
+    expect(dec(false, false, true, true).kind == LoadKind::BadBuild && !dec(false, false, true, true).drop_old,
+           "image: unexpected build -> nothing touched");
+    expect(dec(false, true, false, false).kind == LoadKind::Skip && !dec(false, true, false, false).drop_old,
+           "image: not wanted, no old hooks -> skip");
+    expect(dec(false, true, false, true).kind == LoadKind::Skip && dec(false, true, false, true).drop_old,
+           "image: not wanted, old hooks -> skip and drop the old ones");
+    expect(dec(false, true, true, false).kind == LoadKind::Install && !dec(false, true, true, false).drop_old,
+           "image: wanted, first image -> install");
+    expect(dec(false, true, true, true).kind == LoadKind::Install && dec(false, true, true, true).drop_old,
+           "image: wanted, reload (hooked image replaced or unpatched) -> drop old, install");
+    // The decision when an Options page is left.
+    using lazysf2::hooks::OptionsExitAction;
+    using lazysf2::hooks::decide_on_options_exit;
+    expect(decide_on_options_exit(true, false, true) == OptionsExitAction::Install, "options exit: wanted, DLL loaded, not hooked -> install");
+    expect(decide_on_options_exit(false, false, true) == OptionsExitAction::Nothing, "options exit: wanted but no DLL yet -> nothing (the load installs)");
+    expect(decide_on_options_exit(true, true, true) == OptionsExitAction::Nothing, "options exit: wanted and hooked -> nothing");
+    expect(decide_on_options_exit(true, true, false) == OptionsExitAction::Remove, "options exit: hooked, no longer wanted -> remove");
+    expect(decide_on_options_exit(false, true, false) == OptionsExitAction::Remove, "options exit: hooked, DLL state unknown, not wanted -> remove");
+    expect(decide_on_options_exit(true, false, false) == OptionsExitAction::Nothing, "options exit: not wanted, not hooked -> nothing");
 }
 
 int main() {

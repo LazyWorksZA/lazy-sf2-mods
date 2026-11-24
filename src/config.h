@@ -31,9 +31,12 @@ void set_display_monitor(int number);
 MouseMode mouse_mode();
 void set_mouse_mode(MouseMode mode);
 
-// Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off). Unlike the settings above this is
-// read from the file on every call (never cached), so a change made in Options applies from the next
-// flight. Callers are rare (once per AircraftObject load), not per frame.
+// Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off), loaded with the other settings.
+// tacview_recording() may load them (shell call): never call it from the module watch.
 bool tacview_recording();
+void set_tacview_recording(bool on);  // the Options page, on Exit
+// For the module watch (it can run under the loader lock): reads the loaded value only, never loads anything.
+// -1 = not loaded yet (treat as off), 0 = off, 1 = on.
+int tacview_recording_peek();
 
 }  // namespace lazysf2::config
