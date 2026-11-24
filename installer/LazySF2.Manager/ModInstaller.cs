@@ -59,7 +59,9 @@ public static class ModInstaller
             byte[] manifestBytes = new UTF8Encoding(false).GetBytes(string.Join(Environment.NewLine, ManagedFiles) + Environment.NewLine);
             // Never write through an existing name: a link swapped in after the check is deleted
             // (not followed), and CreateNew refuses to open anything that exists.
-            if (!ReplaceFile(dll, payload, gameDir) || !ReplaceFile(manifest, manifestBytes, gameDir)) return Result.Failed;
+            // Manifest first: if the DLL step then fails, the manifest already lists winmm.dll, so a later
+            // uninstall or retry still works. The other order could leave our DLL with no manifest ("Foreign").
+            if (!ReplaceFile(manifest, manifestBytes, gameDir) || !ReplaceFile(dll, payload, gameDir)) return Result.Failed;
             return Result.Ok;
         }
         catch (UnauthorizedAccessException) { return Result.AccessDenied; }

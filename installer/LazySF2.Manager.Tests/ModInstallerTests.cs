@@ -120,6 +120,21 @@ public sealed class ModInstallerTests : IDisposable
     }
 
     [Fact]
+    public void Install_with_manifest_held_open_fails_and_keeps_the_old_dll()
+    {
+        string dir = MakeGameDir();
+        string payload = Path.Combine(_root, "payload.dll");
+        File.WriteAllText(payload, "newer");
+        string manifest = Path.Combine(dir, ModInstaller.ManifestName);
+        using (new FileStream(manifest, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Equal(ModInstaller.Result.Failed, ModInstaller.Install(dir, payload));
+        }
+        Assert.Equal("dll", File.ReadAllText(Path.Combine(dir, "winmm.dll")));
+        Assert.True(File.Exists(manifest));
+    }
+
+    [Fact]
     public void ElevatedDeleteArgs_refuses_a_percent_in_the_path()
     {
         string dir = Path.Combine(_root, "g%PATH%ame");
