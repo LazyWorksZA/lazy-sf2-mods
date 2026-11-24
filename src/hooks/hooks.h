@@ -142,4 +142,17 @@ void replay_cycle_rate();
 // True while a replay runs. The recorder refuses to start then.
 bool replay_active();
 
+// Host mode (developer tool, part of the probe; src/net/host.cpp): LAZYSF2_HOST=port or address:port makes the mod
+// listen for remote clients over UDP (ENet) and drive one AI aircraft per client as its avatar. Inert unless
+// LAZYSF2_HOST is set and the probe is on; the address defaults to 127.0.0.1.
+// host_install() reads the variable once (call from DllMain, after install_probe_hooks()) and logs "net: host off"
+// or that it is pending. host_on_modules_loaded() starts the network thread and registers the step callback (the
+// probe calls it). host_shutdown() stops the thread and gives every avatar back to the AI (DLL unload only).
+void host_install();
+void host_on_modules_loaded();
+void host_shutdown();
+// True while any client holds an avatar. Puppet and replay refuse to start then, and the host refuses clients
+// while one of them runs.
+bool host_has_clients();
+
 }  // namespace lazysf2::hooks

@@ -71,21 +71,6 @@ Samp place(const RecSample& r, const Placement& pl) {
     return o;
 }
 
-// Rotation matrix rows (right, forward, up) from pitch, heading, roll. Verified from live dumps: pitch nose-up
-// positive, roll right-wing-down positive, heading in (-pi, pi]. Heading is from north toward east.
-void build_matrix(const double a[3], float m[9]) {
-    const double cp = std::cos(a[0]), sp = std::sin(a[0]), ch = std::cos(a[1]), sh = std::sin(a[1]);
-    const double cr = std::cos(a[2]), sr = std::sin(a[2]);
-    const double f[3] = {sh * cp, ch * cp, sp};
-    const double r0[3] = {ch, -sh, 0.0};
-    const double u0[3] = {-sh * sp, -ch * sp, cp};  // r0 x f
-    for (int i = 0; i < 3; ++i) {
-        m[i] = static_cast<float>(r0[i] * cr - u0[i] * sr);
-        m[3 + i] = static_cast<float>(f[i]);
-        m[6 + i] = static_cast<float>(u0[i] * cr + r0[i] * sr);
-    }
-}
-
 template <typename T>
 void read_at(const void* obj, size_t off, T* out, size_t n) {
     std::memcpy(out, static_cast<const char*>(obj) + off, n * sizeof(T));
@@ -281,6 +266,10 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sh
 }
 
 void try_start(void* player) {
+    if (host_has_clients()) {
+        LOG("replay: not started, host mode has clients");
+        return;
+    }
     if (g_puppet_state.load() != 0) {
         LOG("replay: not started, a puppet run is active");
         return;

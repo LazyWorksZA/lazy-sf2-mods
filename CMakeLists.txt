@@ -32,6 +32,7 @@ add_library(lazysf2 SHARED
     src/hooks/replay.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
+    src/net/host.cpp
     src/net/enet_winmm_shim.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)

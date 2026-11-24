@@ -150,6 +150,11 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
 }
 
 void start_run() {
+    if (host_has_clients()) {
+        LOG("puppet: not started, host mode has clients");
+        g_puppet_state.store(kIdle);
+        return;
+    }
     if (replay_active()) {
         LOG("puppet: not started, a replay is running");
         g_puppet_state.store(kIdle);

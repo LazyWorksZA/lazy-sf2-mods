@@ -390,6 +390,7 @@ void probe_on_modules_loaded() {
     sim_on_modules_loaded();  // own build check and once-flag
     recorder_on_modules_loaded();  // registers its step callback (once)
     replay_on_modules_loaded();    // likewise
+    host_on_modules_loaded();      // starts the network thread (once), only with LAZYSF2_HOST
     if (HANDLE t = CreateThread(nullptr, 0, hotkey_thread, nullptr, 0, nullptr)) {
         CloseHandle(t);
     } else {
