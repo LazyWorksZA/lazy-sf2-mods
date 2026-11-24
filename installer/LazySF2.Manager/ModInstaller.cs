@@ -43,14 +43,18 @@ public static class ModInstaller
         return SameContent(dll, PayloadDll) ? State.Installed : State.Outdated;
     }
 
-    public static Result Install(string? gameDir)
+    public static Result Install(string? gameDir) => Install(gameDir, PayloadDll);
+
+    // The payload path is a parameter so tests can run Install without the shipped payload folder.
+    internal static Result Install(string? gameDir, string payloadDll)
     {
         if (gameDir == null) return Result.GameNotFound;
+        if (HasReparsePoint(gameDir)) return Result.Failed;
         try
         {
             string dll = Path.Combine(gameDir, DllName);
             if (File.Exists(dll) && !File.Exists(Path.Combine(gameDir, ManifestName))) return Result.Foreign;
-            File.Copy(PayloadDll, dll, overwrite: true);
+            File.Copy(payloadDll, dll, overwrite: true);
             File.WriteAllLines(Path.Combine(gameDir, ManifestName), ManagedFiles, new UTF8Encoding(false));
             return Result.Ok;
         }
@@ -58,22 +62,64 @@ public static class ModInstaller
         catch (IOException) { return Result.Failed; }  // e.g. the game is running and has winmm.dll loaded
     }
 
-    /// <summary>Files to remove: those listed in the manifest (plain names in the game folder only).</summary>
+    /// <summary>
+    /// Files to remove: manifest lines that, trimmed, equal one of the managed names (allow-list,
+    /// case-insensitive). Anything else, such as "C:x" or "sub\winmm.dll", is ignored, because this
+    /// runs elevated and the folder is often writable by non-admins.
+    /// </summary>
     public static IReadOnlyList<string> InstalledFiles(string gameDir)
     {
         string manifest = Path.Combine(gameDir, ManifestName);
         if (!File.Exists(manifest)) return [];
-        return File.ReadAllLines(manifest)
-            .Select(l => l.Trim())
-            .Where(n => n.Length > 0 && n.IndexOfAny(['\\', '/']) < 0 && !n.Contains(".."))
-            .Select(n => Path.Combine(gameDir, n))
-            .Where(File.Exists)
-            .ToList();
+        string root = TrimSeparators(Path.GetFullPath(gameDir));
+        var result = new List<string>();
+        foreach (string line in File.ReadAllLines(manifest))
+        {
+            string name = line.Trim();
+            string? managed = ManagedFiles.FirstOrDefault(m => m.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (managed == null) continue;
+            string path = Path.GetFullPath(Path.Combine(gameDir, managed));
+            string? parent = Path.GetDirectoryName(path);
+            if (parent == null || !TrimSeparators(parent).Equals(root, StringComparison.OrdinalIgnoreCase)) continue;
+            if (File.Exists(path) && !result.Contains(path, StringComparer.OrdinalIgnoreCase)) result.Add(path);
+        }
+        return result;
+    }
+
+    static string TrimSeparators(string p) => p.Length > 3 ? p.TrimEnd('\\', '/') : p;
+
+    /// <summary>
+    /// True if the game folder or any parent directory is a reparse point (junction, symlink), or an
+    /// existing managed file in it is one. A drive root is never counted.
+    /// </summary>
+    public static bool HasReparsePoint(string gameDir)
+    {
+        try
+        {
+            string full = TrimSeparators(Path.GetFullPath(gameDir));
+            string root = TrimSeparators(Path.GetPathRoot(full) ?? "");
+            for (string? d = full; d != null; d = Path.GetDirectoryName(d))
+            {
+                if (TrimSeparators(d).Equals(root, StringComparison.OrdinalIgnoreCase)) break;
+                if (Directory.Exists(d) && new DirectoryInfo(d).Attributes.HasFlag(FileAttributes.ReparsePoint)) return true;
+            }
+            foreach (string name in ManagedFiles)
+            {
+                var fi = new FileInfo(Path.Combine(full, name));
+                if (fi.Exists && fi.Attributes.HasFlag(FileAttributes.ReparsePoint)) return true;
+            }
+            return false;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return true;  // can't tell: refuse
+        }
     }
 
     public static Result Uninstall(string? gameDir)
     {
         if (gameDir == null) return Result.GameNotFound;
+        if (HasReparsePoint(gameDir)) return Result.Failed;
         try
         {
             // The manifest goes last, so a partial removal can be retried.

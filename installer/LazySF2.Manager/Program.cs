@@ -114,7 +114,15 @@ static class Program
 
         // No UI is allowed here, but Windows' own UAC prompt is: delete exactly the manifest's files
         // with an elevated cmd that doesn't depend on our files (Velopack removes them next).
-        var files = ModInstaller.InstalledFiles(game).Select(f => $"\"{f}\"");
+        // Only allow-listed absolute paths go in, and nothing that cmd would interpret.
+        var paths = ModInstaller.InstalledFiles(game);
+        if (paths.Count == 0) return;
+        if (paths.Any(p => p.IndexOfAny(['%', '^', '!', '&', '"', '<', '>', '|']) >= 0) || ModInstaller.HasReparsePoint(game))
+        {
+            Log("uninstall hook: elevated removal refused (unsafe path or reparse point); the mod files remain in the game folder");
+            return;
+        }
+        var files = paths.Select(f => $"\"{f}\"");
         try
         {
             Process.Start(new ProcessStartInfo("cmd.exe", "/c del /f /q " + string.Join(' ', files))
