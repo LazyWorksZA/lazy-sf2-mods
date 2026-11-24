@@ -17,6 +17,7 @@
 #include "acmi/acmi_format.h"
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_writer.h"
+#include "hooks/options_other_splice.h"
 #include "hooks/weapon_class.h"
 #include "hooks/aircraft_side.h"
 #include "bot_client.h"
@@ -1825,6 +1826,52 @@ void tacview_tests() {
     }
 }
 
+// The Other page splice, on a miniature of the stock OptionsScreen.ini shape.
+void other_page_splice_tests() {
+    std::printf("other_page_splice\n");
+    std::wstring ini = L"[OptionsScreen]\r\nMenuItem006=NetworkOptionsButton\r\nMenuItem007=OtherOptionsButton\r\n\r\n";
+    const wchar_t* names[] = {L"GameplayOptionsButton", L"GraphicsOptionsButton", L"SoundOptionsButton",
+                              L"ControlOptionsButton", L"OtherOptionsButton"};
+    for (int i = 0; i < 4; ++i) {
+        ini += std::wstring(L"[") + names[i] +
+               L"]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=\r\nTextPosition=597,120\r\n\r\n";
+    }
+    ini +=
+        L"[OtherOptionsButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=\r\nTextStringID=\r\nTextPosition=\r\n"
+        L"InfoTextStringID=\r\nStickySelection=TRUE\r\nActive=FALSE\r\n\r\n"
+        L"[OtherOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nMenuItem001=OtherTitleText\r\nMenuItem002=SectionVITitleText\r\n"
+        L"Position=565,130\r\nWidth=362\r\nHeight=480\r\nHasBackground=FALSE\r\nActive=FALSE\r\n\r\n"
+        L"[OtherTitleText]\r\nMenuItemType=INACTIVE\r\n";
+    std::wstring t = ini;
+    const int id = lazysf2::hooks::splice_other_page(t);
+    expect(id == 3, "row takes the next free MenuItem ID");
+    auto has = [&](const wchar_t* needle) { return t.find(needle) != std::wstring::npos; };
+    expect(has(L"MenuItem003=TacviewRecordingList\r\nMenuItem004=TacviewRecordingText\r\n"),
+           "row items listed, ids unique");
+    expect(has(L"MenuItem002=SectionVITitleText\r\nMenuItem003="), "items appended after the existing ones");
+    expect(has(L"Position=550,180\r\nWidth=450\r\nHeight=460\r\n"), "page sized like the visible pages");
+    expect(has(L"[TacviewRecordingList]") && has(L"Position=200,0") && has(L"TextPosition=0,3") &&
+               has(L"InfoTextStringID=TXT_LAZY_TACVIEW_INFO") && has(L"TextStringID=TXT_LAZY_TACVIEW_RECORDING"),
+           "list and text sections present");
+    const size_t ob = t.find(L"[OtherOptionsButton]");
+    const std::wstring button = t.substr(ob, t.find(L"\n[", ob) - ob);
+    expect(button.find(L"Active=FALSE") == std::wstring::npos, "Other tab activated");
+    expect(button.find(L"TextStringID=TXT_LAZY_OTHER_OPTIONS\r") != std::wstring::npos &&
+               button.find(L"InfoTextStringID=TXT_LAZY_OTHER_OPTIONS_INFO") != std::wstring::npos,
+           "Other tab text keys");
+    expect(button.find(L"DestinationMenu=\r") != std::wstring::npos, "DestinationMenu stays empty, like the stock tabs");
+    bool spaced = true;
+    for (int i = 0; i < 5; ++i) {
+        const std::wstring want = L"TextPosition=" + std::to_wstring(lazysf2::hooks::kTabX[i]) + L",120\r\n";
+        const size_t b = t.find(std::wstring(L"[") + names[i] + L"]");
+        spaced &= b != std::wstring::npos && t.substr(b, t.find(L"\n[", b) - b).find(want) != std::wstring::npos;
+    }
+    expect(spaced, "five tabs re-spaced at the named x positions, y=120");
+    expect(lazysf2::hooks::splice_other_page(t) == 0, "second splice is refused");
+    std::wstring bad = L"[OptionsScreen]\r\n";
+    expect(lazysf2::hooks::splice_other_page(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -1846,6 +1893,7 @@ int main() {
     acmi_tests();
     tracker_logic_tests();
     tacview_tests();
+    other_page_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

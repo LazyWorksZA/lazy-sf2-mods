@@ -54,7 +54,7 @@ The test project is only for development: it is not published or shipped.
   - The output in `installer\Releases` and `installer\publish*` is ignored by git.
   - The helper's install, update and uninstall hooks use the same manifest rules as `scripts/install.ps1`. Hooks have 15–30 s and no UI. The MSI runs them elevated. The per-user `Setup.exe` falls back to a UAC prompt on the next normal start, and its uninstall falls back to an elevated `cmd /c del`.
   - Velopack's MSI doesn't start the helper after installing and has no "launch" checkbox. The finish page tells players how to start the game.
-- **Settings** live in the player's `Options.ini`, written by the game's own Options menu (rows the mod adds): `[GraphicsOptions] DisplayMode/DisplayMonitor` and `[ControlOptions] MouseMode`. They take effect when the player leaves the Options screen. There is no mod settings file.
+- **Settings** live in the player's `Options.ini`, written by the game's own Options menu (rows the mod adds): `[GraphicsOptions] DisplayMode/DisplayMonitor`, `[ControlOptions] MouseMode` and `[OtherOptions] TacviewRecording`. They take effect when the player leaves the Options screen. The mod reads them once per process: if you edit `Options.ini` by hand during a session, the change applies after a restart, and only the Options UI applies live. There is no mod settings file.
 
 ## Reverse-engineering tools
 
