@@ -113,6 +113,11 @@ namespace {
         }                        \
     } while (0)
 
+bool peek_is(const uint8_t* buf, size_t n, MsgType want) {
+    MsgType t{};
+    return peek_type(buf, n, t) == Status::Ok && t == want;
+}
+
 // Negative cases for one encoded message (n bytes at good) and its decoder.
 template <class T>
 bool negatives(const uint8_t* good, size_t n, const char** why) {
@@ -153,8 +158,8 @@ bool protocol_selftest(const char** why) {
 
     {
         HelloMsg a{};
-        std::strcpy(a.callsign, "Maverick");
-        std::strcpy(a.aircraft, "F-4E");
+        set_str(a.callsign, "Maverick");
+        set_str(a.aircraft, "F-4E");
         size_t n = encode(a, buf, sizeof(buf));
         LZ_CHECK(n == sizeof(HelloMsg), "hello size");
         LZ_CHECK(encode(a, buf, n - 1) == 0, "hello encode into small buffer");
@@ -162,6 +167,7 @@ bool protocol_selftest(const char** why) {
         LZ_CHECK(decode(buf, n, b) == Status::Ok, "hello decode");
         LZ_CHECK(std::strcmp(b.callsign, "Maverick") == 0 && std::strcmp(b.aircraft, "F-4E") == 0, "hello fields");
         LZ_CHECK(buf[0] == 'L' && buf[1] == 'Z' && buf[2] == 1 && buf[3] == 1, "header bytes");
+        LZ_CHECK(peek_is(buf, n, MsgType::Hello), "peek hello");
         if (!negatives<HelloMsg>(buf, n, why)) return false;
         HelloMsg c{};
         std::memset(c.callsign, 'x', sizeof(c.callsign));
@@ -185,6 +191,7 @@ bool protocol_selftest(const char** why) {
         LZ_CHECK(b.client_id == 7 && b.spawn_pos[0] == 1.5 && b.spawn_pos[1] == -2000.25 && b.spawn_pos[2] == 3e6 &&
                      b.spawn_heading == 1.25f && b.host_game_time == 123.456,
                  "welcome fields");
+        LZ_CHECK(peek_is(buf, n, MsgType::Welcome), "peek welcome");
         if (!negatives<WelcomeMsg>(buf, n, why)) return false;
     }
     {
@@ -194,6 +201,7 @@ bool protocol_selftest(const char** why) {
         LZ_CHECK(n == sizeof(PingMsg), "ping size");
         PingMsg b{};
         LZ_CHECK(decode(buf, n, b) == Status::Ok && b.client_send_time == 42.125, "ping roundtrip");
+        LZ_CHECK(peek_is(buf, n, MsgType::Ping), "peek ping");
         if (!negatives<PingMsg>(buf, n, why)) return false;
     }
     {
@@ -205,6 +213,7 @@ bool protocol_selftest(const char** why) {
         PongMsg b{};
         LZ_CHECK(decode(buf, n, b) == Status::Ok && b.client_send_time == 42.125 && b.host_game_time == 99.5,
                  "pong roundtrip");
+        LZ_CHECK(peek_is(buf, n, MsgType::Pong), "peek pong");
         if (!negatives<PongMsg>(buf, n, why)) return false;
     }
     {
@@ -226,7 +235,7 @@ bool protocol_selftest(const char** why) {
         if (!negatives<StateMsg>(buf, n, why)) return false;
 
         MsgType t{};
-        LZ_CHECK(peek_type(buf, n, t) == Status::Ok && t == MsgType::State, "peek state");
+        LZ_CHECK(peek_is(buf, n, MsgType::State), "peek state");
         LZ_CHECK(peek_type(buf, n - 1, t) == Status::Truncated, "peek truncated");
         uint8_t bad[sizeof(StateMsg)];
         std::memcpy(bad, buf, n);
@@ -243,6 +252,7 @@ bool protocol_selftest(const char** why) {
         LZ_CHECK(n == sizeof(ByeMsg), "bye size");
         ByeMsg b{};
         LZ_CHECK(decode(buf, n, b) == Status::Ok && b.client_id == 65535 && b.reason == 9, "bye roundtrip");
+        LZ_CHECK(peek_is(buf, n, MsgType::Bye), "peek bye");
         if (!negatives<ByeMsg>(buf, n, why)) return false;
     }
     return true;

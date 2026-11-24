@@ -106,6 +106,15 @@ Status decode(const uint8_t* data, size_t len, PongMsg& out);
 Status decode(const uint8_t* data, size_t len, StateMsg& out);
 Status decode(const uint8_t* data, size_t len, ByeMsg& out);
 
+// Copies at most N-1 bytes of src into a fixed field and always NUL-terminates it (zero-fills the rest).
+template <size_t N>
+void set_str(char (&dst)[N], const char* src) {
+    size_t i = 0;
+    if (src)
+        for (; i + 1 < N && src[i]; ++i) dst[i] = src[i];
+    for (; i < N; ++i) dst[i] = '\0';
+}
+
 const char* status_name(Status s);
 
 // Round-trips every message and rejects bad input. Returns true on success; on failure writes a

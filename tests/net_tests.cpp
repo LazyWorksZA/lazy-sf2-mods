@@ -25,18 +25,35 @@ bool send_msg(ENetPeer* peer, const uint8_t* data, size_t n, uint8_t channel, bo
 
 void loopback() {
     std::printf("loopback\n");
-    expect(enet_initialize() == 0, "enet_initialize");
+    const bool inited = enet_initialize() == 0;
+    expect(inited, "enet_initialize");
+    if (!inited) return;
+
+    // Cleans up on every exit path.
+    struct Cleanup {
+        ENetHost* host = nullptr;
+        ENetHost* client = nullptr;
+        ~Cleanup() {
+            if (client) enet_host_destroy(client);
+            if (host) enet_host_destroy(host);
+            enet_deinitialize();
+        }
+    } cleanup;
 
     ENetAddress addr{};
     enet_address_set_host(&addr, "127.0.0.1");
-    addr.port = 47123;
-    ENetHost* host = enet_host_create(&addr, 4, kChannelCount, 0, 0);
-    ENetHost* client = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+    addr.port = 0;  // let the OS pick a free port
+    ENetHost* host = cleanup.host = enet_host_create(&addr, 4, kChannelCount, 0, 0);
+    ENetHost* client = cleanup.client = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
     expect(host && client, "host and client created");
     if (!host || !client) return;
+    addr.port = host->address.port;
+    expect(addr.port != 0, "host bound to an actual port");
+    if (addr.port == 0) return;
 
     ENetPeer* cpeer = enet_host_connect(client, &addr, kChannelCount, 0);
     expect(cpeer != nullptr, "connect started");
+    if (!cpeer) return;
 
     ENetPeer* hpeer = nullptr;
     bool got_hello = false, got_welcome = false, host_connected = false, client_connected = false;
@@ -81,8 +98,8 @@ void loopback() {
             if (ev.type == ENET_EVENT_TYPE_CONNECT) {
                 client_connected = true;
                 HelloMsg h{};
-                std::strcpy(h.callsign, "Bot");
-                std::strcpy(h.aircraft, "F-4E");
+                set_str(h.callsign, "Bot");
+                set_str(h.aircraft, "F-4E");
                 uint8_t buf[64];
                 size_t n = encode(h, buf, sizeof(buf));
                 send_msg(ev.peer, buf, n, kChannelReliable, true);
@@ -121,9 +138,6 @@ void loopback() {
 
     enet_peer_disconnect_now(cpeer, 0);
     enet_host_flush(client);
-    enet_host_destroy(client);
-    enet_host_destroy(host);
-    enet_deinitialize();
 }
 
 }  // namespace
