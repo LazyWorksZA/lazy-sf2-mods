@@ -23,6 +23,10 @@
 #include "log.h"
 
 namespace lazysf2::hooks {
+
+// Bumped whenever a tracked aircraft is destroyed or its address is reused (see hooks.h).
+std::atomic<uint32_t> g_aircraft_generation{0};
+
 namespace {
 
 constexpr DWORD kAircraftTimestamp = 0x51d220bd, kAircraftImageSize = 0xc2000;
@@ -61,6 +65,7 @@ void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
     for (size_t i = 0; i < g_count; ++i) {
         if (g_table[i].obj == self) {  // address reused without a destructor call we saw
             slot = i;
+            g_aircraft_generation.fetch_add(1, std::memory_order_release);
             break;
         }
     }
@@ -95,6 +100,7 @@ void __fastcall h_Dtor(void* self, void* edx) {
     for (size_t i = 0; i < g_count; ++i) {
         if (g_table[i].obj == self) {
             g_table[i] = g_table[--g_count];
+            g_aircraft_generation.fetch_add(1, std::memory_order_release);
             break;
         }
     }
@@ -252,7 +258,7 @@ bool game_in_front() {
 }
 
 DWORD WINAPI hotkey_thread(LPVOID) {
-    bool was_down = false, puppet_was_down = false, missile_was_down = false;
+    bool was_down = false, puppet_was_down = false, missile_was_down = false, rec_was_down = false;
     for (;;) {
         Sleep(50);
         const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
@@ -266,6 +272,9 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         const bool missile_down = mods && (GetAsyncKeyState('M') & 0x8000);
         if (missile_down && !missile_was_down) missile_spawn_request();
         missile_was_down = missile_down;
+        const bool rec_down = mods && (GetAsyncKeyState('R') & 0x8000);
+        if (rec_down && !rec_was_down) recorder_toggle();
+        rec_was_down = rec_down;
     }
 }
 
@@ -313,6 +322,8 @@ bool valid_probe_dir(const wchar_t* value, std::wstring& out) {
 
 }  // namespace
 
+const wchar_t* probe_output_dir() { return g_dir.empty() ? nullptr : g_dir.c_str(); }
+
 void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx) {
     LiveAircraft list[kMaxTracked];  // a copy of the table, so the callback never sees Entry
     AcquireSRWLockShared(&g_lock);
@@ -350,6 +361,7 @@ void probe_on_modules_loaded() {
                                  reinterpret_cast<void**>(&o_Dtor), "AircraftObject dtor");
     if (!ok) return;
     sim_on_modules_loaded();  // own build check and once-flag
+    recorder_on_modules_loaded();  // registers its step callback (once)
     if (HANDLE t = CreateThread(nullptr, 0, hotkey_thread, nullptr, 0, nullptr)) {
         CloseHandle(t);
     } else {

@@ -59,6 +59,11 @@ struct LiveAircraft {
 // until it returns (the destructor hook needs the lock exclusively). The callback must not log or
 // do file I/O. The table is empty unless the probe is on.
 void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx);
+// Incremented (release) each time a tracked aircraft is destroyed or its address is reused by a new one.
+// A cached aircraft pointer is only trusted while this still has the value it had at the last validation.
+extern std::atomic<uint32_t> g_aircraft_generation;
+// The probe's output directory (LAZYSF2_PROBE_DIR, validated), or nullptr when the probe is off.
+const wchar_t* probe_output_dir();
 
 // Puppet mode (developer tool, part of the probe): drives one AI aircraft along a level path from
 // the render thread, to see whether the game lets us hold it there. Ctrl+Shift+P toggles a run of
@@ -98,5 +103,27 @@ using SimStepCallback = void (*)(void* aircraft, float dt, bool is_player);
 bool sim_register_step_callback(SimStepCallback cb);
 // While a developer run (recording, replay) is active, the hook logs one clock line per second of game time.
 void sim_set_run_active(bool active);
+
+// Recorder (developer tool, part of the probe): Ctrl+Shift+R records the player's aircraft state on every
+// player step (game time), for at most 180 s, and writes <probe dir>ec_NNN.bin when it stops.
+// recorder_toggle() is called by the probe's hotkey thread and only sets a request; the game thread acts on it.
+// File format (little endian, no padding): "LZRC", uint32 version (1), uint32 count, then count RecSample.
+#pragma pack(push, 1)
+struct RecSample {
+    double t;         // game time (sim_game_time()), seconds
+    double pos[3];    // world metres (x east, y north, z up)
+    float vel[3];     // world m/s
+    float ang[3];     // pitch, heading, roll, radians
+    float rate[3];    // angular rates
+};
+#pragma pack(pop)
+static_assert(sizeof(RecSample) == 68, "RecSample is part of the rec_NNN.bin file format");
+void recorder_on_modules_loaded();
+void recorder_toggle();
+// The latest finished recording (game thread only), or nullptr with *count = 0 while none exists or one is
+// being recorded. Valid until the next recording starts.
+const RecSample* recorder_latest(uint32_t* count);
+// True while a replay runs. The recorder refuses to start then. Stub in recorder.cpp until replay.cpp defines it.
+bool replay_active();
 
 }  // namespace lazysf2::hooks

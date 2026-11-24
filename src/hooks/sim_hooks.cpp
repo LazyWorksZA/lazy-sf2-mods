@@ -15,8 +15,8 @@
 //
 // Finding the player: the player is the earliest-created entry of the probe table. The hook caches its
 // pointer and created tick. A step of the cached player costs one pointer compare, plus one tick read;
-// once per second it re-checks the cache under the probe lock (this also catches an address reused by
-// another aircraft). Other aircraft take the lock only when no player is cached, or none has stepped for
+// once per second, and whenever the probe's destroy generation changed, it re-checks the cache under the
+// probe lock (this catches an address reused by another aircraft). Other aircraft take the lock only when no player is cached, or none has stepped for
 // 250 ms, and then at most once per 50 ms.
 #include <windows.h>
 
@@ -54,6 +54,7 @@ void* g_player = nullptr;  // cached player aircraft, or null
 ULONGLONG g_player_created = 0;
 ULONGLONG g_last_player_tick = 0;  // tick of the last player step
 ULONGLONG g_last_validate = 0;     // tick of the last refresh or validation
+uint32_t g_player_gen = 0;         // g_aircraft_generation when the cache was last refreshed or validated
 double g_next_log = 1.0;
 
 // dt statistics over the first kDtStatSteps player steps.
@@ -92,8 +93,10 @@ void player_cb(const LiveAircraft* list, size_t n, void* vctx) {
 // Slow path: the cache is empty or suspect. Takes the probe lock, so callers throttle it by tick.
 void refresh_player(ULONGLONG now) {
     g_last_validate = now;
+    const uint32_t gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
     PlayerCtx c;
     probe_with_aircraft(player_cb, &c);
+    g_player_gen = gen;
     g_player = c.found ? c.obj : nullptr;
     g_player_created = c.found ? c.created : 0;
     g_last_player_tick = now;
@@ -111,8 +114,12 @@ void __fastcall h_Update(void* self, void* edx, float dt) {
         is_player = true;
         const ULONGLONG now = GetTickCount64();
         g_last_player_tick = now;
-        if (now - g_last_validate >= kRevalidateMs) {
+        const uint32_t gen = g_aircraft_generation.load(std::memory_order_acquire);
+        // An aircraft was destroyed (or an address reused) since the last check: the cached pointer may now
+        // belong to a new aircraft, so check at once instead of waiting for the periodic re-check.
+        if (gen != g_player_gen || now - g_last_validate >= kRevalidateMs) {
             g_last_validate = now;
+            g_player_gen = gen;
             PlayerCtx c;
             c.obj = g_player;
             c.created = g_player_created;
