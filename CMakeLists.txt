@@ -23,6 +23,7 @@ add_library(lazysf2 SHARED
     src/hooks/dxgi_hooks.cpp
     src/hooks/input_hooks.cpp
     src/hooks/menu_hooks.cpp
+    src/hooks/probe_hooks.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)
 target_compile_features(lazysf2 PRIVATE cxx_std_20)

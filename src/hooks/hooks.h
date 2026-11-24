@@ -39,4 +39,9 @@ void input_apply_settings();
 bool install_menu_hooks();
 void menu_on_modules_loaded();
 
+// Object probe (developer tool): only active when LAZYSF2_PROBE_DIR is set. install_probe_hooks()
+// reads it once (call from DllMain); probe_on_modules_loaded() hooks AircraftObject.dll when it loads.
+void install_probe_hooks();
+void probe_on_modules_loaded();
+
 }  // namespace lazysf2::hooks
