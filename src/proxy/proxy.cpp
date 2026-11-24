@@ -68,6 +68,8 @@ bool init() {
     return true;
 }
 
+HMODULE real_module() { return g_real; }
+
 void shutdown() {
     // Deliberately not freeing g_real: other DLLs may still call through our stubs during
     // process teardown.

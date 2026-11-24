@@ -1,9 +1,14 @@
 // Console tests for the network protocol and an ENet loopback. Not shipped, no game needed.
 #include <enet/enet.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <thread>
+#include <vector>
 
+#include "net/host_core.h"
 #include "net/protocol.h"
 
 using namespace lazysf2::net;
@@ -140,6 +145,271 @@ void loopback() {
     enet_host_flush(client);
 }
 
+// --- The host's network core (the part of host mode that needs no game) ---------------------------
+
+void parse_tests() {
+    std::printf("parse_host_spec\n");
+    char a[48];
+    uint16_t port = 0;
+    expect(parse_host_spec("7777", a, sizeof(a), &port) && port == 7777 && !std::strcmp(a, "127.0.0.1"),
+           "a bare port defaults to 127.0.0.1");
+    expect(parse_host_spec("0.0.0.0:65535", a, sizeof(a), &port) && port == 65535 && !std::strcmp(a, "0.0.0.0"),
+           "address and port");
+    const char* bad[] = {"",          "0",           "65536",       "-1",           "12a",
+                         ":7777",     "127.0.0.1:",  "localhost:7777", "1.2.3:5",    "1.2.3.4.5:5",
+                         "1111.2.3.4:5", "1..2.3:5", "127.0.0.1:0", "::1",          "127.0.0.1:99999999999999"};
+    bool all_bad = true;
+    for (const char* b : bad) {
+        if (parse_host_spec(b, a, sizeof(a), &port)) {
+            std::printf("    accepted '%s'\n", b);
+            all_bad = false;
+        }
+    }
+    expect(all_bad, "malformed specs are rejected");
+}
+
+// A client, and helpers that stand in for the game thread.
+struct TestClient {
+    ENetHost* host = nullptr;
+    ENetPeer* peer = nullptr;
+    bool connected = false, disconnected = false;
+    struct Got {
+        uint8_t channel;
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<Got> got;
+    ~TestClient() {
+        if (host) enet_host_destroy(host);
+    }
+    void service(int ms) {
+        ENetEvent ev;
+        while (enet_host_service(host, &ev, ms) > 0) {
+            ms = 0;
+            if (ev.type == ENET_EVENT_TYPE_CONNECT) connected = true;
+            if (ev.type == ENET_EVENT_TYPE_DISCONNECT) disconnected = true;
+            if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
+                got.push_back(
+                    {ev.channelID, std::vector<uint8_t>(ev.packet->data, ev.packet->data + ev.packet->dataLength)});
+                enet_packet_destroy(ev.packet);
+            }
+        }
+    }
+    void send(const uint8_t* d, size_t n, uint8_t channel) {
+        ENetPacket* p = enet_packet_create(d, n, channel == kChannelReliable ? ENET_PACKET_FLAG_RELIABLE : 0);
+        if (p && enet_peer_send(peer, channel, p) != 0) enet_packet_destroy(p);
+        enet_host_flush(host);
+    }
+    void idle(int ms) {  // service the client for about ms milliseconds
+        for (int i = 0; i < ms; ++i) {
+            service(0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+};
+
+// Polls the core for up to ms, until want events have arrived; the client is serviced meanwhile.
+std::vector<HostEvent> collect(HostCore& core, TestClient& c, size_t want, int ms) {
+    std::vector<HostEvent> out;
+    for (int t = 0; t < ms && out.size() < want; ++t) {
+        c.service(0);
+        HostEvent ev[16];
+        const size_t n = core.poll(ev, 16);
+        out.insert(out.end(), ev, ev + n);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return out;
+}
+
+bool queue_empty(HostCore& core) {
+    HostEvent e[4];
+    return core.poll(e, 4) == 0;
+}
+
+StateMsg good_state(uint32_t seq, double t) {
+    StateMsg s{};
+    s.client_id = 1;
+    s.seq = seq;
+    s.game_time = t;
+    s.pos[0] = 100.0 + seq;
+    s.vel[1] = 200.0f;
+    s.ang[1] = 1.0f;
+    s.rates[2] = 0.1f;
+    return s;
+}
+template <typename M>
+size_t enc(const M& m, uint8_t* out) {
+    return encode(m, out, 128);
+}
+
+void host_core_tests() {
+    std::printf("host core\n");
+    HostCore core;
+    expect(core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); }), "start");
+    for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    expect(core.state() == HostCore::State::Running && core.port() != 0, "the network thread bound a free port");
+    if (core.state() != HostCore::State::Running) return;
+    core.set_host_time(100.0);
+
+    TestClient c;
+    c.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+    expect(c.host != nullptr, "client host");
+    if (!c.host) return;
+    ENetAddress addr{};
+    enet_address_set_host_ip(&addr, "127.0.0.1");
+    addr.port = core.port();
+    c.peer = enet_host_connect(c.host, &addr, kChannelCount, 0);
+    auto ev = collect(core, c, 1, 2000);
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect && ev[0].slot == 0, "Connect event for slot 0");
+
+    uint8_t buf[128];
+    HelloMsg h{};
+    set_str(h.callsign, "BOT1");
+    set_str(h.aircraft, "F-4E");
+    c.send(buf, enc(h, buf), kChannelReliable);
+    // A State before the Welcome (slot not welcomed yet) must not get through.
+    c.send(buf, enc(good_state(1, 100.5), buf), kChannelUnreliable);
+    ev = collect(core, c, 1, 2000);
+    HelloMsg hd{};
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Message && ev[0].channel == kChannelReliable &&
+               decode(ev[0].data, ev[0].len, hd) == Status::Ok && !std::strcmp(hd.callsign, "BOT1"),
+           "Hello arrives intact");
+    c.idle(100);  // let the early State arrive (and be dropped)
+    expect(core.counters().dropped_state == 1 && queue_empty(core), "a State before the Welcome is dropped");
+
+    // Welcome, then Ping/Pong, as the game thread would do.
+    WelcomeMsg w{};
+    w.client_id = 1;
+    w.spawn_pos[0] = 5.0;
+    w.host_game_time = 100.0;
+    core.set_welcomed(0, true);
+    expect(core.send(0, buf, enc(w, buf), kChannelReliable, true), "Welcome queued");
+    PingMsg ping{};
+    ping.client_send_time = 12.5;
+    c.send(buf, enc(ping, buf), kChannelUnreliable);
+    ev = collect(core, c, 1, 2000);
+    PingMsg pd{};
+    expect(ev.size() == 1 && decode(ev[0].data, ev[0].len, pd) == Status::Ok && pd.client_send_time == 12.5,
+           "Ping arrives");
+    PongMsg pong{};
+    pong.client_send_time = pd.client_send_time;
+    pong.host_game_time = 100.25;
+    expect(core.send(0, buf, enc(pong, buf), kChannelUnreliable, false), "Pong queued");
+    for (int i = 0; i < 500 && c.got.size() < 2; ++i) c.idle(1);
+    bool got_welcome = false, got_pong = false;
+    for (auto& g : c.got) {
+        WelcomeMsg wd;
+        PongMsg qd;
+        if (decode(g.bytes.data(), g.bytes.size(), wd) == Status::Ok && wd.client_id == 1 && wd.spawn_pos[0] == 5.0)
+            got_welcome = true;
+        if (decode(g.bytes.data(), g.bytes.size(), qd) == Status::Ok && qd.client_send_time == 12.5 &&
+            qd.host_game_time == 100.25)
+            got_pong = true;
+    }
+    expect(got_welcome && got_pong, "client got Welcome and Pong");
+
+    // Good States pass.
+    for (uint32_t i = 1; i <= 3; ++i) c.send(buf, enc(good_state(i, 100.0 + 0.1 * i), buf), kChannelUnreliable);
+    ev = collect(core, c, 3, 2000);
+    bool states_ok = ev.size() == 3;
+    for (size_t i = 0; states_ok && i < ev.size(); ++i) {
+        StateMsg d;
+        states_ok = decode(ev[i].data, ev[i].len, d) == Status::Ok && d.seq == i + 1 && d.pos[0] == 101.0 + i;
+    }
+    expect(states_ok, "3 good States arrive in order and intact");
+
+    // Bad packets: every one must be dropped, none may reach the game thread.
+    const HostCounters before = core.counters();
+    const double inf = std::numeric_limits<double>::infinity();
+    const float nanf = std::numeric_limits<float>::quiet_NaN();
+    auto send_state = [&](const StateMsg& m) { c.send(buf, enc(m, buf), kChannelUnreliable); };
+    StateMsg s = good_state(10, 100.5);
+    s.pos[2] = 1.0e7;
+    send_state(s);  // position out of range
+    s = good_state(11, 100.5);
+    s.vel[0] = 2000.0f;
+    send_state(s);  // velocity out of range
+    s = good_state(12, 100.5);
+    s.ang[0] = nanf;
+    send_state(s);  // NaN angle
+    s = good_state(13, 100.5);
+    s.rates[1] = static_cast<float>(inf);
+    send_state(s);  // infinite rate
+    send_state(good_state(14, 100.0 + 3601.0));  // time more than an hour from the host's
+    s = good_state(15, 100.5);
+    s.client_id = 2;
+    send_state(s);  // someone else's client id
+    {
+        const size_t n = enc(good_state(16, 100.5), buf);
+        c.send(buf, n - 1, kChannelUnreliable);  // truncated
+        buf[n] = 0;
+        c.send(buf, n + 1, kChannelUnreliable);  // oversized
+        enc(good_state(17, 100.5), buf);
+        buf[0] = 'X';
+        c.send(buf, n, kChannelUnreliable);  // wrong magic
+        enc(good_state(18, 100.5), buf);
+        buf[2] = 2;
+        c.send(buf, n, kChannelUnreliable);  // wrong version
+        enc(good_state(19, 100.5), buf);
+        c.send(buf, n, kChannelReliable);  // a State on the reliable channel
+    }
+    c.send(buf, enc(w, buf), kChannelUnreliable);  // a Welcome from a client
+    c.send(buf, enc(h, buf), kChannelUnreliable);  // a Hello on the unreliable channel
+    c.send(buf, enc(h, buf), kChannelReliable);    // a second Hello
+    PingMsg nanping{};
+    nanping.client_send_time = std::numeric_limits<double>::quiet_NaN();
+    c.send(buf, enc(nanping, buf), kChannelUnreliable);  // NaN in a Ping
+    // And a good one after them all, which must still get through.
+    c.send(buf, enc(good_state(20, 101.0), buf), kChannelUnreliable);
+    ev = collect(core, c, 1, 3000);
+    StateMsg last{};
+    expect(ev.size() == 1 && decode(ev[0].data, ev[0].len, last) == Status::Ok && last.seq == 20,
+           "only the good State after the bad ones reaches the game thread");
+    c.idle(200);
+    const HostCounters after = core.counters();
+    const uint32_t range = after.dropped_range - before.dropped_range;
+    const uint32_t format = after.dropped_format - before.dropped_format;
+    const uint32_t state = after.dropped_state - before.dropped_state;
+    std::printf("  dropped: %u out of range, %u malformed, %u wrong phase\n", range, format, state);
+    expect(range == 6 && format == 8 && state == 1 && queue_empty(core),
+           "6 out of range, 8 malformed, 1 repeated Hello, and nothing else queued");
+
+    // Bye: the game thread frees the slot and asks for the disconnect.
+    ByeMsg bye{};
+    bye.client_id = 1;
+    c.send(buf, enc(bye, buf), kChannelReliable);
+    ev = collect(core, c, 1, 2000);
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Message && ev[0].channel == kChannelReliable, "Bye arrives");
+    core.disconnect(0);
+    for (int i = 0; i < 2000 && !c.disconnected; ++i) c.idle(1);
+    ev = collect(core, c, 1, 2000);
+    expect(c.disconnected && ev.size() == 1 && ev[0].kind == HostEvent::Disconnect && ev[0].slot == 0,
+           "disconnect: the client sees it, and the game thread gets a Disconnect event");
+
+    // Silence: a client that stops talking (here: stops being serviced) is dropped after 5 s.
+    TestClient d;
+    d.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+    d.peer = enet_host_connect(d.host, &addr, kChannelCount, 0);
+    ev = collect(core, d, 1, 2000);
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "second client connects (slot reused)");
+    std::printf("  waiting for the 5 s silence timeout...\n");
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<HostEvent> gone;
+    for (int i = 0; i < 9000 && gone.empty(); ++i) {  // the client is not serviced from here on
+        HostEvent e2[4];
+        const size_t n = core.poll(e2, 4);
+        gone.insert(gone.end(), e2, e2 + n);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("  Disconnect after %.1f s\n", secs);
+    expect(!gone.empty() && gone[0].kind == HostEvent::Disconnect && secs >= 4.5 && secs < 8.0,
+           "a silent client times out after about 5 s");
+
+    core.stop(false);
+    expect(core.state() == HostCore::State::Idle, "stopped cleanly");
+}
+
 }  // namespace
 
 int main() {
@@ -149,6 +419,14 @@ int main() {
     expect(ok, ok ? "round trips and rejections" : why);
 
     loopback();
+    parse_tests();
+
+    if (enet_initialize() == 0) {
+        host_core_tests();
+        enet_deinitialize();
+    } else {
+        expect(false, "enet_initialize");
+    }
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;
