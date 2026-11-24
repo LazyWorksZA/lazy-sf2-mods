@@ -52,8 +52,20 @@ add_executable(lazysf2-net-tests
     tests/net_tests.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
+    tools/bot/bot_client.cpp
 )
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
 target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)
-target_include_directories(lazysf2-net-tests PRIVATE src)
+target_include_directories(lazysf2-net-tests PRIVATE src tools/bot)
 target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet ws2_32 winmm)
+
+# The synthetic client (console, developer tool, not shipped). A normal exe, so it links winmm and ws2_32 as usual.
+add_executable(lazysf2-bot
+    tools/bot/main.cpp
+    tools/bot/bot_client.cpp
+    src/net/protocol.cpp
+)
+target_compile_features(lazysf2-bot PRIVATE cxx_std_20)
+target_compile_options(lazysf2-bot PRIVATE /W4 /permissive-)
+target_include_directories(lazysf2-bot PRIVATE src tools/bot)
+target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet ws2_32 winmm)
