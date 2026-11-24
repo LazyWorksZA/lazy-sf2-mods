@@ -53,7 +53,11 @@ void probe_on_modules_loaded();
 struct LiveAircraft {
     void* obj;
     const wchar_t* name;
-    unsigned long long created;  // GetTickCount64() at construction
+    unsigned long long seq;  // construction sequence number: unique, increasing, never reused. Identifies the object
+                             // together with obj (an address can be reused).
+    bool is_player;          // the player's aircraft: the first constructed since the table was last empty. At most
+                             // one entry; none once the player is destroyed (until the table empties and refills).
+                             // Every "which one is the player" decision uses this flag, nothing else.
 };
 // Runs callback while holding the aircraft table's lock shared: no listed object can be destroyed
 // until it returns (the destructor hook needs the lock exclusively). The callback must not log or
@@ -90,9 +94,12 @@ inline void missile_spawn_on_present() {
 // Simulation step (developer tool, part of the probe): hooks the aircraft's own Update(dt), which runs
 // once per simulation step for every aircraft on the game's main thread, and not while the game is
 // paused. sim_on_modules_loaded() installs the hook (the probe calls it); nothing is hooked with the probe off.
-// The game clock adds dt on each step of the player's aircraft (the earliest-created tracked aircraft).
+// The game clock adds dt on each step of the player's aircraft (LiveAircraft::is_player: the first aircraft constructed since the probe table was last empty).
 // sim_game_time() and sim_step_count() may be read from the game thread only (inside a step callback).
 void sim_on_modules_loaded();
+// True once the player was seen and has since been destroyed. Stays true until a new player is chosen (the table
+// empties and refills). Game thread; updated on any aircraft's step.
+bool sim_player_lost();
 double sim_game_time();
 uint64_t sim_step_count();
 // "After an aircraft's Update" callback: called on the game thread, after the original returns and after the

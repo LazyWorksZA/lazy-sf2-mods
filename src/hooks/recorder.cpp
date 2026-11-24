@@ -126,7 +126,11 @@ void start_recording() {
 }
 
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
-    if (!is_player) return;
+    if (!is_player) {
+        // The destroyed player never steps again, so another aircraft's step is where we notice.
+        if (g_recording && sim_player_lost()) stop_recording("player lost");
+        return;
+    }
     if (g_toggle_request.exchange(false, std::memory_order_relaxed)) {
         if (g_recording) {
             stop_recording("hotkey");

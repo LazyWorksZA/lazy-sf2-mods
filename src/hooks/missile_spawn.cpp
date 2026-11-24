@@ -116,11 +116,11 @@ struct PlayerCtx {
 // Runs under the aircraft table's shared lock: reads only, no logging.
 void player_cb(const LiveAircraft* list, size_t n, void* vctx) {
     auto& c = *static_cast<PlayerCtx*>(vctx);
-    if (n == 0) return;
-    size_t player = 0;
-    for (size_t i = 1; i < n; ++i) {
-        if (list[i].created < list[player].created) player = i;
+    size_t player = n;
+    for (size_t i = 0; i < n; ++i) {
+        if (list[i].is_player) player = i;
     }
+    if (player == n) return;  // no player (none yet, or destroyed)
     const char* o = static_cast<const char*>(list[player].obj);
     memcpy(&c.pos, o + kPosOffset, sizeof(c.pos));
     memcpy(c.vel, o + kVelOffset, sizeof(c.vel));

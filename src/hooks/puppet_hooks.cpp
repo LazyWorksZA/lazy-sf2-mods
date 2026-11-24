@@ -45,7 +45,7 @@ struct Vec3d {
 // The run. Present thread only.
 struct Run {
     void* target = nullptr;
-    unsigned long long created = 0;  // identifies the object, in case its address is reused
+    unsigned long long seq = 0;  // identifies the object, in case its address is reused
     double last_alt = 0;
     uint32_t mask = 0, orig_flags = 0;  // REMOTEOBJECT mask, and the flag word before we set it
     bool cleared_logged = false;
@@ -69,7 +69,7 @@ void read_pos(const void* obj, Vec3d* p) { memcpy(p, static_cast<const char*>(ob
 // --- Start (callback runs under the shared lock) --------------------------------------------------
 
 struct StartCtx {
-    int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 player too slow
+    int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 player too slow, 3 no player
     void* player = nullptr;
     wchar_t name[64] = {};
     double distance = 0, speed = 0, heading_deg = 0;
@@ -83,9 +83,13 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
         c.result = 1;
         return;
     }
-    size_t player = 0;
-    for (size_t i = 1; i < n; ++i) {
-        if (list[i].created < list[player].created) player = i;
+    size_t player = n;
+    for (size_t i = 0; i < n; ++i) {
+        if (list[i].is_player) player = i;
+    }
+    if (player == n) {
+        c.result = 3;
+        return;
     }
     Vec3d pp;
     read_pos(list[player].obj, &pp);
@@ -117,7 +121,7 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
     const double hp = hp_f, sh = std::sin(hp), ch = std::cos(hp);
     Run& r = c.run;
     r.target = list[best].obj;
-    r.created = list[best].created;
+    r.seq = list[best].seq;
     r.p0 = {pp.x + 150.0 * sh + 20.0 * ch, pp.y + 150.0 * ch - 20.0 * sh, pp.z + 10.0};
     r.v = {speed * sh, speed * ch, 0.0};
     const float rows[9] = {float(ch), float(-sh), 0.f, float(sh), float(ch), 0.f, 0.f, 0.f, 1.f};
@@ -168,6 +172,11 @@ void start_run() {
         g_puppet_state.store(kIdle);
         return;
     }
+    if (c.result == 3) {
+        LOG("puppet: the player is unknown (destroyed, or not seen); not starting");
+        g_puppet_state.store(kIdle);
+        return;
+    }
     if (c.result == 2) {
         LOG("puppet: player speed %.1f m/s is below 1 m/s; not starting", c.speed);
         g_puppet_state.store(kIdle);
@@ -200,7 +209,7 @@ void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
     auto& c = *static_cast<FrameCtx*>(vctx);
     bool live = false;
     for (size_t i = 0; i < n; ++i) {
-        if (list[i].obj == g_run.target && list[i].created == g_run.created) {
+        if (list[i].obj == g_run.target && list[i].seq == g_run.seq) {
             live = true;
             break;
         }
@@ -255,7 +264,7 @@ void log_stats(double t, double alt) {
 
 void stop_cb(const LiveAircraft* list, size_t n, void*) {
     for (size_t i = 0; i < n; ++i) {
-        if (list[i].obj == g_run.target && list[i].created == g_run.created) {
+        if (list[i].obj == g_run.target && list[i].seq == g_run.seq) {
             char* obj = static_cast<char*>(g_run.target);
             uint32_t flags;
             memcpy(&flags, obj + kFlagsOffset, sizeof(flags));
