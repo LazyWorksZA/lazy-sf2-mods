@@ -64,7 +64,7 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 
 ## Workflow
 
-- **Never commit to `master`.** Branch, push, and open a pull request against `master`. The user merges.
+- **GitHub flow, without pull requests.** Do each piece of work on its own branch off `master`, and commit there. **Never commit to `master` directly.** Merge into `master` and push it **only when the user explicitly says so**. Don't open pull requests.
 - Delete branches after they are merged.
 - End commit messages with the `Co-Authored-By` lines given in your session instructions, if any.
 - Testing needs the live game. Get the user to drive it, ask specific questions, and read `lazysf2.log` yourself.
