@@ -7,11 +7,13 @@
 #include <cmath>
 #include <string>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <thread>
 #include <vector>
 
+#include "acmi/acmi_convert.h"
 #include "bot_client.h"
 #include "bot_core.h"
 #include "net/host_core.h"
@@ -1185,6 +1187,147 @@ void stream_tests() {
     remove_dir(dir);
 }
 
+// ---- ACMI export ----
+void acmi_tests() {
+    std::printf("acmi export\n");
+    std::vector<uint8_t> f(48 + 100000);
+    size_t n = encode_stream_header(10.0, "", f.data(), f.size());
+    auto add = [&](StreamKind k, double t, const void* p, size_t len) {
+        n += encode_stream_record(k, t, static_cast<const uint8_t*>(p), len, f.data() + n, f.size() - n);
+    };
+    uint8_t buf[96];
+    ClientJoinedPayload jp{};
+    jp.client_id = 2;
+    set_str(jp.callsign, "Bo,t");
+    set_str(jp.aircraft, "F-4E");
+    add(StreamKind::ClientJoined, 10.0, &jp, sizeof(jp));
+    // 100 Hz host samples for 1 s, flying east (heading +90 deg), pitch 0.1, roll 0.2 rad. The client's
+    // game_time stamps run 50 ms before the arrival time, so the two kinds interleave out of order.
+    for (int i = 0; i < 100; ++i) {
+        StateMsg hs{};
+        hs.client_id = 0;
+        hs.game_time = 10.0 + 0.01 * i;
+        hs.pos[0] = 1000.0 + i;
+        hs.pos[1] = 2000.0;
+        hs.pos[2] = 3000.0;
+        hs.ang[0] = 0.1f;
+        hs.ang[1] = 1.5707964f;
+        hs.ang[2] = 0.2f;
+        add(StreamKind::HostState, hs.game_time, buf, encode(hs, buf, sizeof(buf)));
+        StateMsg cs{};
+        cs.client_id = 2;
+        cs.game_time = 10.0 + 0.01 * i - 0.05;
+        cs.pos[0] = -500.0;
+        cs.pos[1] = 111320.0;  // 1 degree north
+        cs.pos[2] = 100.0;
+        cs.ang[1] = -1.5707964f;  // west: 270 deg
+        if (i == 50) cs.pos[0] = std::numeric_limits<double>::quiet_NaN();
+        add(StreamKind::StateReceived, 10.0 + 0.01 * i, buf, encode(cs, buf, sizeof(buf)));
+    }
+    ClientLeftPayload lp{2, 0};
+    add(StreamKind::ClientLeft, 11.0, &lp, sizeof(lp));
+    const size_t full = n;
+    char* dump = nullptr;
+    size_t dump_len = 0;
+    if (_dupenv_s(&dump, &dump_len, "LAZYSF2_ACMI_TEST_DUMP") == 0 && dump) {  // for trying lazysf2-acmi by hand
+        FILE* df = nullptr;
+        if (fopen_s(&df, dump, "wb") == 0 && df) {
+            std::fwrite(f.data(), 1, full, df);
+            std::fclose(df);
+        }
+        std::free(dump);
+    }
+
+    lazysf2::acmi::Options opt;
+    std::string out;
+    lazysf2::acmi::Info info;
+    expect(lazysf2::acmi::convert_stream(f.data(), full, opt, out, info), "converts");
+    expect(info.end == StreamStatus::End, "reads to the end");
+    expect(out.rfind("FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=", 0) == 0, "header and global object");
+    expect(out.find("ReferenceLongitude=0,ReferenceLatitude=0") != std::string::npos, "reference point");
+    auto line_of = [&](const std::string& prefix) {
+        const size_t p = out.find("\n" + prefix);
+        if (p == std::string::npos) return std::string();
+        const size_t e = out.find('\n', p + 1);
+        return out.substr(p + 1, e - p - 1);
+    };
+    const std::string host1 = line_of("1,T=");
+    // lon = 1000 / 111320, lat = 2000 / 111320 (offsets from the reference), alt 3000, roll 11.46, pitch 5.73,
+    // yaw 90 (east), U 1000, V 2000, heading 90.
+    expect(host1 == "1,T=0.008983112|0.017966223|3000|11.46|5.73|90|1000|2000|90,Pilot=Host,Type=Air+FixedWing,Coalition=Allies,Color=Blue",
+           "host line: transform and properties (east = 90)");
+    const std::string cl = line_of("102,T=");
+    expect(cl.find(",T=-0.004491556|1|100|0|0|270|-500|111320|270,") != std::string::npos &&
+               cl.find("Name=F-4E,Pilot=Bo\\,t,Type=Air+FixedWing,Coalition=Enemies,Color=Red") != std::string::npos,
+           "client line: id 0x100+2, 1 degree north, west = 270, escaped callsign");
+    // Frames: monotonic.
+    double last = -1;
+    bool mono = true;
+    int frames = 0, host_lines = 0, nan_lines = 0;
+    for (size_t p = 0; p < out.size();) {
+        const size_t e = out.find('\n', p);
+        const std::string l = out.substr(p, e - p);
+        if (!l.empty() && l[0] == '#') {
+            const double t = std::atof(l.c_str() + 1);
+            if (t <= last) mono = false;
+            last = t;
+            ++frames;
+        } else if (l.rfind("1,T=", 0) == 0) {
+            ++host_lines;
+        }
+        if (l.find("nan") != std::string::npos || l.find("inf") != std::string::npos) ++nan_lines;
+        p = e + 1;
+    }
+    expect(mono && frames > 0, "frames strictly increase");
+    expect(host_lines >= 24 && host_lines <= 31, "30 Hz default rate limit (100 Hz in gives every 4th)");
+    expect(nan_lines == 0 && info.skipped_bad == 1, "the non-finite sample is skipped");
+    const size_t rm = out.find("\n-102\n");
+    expect(rm != std::string::npos && out.find("\n102,", rm) == std::string::npos, "client removed on leave, nothing after");
+    expect(out.find("\n#1.000\n-102\n") != std::string::npos, "removal is at the leave time");
+
+    lazysf2::acmi::Options all;
+    all.max_rate = 0;
+    std::string out_all;
+    lazysf2::acmi::convert_stream(f.data(), full, all, out_all, info);
+    int c = 0;
+    for (size_t p = out_all.find("\n1,T="); p != std::string::npos; p = out_all.find("\n1,T=", p + 1)) ++c;
+    expect(c == 100, "--max-rate 0 keeps every sample");
+
+    // Reference point: lat/lon are offsets from it, and x is scaled by cos(lat).
+    lazysf2::acmi::Options ro;
+    ro.ref_lat = 60;
+    ro.ref_lon = 10;
+    std::string out_ref;
+    lazysf2::acmi::convert_stream(f.data(), full, ro, out_ref, info);
+    expect(out_ref.find("ReferenceLongitude=10,ReferenceLatitude=60") != std::string::npos &&
+               out_ref.find("\n1,T=0.017966223|0.017966223|") != std::string::npos,
+           "reference point and cos(lat) scaling");
+
+    // Truncated tail: cut in the middle of a record. What was read is converted, the status says Truncated.
+    std::string out_t;
+    lazysf2::acmi::Info it;
+    expect(lazysf2::acmi::convert_stream(f.data(), full - 20, opt, out_t, it) && it.end == StreamStatus::Truncated &&
+               out_t.find("\n1,T=") != std::string::npos,
+           "truncated tail: converted, reported");
+    // A corrupt length stops reading, the earlier records stay.
+    {
+        std::vector<uint8_t> g(f.begin(), f.begin() + static_cast<std::ptrdiff_t>(full));
+        const size_t second = 48 + (4 + 9 + 50) + (4 + 9 + 78) + (4 + 9 + 78);  // the 4th record
+        g[second + 3] = 0xff;  // top byte of its length
+        std::string o2;
+        lazysf2::acmi::Info i2;
+        expect(lazysf2::acmi::convert_stream(g.data(), g.size(), opt, o2, i2) && i2.end == StreamStatus::BadLength &&
+                   o2.find("\n1,T=") != std::string::npos,
+               "corrupt length: stops, keeps the earlier records");
+    }
+    std::string o3;
+    lazysf2::acmi::Info i3;
+    expect(!lazysf2::acmi::convert_stream(f.data(), 20, opt, o3, i3) && o3.empty(), "short header: rejected");
+    std::vector<uint8_t> bad(f.begin(), f.begin() + 60);
+    bad[0] = 'X';
+    expect(!lazysf2::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -1203,6 +1346,7 @@ int main() {
 
     bot_loopback_tests();
     stream_tests();
+    acmi_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;
