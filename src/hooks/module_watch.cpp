@@ -22,6 +22,7 @@ void notify() {
     dxgi_on_modules_loaded();  // behaves as stock unless the display mode is Borderless
     input_on_modules_loaded();  // keyboard Windows key always; mouse only in Cursor mode
     menu_on_modules_loaded();  // the Display Mode option is offered in every mode
+    probe_on_modules_loaded();  // developer probe; does nothing unless LAZYSF2_PROBE_DIR is set
 }
 
 HMODULE WINAPI h_LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {

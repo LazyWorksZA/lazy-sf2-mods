@@ -2,6 +2,9 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <cstddef>
+
 namespace lazysf2::hooks {
 
 // Game window: strip WS_EX_TOPMOST at creation and keep it non-topmost afterwards (Borderless).
@@ -38,5 +41,44 @@ void input_apply_settings();
 // menu_on_modules_loaded() hooks OptionsScreen.dll once it is loaded.
 bool install_menu_hooks();
 void menu_on_modules_loaded();
+
+// Object probe (developer tool): only active when LAZYSF2_PROBE_DIR is set. install_probe_hooks()
+// reads it once (call from DllMain); probe_on_modules_loaded() hooks AircraftObject.dll when it loads.
+void install_probe_hooks();
+void probe_on_modules_loaded();
+
+// One live aircraft object, as seen by probe_with_aircraft(). name points into the probe table and is valid
+// only inside the callback.
+struct LiveAircraft {
+    void* obj;
+    const wchar_t* name;
+    unsigned long long created;  // GetTickCount64() at construction
+};
+// Runs callback while holding the aircraft table's lock shared: no listed object can be destroyed
+// until it returns (the destructor hook needs the lock exclusively). The callback must not log or
+// do file I/O. The table is empty unless the probe is on.
+void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx);
+
+// Puppet mode (developer tool, part of the probe): drives one AI aircraft along a level path from
+// the render thread, to see whether the game lets us hold it there. Ctrl+Shift+P toggles a run of
+// at most 120 s. puppet_toggle() is called by the probe's hotkey thread; puppet_on_present() from
+// IDXGISwapChain::Present, and costs one relaxed atomic load while no run is requested.
+void puppet_toggle();
+void puppet_run_frame();
+extern std::atomic<int> g_puppet_state;
+inline void puppet_on_present() {
+    if (g_puppet_state.load(std::memory_order_relaxed) != 0) puppet_run_frame();
+}
+
+// Missile spawn test (developer tool, part of the probe): Ctrl+Shift+M creates one missile 200 m ahead of
+// the player through the game's object manager, on the next Present, and follows it for 20 s.
+// missile_spawn_on_modules_loaded() hooks MissileObject's constructor (to learn weapon ids); the probe calls it.
+void missile_spawn_request();
+void missile_spawn_run_frame();
+void missile_spawn_on_modules_loaded();
+extern std::atomic<int> g_missile_state;
+inline void missile_spawn_on_present() {
+    if (g_missile_state.load(std::memory_order_relaxed) != 0) missile_spawn_run_frame();
+}
 
 }  // namespace lazysf2::hooks

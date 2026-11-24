@@ -64,6 +64,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             // Settings come from Options.ini and are read later, on first use outside DllMain.
             bool ok = lazysf2::hooks::install_window_hooks();
             ok &= lazysf2::hooks::install_menu_hooks();
+            lazysf2::hooks::install_probe_hooks();  // reads LAZYSF2_PROBE_DIR once; no hooks yet
             ok &= lazysf2::hooks::install_module_watch();
             s = MH_EnableHook(MH_ALL_HOOKS);
             LOG("hooks installed: %s, enable: %s", ok ? "ok" : "PARTIAL", MH_StatusToString(s));
