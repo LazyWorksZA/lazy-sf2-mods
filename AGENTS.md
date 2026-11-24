@@ -17,7 +17,9 @@ This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a
    - The mod may only add its own files to the game folder, and must list them in `lazysf2.manifest.txt` (see `scripts/install.ps1`). Running `scripts/uninstall.ps1` must return the folder to stock.
    - Temporary experiments on a game file must be restored from `G:\SF2-backup`, then hash-checked.
 3. **Test against the original install. Don't run a copy of the game.** EULA 3(b) allows copies only as backups. The backups in `G:\SF2-backup\` exist only to restore files.
-4. **Stay compatible with DXVK.** Don't assume we own `d3d9.dll`, `dxgi.dll` or the `d3d10*.dll` files. Hook the COM objects the game actually gets, rather than replacing system DLLs.
+4. **Stay compatible with DXVK, but don't vendor it.** Don't assume we own `d3d9.dll`, `dxgi.dll` or the `d3d10*.dll` files. Hook the COM objects the game actually gets, rather than replacing system DLLs.
+   - DXVK isn't part of this project: never commit it, ship it, or install it with the mod. We only make sure the mod works when a player has installed it.
+   - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `docs/recon-notes.md` §15).
 5. **Stop at each phase checkpoint** listed in the brief, report, and wait for review. If something contradicts the brief, stop and say so; don't work around it.
 6. **Write findings down as you go** in `docs/recon-notes.md`: addresses as RVAs (offsets from the module base), function roles, file formats and open questions.
 7. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
