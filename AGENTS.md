@@ -22,7 +22,8 @@ This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a
    - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `docs/recon-notes.md` §15).
 5. **Stop at each phase checkpoint** listed in the brief, report, and wait for review. If something contradicts the brief, stop and say so; don't work around it.
 6. **Write findings down as you go** in `docs/recon-notes.md`: addresses as RVAs (offsets from the module base), function roles, file formats and open questions.
-7. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
+7. **Third-party notices.** Every third-party component we *distribute* (statically linked libraries such as MinHook; shipped assemblies and binaries such as Velopack's) must be listed in `THIRD_PARTY_NOTICES.md` with its full license text, taken from the package itself rather than from memory. The installer ships that file with `LICENSE`. When you add, upgrade or remove a dependency, update the file in the same change.
+8. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
 
 ## Fixed-address hooks
 

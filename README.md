@@ -63,4 +63,4 @@ Contributors, human or AI, should read [`AGENTS.md`](AGENTS.md) first. It lists 
 
 ## License
 
-[MIT](LICENSE), for this project's own code and documentation only.
+[MIT](LICENSE), for this project's own code and documentation only. Third-party components we distribute (MinHook, Velopack) are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

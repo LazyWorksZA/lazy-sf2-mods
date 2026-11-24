@@ -30,6 +30,9 @@ dotnet publish (Join-Path $PSScriptRoot 'LazySF2.Manager') -c Release -o $publis
 if ($LASTEXITCODE) { throw "dotnet publish failed ($LASTEXITCODE)" }
 New-Item -ItemType Directory -Force (Join-Path $publish 'payload') | Out-Null
 Copy-Item (Join-Path $root 'build\Release\winmm.dll') (Join-Path $publish 'payload\winmm.dll')
+# Our license and the third-party notices (MinHook in winmm.dll, Velopack) travel with the install.
+Copy-Item (Join-Path $root 'LICENSE') (Join-Path $publish 'LICENSE.txt')
+Copy-Item (Join-Path $root 'THIRD_PARTY_NOTICES.md') (Join-Path $publish 'THIRD_PARTY_NOTICES.md')
 
 # 3. Velopack package + Setup.exe.
 if ($Clean -and (Test-Path $releases)) { Remove-Item $releases -Recurse -Force }
