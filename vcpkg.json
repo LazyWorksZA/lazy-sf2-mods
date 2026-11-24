@@ -1,0 +1,8 @@
+{
+  "name": "lazysf2",
+  "version": "0.1.0",
+  "dependencies": [
+    "minhook"
+  ],
+  "builtin-baseline": "7f2ca8f8f9a2b6ae02ea4b4b7e0ef27490568afa"
+}

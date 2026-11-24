@@ -1,0 +1,34 @@
+# ThirdWire EULA text: third-party, do not redistribute (EULA 3(d))
+docs/SF2-EULA.txt
+
+# Game files must never enter the repo
+*.exe
+*.cat
+*.CAT
+*.lod
+*.LOD
+*.tga
+*.bmp
+*.dds
+/game/
+/extracted/
+
+# Build output
+build/
+out/
+.vs/
+*.pdb
+*.ilk
+*.obj
+
+# Analysis artefacts
+*.gpr
+*.rep/
+*.pml
+*.PML
+*.apmx86
+*.trace
+
+# Local tooling state
+.remember/
+.claude/settings.local.json
