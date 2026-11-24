@@ -9,8 +9,9 @@
 //    not a known key, so no string-table changes are needed.
 // 2. Screen logic. The Graphics sub-menu class in OptionsScreen.dll has Init/Refresh/Changed/Exit
 //    methods; after the stock work we fill, select, read and save our list like the stock ones.
-// 3. The value is saved through the game's own Options.ini helper and read at the next start by
-//    config::display_mode(). The new mode applies after a restart (v1 scope).
+// 3. The value is saved through the game's own Options.ini helper, read at start-up by
+//    config::display_mode(), and applied live when it changes (dxgi_apply_display_mode, on the
+//    window thread).
 //
 // All hooks are at fixed RVAs and only installed on the July 2013 builds.
 #include <windows.h>
@@ -177,7 +178,8 @@ std::wstring splice(const std::wstring& text, int& list_id) {
         L"ListFieldSetting=MediumListField\r\n"
         L"DropDownListSize=10\r\n"
         L"InfoTextSetting=InfoTextSetting\r\n"
-        L"InfoTextStringID=Fullscreen changes the screen mode. Borderless runs in a window covering the desktop, for instant Alt-Tab. Applies after a restart.\r\n"
+        // Same length class as the stock hints (~55 characters); longer text is cut off.
+        L"InfoTextStringID=Select exclusive fullscreen or borderless window mode.\r\n"
         L"\r\n"
         L"[DisplayModeText]\r\n"
         L"MenuItemType=TEXT\r\n"
@@ -319,13 +321,29 @@ void __fastcall h_Exit(void* self, void* edx) {
     if (g_list_id.load()) {
         if (void* ini = options_ini()) {
             reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva))(ini, nullptr, kSection, kKey, g_selected);
-            LOG("menu: saved [GraphicsOptions] DisplayMode=%d (applies after a restart)", g_selected);
+            LOG("menu: saved [GraphicsOptions] DisplayMode=%d", g_selected);
+        }
+        const auto chosen = static_cast<config::DisplayMode>(g_selected);
+        if (chosen != config::display_mode()) {
+            config::set_display_mode(chosen);
+            request_display_mode_apply();  // switched on the window thread once this page has closed
         }
     }
     o_Exit(self, edx);
 }
 
-std::atomic<bool> g_opts_done{false};
+SRWLOCK g_opts_lock = SRWLOCK_INIT;
+
+void hook_options_screen(HMODULE opts) {
+    create_and_enable(at_rva(opts, kGfxInitRva), reinterpret_cast<void*>(&h_Init), reinterpret_cast<void**>(&o_Init),
+                      "OptionsScreen Graphics Init");
+    create_and_enable(at_rva(opts, kGfxRefreshRva), reinterpret_cast<void*>(&h_Refresh),
+                      reinterpret_cast<void**>(&o_Refresh), "OptionsScreen Graphics Refresh");
+    create_and_enable(at_rva(opts, kGfxChangedRva), reinterpret_cast<void*>(&h_Changed),
+                      reinterpret_cast<void**>(&o_Changed), "OptionsScreen Graphics Changed");
+    create_and_enable(at_rva(opts, kGfxExitRva), reinterpret_cast<void*>(&h_Exit), reinterpret_cast<void**>(&o_Exit),
+                      "OptionsScreen Graphics Exit");
+}
 
 }  // namespace
 
@@ -344,19 +362,28 @@ bool install_menu_hooks() {
 }
 
 void menu_on_modules_loaded() {
-    if (g_opts_done.load()) return;
+    // MenuSystem loads OptionsScreen.dll when the Options screen opens and frees it when it closes,
+    // so every load is a fresh, unpatched image (possibly at the same address). Re-hook whenever
+    // the loaded image does not carry our patch.
     HMODULE opts = GetModuleHandleW(L"OptionsScreen.dll");
-    if (!opts || g_opts_done.exchange(true)) return;
-    if (!is_expected_build(opts, kOptsTimestamp, kOptsImageSize, "OptionsScreen.dll")) return;
-    g_opts = opts;
-    create_and_enable(at_rva(opts, kGfxInitRva), reinterpret_cast<void*>(&h_Init), reinterpret_cast<void**>(&o_Init),
-                      "OptionsScreen Graphics Init");
-    create_and_enable(at_rva(opts, kGfxRefreshRva), reinterpret_cast<void*>(&h_Refresh),
-                      reinterpret_cast<void**>(&o_Refresh), "OptionsScreen Graphics Refresh");
-    create_and_enable(at_rva(opts, kGfxChangedRva), reinterpret_cast<void*>(&h_Changed),
-                      reinterpret_cast<void**>(&o_Changed), "OptionsScreen Graphics Changed");
-    create_and_enable(at_rva(opts, kGfxExitRva), reinterpret_cast<void*>(&h_Exit), reinterpret_cast<void**>(&o_Exit),
-                      "OptionsScreen Graphics Exit");
+    if (!opts) return;
+    auto* init = static_cast<const BYTE*>(at_rva(opts, kGfxInitRva));
+    if (opts == g_opts && *init == 0xE9) return;  // already hooked (MinHook writes a JMP rel32)
+
+    AcquireSRWLockExclusive(&g_opts_lock);
+    if (!(opts == g_opts && *init == 0xE9)) {
+        if (g_opts) {
+            // Forget the hooks on the previous image. If it was mapped at the same address, this just
+            // writes back the original bytes; if it is gone, MinHook reports an error and we move on.
+            for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva}) MH_RemoveHook(at_rva(g_opts, rva));
+            g_opts = nullptr;
+        }
+        if (is_expected_build(opts, kOptsTimestamp, kOptsImageSize, "OptionsScreen.dll")) {
+            g_opts = opts;
+            hook_options_screen(opts);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_opts_lock);
 }
 
 }  // namespace lazysf2::hooks

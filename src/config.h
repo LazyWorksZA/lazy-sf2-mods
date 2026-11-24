@@ -23,9 +23,11 @@ struct Config {
 void load();
 const Config& get();
 
-// Display mode from the game's Options.ini, read once on first use. Must NOT be called from
-// DllMain (it uses the shell to find Saved Games).
+// Current display mode. Starts from the game's Options.ini (read once on first use) and changes
+// when the player picks another mode in the Options menu (applied live). Must NOT be first called
+// from DllMain or under the loader lock (it uses the shell to find Saved Games).
 DisplayMode display_mode();
+void set_display_mode(DisplayMode mode);
 inline bool borderless() { return display_mode() == DisplayMode::Borderless; }
 
 }  // namespace lazysf2::config

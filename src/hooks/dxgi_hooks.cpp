@@ -1,7 +1,14 @@
-// Borderless: GraphicsEngineDX10 always creates its swap chain windowed, then calls _DoFullScreen
-// (ResizeTarget + SetFullscreenState(TRUE) + ResizeBuffers) when its fullscreen flag is set
-// (recon-notes.md §4.3). We turn the exclusive-mode calls into no-ops, so the swap chain stays
-// windowed inside the stock monitor-sized popup, and ResizeBuffers(0,0) sizes the buffers to it.
+// Display mode at the DXGI layer.
+//
+// GraphicsEngineDX10 always creates its swap chain windowed, then calls _DoFullScreen
+// (ResizeTarget + SetFullscreenState(TRUE) + ResizeTarget + ResizeBuffers) when its fullscreen flag
+// is set, at start-up and every time the game regains focus (recon-notes.md §4.3). In Borderless
+// mode we turn the exclusive-mode calls into no-ops, so the swap chain stays windowed inside the
+// stock monitor-sized popup. In Fullscreen mode everything passes through unchanged.
+//
+// The mode can change while the game runs (Options menu). dxgi_apply_display_mode() then moves
+// the existing swap chain into or out of exclusive mode the way the game itself does; it must run
+// on the game window's thread.
 //
 // We hook the functions behind the COM vtables of whatever dxgi.dll the game loads, so this
 // works the same with the system DXGI and with DXVK.
@@ -14,6 +21,7 @@
 #include <atomic>
 
 #include "config.h"
+#include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "log.h"
 
@@ -42,22 +50,26 @@ std::atomic<bool> g_factory_hooked{false};
 std::atomic<bool> g_swapchain_hooked{false};
 SRWLOCK g_install_lock = SRWLOCK_INIT;
 
-void* vtable_slot(void* com_object, int slot) { return (*static_cast<void***>(com_object))[slot]; }
+// The game's swap chain and what it last asked for. Not reference-counted: the game keeps its
+// swap chain for the whole session, and we only use it from the window thread.
+IDXGISwapChain* g_swapchain = nullptr;
+IDXGIFactory* g_factory = nullptr;
+HWND g_output_window = nullptr;
+DXGI_MODE_DESC g_target_mode = {};
+bool g_have_target_mode = false;
+bool g_game_wants_fullscreen = false;  // the game's own fullscreen flag, as seen through its calls
 
-bool create_and_enable(void* target, void* detour, void** original, const char* what) {
-    MH_STATUS s = MH_CreateHook(target, detour, original);
-    if (s == MH_OK) s = MH_EnableHook(target);
-    if (s != MH_OK) {
-        LOG("dxgi: hooking %s at %p failed: %s", what, target, MH_StatusToString(s));
-        return false;
-    }
-    LOG("dxgi: hooked %s at %p", what, target);
-    return true;
+void set_alt_enter_handling(bool borderless) {
+    if (!g_factory || !g_output_window) return;
+    const UINT flags = borderless ? (DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES) : 0;  // 0 = stock
+    HRESULT hr = g_factory->MakeWindowAssociation(g_output_window, flags);
+    LOG("dxgi: MakeWindowAssociation(0x%x) -> 0x%08lx", flags, hr);
 }
 
 // --- IDXGISwapChain ---------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
+    if (self == g_swapchain) g_game_wants_fullscreen = fullscreen != FALSE;
     if (fullscreen && config::borderless()) {
         LOG("dxgi: SetFullscreenState(TRUE) suppressed (borderless)");
         return S_OK;
@@ -66,6 +78,10 @@ HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullsc
 }
 
 HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* mode) {
+    if (mode && self == g_swapchain && !g_have_target_mode) {
+        g_target_mode = *mode;  // the mode the game wants for exclusive fullscreen
+        g_have_target_mode = true;
+    }
     if (!config::borderless()) return o_ResizeTarget(self, mode);
     if (mode) {
         LOG("dxgi: ResizeTarget(%ux%u @ %u/%u) suppressed (borderless)", mode->Width, mode->Height,
@@ -106,12 +122,13 @@ HRESULT STDMETHODCALLTYPE h_CreateSwapChain(IDXGIFactory* self, IUnknown* device
 
     HRESULT hr = o_CreateSwapChain(self, device, desc, out);
     LOG("dxgi: CreateSwapChain -> 0x%08lx", hr);
-    if (SUCCEEDED(hr) && out && *out && config::borderless()) {
-        if (desc && desc->OutputWindow) {
-            HRESULT mwa = self->MakeWindowAssociation(desc->OutputWindow, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
-            LOG("dxgi: MakeWindowAssociation(NO_ALT_ENTER|NO_WINDOW_CHANGES) -> 0x%08lx", mwa);
-        }
+    if (SUCCEEDED(hr) && out && *out && desc && desc->OutputWindow == game_window()) {
+        g_swapchain = *out;
+        g_factory = self;  // the game keeps its factory alive with the swap chain
+        g_output_window = desc->OutputWindow;
+        g_have_target_mode = false;
         hook_swapchain(*out);
+        if (config::borderless()) set_alt_enter_handling(true);
     }
     return hr;
 }
@@ -135,6 +152,45 @@ HRESULT WINAPI h_CreateDXGIFactory(REFIID riid, void** out) {
 }
 
 }  // namespace
+
+// --- Live switching -----------------------------------------------------------------------------
+
+void dxgi_apply_display_mode() {
+    const bool borderless = config::borderless();
+    IDXGISwapChain* sc = g_swapchain;
+    if (!sc || !o_SetFullscreenState || !o_ResizeTarget) {
+        LOG("dxgi: live switch skipped: no swap chain yet");
+        return;
+    }
+    BOOL exclusive = FALSE;
+    sc->GetFullscreenState(&exclusive, nullptr);
+    LOG("dxgi: live switch to %s (exclusive now: %d, game fullscreen flag: %d)", borderless ? "Borderless" : "Fullscreen",
+        exclusive, g_game_wants_fullscreen);
+
+    HWND hwnd = g_output_window;
+    if (borderless) {
+        if (exclusive) LOG("dxgi: SetFullscreenState(FALSE) -> 0x%08lx", o_SetFullscreenState(sc, FALSE, nullptr));
+        set_alt_enter_handling(true);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return;
+    }
+
+    // Fullscreen: only enter exclusive mode if the game itself runs fullscreen (its stock state).
+    set_alt_enter_handling(false);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    if (!g_game_wants_fullscreen || exclusive) return;
+    // Same sequence as the game's _DoFullScreen. ResizeBuffers is left out: the game still holds its
+    // back-buffer view, and the buffers already match the mode.
+    DXGI_MODE_DESC mode = g_target_mode;
+    if (g_have_target_mode) o_ResizeTarget(sc, &mode);
+    HRESULT hr = o_SetFullscreenState(sc, TRUE, nullptr);
+    LOG("dxgi: SetFullscreenState(TRUE) -> 0x%08lx", hr);
+    if (SUCCEEDED(hr) && g_have_target_mode) {
+        mode.RefreshRate.Numerator = 0;
+        mode.RefreshRate.Denominator = 0;
+        o_ResizeTarget(sc, &mode);
+    }
+}
 
 // --- dxgi.dll load watch ----------------------------------------------------------------------
 

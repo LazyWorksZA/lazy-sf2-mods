@@ -4,9 +4,13 @@
 
 namespace lazysf2::hooks {
 
-// Game window: strip WS_EX_TOPMOST at creation and keep it non-topmost afterwards.
+// Game window: strip WS_EX_TOPMOST at creation and keep it non-topmost afterwards (Borderless).
 bool install_window_hooks();
 HWND game_window();
+// Asks the game window's thread to apply config::display_mode() to the running game.
+void request_display_mode_apply();
+// Applies config::display_mode() to the game's swap chain. Window thread only.
+void dxgi_apply_display_mode();
 
 // Hooks kernelbase!LoadLibraryExW and, after every load, gives each feature a chance to hook
 // modules that have just appeared (dxgi.dll, dinput8.dll, Core\DirectInput.dll, ...).
