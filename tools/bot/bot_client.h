@@ -26,7 +26,7 @@ struct BotConfig {
 };
 
 struct BotResult {
-    int code = 0;  // 0 ok, 1 bad arguments, 2 cannot connect, 3 no Welcome, 4 the host closed the connection
+    int code = 0;  // 0 ok, 1 bad arguments, 2 cannot connect, 3 no Welcome, 4 the host closed the connection or is not answering
     uint16_t client_id = 0;
     uint32_t generated = 0;  // States produced (seq numbers used)
     uint32_t sent = 0;       // States handed to ENet

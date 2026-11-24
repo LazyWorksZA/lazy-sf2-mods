@@ -17,7 +17,7 @@ void usage() {
         "--jitter delays each State by a random 0..MS before it is sent, so States can overtake each other: on the\n"
         "sequenced (unreliable) channel a late State is dropped by the host, so jitter also acts as extra loss.\n"
         "--drop exits without Bye (tests the host's 5 s timeout). Exit code 0 ok, 1 bad arguments, 2 cannot connect,\n"
-        "3 no Welcome, 4 the host closed the connection.\n");
+        "3 no Welcome, 4 the host closed the connection or is not answering.\n");
 }
 
 bool to_double(const char* s, double* out) {
