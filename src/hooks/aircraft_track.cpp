@@ -154,6 +154,7 @@ void __fastcall h_Dtor(void* self, void* edx) {
     } else if (live == 0 && removed) {
         LOG("track: table empty (the flight's aircraft are gone)");
     }
+    if (live == 0 && removed) tacview_recorder_table_empty();
     o_Dtor(self, edx);
 }
 

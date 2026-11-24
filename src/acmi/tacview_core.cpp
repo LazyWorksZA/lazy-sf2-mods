@@ -35,16 +35,17 @@ void TacviewCore::seed_time(double t0, long long last_ms) {
 
 void TacviewCore::add(const TacviewRec& r) {
     if (r.kind != TacviewRec::kObject) return;
-    if (!std::isfinite(r.t) || !finite3(r.pos) || !finite3(r.ang)) {
-        ++stats_.bad_samples;
-        return;
-    }
     State* s = nullptr;
     for (State& o : objs_) {
         if (o.seq == r.seq) {
             s = &o;
             break;
         }
+    }
+    if (!std::isfinite(r.t) || !finite3(r.pos) || !finite3(r.ang)) {
+        ++stats_.bad_samples;
+        if (s) s->seen = frame_no_;  // still present: no remove and re-add for one bad sample
+        return;
     }
     const bool is_new = s == nullptr;
     if (is_new) {

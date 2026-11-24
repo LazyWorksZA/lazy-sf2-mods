@@ -28,6 +28,17 @@ void TacviewWriter::join_previous() {
     if (thread_.joinable()) thread_.join();  // it was told to stop by close(); a drain and a flush at most
 }
 
+bool TacviewWriter::idle() const {
+    if (!thread_.joinable()) return true;
+    return finished_.load(std::memory_order_acquire);
+}
+
+void TacviewWriter::close_and_join(const char* why) {
+    if (!thread_.joinable()) return;
+    close(false, why);
+    thread_.join();
+}
+
 std::wstring TacviewWriter::path() const {
     AcquireSRWLockShared(&path_lock_);
     std::wstring p = path_;
@@ -38,8 +49,8 @@ std::wstring TacviewWriter::path() const {
 bool TacviewWriter::open(const std::wstring& dir, const SYSTEMTIME& t, const char* utc_iso,
                          const TacviewCoreConfig& cfg, LogFn log, DisplayFn display, uint64_t max_bytes) {
     if (!ready() || !log || !utc_iso) return false;
-    join_previous();
     if (open_.load()) return false;  // already open
+    join_previous();                 // callers check idle() first on the game thread: this returns at once then
     log_ = log;
     display_ = display;
     max_bytes_ = max_bytes;

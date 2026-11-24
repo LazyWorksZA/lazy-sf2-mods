@@ -8,8 +8,12 @@
 // One file per flight. A recording starts at the first step of the player's aircraft while the setting is On
 // (checked at that moment: tracking may be on for the probe alone), and stops when the player is lost (the sim's
 // player epoch changes), when the writer fails or reaches the size cap, when the Options screen is left, or at
-// process exit. A flight that ends with the table emptying and no further aircraft step is noticed at the next
-// step of any aircraft, at the next Options exit, or at process exit.
+// process exit. When the aircraft table empties (the tracker's destructor hook calls tacview_recorder_table_empty(),
+// which only sets a flag), the recording is closed at the next step of any aircraft or at the next menu moment (an
+// Options page left), whichever comes first; a mission that ends with nothing stepping again is closed there. Before
+// a stop for "player lost" or "table empty" one last empty frame is written, so the file gets its removal lines.
+// The writer thread of a finished recording is only joined once it has finished: a new start waits (retrying at the
+// next player step) while the previous writer is still draining, so the game thread never blocks on it.
 //
 // Game thread cost: at most 10 times per second of game time, on a player step, one pass over the live aircraft
 // under probe_with_aircraft's shared lock: a pose read (SEH-guarded) and a name copy per aircraft into the ring. No
@@ -19,6 +23,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <new>
@@ -46,6 +51,7 @@ bool g_skip_valid = false;   // a start failed or the writer failed during this 
 uint32_t g_skip_epoch = 0;
 double g_last_snapshot = 0;
 std::atomic<bool> g_registered{false};
+std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
 
 void writer_log(const char* line) { LOG("%s", line); }
 
@@ -75,7 +81,16 @@ void snapshot_cb(const LiveAircraft* list, size_t n, void* vctx) {
     size_t used = 0;
     for (size_t i = 0; i < n; ++i) {
         acmi::TacviewRec& r = g_writer->slot(used);
-        if (!read_pose(list[i].obj, r.pos, r.ang)) continue;
+        if (!read_pose(list[i].obj, r.pos, r.ang)) {
+            // Keep the object in the frame with a non-finite pose: the core counts it as seen (no remove and re-add)
+            // and skips the transform.
+            r.kind = acmi::TacviewRec::kObject;
+            r.seq = list[i].seq;
+            r.t = c.t;
+            r.pos[0] = r.pos[1] = r.pos[2] = std::nan("");
+            ++used;
+            continue;
+        }
         r.kind = acmi::TacviewRec::kObject;
         r.side = static_cast<uint8_t>(list[i].side);
         r.is_player = list[i].is_player ? 1 : 0;
@@ -93,13 +108,18 @@ void snapshot_cb(const LiveAircraft* list, size_t n, void* vctx) {
     c.wrote = true;
 }
 
-void stop_recording(const char* why) {
+// One last frame with no objects, so the file gets a removal line for every object (the player's -1 included).
+// An empty frame is right in both cases: the table is empty, or it holds a new flight's aircraft.
+void stop_recording(const char* why, bool final_frame = false) {
     if (!g_recording) return;
     g_recording = false;
+    if (final_frame && g_writer->accepting() && g_writer->begin_frame(0)) g_writer->commit_frame(0, sim_game_time());
     g_writer->close(false, why);  // the thread logs the summary
 }
 
-bool start_recording(uint32_t epoch) {
+enum class StartResult { Started, Failed, Retry };
+
+StartResult start_recording(uint32_t epoch) {
     if (!g_dir_tried) {
         g_dir_tried = true;
         const std::wstring base = config::game_data_dir();  // the shell: game thread, once
@@ -107,13 +127,14 @@ bool start_recording(uint32_t epoch) {
     }
     if (g_dir.empty()) {
         LOG("tacview: not recording: the Saved Games folder was not found");
-        return false;
+        return StartResult::Failed;
     }
     if (!g_writer) g_writer = new (std::nothrow) acmi::TacviewWriter;
     if (!g_writer || !g_writer->ready()) {
         LOG("tacview: not recording: out of memory for the frame ring");
-        return false;
+        return StartResult::Failed;
     }
+    if (!g_writer->idle()) return StartResult::Retry;  // the previous recording is still being written out
     SYSTEMTIME local, utc;
     GetLocalTime(&local);
     GetSystemTime(&utc);
@@ -123,18 +144,21 @@ bool start_recording(uint32_t epoch) {
     acmi::TacviewCoreConfig cfg;  // reference 0/0, 10 Hz
     if (!g_writer->open(g_dir, local, iso, cfg, writer_log, display_path)) {
         LOG("tacview: not recording: could not start the writer");
-        return false;
+        return StartResult::Failed;
     }
+    g_table_empty.store(false, std::memory_order_relaxed);
     g_recording = true;
     g_epoch = epoch;
     g_last_snapshot = -1e300;
-    return true;
+    return StartResult::Started;
 }
 
 void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
     if (g_recording) {
         if (sim_player_epoch() != g_epoch) {
-            stop_recording("player lost");
+            stop_recording("player lost", true);
+        } else if (g_table_empty.exchange(false, std::memory_order_acq_rel)) {
+            stop_recording("table empty", true);
         } else if (!g_writer->accepting()) {
             g_skip_valid = true;  // the writer already logged why (write failure, size cap, no file)
             g_skip_epoch = g_epoch;
@@ -146,7 +170,9 @@ void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
         if (config::tacview_recording_peek() != 1) return;
         const uint32_t ep = sim_player_epoch();
         if (g_skip_valid && g_skip_epoch == ep) return;
-        if (!start_recording(ep)) {
+        const StartResult sr = start_recording(ep);
+        if (sr == StartResult::Retry) return;  // not marked: tried again at the next player step
+        if (sr == StartResult::Failed) {
             g_skip_valid = true;
             g_skip_epoch = ep;
             return;
@@ -167,9 +193,25 @@ void tacview_recorder_on_modules_loaded() {
     if (!sim_register_step_callback(on_step)) LOG("tacview: no free step callback slot; the recorder is off");
 }
 
+void tacview_recorder_table_empty() { g_table_empty.store(true, std::memory_order_release); }
+
+namespace {
+void count_cb(const LiveAircraft*, size_t n, void* ctx) { *static_cast<size_t*>(ctx) = n; }
+}  // namespace
+
 void tacview_recorder_menu_moment() {
-    if (g_recording && sim_player_epoch() != g_epoch) stop_recording("player lost");
-    if (g_recording && !g_writer->accepting()) stop_recording("writer stopped");
+    if (!g_recording) return;
+    if (sim_player_epoch() != g_epoch) {
+        stop_recording("player lost", true);
+        return;
+    }
+    size_t live = 1;
+    probe_with_aircraft(count_cb, &live);
+    if (live == 0 || g_table_empty.exchange(false, std::memory_order_acq_rel)) {
+        stop_recording("table empty", true);
+        return;
+    }
+    if (!g_writer->accepting()) stop_recording("writer stopped");
 }
 
 void tacview_recorder_shutdown() {

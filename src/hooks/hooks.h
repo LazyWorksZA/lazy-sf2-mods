@@ -74,6 +74,9 @@ bool aircraft_track_for_tacview();
 // FreeLibrary and process exit) closes the file; at process exit it writes what the dead writer left in its ring.
 void tacview_recorder_on_modules_loaded();
 void tacview_recorder_menu_moment();
+// Called by the tracker (any thread, after its lock is released) when the aircraft table has just become empty: a
+// flight has ended. Only sets an atomic flag; the recorder acts on it at the next step or menu moment.
+void tacview_recorder_table_empty();
 void tacview_recorder_shutdown();
 // Hooks of the sim step (sim_hooks.cpp); the tracker calls these, after its own build check.
 bool sim_install(HMODULE aircraft_dll);

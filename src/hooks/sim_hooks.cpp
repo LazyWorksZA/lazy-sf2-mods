@@ -36,7 +36,7 @@ namespace lazysf2::hooks {
 namespace {
 
 constexpr DWORD kUpdateRva = 0x466c0;  // void __thiscall Update(void* aircraft, float dt)  (ret 4)
-constexpr int kMaxCallbacks = 4;
+constexpr int kMaxCallbacks = 8;
 constexpr unsigned kDtStatSteps = 300;
 constexpr ULONGLONG kRevalidateMs = 1000;  // re-check the cached player under the lock this often
 constexpr ULONGLONG kStaleMs = 250;        // no player step for this long while others update: cache suspect

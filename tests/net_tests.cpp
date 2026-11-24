@@ -1648,7 +1648,7 @@ void tacview_tests() {
         const uint32_t dropped_before = w.dropped_frames();
         expect(!w.begin_frame(100) && w.dropped_frames() == dropped_before + 1,
                "tacview writer: a frame that cannot fit is dropped and counted");
-        w.close(true, "test");
+        w.close_and_join("test");
         const std::string c1 = read_whole(dir + L"\\SF2 2026-11-24 10-11-12.acmi");
         {
             char* dump = nullptr;
@@ -1672,7 +1672,7 @@ void tacview_tests() {
         tv_logged.clear();
         TacviewWriter w2(64);
         expect(w2.open(dir, st, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview writer: second open");
-        w2.close(true, "test");
+        w2.close_and_join("test");
         expect(GetFileAttributesW((dir + L"\\SF2 2026-11-24 10-11-12 (2).acmi").c_str()) != INVALID_FILE_ATTRIBUTES,
                "tacview writer: a name clash appends (2)");
 
@@ -1693,7 +1693,7 @@ void tacview_tests() {
         }
         for (int i = 0; i < 100 && w3.accepting(); ++i) Sleep(10);
         expect(!w3.accepting(), "tacview writer: the size cap stops the recording");
-        w3.close(true, "cap test");
+        w3.close_and_join("cap test");
         const std::string c3 = read_whole(dir + L"\\SF2 2026-11-24 10-11-40.acmi");
         expect(!c3.empty() && c3.size() <= 600 && c3.back() == '\n' && count_of(tv_logged, "byte cap") == 1,
                "tacview writer: capped file is a whole-line prefix, logged once");
@@ -1706,7 +1706,7 @@ void tacview_tests() {
         for (int i = 0; i < 100 && w4.accepting(); ++i) Sleep(10);
         expect(!w4.accepting() && count_of(tv_logged, "not recording") == 1,
                "tacview writer: folder failure logged once, recording off");
-        w4.close(true, "test");
+        w4.close_and_join("test");
 
         // Clean up.
         WIN32_FIND_DATAW fd;

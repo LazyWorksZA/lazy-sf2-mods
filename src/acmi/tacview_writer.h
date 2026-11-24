@@ -41,6 +41,12 @@ public:
     TacviewWriter(const TacviewWriter&) = delete;
     TacviewWriter& operator=(const TacviewWriter&) = delete;
 
+    // True when no writer thread is running or it has finished (so open() will not wait). Game thread: check this
+    // before open(), and retry later when false.
+    bool idle() const;
+    // For tests: asks the thread to finish and waits for it, however long it takes.
+    void close_and_join(const char* why = "closed");
+
     bool ready() const { return ring_ != nullptr; }  // false if the ring could not be allocated
 
     // Starts a recording in folder dir (the Tacview folder; created if missing). local_now names the file. The
