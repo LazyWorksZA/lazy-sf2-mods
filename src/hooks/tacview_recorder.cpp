@@ -3,14 +3,13 @@
 //
 // Inert while Off: the aircraft tracker only installs its hooks when the setting (or the probe) asks for them, so
 // our sim step callback is never called, no thread exists, no memory is reserved and no file is made. The ring
-// (about 1 MB) is allocated when the first recording starts.
+// (8192 slots of 168 B, about 1.3 MB) is allocated when the first recording starts.
 //
 // One file per flight. A recording starts at the first step of the player's aircraft while the setting is On
 // (checked at that moment: tracking may be on for the probe alone), and stops when the player is lost (the sim's
-// player epoch changes), when the writer fails or reaches the size cap, when the Options screen is left, or at
-// process exit. When the aircraft table empties (the tracker's destructor hook calls tacview_recorder_table_empty(),
+// player epoch changes), when the writer fails or reaches the size cap, or at process exit. When the aircraft table empties (the tracker's destructor hook calls tacview_recorder_table_empty(),
 // which only sets a flag), the recording is closed at the next step of any aircraft or at the next menu moment (an
-// Options page left), whichever comes first; a mission that ends with nothing stepping again is closed there. Before
+// Options page left, which also stops a recording whose setting is now Off), whichever comes first; a mission that ends with nothing stepping again is closed there. Before
 // a stop for "player lost" or "table empty" one last empty frame is written, so the file gets its removal lines.
 // The writer thread of a finished recording is only joined once it has finished: a new start waits (retrying at the
 // next player step) while the previous writer is still draining, so the game thread never blocks on it.
@@ -263,6 +262,10 @@ void count_cb(const LiveAircraft*, size_t n, void* ctx) { *static_cast<size_t*>(
 
 void tacview_recorder_menu_moment() {
     if (!g_recording) return;
+    if (config::tacview_recording_peek() != 1) {  // the setting was turned Off: never leave a file open
+        stop_recording("setting off", true);
+        return;
+    }
     if (sim_player_epoch() != g_epoch) {
         stop_recording("player lost", true);
         return;

@@ -121,6 +121,9 @@ void weapon_track_reevaluate();
 bool weapon_track_active();
 // A new flight begins: forgets the count of weapons skipped because the table was full (and logs it if not zero).
 void weapon_track_new_flight();
+// Clears the weapon table (the aircraft table emptied: the flight is over); returns the live weapons dropped.
+// Takes only the weapon lock; call it with no other tracker lock held.
+size_t weapon_track_drop_all();
 // Runs callback while holding the weapon table's lock shared; the callback must not log or do file I/O. Empty
 // unless the weapon hooks are installed. Do not call while holding the aircraft table's lock exclusively.
 void probe_with_weapons(void (*callback)(const LiveWeapon* list, size_t count, void* ctx), void* ctx);

@@ -90,11 +90,6 @@ void set_display_monitor(int number) {
     g_monitor = number > 0 ? number : 0;
 }
 
-bool tacview_recording() {
-    ensure_loaded();
-    return g_tacview.load() == 1;
-}
-
 void set_tacview_recording(bool on) {
     ensure_loaded();
     if (g_tacview.exchange(on ? 1 : 0) != (on ? 1 : 0)) LOG("config: Tacview Recording -> %s", on ? "on" : "off");

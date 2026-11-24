@@ -174,10 +174,13 @@ void __fastcall h_Dtor(void* self, void* edx) {
     ReleaseSRWLockExclusive(&g_lock);
     if (g_for_probe.load()) {
         LOG("track: aircraft - %p (%zu live)", self, live);
-    } else if (live == 0 && removed) {
-        LOG("track: table empty (the flight's aircraft are gone)");
     }
-    if (live == 0 && removed) tacview_recorder_table_empty();
+    if (live == 0 && removed) {
+        const size_t weapons_dropped = weapon_track_drop_all();  // the flight is over; no stale weapons into the next
+        if (!g_for_probe.load())
+            LOG("track: table empty (the flight's aircraft are gone; %zu live weapons dropped)", weapons_dropped);
+        tacview_recorder_table_empty();
+    }
     o_Dtor(self, edx);
 }
 

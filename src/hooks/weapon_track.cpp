@@ -322,6 +322,14 @@ void weapon_track_reevaluate() {
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 
+size_t weapon_track_drop_all() {
+    AcquireSRWLockExclusive(&g_lock);
+    const size_t dropped = g_count;
+    g_count = 0;
+    ReleaseSRWLockExclusive(&g_lock);
+    return dropped;
+}
+
 void weapon_track_new_flight() {
     const uint32_t skipped = g_skipped.exchange(0);
     g_skip_logged = false;
