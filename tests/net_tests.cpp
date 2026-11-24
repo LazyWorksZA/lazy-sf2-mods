@@ -733,6 +733,11 @@ void bot_clock_tests() {
         c.on_pong(10.25 - 0.002, 10.25, 100.25);
         expect(!c.on_hold(12.0) && c.on_hold(13.5), "no Pong for 3 s puts the sender on hold");
     }
+    {  // silence from the start: no Pong ever, the Welcome's clock goes stale, too
+        bot::ClockSync c;
+        c.on_welcome(10.0, 100.0, 0.0);
+        expect(!c.on_hold(12.0) && c.on_hold(13.5), "no Pong since the Welcome for 3 s puts the sender on hold");
+    }
 }
 
 struct BotSession {
@@ -748,7 +753,7 @@ struct BotSession {
 // Hello with Welcome, and collects what the host would hand to the game. pause_at/pause_len freeze the host clock
 // for a while, as a paused game does.
 BotSession run_bot_session(bot::Script script, double rate, double duration, double pause_at, double pause_len,
-                           double loss, bool drop = false) {
+                           double loss, bool drop = false, double jitter_ms = 0.0) {
     BotSession out;
     HostCore core;
     core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); });
@@ -770,6 +775,7 @@ BotSession run_bot_session(bot::Script script, double rate, double duration, dou
     cfg.rate = rate;
     cfg.duration = duration;
     cfg.loss_pct = loss;
+    cfg.jitter_ms = jitter_ms;
     cfg.drop = drop;
     cfg.callsign = "BOTTEST";
     cfg.log = [](const char* l) { std::printf("    [bot] %s\n", l); };
@@ -896,6 +902,28 @@ void bot_loopback_tests() {
         const BotSession r = run_bot_session(bot::Script::Straight, 20.0, 1.0, 0, 0, 0, true);
         check_session(r, 20.0, 0.8, 1.2, "straight, 20 Hz, --drop");
         expect(!r.got_bye, "with --drop the bot leaves without a Bye");
+    }
+    {
+        // Jitter holds States back; every one must have been handed to ENet before the Bye (none left in the queue).
+        const BotSession r = run_bot_session(bot::Script::Straight, 20.0, 1.0, 0, 0, 0, false, 400.0);
+        expect(r.got_bye && r.res.generated > 0 && r.res.sent == r.res.generated - r.res.lost,
+               "jitter: the delayed States are flushed before the Bye");
+    }
+    {  // argument checks that return before any network use
+        auto code = [](double rate, double dur, double loss, double jit, const char* host) {
+            bot::BotConfig c;
+            c.rate = rate;
+            c.duration = dur;
+            c.loss_pct = loss;
+            c.jitter_ms = jit;
+            c.host = host;
+            return bot::run_bot(c).code;
+        };
+        const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+        expect(code(30, 5, 0, 0, "127.0.0.1:7777abc") == 1 && code(30, 5, 0, 0, "127.0.0.1:") == 1 &&
+                   code(nan, 5, 0, 0, "127.0.0.1:7777") == 1 && code(30, inf, 0, 0, "127.0.0.1:7777") == 1 &&
+                   code(30, 5, nan, 0, "127.0.0.1:7777") == 1 && code(30, 5, 0, inf, "127.0.0.1:7777") == 1,
+               "the bot rejects non-finite numbers and a port with trailing characters");
     }
     {
         const BotSession r = run_bot_session(bot::Script::Climb, 20.0, 1.0, 0, 0, 0);
@@ -1200,6 +1228,8 @@ void acmi_tests() {
     jp.client_id = 2;
     set_str(jp.callsign, "Bo,t");
     set_str(jp.aircraft, "F-4E");
+    std::vector<size_t> starts;  // offset of each record in the file, for the corrupt-length test
+    starts.push_back(n);
     add(StreamKind::ClientJoined, 10.0, &jp, sizeof(jp));
     // 100 Hz host samples for 1 s, flying east (heading +90 deg), pitch 0.1, roll 0.2 rad. The client's
     // game_time stamps run 50 ms before the arrival time, so the two kinds interleave out of order.
@@ -1213,6 +1243,7 @@ void acmi_tests() {
         hs.ang[0] = 0.1f;
         hs.ang[1] = 1.5707964f;
         hs.ang[2] = 0.2f;
+        starts.push_back(n);
         add(StreamKind::HostState, hs.game_time, buf, encode(hs, buf, sizeof(buf)));
         StateMsg cs{};
         cs.client_id = 2;
@@ -1222,6 +1253,7 @@ void acmi_tests() {
         cs.pos[2] = 100.0;
         cs.ang[1] = -1.5707964f;  // west: 270 deg
         if (i == 50) cs.pos[0] = std::numeric_limits<double>::quiet_NaN();
+        starts.push_back(n);
         add(StreamKind::StateReceived, 10.0 + 0.01 * i, buf, encode(cs, buf, sizeof(buf)));
     }
     ClientLeftPayload lp{2, 0};
@@ -1279,7 +1311,7 @@ void acmi_tests() {
         p = e + 1;
     }
     expect(mono && frames > 0, "frames strictly increase");
-    expect(host_lines >= 24 && host_lines <= 31, "30 Hz default rate limit (100 Hz in gives every 4th)");
+    expect(host_lines >= 29 && host_lines <= 31, "30 Hz default rate limit (100 Hz in gives about 30 lines, not 25)");
     expect(nan_lines == 0 && info.skipped_bad == 1, "the non-finite sample is skipped");
     const size_t rm = out.find("\n-102\n");
     expect(rm != std::string::npos && out.find("\n102,", rm) == std::string::npos, "client removed on leave, nothing after");
@@ -1312,13 +1344,44 @@ void acmi_tests() {
     // A corrupt length stops reading, the earlier records stay.
     {
         std::vector<uint8_t> g(f.begin(), f.begin() + static_cast<std::ptrdiff_t>(full));
-        const size_t second = 48 + (4 + 9 + 50) + (4 + 9 + 78) + (4 + 9 + 78);  // the 4th record
-        g[second + 3] = 0xff;  // top byte of its length
+        const size_t fourth = starts[3];  // from the real record sizes: the 4th record
+        g[fourth + 3] = 0xff;  // top byte of its length
         std::string o2;
         lazysf2::acmi::Info i2;
         expect(lazysf2::acmi::convert_stream(g.data(), g.size(), opt, o2, i2) && i2.end == StreamStatus::BadLength &&
                    o2.find("\n1,T=") != std::string::npos,
                "corrupt length: stops, keeps the earlier records");
+    }
+    {  // A client joins again while its object is still shown: the old one is removed first. Headings that print as 360 or -0 are 0.
+        std::vector<uint8_t> g(48 + 4000);
+        size_t m = encode_stream_header(10.0, "", g.data(), g.size());
+        auto put = [&](StreamKind k, double t, const void* p, size_t len) {
+            m += encode_stream_record(k, t, static_cast<const uint8_t*>(p), len, g.data() + m, g.size() - m);
+        };
+        put(StreamKind::ClientJoined, 10.0, &jp, sizeof(jp));
+        const float angs[3] = {-0.0f, -1e-5f, 3.14159265f};  // -0, a hair below 0 (359.9994 deg), and 180 deg
+        for (int k = 0; k < 3; ++k) {
+            StateMsg cs{};
+            cs.client_id = 2;
+            cs.game_time = 10.1 + 0.1 * k;
+            cs.ang[1] = angs[k];
+            put(StreamKind::StateReceived, cs.game_time, buf, encode(cs, buf, sizeof(buf)));
+        }
+        put(StreamKind::ClientJoined, 10.5, &jp, sizeof(jp));  // again, no ClientLeft in between
+        std::string o4;
+        lazysf2::acmi::Info i4;
+        lazysf2::acmi::Options all2;
+        all2.max_rate = 0;
+        expect(lazysf2::acmi::convert_stream(g.data(), m, all2, o4, i4), "rejoin stream converts");
+        expect(o4.find("\n#0.500\n-102\n") != std::string::npos, "a rejoin removes the object that is still shown");
+        int zero_heading = 0, bad360 = 0, neg0 = 0;
+        for (size_t p = o4.find("\n102,T="); p != std::string::npos; p = o4.find("\n102,T=", p + 1)) {
+            const std::string l = o4.substr(p + 1, o4.find('\n', p + 1) - p - 1);
+            if (l.find("|360|") != std::string::npos) ++bad360;
+            if (l.find("|-0|") != std::string::npos) ++neg0;
+            if (l.find(",T=0|0|0|0|0|0|0|0|0") != std::string::npos) ++zero_heading;
+        }
+        expect(bad360 == 0 && neg0 == 0 && zero_heading >= 2, "a heading of -0 or one that rounds to 360 is written as 0");
     }
     std::string o3;
     lazysf2::acmi::Info i3;

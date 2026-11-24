@@ -215,8 +215,9 @@ public:
         return true;
     }
 
-    // True while States must not be sent: the host's clock is frozen, or no Pong has come for kStale.
-    bool on_hold(double wall) const { return frozen_ || (pongs_ > 0 && wall - last_pong_wall_ > kStale); }
+    // True while States must not be sent: the host's clock is frozen, or nothing has come for kStale: no Pong since
+    // the last one, or, if none ever arrived, none since the Welcome (the Welcome's clock goes stale, too).
+    bool on_hold(double wall) const { return frozen_ || (welcomed_ && wall - last_pong_wall_ > kStale); }
     // The host's game time as of wall. Held at the last known host time while frozen.
     double now(double wall) const { return frozen_ ? held_ : wall + offset_; }
 

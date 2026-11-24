@@ -3,6 +3,7 @@
 #include <enet/enet.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -101,16 +102,20 @@ struct Runner {
 BotResult run_bot(const BotConfig& cfg) {
     Runner r(cfg);
     BotResult& res = r.res;
-    if (!(cfg.rate > 0.0 && cfg.rate <= 240.0) || !(cfg.duration >= 0.0) || cfg.loss_pct < 0 || cfg.loss_pct > 100 ||
-        cfg.jitter_ms < 0) {
+    if (!std::isfinite(cfg.rate) || !std::isfinite(cfg.duration) || !std::isfinite(cfg.loss_pct) ||
+        !std::isfinite(cfg.jitter_ms) || !(cfg.rate > 0.0 && cfg.rate <= 240.0) || !(cfg.duration >= 0.0) ||
+        cfg.loss_pct < 0 || cfg.loss_pct > 100 || cfg.jitter_ms < 0) {
         r.say("bot: bad arguments (rate 0..240 Hz, duration >= 0, loss 0..100 %%, jitter >= 0)");
         res.code = 1;
         return res;
     }
     // host "address:port"
     const size_t colon = cfg.host.rfind(':');
-    const long port = colon == std::string::npos ? 0 : std::strtol(cfg.host.c_str() + colon + 1, nullptr, 10);
-    if (colon == std::string::npos || colon == 0 || port < 1 || port > 65535) {
+    char* port_end = nullptr;
+    const long port =
+        colon == std::string::npos ? 0 : std::strtol(cfg.host.c_str() + colon + 1, &port_end, 10);
+    if (colon == std::string::npos || colon == 0 || port < 1 || port > 65535 || port_end == cfg.host.c_str() + colon + 1 ||
+        *port_end != '\0') {
         r.say("bot: --host must be address:port");
         res.code = 1;
         return res;
@@ -207,7 +212,7 @@ BotResult run_bot(const BotConfig& cfg) {
         }
 
         if (!flying && (r.clock.have_pong() || wall - r.welcome_wall > 3.0)) {
-            if (!r.clock.have_pong()) r.say("bot: no Pong after 3 s, flying on the Welcome's clock");
+            if (!r.clock.have_pong()) r.say("bot: no Pong after 3 s: holding until the host answers");
             const double t0 = r.clock.now(wall);
             r.flight.start(cfg.script, r.welcome.spawn_pos, static_cast<double>(r.welcome.spawn_heading), t0);
             flying = true;
@@ -285,6 +290,9 @@ BotResult run_bot(const BotConfig& cfg) {
     if (cfg.drop) {
         r.say("bot: --drop: leaving without Bye");
     } else if (!r.disconnected) {
+        // Send every State still held back by --jitter first, so the Bye does not overtake them.
+        for (auto& d : r.delayed) send_state(d.second);
+        r.delayed.clear();
         ByeMsg b{};
         b.client_id = res.client_id;
         b.reason = 0;

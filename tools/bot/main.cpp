@@ -1,4 +1,5 @@
 // lazysf2-bot: a headless synthetic client for the host mode. Developer tool, not shipped.
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +14,8 @@ void usage() {
         "lazysf2-bot --host ADDR:PORT [--callsign BOT1] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
         "            [--rate HZ] [--duration SECONDS] [--loss PERCENT] [--jitter MS] [--drop] [--log FILE]\n"
         "Defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter.\n"
+        "--jitter delays each State by a random 0..MS before it is sent, so States can overtake each other: on the\n"
+        "sequenced (unreliable) channel a late State is dropped by the host, so jitter also acts as extra loss.\n"
         "--drop exits without Bye (tests the host's 5 s timeout). Exit code 0 ok, 1 bad arguments, 2 cannot connect,\n"
         "3 no Welcome, 4 the host closed the connection.\n");
 }
@@ -20,7 +23,7 @@ void usage() {
 bool to_double(const char* s, double* out) {
     char* end = nullptr;
     *out = std::strtod(s, &end);
-    return end && end != s && !*end;
+    return end && end != s && !*end && std::isfinite(*out);
 }
 
 FILE* g_logfile = nullptr;
@@ -45,6 +48,15 @@ int main(int argc, char** argv) {
         auto val = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         const char* v = nullptr;
         bool ok = true;
+        static const char* const kNeedValue[] = {"--host", "--callsign", "--aircraft", "--script",
+                                                 "--rate", "--duration", "--loss",     "--jitter", "--log"};
+        bool needs_value = false;
+        for (const char* o : kNeedValue) needs_value = needs_value || a == o;
+        if (needs_value && i + 1 >= argc) {
+            std::printf("missing value for %s\n", a.c_str());
+            usage();
+            return 1;
+        }
         if (a == "--drop") {
             cfg.drop = true;
         } else if (a == "--help" || a == "-h") {
