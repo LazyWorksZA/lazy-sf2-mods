@@ -15,6 +15,7 @@ add_library(lazysf2 SHARED
     src/dllmain.cpp
     src/config.cpp
     src/log.cpp
+    src/monitors.cpp
     src/proxy/proxy.cpp
     src/proxy/winmm.def
     src/hooks/module_watch.cpp

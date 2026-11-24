@@ -97,7 +97,23 @@ HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_D
         g_target_mode = *mode;  // the mode the game wants for exclusive fullscreen
         g_have_target_mode = true;
     }
-    if (!config::borderless()) return o_ResizeTarget(self, mode);
+    if (!config::borderless()) {
+        // Fullscreen on a chosen Screen whose size differs from the game's mode: switch that
+        // monitor to its own size (DXGI scales the back buffer) instead of growing the window past it.
+        RECT r;
+        if (mode && self == g_swapchain && window_chosen_screen(&r)) {
+            const UINT w = static_cast<UINT>(r.right - r.left), h = static_cast<UINT>(r.bottom - r.top);
+            if (mode->Width != w || mode->Height != h) {
+                DXGI_MODE_DESC m = *mode;
+                m.Width = w;
+                m.Height = h;
+                m.RefreshRate = {0, 0};
+                LOG("dxgi: ResizeTarget %ux%u -> %ux%u (chosen Screen)", mode->Width, mode->Height, w, h);
+                return o_ResizeTarget(self, &m);
+            }
+        }
+        return o_ResizeTarget(self, mode);
+    }
     if (mode) {
         LOG("dxgi: ResizeTarget(%ux%u @ %u/%u) suppressed (borderless)", mode->Width, mode->Height,
             mode->RefreshRate.Numerator, mode->RefreshRate.Denominator);
@@ -143,11 +159,30 @@ HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain* self, UINT sync, UINT flags)
     return hr;
 }
 
+// The game renders at its own resolution (DisplayWidth/Height). After its explicit
+// ResizeBuffers(2, W, H), its _DoFullScreen calls ResizeBuffers(0, 0, 0) = "size of the window".
+// In stock exclusive mode ResizeTarget made the window W x H first, so that is the same thing; but
+// when the window covers a monitor of another size (Borderless, or the chosen Screen), the buffers
+// would follow the monitor while the game keeps rendering W x H, pushing the picture off-screen.
+// So 0 x 0 becomes the game's last explicit size, and DXGI scales it to the window / display mode.
+UINT g_game_buffer_w = 0, g_game_buffer_h = 0;
+
 HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
-    HRESULT hr = o_ResizeBuffers(self, count, w, h, fmt, flags);
     char caller[96];
     describe_address(_ReturnAddress(), caller, sizeof(caller));
-    LOG("dxgi: ResizeBuffers(%u, %ux%u, fmt %d, flags 0x%x) from %s -> 0x%08lx", count, w, h, fmt, flags, caller, hr);
+    const UINT asked_w = w, asked_h = h;
+    if (self == g_swapchain) {
+        if (w && h) {
+            g_game_buffer_w = w;
+            g_game_buffer_h = h;
+        } else if (g_game_buffer_w && g_game_buffer_h) {
+            w = g_game_buffer_w;
+            h = g_game_buffer_h;
+        }
+    }
+    HRESULT hr = o_ResizeBuffers(self, count, w, h, fmt, flags);
+    LOG("dxgi: ResizeBuffers(%u, %ux%u%s, fmt %d, flags 0x%x) from %s -> 0x%08lx", count, asked_w, asked_h,
+        (w != asked_w || h != asked_h) ? " -> game resolution" : "", fmt, flags, caller, hr);
     return hr;
 }
 
@@ -190,6 +225,8 @@ HRESULT STDMETHODCALLTYPE h_CreateSwapChain(IDXGIFactory* self, IUnknown* device
     LOG("dxgi: CreateSwapChain -> 0x%08lx", hr);
     if (SUCCEEDED(hr) && out && *out && desc && desc->OutputWindow == game_window()) {
         g_swapchain = *out;
+        g_game_buffer_w = desc->BufferDesc.Width;  // the game's resolution
+        g_game_buffer_h = desc->BufferDesc.Height;
         g_factory = self;  // the game keeps its factory alive with the swap chain
         g_output_window = desc->OutputWindow;
         g_have_target_mode = false;
@@ -237,12 +274,24 @@ void dxgi_apply_display_mode() {
     }
     BOOL exclusive = FALSE;
     sc->GetFullscreenState(&exclusive, nullptr);
-    LOG("dxgi: live switch to %s (exclusive now: %d, game fullscreen flag: %d)", borderless ? "Borderless" : "Fullscreen",
-        exclusive, g_game_wants_fullscreen);
+    RECT target{};
+    const bool move = window_needs_move(&target);
+    LOG("dxgi: live switch to %s%s (exclusive now: %d, game fullscreen flag: %d)", borderless ? "Borderless" : "Fullscreen",
+        move ? " on another Screen" : "", exclusive, g_game_wants_fullscreen);
 
     HWND hwnd = g_output_window;
+    // Exclusive mode is tied to a monitor: leave it before moving, or when going borderless.
+    if (exclusive && (borderless || move)) {
+        LOG("dxgi: SetFullscreenState(FALSE) -> 0x%08lx", o_SetFullscreenState(sc, FALSE, nullptr));
+        exclusive = FALSE;
+    }
+    if (move) {
+        // Our SetWindowPos hook only rewrites the exe's own calls, so this one goes through as is.
+        SetWindowPos(hwnd, borderless ? HWND_NOTOPMOST : HWND_TOPMOST, target.left, target.top,
+                     target.right - target.left, target.bottom - target.top, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        LOG("dxgi: moved the game window to (%ld,%ld)-(%ld,%ld)", target.left, target.top, target.right, target.bottom);
+    }
     if (borderless) {
-        if (exclusive) LOG("dxgi: SetFullscreenState(FALSE) -> 0x%08lx", o_SetFullscreenState(sc, FALSE, nullptr));
         set_alt_enter_handling(true);
         SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         return;
@@ -255,6 +304,13 @@ void dxgi_apply_display_mode() {
     // Same sequence as the game's _DoFullScreen. ResizeBuffers is left out: the game still holds its
     // back-buffer view, and the buffers already match the mode.
     DXGI_MODE_DESC mode = g_target_mode;
+    if (move) {
+        // On another Screen the game's own mode may not exist (e.g. 2560x1440 on a 1080p monitor):
+        // use that monitor's size; DXGI scales the back buffer to it.
+        mode.Width = static_cast<UINT>(target.right - target.left);
+        mode.Height = static_cast<UINT>(target.bottom - target.top);
+        mode.RefreshRate = {0, 0};
+    }
     if (g_have_target_mode) o_ResizeTarget(sc, &mode);
     HRESULT hr = o_SetFullscreenState(sc, TRUE, nullptr);
     LOG("dxgi: SetFullscreenState(TRUE) -> 0x%08lx", hr);

@@ -7,6 +7,10 @@ namespace lazysf2::hooks {
 // Game window: strip WS_EX_TOPMOST at creation and keep it non-topmost afterwards (Borderless).
 bool install_window_hooks();
 HWND game_window();
+// Rect of the Screen chosen in Options, or false for the stock monitor choice.
+bool window_chosen_screen(RECT* r);
+// True (with the chosen Screen's rect) if the game window is not on the chosen Screen.
+bool window_needs_move(RECT* target);
 // Asks the game window's thread to apply config::display_mode() to the running game.
 void request_display_mode_apply();
 // Applies config::display_mode() to the game's swap chain. Window thread only.

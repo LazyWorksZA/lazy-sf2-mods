@@ -30,4 +30,9 @@ DisplayMode display_mode();
 void set_display_mode(DisplayMode mode);
 inline bool borderless() { return display_mode() == DisplayMode::Borderless; }
 
+// Options.ini [GraphicsOptions] DisplayMonitor: n = Windows display number (\\.\DISPLAYn) to run
+// on; 0 / missing = stock (the game picks the monitor). Read with the display mode, same rules.
+int display_monitor();
+void set_display_monitor(int number);
+
 }  // namespace lazysf2::config
