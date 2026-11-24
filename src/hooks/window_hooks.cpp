@@ -1,12 +1,14 @@
 // The stock game window is already a monitor-sized WS_POPUP (recon-notes.md §4.1), but it is
 // created WS_EX_TOPMOST and the exe re-asserts HWND_TOPMOST later (exe +0x5790, +0x5830).
-// A topmost borderless window covers everything after Alt-Tab, so we drop topmost in both places.
+// A topmost borderless window covers everything after Alt-Tab, so in borderless mode we drop
+// topmost in both places. The game window handle is recorded in every mode.
 #include <windows.h>
 
 #include <MinHook.h>
 
 #include <atomic>
 
+#include "config.h"
 #include "hooks/hooks.h"
 #include "log.h"
 
@@ -28,24 +30,43 @@ bool is_game_class(LPCWSTR cls) {
     return cls && !IS_INTRESOURCE(cls) && wcscmp(cls, kGameWindowClass) == 0;
 }
 
+// Private message: apply the current display mode on the window thread (DXGI fullscreen changes
+// send messages to the window, so they must not run on another thread while it waits).
+// Registered when the game window is created (not at static-init time, which runs in DllMain).
+UINT g_apply_msg = 0;
+WNDPROC g_game_wndproc = nullptr;
+
+LRESULT CALLBACK game_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == g_apply_msg && g_apply_msg != 0) {
+        dxgi_apply_display_mode();
+        return 0;
+    }
+    return CallWindowProcW(g_game_wndproc, hwnd, msg, wp, lp);
+}
+
 HWND WINAPI h_CreateWindowExW(DWORD ex_style, LPCWSTR cls, LPCWSTR title, DWORD style, int x, int y, int w,
                               int h, HWND parent, HMENU menu, HINSTANCE inst, LPVOID param) {
     const bool game = is_game_class(cls);
+    const bool borderless = game && config::borderless();
     if (game) {
         LOG("window: game CreateWindowExW ex=0x%08lx style=0x%08lx rect=(%d,%d %dx%d)", ex_style, style, x, y, w,
             h);
-        ex_style &= ~static_cast<DWORD>(WS_EX_TOPMOST);
+        if (borderless) ex_style &= ~static_cast<DWORD>(WS_EX_TOPMOST);
     }
     HWND hwnd = o_CreateWindowExW(ex_style, cls, title, style, x, y, w, h, parent, menu, inst, param);
-    if (game) {
-        g_game_hwnd = hwnd;
-        LOG("window: game hwnd=%p (WS_EX_TOPMOST removed)", static_cast<void*>(hwnd));
+    if (game && hwnd) {
+        g_game_hwnd = hwnd;  // also needed by mouse Cursor mode in exclusive fullscreen
+        g_apply_msg = RegisterWindowMessageW(L"lazysf2.ApplyDisplayMode");
+        g_game_wndproc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&game_subclass_proc)));
+        LOG("window: game hwnd=%p%s, subclassed: %s", static_cast<void*>(hwnd),
+            borderless ? " (WS_EX_TOPMOST removed)" : "", g_game_wndproc ? "ok" : "FAILED");
     }
     return hwnd;
 }
 
 BOOL WINAPI h_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy, UINT flags) {
-    if (hwnd && hwnd == g_game_hwnd.load() && after == HWND_TOPMOST) {
+    if (hwnd && hwnd == g_game_hwnd.load() && after == HWND_TOPMOST && config::borderless()) {
         static std::atomic<int> logged{0};
         if (logged++ < 3) LOG("window: SetWindowPos HWND_TOPMOST -> HWND_NOTOPMOST (%d,%d %dx%d)", x, y, cx, cy);
         after = HWND_NOTOPMOST;
@@ -65,6 +86,15 @@ bool hook_api(LPCWSTR module, LPCSTR proc, LPVOID detour, LPVOID* original) {
 }  // namespace
 
 HWND game_window() { return g_game_hwnd.load(); }
+
+void request_display_mode_apply() {
+    HWND hwnd = g_game_hwnd.load();
+    if (!hwnd || !g_game_wndproc || !g_apply_msg) {
+        LOG("window: cannot apply the display mode live (no game window)");
+        return;
+    }
+    PostMessageW(hwnd, g_apply_msg, 0, 0);
+}
 
 bool install_window_hooks() {
     bool ok = hook_api(L"user32", "CreateWindowExW", reinterpret_cast<LPVOID>(&h_CreateWindowExW),
