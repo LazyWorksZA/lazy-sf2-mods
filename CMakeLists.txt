@@ -36,3 +36,14 @@ target_compile_definitions(lazysf2 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE 
 target_compile_options(lazysf2 PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2 PRIVATE src)
 target_link_libraries(lazysf2 PRIVATE minhook::minhook shell32 ole32)
+
+# Network protocol tests (console, not shipped, no game needed). ENet comes from vcpkg.
+find_package(unofficial-enet CONFIG REQUIRED)
+add_executable(lazysf2-net-tests
+    tests/net_tests.cpp
+    src/net/protocol.cpp
+)
+target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
+target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)
+target_include_directories(lazysf2-net-tests PRIVATE src)
+target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet ws2_32 winmm)
