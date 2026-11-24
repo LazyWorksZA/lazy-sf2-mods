@@ -12,8 +12,10 @@
 //  - Hello (reliable): the player's callback picks the nearest live AI aircraft that is not the player and not
 //    already an avatar, flags it REMOTEOBJECT (no AI, no flight model), zeroes its rates and puts it 300 m ahead
 //    of the player (50 m to the right per slot, the player's heading), and sends Welcome with that spawn and the
-//    host's game time. Until the first State arrives the avatar holds at the spawn.
-//  - Ping: answered with a Pong carrying sim_game_time(), which is the clock the clients stamp States in.
+//    host's game time. Until the first State arrives the avatar flies on
+//    with the player's velocity (formation), with zero rates.
+//  - Ping: answered by the network thread with a Pong carrying the host game time published at the last player
+//    step, which is the clock the clients stamp States in. It keeps working while the game is paused.
 //  - State: checked on the network thread (formats, ranges), queued, and on the avatar's own step turned into the
 //    same receiver as replay.cpp: samples keyed by their game_time in a ring, the state shown at now - delay by
 //    Hermite interpolation, dead reckoning past the newest sample, and a correction offset that decays over 200 ms
@@ -86,8 +88,11 @@ struct Avatar {
     uint32_t set_bits = 0;  // REMOTEOBJECT bits that we set (mask & ~original flags)
     char callsign[17] = {};
     char aircraft[33] = {};
+    uint32_t gen = 0;  // the core's connection generation for this slot; stale commands are dropped by the core
     double spawn[3] = {};
     double spawn_heading = 0;
+    float hold_vel[3] = {};  // the player's velocity at the spawn: the avatar coasts with it until the first State
+    double hold_t0 = 0;
 
     // Receiver (see replay.cpp for the same structure).
     Samp ring[kRing];
@@ -116,6 +121,7 @@ uint32_t g_mask = 0;         // REMOTEOBJECT mask, read once
 uint32_t g_epoch = 0;        // sim_player_epoch() when the current session started
 uint32_t g_checked_gen = 0;  // g_aircraft_generation at the last liveness check
 double g_next_report = 0;
+unsigned g_send_fail = 0;  // messages the core's out queue refused since the last report
 
 void set_clients(int n) {
     g_nclients = n;
@@ -131,13 +137,17 @@ void sanitize(char* dst, size_t cap, const char* src) {
 
 void core_log(const char* line) { LOG("%s", line); }
 
-bool send_bye(int slot, uint8_t reason) {
+// Queue helpers: a refusal (the out queue is full) is counted and reported once a second.
+void send_bye(int slot, uint32_t gen, uint8_t reason) {
     net::ByeMsg b{};
     b.client_id = static_cast<uint16_t>(slot + 1);
     b.reason = reason;
     uint8_t buf[16];
     const size_t n = net::encode(b, buf, sizeof(buf));
-    return n && g_core.send(static_cast<uint8_t>(slot), buf, n, net::kChannelReliable, true);
+    if (!n || !g_core.send(static_cast<uint8_t>(slot), gen, buf, n, net::kChannelReliable, true)) ++g_send_fail;
+}
+void request_disconnect(int slot, uint32_t gen) {
+    if (!g_core.disconnect(static_cast<uint8_t>(slot), gen)) ++g_send_fail;  // the 5 s silence timeout ends it then
 }
 
 // --- Liveness ------------------------------------------------------------------------------------
@@ -177,10 +187,10 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason) 
         write_at(a.obj, kOffFlags, &flags, 1);
     }
     if (bye_reason != kByeNone) {
-        send_bye(slot, bye_reason);
-        g_core.disconnect(static_cast<uint8_t>(slot));
+        send_bye(slot, a.gen, bye_reason);
+        request_disconnect(slot, a.gen);
     }
-    g_core.set_welcomed(static_cast<uint8_t>(slot), false);
+    g_core.set_welcomed(static_cast<uint8_t>(slot), a.gen, false);
     LOG("net: client %d \"%s\" left (%s); avatar %p %s", slot + 1, a.callsign, why, a.obj,
         aircraft_live ? "given back to the AI" : "is gone, flags not restored");
     a = Avatar{};
@@ -220,6 +230,7 @@ struct PickCtx {
     double distance = 0;
     double from[3] = {};
     uint32_t orig_flags = 0;
+    float vel[3] = {};  // in: the player's velocity
 };
 
 void pick_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the shared lock: no logging
@@ -253,7 +264,7 @@ void pick_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     read_at(obj, kOffFlags, &c.orig_flags, 1);
     const float zero[3] = {};
     write_at(obj, kOffRates, zero, 3);
-    write_at(obj, kOffVel, zero, 3);
+    write_at(obj, kOffVel, c.vel, 3);  // in formation with the player until the first State
     const uint32_t flags = c.orig_flags | c.mask;
     write_at(obj, kOffFlags, &flags, 1);
     write_at(obj, kOffPos, c.spawn, 3);
@@ -265,15 +276,15 @@ void pick_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     write_at(obj, kOffAngles, af, 3);
 }
 
-void reject(int slot, uint8_t reason, const char* why) {
+void reject(int slot, uint32_t gen, uint8_t reason, const char* why) {
     LOG("net: client %d refused: %s", slot + 1, why);
-    send_bye(slot, reason);
-    g_core.disconnect(static_cast<uint8_t>(slot));
+    send_bye(slot, gen, reason);
+    request_disconnect(slot, gen);
 }
 
-void handle_hello(int slot, const net::HelloMsg& h, void* player, double now) {
+void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, double now) {
     if (g_puppet_state.load() != 0 || replay_active()) {
-        reject(slot, kByeBusy, "a puppet or replay run is active");
+        reject(slot, gen, kByeBusy, "a puppet or replay run is active");
         return;
     }
     if (!g_mask) {
@@ -281,7 +292,7 @@ void handle_hello(int slot, const net::HelloMsg& h, void* player, double now) {
             std::memcpy(&g_mask, reinterpret_cast<const char*>(m) + kRemoteMaskRva, sizeof(g_mask));
         }
         if (!g_mask) {
-            reject(slot, kByeNoAvatar, "REMOTEOBJECT mask not set");
+            reject(slot, gen, kByeNoAvatar, "REMOTEOBJECT mask not set");
             return;
         }
     }
@@ -294,27 +305,31 @@ void handle_hello(int slot, const net::HelloMsg& h, void* player, double now) {
     float pang[3];
     read_at(player, kOffPos, c.player_pos, 3);
     read_at(player, kOffAngles, pang, 3);
+    read_at(player, kOffVel, c.vel, 3);
     const double hp = pang[1], sh = std::sin(hp), ch = std::cos(hp);
     const double right = kSpawnRight * slot;
     c.spawn[0] = c.player_pos[0] + kSpawnAhead * sh + right * ch;
     c.spawn[1] = c.player_pos[1] + kSpawnAhead * ch - right * sh;
     c.spawn[2] = c.player_pos[2];
     c.heading = pang[1];
-    const uint32_t gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
+    const uint32_t air_gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
     probe_with_aircraft(pick_cb, &c);
     if (!c.found) {
-        reject(slot, kByeNoAvatar, "no free AI aircraft to use as an avatar");
+        reject(slot, gen, kByeNoAvatar, "no free AI aircraft to use as an avatar");
         return;
     }
     if (g_nclients == 0) {
         g_epoch = sim_player_epoch();
-        g_checked_gen = gen;
+        g_checked_gen = air_gen;
         sim_set_run_active(true);
         g_next_report = now + 1.0;
     }
     Avatar& a = g_av[slot];
     a = Avatar{};
     a.active = true;
+    a.gen = gen;
+    std::memcpy(a.hold_vel, c.vel, sizeof(a.hold_vel));
+    a.hold_t0 = now;
     a.obj = c.obj;
     a.seq = c.seq;
     a.set_bits = c.mask & ~c.orig_flags;
@@ -326,7 +341,7 @@ void handle_hello(int slot, const net::HelloMsg& h, void* player, double now) {
     set_clients(g_nclients + 1);
 
     // The slot may now pass State packets, and only then does the client learn it may send them.
-    g_core.set_welcomed(static_cast<uint8_t>(slot), true);
+    g_core.set_welcomed(static_cast<uint8_t>(slot), gen, true);
     net::WelcomeMsg w{};
     w.client_id = static_cast<uint16_t>(slot + 1);
     std::memcpy(w.spawn_pos, c.spawn, sizeof(w.spawn_pos));
@@ -334,7 +349,13 @@ void handle_hello(int slot, const net::HelloMsg& h, void* player, double now) {
     w.host_game_time = now;
     uint8_t buf[64];
     const size_t n = net::encode(w, buf, sizeof(buf));
-    g_core.send(static_cast<uint8_t>(slot), buf, n, net::kChannelReliable, true);
+    const bool welcomed = n && g_core.send(static_cast<uint8_t>(slot), gen, buf, n, net::kChannelReliable, true);
+    if (!welcomed) {
+        LOG("net: client %d: the Welcome could not be queued (out queue full); client refused", slot + 1);
+        release(slot, "welcome not sent", true, kByeNone);
+        request_disconnect(slot, gen);
+        return;
+    }
     LOG("net: client %d \"%s\" (%s) joined: avatar %p \"%ls\" (was %.0f m from the player at (%.0f, %.0f, %.0f)), "
         "spawn (%.0f, %.0f, %.0f) heading %.1f deg",
         slot + 1, a.callsign, a.aircraft, c.obj, c.name, c.distance, c.from[0], c.from[1], c.from[2], c.spawn[0],
@@ -385,6 +406,18 @@ void push_ring(Avatar& a, const Samp& s) {
 
 // --- Driving the avatar ----------------------------------------------------------------------------
 
+// Before the first State: the spawn, moved on with the player's velocity at the time of the Hello (dead reckoning in
+// formation), level, with zero rates.
+void hold_kin(const Avatar& a, double now, Kin* out) {
+    *out = Kin{};
+    const double dt = now > a.hold_t0 ? now - a.hold_t0 : 0.0;
+    for (int i = 0; i < 3; ++i) {
+        out->p[i] = a.spawn[i] + static_cast<double>(a.hold_vel[i]) * dt;
+        out->v[i] = a.hold_vel[i];
+    }
+    out->a[1] = a.spawn_heading;
+}
+
 void avatar_step(int slot, double now) {
     Avatar& a = g_av[slot];
     char* obj = static_cast<char*>(a.obj);
@@ -415,8 +448,7 @@ void avatar_step(int slot, double now) {
         if (a.ring_n > 0) {
             have_before = sample_at(a.ring, a.ring_n, t_render, &before);
         } else {
-            for (int i = 0; i < 3; ++i) before.p[i] = a.spawn[i];
-            before.a[1] = a.spawn_heading;
+            hold_kin(a, now, &before);
             have_before = true;
         }
         for (int i = 0; i < a.pending_n; ++i) push_ring(a, a.pending[i]);
@@ -424,9 +456,8 @@ void avatar_step(int slot, double now) {
     }
 
     Kin shown{};
-    if (a.ring_n == 0) {  // nothing received yet: hold at the spawn
-        for (int i = 0; i < 3; ++i) shown.p[i] = a.spawn[i];
-        shown.a[1] = a.spawn_heading;
+    if (a.ring_n == 0) {  // nothing received yet: coast from the spawn with the player's velocity
+        hold_kin(a, now, &shown);
     } else {
         Kin raw;
         sample_at(a.ring, a.ring_n, t_render, &raw);
@@ -471,15 +502,6 @@ void avatar_step(int slot, double now) {
 
 // --- Events and the per-second line ----------------------------------------------------------------
 
-void send_pong(int slot, const net::PingMsg& p, double now) {
-    net::PongMsg pong{};
-    pong.client_send_time = p.client_send_time;
-    pong.host_game_time = now;
-    uint8_t buf[32];
-    const size_t n = net::encode(pong, buf, sizeof(buf));
-    if (n) g_core.send(static_cast<uint8_t>(slot), buf, n, net::kChannelUnreliable, false);
-}
-
 void handle_message(const HostEvent& e, void* player, double now) {
     const int slot = e.slot;
     net::MsgType type{};
@@ -488,25 +510,21 @@ void handle_message(const HostEvent& e, void* player, double now) {
         case net::MsgType::Hello: {
             net::HelloMsg h;
             if (g_av[slot].active || net::decode(e.data, e.len, h) != net::Status::Ok) return;
-            handle_hello(slot, h, player, now);
-            break;
-        }
-        case net::MsgType::Ping: {
-            net::PingMsg p;
-            if (net::decode(e.data, e.len, p) == net::Status::Ok) send_pong(slot, p, now);
+            handle_hello(slot, e.gen, h, player, now);
             break;
         }
         case net::MsgType::State: {
             net::StateMsg s;
-            if (g_av[slot].active && net::decode(e.data, e.len, s) == net::Status::Ok) accept_state(g_av[slot], s);
+            if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok)
+                accept_state(g_av[slot], s);
             break;
         }
         case net::MsgType::Bye: {
-            if (!g_av[slot].active) break;
+            if (!g_av[slot].active || g_av[slot].gen != e.gen) break;
             bool live[net::kMaxClients];
             check_live(live);
             release(slot, "bye", live[slot], kByeNone);
-            g_core.disconnect(static_cast<uint8_t>(slot));
+            request_disconnect(slot, e.gen);
             break;
         }
         default:
@@ -528,7 +546,7 @@ void pump(void* player, double now) {
                     LOG("net: peer %d connected", slot + 1);
                     break;
                 case HostEvent::Disconnect:
-                    if (g_av[slot].active) {
+                    if (g_av[slot].active && g_av[slot].gen == ev[i].gen) {
                         bool live[net::kMaxClients];
                         check_live(live);
                         release(slot, ev[i].reason == 1 ? "timeout, no packets for 5 s" : "disconnected", live[slot],
@@ -562,6 +580,10 @@ void report(void* player, double now) {
         a.rx = 0;
         a.flag_clears = 0;
         a.err_max = 0;
+    }
+    if (g_send_fail) {
+        LOG("net: %u message(s) to clients could not be queued for the network thread (out queue full)", g_send_fail);
+        g_send_fail = 0;
     }
 }
 

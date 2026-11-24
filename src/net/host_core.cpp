@@ -94,17 +94,17 @@ void HostCore::stop(bool in_loader_lock) {
     state_.store(State::Idle, std::memory_order_release);
 }
 
-bool HostCore::push_in(const HostEvent& e) {
+bool HostCore::push_in(const HostEvent& e, bool control) {
     {
         std::lock_guard<std::mutex> lock(in_mx_);
-        if (in_n_ < kInCap) {
+        if (in_n_ < (control ? kInCap : kInCap - kControlReserve)) {
             in_[(in_head_ + in_n_) % kInCap] = e;
             ++in_n_;
             in_count_.store(static_cast<uint32_t>(in_n_), std::memory_order_release);
             return true;
         }
     }
-    n_queue_.fetch_add(1, std::memory_order_relaxed);
+    (control ? n_control_ : n_queue_).fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -121,13 +121,14 @@ size_t HostCore::poll(HostEvent* out, size_t max) {
     return n;
 }
 
-bool HostCore::send(uint8_t slot, const uint8_t* data, size_t len, uint8_t channel, bool reliable) {
+bool HostCore::send(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, uint8_t channel, bool reliable) {
     if (slot >= kMaxClients || !data || len == 0 || len > sizeof(OutMsg::data) || channel >= kChannelCount) return false;
     std::lock_guard<std::mutex> lock(out_mx_);
     if (out_n_ >= kOutCap) return false;
     OutMsg& m = out_[(out_head_ + out_n_) % kOutCap];
     m.op = OutMsg::Send;
     m.slot = slot;
+    m.gen = gen;
     m.channel = channel;
     m.reliable = reliable ? 1 : 0;
     m.len = static_cast<uint8_t>(len);
@@ -136,19 +137,22 @@ bool HostCore::send(uint8_t slot, const uint8_t* data, size_t len, uint8_t chann
     return true;
 }
 
-void HostCore::disconnect(uint8_t slot) {
-    if (slot >= kMaxClients) return;
+bool HostCore::disconnect(uint8_t slot, uint32_t gen) {
+    if (slot >= kMaxClients) return false;
     std::lock_guard<std::mutex> lock(out_mx_);
-    if (out_n_ >= kOutCap) return;  // the peer's own timeout (or ours) ends it
+    if (out_n_ >= kOutCap) return false;
     OutMsg& m = out_[(out_head_ + out_n_) % kOutCap];
     m.op = OutMsg::Disconnect;
     m.slot = slot;
+    m.gen = gen;
     m.len = 0;
     ++out_n_;
+    return true;
 }
 
-void HostCore::set_welcomed(uint8_t slot, bool welcomed) {
-    if (slot < kMaxClients) welcomed_[slot].store(welcomed, std::memory_order_release);
+void HostCore::set_welcomed(uint8_t slot, uint32_t gen, bool welcomed) {
+    if (slot < kMaxClients && slot_gen_[slot].load(std::memory_order_acquire) == gen)
+        welcomed_[slot].store(welcomed, std::memory_order_release);
 }
 
 uint32_t HostCore::rtt_ms(uint8_t slot) const {
@@ -162,6 +166,7 @@ HostCounters HostCore::counters() const {
     c.dropped_range = n_range_.load(std::memory_order_relaxed);
     c.dropped_state = n_state_.load(std::memory_order_relaxed);
     c.dropped_queue = n_queue_.load(std::memory_order_relaxed);
+    c.dropped_control = n_control_.load(std::memory_order_relaxed);
     return c;
 }
 
@@ -203,11 +208,15 @@ void HostCore::run() {
     bool hello_seen[kMaxClients] = {};
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
+    uint32_t gens[kMaxClients] = {};
+    uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
 
     auto free_slot = [&](int slot) {
         peers[slot] = nullptr;
+        gens[slot] = 0;
+        slot_gen_[slot].store(0, std::memory_order_release);  // commands for this connection are void from now on
         hello_seen[slot] = false;
         welcomed_[slot].store(false, std::memory_order_release);
         rtt_[slot].store(0, std::memory_order_relaxed);
@@ -233,7 +242,19 @@ void HostCore::run() {
                 if (channel != kChannelUnreliable || decode(data, len, m) != Status::Ok) return drop(n_format_);
                 if (!finite(m.client_send_time)) return drop(n_range_);
                 if (++pings[slot] > kMaxPingsPerSecond) return drop(n_state_);
-                break;
+                // Answered here, with the host game time the game thread last published (it does not advance
+                // while the game is paused, which is the truth for a clock the clients stamp States in).
+                PongMsg pong{};
+                pong.client_send_time = m.client_send_time;
+                pong.host_game_time = host_time_.load(std::memory_order_relaxed);
+                uint8_t out[sizeof(PongMsg)];
+                const size_t n = encode(pong, out, sizeof(out));
+                if (n && peers[slot]) {
+                    if (ENetPacket* p = enet_packet_create(out, n, 0)) {
+                        if (enet_peer_send(peers[slot], kChannelUnreliable, p) != 0) enet_packet_destroy(p);
+                    }
+                }
+                return;  // never queued: the game thread has nothing to do with it
             }
             case MsgType::State: {
                 StateMsg m;
@@ -255,10 +276,11 @@ void HostCore::run() {
         HostEvent e;
         e.kind = HostEvent::Message;
         e.slot = static_cast<uint8_t>(slot);
+        e.gen = gens[slot];
         e.channel = channel;
         e.len = static_cast<uint16_t>(len);
         std::memcpy(e.data, data, len);
-        push_in(e);
+        push_in(e, type != MsgType::State);
     };
 
     auto handle_event = [&](ENetEvent& ev) {
@@ -272,6 +294,9 @@ void HostCore::run() {
                     break;
                 }
                 peers[slot] = ev.peer;
+                gens[slot] = next_gen++;
+                if (next_gen == 0) next_gen = 1;
+                slot_gen_[slot].store(gens[slot], std::memory_order_release);
                 ev.peer->data = reinterpret_cast<void*>(static_cast<uintptr_t>(slot + 1));
                 hello_seen[slot] = false;
                 welcomed_[slot].store(false, std::memory_order_release);
@@ -280,7 +305,8 @@ void HostCore::run() {
                 HostEvent e;
                 e.kind = HostEvent::Connect;
                 e.slot = static_cast<uint8_t>(slot);
-                push_in(e);
+                e.gen = gens[slot];
+                push_in(e, true);
                 break;
             }
             case ENET_EVENT_TYPE_DISCONNECT: {  // the peer left, or ENet's own timeout fired
@@ -288,11 +314,12 @@ void HostCore::run() {
                 ev.peer->data = nullptr;
                 if (tag >= 1 && tag <= kMaxClients && peers[tag - 1] == ev.peer) {
                     const int slot = static_cast<int>(tag) - 1;
-                    free_slot(slot);
                     HostEvent e;
                     e.kind = HostEvent::Disconnect;
                     e.slot = static_cast<uint8_t>(slot);
-                    push_in(e);
+                    e.gen = gens[slot];
+                    free_slot(slot);
+                    push_in(e, true);
                 }
                 break;
             }
@@ -327,7 +354,7 @@ void HostCore::run() {
             for (size_t i = 0; i < n; ++i) {
                 const OutMsg& m = batch[i];
                 ENetPeer* peer = peers[m.slot];
-                if (!peer) continue;
+                if (!peer || m.gen != gens[m.slot]) continue;  // a command for a connection that is gone
                 if (m.op == OutMsg::Disconnect) {
                     enet_peer_disconnect(peer, 0);
                 } else if (ENetPacket* p =
@@ -355,12 +382,13 @@ void HostCore::run() {
             rtt_[i].store(peers[i]->roundTripTime, std::memory_order_relaxed);
             if (now - last_rx[i] >= kTimeoutMs) {
                 enet_peer_disconnect_now(peers[i], 0);
-                free_slot(i);
                 HostEvent e;
                 e.kind = HostEvent::Disconnect;
                 e.slot = static_cast<uint8_t>(i);
+                e.gen = gens[i];
                 e.reason = 1;
-                push_in(e);
+                free_slot(i);
+                push_in(e, true);
             }
         }
         if (now >= next_report) {
@@ -368,11 +396,13 @@ void HostCore::run() {
             for (uint32_t& p : pings) p = 0;
             const HostCounters c = counters();
             if (c.dropped_format != reported.dropped_format || c.dropped_range != reported.dropped_range ||
-                c.dropped_state != reported.dropped_state || c.dropped_queue != reported.dropped_queue) {
+                c.dropped_state != reported.dropped_state || c.dropped_queue != reported.dropped_queue ||
+                c.dropped_control != reported.dropped_control) {
                 say("net: dropped packets in the last second: %u malformed, %u out of range, %u wrong phase or rate, "
-                    "%u queue full",
+                    "%u States while the game is not draining (queue nearly full), %u control events (queue full)",
                     c.dropped_format - reported.dropped_format, c.dropped_range - reported.dropped_range,
-                    c.dropped_state - reported.dropped_state, c.dropped_queue - reported.dropped_queue);
+                    c.dropped_state - reported.dropped_state, c.dropped_queue - reported.dropped_queue,
+                    c.dropped_control - reported.dropped_control);
                 reported = c;
             }
         }

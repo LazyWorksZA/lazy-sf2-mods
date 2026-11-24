@@ -260,7 +260,9 @@ void host_core_tests() {
     addr.port = core.port();
     c.peer = enet_host_connect(c.host, &addr, kChannelCount, 0);
     auto ev = collect(core, c, 1, 2000);
-    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect && ev[0].slot == 0, "Connect event for slot 0");
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect && ev[0].slot == 0 && ev[0].gen != 0,
+           "Connect event for slot 0, with a connection generation");
+    const uint32_t gen0 = ev.empty() ? 0 : ev[0].gen;
 
     uint8_t buf[128];
     HelloMsg h{};
@@ -282,20 +284,14 @@ void host_core_tests() {
     w.client_id = 1;
     w.spawn_pos[0] = 5.0;
     w.host_game_time = 100.0;
-    core.set_welcomed(0, true);
-    expect(core.send(0, buf, enc(w, buf), kChannelReliable, true), "Welcome queued");
+    core.set_welcomed(0, gen0, true);
+    expect(core.send(0, gen0, buf, enc(w, buf), kChannelReliable, true), "Welcome queued");
     PingMsg ping{};
     ping.client_send_time = 12.5;
     c.send(buf, enc(ping, buf), kChannelUnreliable);
-    ev = collect(core, c, 1, 2000);
-    PingMsg pd{};
-    expect(ev.size() == 1 && decode(ev[0].data, ev[0].len, pd) == Status::Ok && pd.client_send_time == 12.5,
-           "Ping arrives");
-    PongMsg pong{};
-    pong.client_send_time = pd.client_send_time;
-    pong.host_game_time = 100.25;
-    expect(core.send(0, buf, enc(pong, buf), kChannelUnreliable, false), "Pong queued");
+    // The network thread answers the Ping itself, with the host time published by set_host_time (100.0).
     for (int i = 0; i < 500 && c.got.size() < 2; ++i) c.idle(1);
+    expect(queue_empty(core), "a Ping is answered on the network thread and never queued for the game thread");
     bool got_welcome = false, got_pong = false;
     for (auto& g : c.got) {
         WelcomeMsg wd;
@@ -303,7 +299,7 @@ void host_core_tests() {
         if (decode(g.bytes.data(), g.bytes.size(), wd) == Status::Ok && wd.client_id == 1 && wd.spawn_pos[0] == 5.0)
             got_welcome = true;
         if (decode(g.bytes.data(), g.bytes.size(), qd) == Status::Ok && qd.client_send_time == 12.5 &&
-            qd.host_game_time == 100.25)
+            qd.host_game_time == 100.0)
             got_pong = true;
     }
     expect(got_welcome && got_pong, "client got Welcome and Pong");
@@ -380,31 +376,94 @@ void host_core_tests() {
     c.send(buf, enc(bye, buf), kChannelReliable);
     ev = collect(core, c, 1, 2000);
     expect(ev.size() == 1 && ev[0].kind == HostEvent::Message && ev[0].channel == kChannelReliable, "Bye arrives");
-    core.disconnect(0);
+    expect(core.disconnect(0, gen0), "disconnect queued");
     for (int i = 0; i < 2000 && !c.disconnected; ++i) c.idle(1);
     ev = collect(core, c, 1, 2000);
     expect(c.disconnected && ev.size() == 1 && ev[0].kind == HostEvent::Disconnect && ev[0].slot == 0,
            "disconnect: the client sees it, and the game thread gets a Disconnect event");
 
-    // Silence: a client that stops talking (here: stops being serviced) is dropped after 5 s.
+    // A command for a connection that is gone must not reach the client that took its slot.
+    TestClient b;
+    b.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+    b.peer = enet_host_connect(b.host, &addr, kChannelCount, 0);
+    ev = collect(core, b, 1, 2000);
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect && ev[0].slot == 0 && ev[0].gen != gen0,
+           "second client takes slot 0 with a new generation");
+    const uint32_t gen_b = ev.empty() ? 0 : ev[0].gen;
+    ByeMsg stale{};
+    stale.client_id = 1;
+    stale.reason = 9;
+    core.send(0, gen0, buf, enc(stale, buf), kChannelReliable, true);  // meant for the first client
+    core.disconnect(0, gen0);
+    b.idle(300);
+    expect(!b.disconnected && b.got.empty(), "stale-generation Bye and disconnect do not reach the new client");
+    expect(core.send(0, gen_b, buf, enc(stale, buf), kChannelReliable, true), "a current-generation Bye is queued");
+    b.idle(300);
+    expect(!b.disconnected && b.got.size() == 1, "the current-generation Bye is delivered");
+
+    // Control events survive a flood of States while the game does not drain the queue.
+    b.send(buf, enc(h, buf), kChannelReliable);
+    core.set_welcomed(0, gen_b, true);
+    b.idle(100);
+    const HostCounters pre_flood = core.counters();
+    uint32_t sent = 0;
+    for (int round = 0; round < 40; ++round) {  // 40 x 20 = 800 States, more than the 512-entry ring holds
+        for (int k = 0; k < 20; ++k) {
+            StateMsg fs = good_state(++sent, 100.5);
+            fs.client_id = 1;
+            b.send(buf, enc(fs, buf), kChannelUnreliable);
+        }
+        b.idle(5);
+    }
+    b.send(buf, enc(bye, buf), kChannelReliable);
+    b.idle(100);
+    enet_peer_disconnect(b.peer, 0);
+    b.idle(300);
+    std::vector<HostEvent> all;
+    for (;;) {  // the game thread wakes up and drains everything
+        HostEvent e3[64];
+        const size_t n = core.poll(e3, 64);
+        if (n == 0) break;
+        all.insert(all.end(), e3, e3 + n);
+    }
+    size_t states = 0, byes = 0, hellos = 0, discs = 0;
+    for (const HostEvent& e : all) {
+        if (e.kind == HostEvent::Disconnect) ++discs;
+        if (e.kind != HostEvent::Message) continue;
+        MsgType t{};
+        peek_type(e.data, e.len, t);
+        if (t == MsgType::State) ++states;
+        if (t == MsgType::Bye) ++byes;
+        if (t == MsgType::Hello) ++hellos;
+    }
+    const HostCounters post_flood = core.counters();
+    std::printf("  flood: %u sent, %zu States queued, %u refused; Hello %zu, Bye %zu, Disconnect %zu\n", sent, states,
+                post_flood.dropped_queue - pre_flood.dropped_queue, hellos, byes, discs);
+    expect(post_flood.dropped_queue > pre_flood.dropped_queue && states < 500, "States are refused when the queue is nearly full");
+    expect(hellos == 1 && byes == 1 && discs == 1 && post_flood.dropped_control == 0,
+           "Hello, Bye and Disconnect are all delivered after the flood");
+
+    // Silence: a client that is serviced (so ENet itself is happy) but sends no application packets is dropped by
+    // the core after 5 s, with reason 1.
     TestClient d;
     d.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
     d.peer = enet_host_connect(d.host, &addr, kChannelCount, 0);
     ev = collect(core, d, 1, 2000);
-    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "second client connects (slot reused)");
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "third client connects (slot reused)");
     std::printf("  waiting for the 5 s silence timeout...\n");
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<HostEvent> gone;
-    for (int i = 0; i < 9000 && gone.empty(); ++i) {  // the client is not serviced from here on
+    for (int i = 0; i < 9000 && gone.empty(); ++i) {
+        d.service(0);
         HostEvent e2[4];
         const size_t n = core.poll(e2, 4);
         gone.insert(gone.end(), e2, e2 + n);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::printf("  Disconnect after %.1f s\n", secs);
-    expect(!gone.empty() && gone[0].kind == HostEvent::Disconnect && secs >= 4.5 && secs < 8.0,
-           "a silent client times out after about 5 s");
+    std::printf("  Disconnect after %.1f s, reason %d\n", secs, gone.empty() ? -1 : gone[0].reason);
+    expect(!gone.empty() && gone[0].kind == HostEvent::Disconnect && gone[0].reason == 1 && secs >= 4.5 && secs < 8.0,
+           "a silent client times out after about 5 s, by the core's timer (reason 1)");
 
     core.stop(false);
     expect(core.state() == HostCore::State::Idle, "stopped cleanly");

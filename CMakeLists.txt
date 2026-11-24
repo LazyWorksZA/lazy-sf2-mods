@@ -42,7 +42,10 @@ target_compile_options(lazysf2 PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2 PRIVATE src)
 # ENet is linked statically. Do NOT link winmm here: this DLL is itself winmm.dll, and ENet's three winmm imports
 # are satisfied by src/net/enet_winmm_shim.cpp (they call the real system DLL).
-target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet ws2_32 shell32 ole32)
+target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet ws2_32 delayimp shell32 ole32)
+# ws2_32 is delay-loaded: it is only touched by ENet (enet_initialize, on the network thread, which only exists in
+# host mode), so a player with host mode off never has it loaded into the game.
+target_link_options(lazysf2 PRIVATE /DELAYLOAD:ws2_32.dll)
 
 # Network protocol and host-core tests (console, not shipped, no game needed). ENet comes from vcpkg.
 add_executable(lazysf2-net-tests
