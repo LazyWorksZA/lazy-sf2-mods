@@ -57,7 +57,8 @@ bool finite_all(const double* p, int n) {
 double norm_deg(double d) {
     d = std::fmod(d, 360.0);
     if (d < 0) d += 360.0;
-    return d;
+    if (d >= 359.995) return 0.0;  // prints as 360.00 with two decimals: the same direction as 0
+    return d + 0.0;                // -0.0 becomes +0.0
 }
 
 // Fixed decimals with trailing zeros trimmed (smaller files).
@@ -219,6 +220,12 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
         std::snprintf(idbuf, sizeof(idbuf), "%x", e.id);
         Obj& o = find(e.id);
         if (e.type == EvType::Join) {
+            if (o.alive && o.described) {  // the old object is still shown (its Leave was lost): remove it first
+                frame(e.t);
+                out += "-";
+                out += idbuf;
+                out += '\n';
+            }
             o = Obj{};  // a new aircraft in a reused slot starts afresh
             o.alive = true;
             o.name = e.name;
@@ -239,8 +246,10 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
                 ++info.objects;
             }
             if (!o.alive) continue;
-            if (o.described && e.t - o.last_t < min_dt) continue;  // rate limit
-            o.last_t = e.t;
+            if (o.described && e.t - o.last_t < min_dt - 1e-9) continue;  // rate limit
+            // Step the limiter's clock by exactly min_dt (not to e.t), so that an input rate just above the cap is
+            // thinned to the cap rather than to a lower one; after a gap, restart from this sample.
+            o.last_t = (o.described && e.t - o.last_t < 2.0 * min_dt) ? o.last_t + min_dt : e.t;
             frame(e.t);
             // T=Lon|Lat|Alt|Roll|Pitch|Yaw|U|V|Heading (spec, "Object transform"). Roll is positive right wing
             // down, pitch positive nose-up and yaw clockwise from north, as in SF2. Yaw and heading are equal
