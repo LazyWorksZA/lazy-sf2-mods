@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
 
@@ -30,7 +31,12 @@ enum State { kIdle = 0, kStartRequested = 1, kRunning = 2, kStopRequested = 3 };
 
 constexpr size_t kPosOffset = 0x38, kVelOffset = 0x50, kRotOffset = 0xdc;
 constexpr size_t kAngleOffset = 0x100;  // pitch, heading, roll in radians: the real attitude state
+constexpr size_t kFlagsOffset = 0xc, kRatesOffset = 0xd0;  // object flag word; angular rates float[3]
+constexpr DWORD kRemoteMaskRva = 0xb7b28;  // AircraftObject.dll global: the REMOTEOBJECT flag mask
 constexpr double kMaxSeconds = 120.0;
+// true: set the game's REMOTEOBJECT flag once and only measure (the game skips AI and coasts the
+// aircraft). false: the old mode, writing position, velocity and attitude every frame.
+constexpr bool kCoast = true;
 
 struct Vec3d {
     double x, y, z;
@@ -41,6 +47,8 @@ struct Run {
     void* target = nullptr;
     unsigned long long created = 0;  // identifies the object, in case its address is reused
     double last_alt = 0;
+    uint32_t mask = 0, orig_flags = 0;  // REMOTEOBJECT mask, and the flag word before we set it
+    bool cleared_logged = false;
     bool first_frame_done = false;  // frame 1 is the teleport; its drift is not a measurement
     Vec3d p0{}, v{};
     float r0[9] = {};
@@ -66,6 +74,7 @@ struct StartCtx {
     wchar_t name[64] = {};
     double distance = 0, speed = 0, heading_deg = 0;
     Run run;
+    uint32_t mask = 0;  // in: REMOTEOBJECT mask
 };
 
 void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
@@ -118,6 +127,20 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
     r.a0[2] = 0.f;
     c.heading_deg = hp * 180.0 / 3.14159265358979323846;
     c.player = list[player].obj;
+    if (kCoast) {
+        char* obj = static_cast<char*>(list[best].obj);
+        r.mask = c.mask;
+        memcpy(&r.orig_flags, obj + kFlagsOffset, sizeof(uint32_t));
+        const float zero[3] = {};
+        memcpy(obj + kRatesOffset, zero, sizeof(zero));
+        const uint32_t flags = r.orig_flags | c.mask;
+        memcpy(obj + kFlagsOffset, &flags, sizeof(flags));
+        const float v[3] = {float(r.v.x), float(r.v.y), float(r.v.z)};
+        memcpy(obj + kPosOffset, &r.p0, sizeof(r.p0));
+        memcpy(obj + kVelOffset, v, sizeof(v));
+        memcpy(obj + kRotOffset, r.r0, sizeof(r.r0));
+        memcpy(obj + kAngleOffset, r.a0, sizeof(r.a0));
+    }
     wcsncpy_s(c.name, list[best].name, _TRUNCATE);
     c.distance = best_d;
 }
@@ -125,6 +148,15 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
 void start_run() {
     if (!g_freq.QuadPart) QueryPerformanceFrequency(&g_freq);
     StartCtx c;
+    if (kCoast) {
+        const HMODULE m = GetModuleHandleW(L"AircraftObject.dll");  // the probe checked its build stamp
+        if (m) memcpy(&c.mask, reinterpret_cast<const char*>(m) + kRemoteMaskRva, sizeof(c.mask));
+        if (!c.mask) {
+            LOG("puppet: REMOTEOBJECT mask not set");
+            g_puppet_state.store(kIdle);
+            return;
+        }
+    }
     probe_with_aircraft(start_cb, &c);
     if (c.result == 1) {
         LOG("puppet: need at least 2 aircraft");
@@ -139,8 +171,9 @@ void start_run() {
     g_run = c.run;
     QueryPerformanceCounter(&g_run.start);
     LOG("puppet: start target %p \"%ls\" placed 150 m ahead of player %p at (%.0f, %.0f, %.0f) heading %.1f deg speed "
-        "%.1f m/s (was %.0f m away)",
-        g_run.target, c.name, c.player, g_run.p0.x, g_run.p0.y, g_run.p0.z, c.heading_deg, c.speed, c.distance);
+        "%.1f m/s (was %.0f m away)%s",
+        g_run.target, c.name, c.player, g_run.p0.x, g_run.p0.y, g_run.p0.z, c.heading_deg, c.speed, c.distance,
+        kCoast ? " (REMOTEOBJECT coast)" : "");
     // A stop request that arrived while starting wins and is handled next frame.
     int expected = kStartRequested;
     g_puppet_state.compare_exchange_strong(expected, kRunning);
@@ -155,6 +188,7 @@ struct FrameCtx {
     double turn = 0;  // degrees between the current and the held orientation
     double angle = 0;  // largest per-component angle difference, degrees
     double alt = 0;
+    bool cleared = false;  // the game cleared REMOTEOBJECT since the last frame
 };
 
 void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
@@ -191,6 +225,16 @@ void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
         if (d < -180.0) d += 360.0;
         if (std::fabs(d) > c.angle) c.angle = std::fabs(d);
     }
+    if (kCoast) {
+        uint32_t flags;
+        memcpy(&flags, obj + kFlagsOffset, sizeof(flags));
+        if ((flags & g_run.mask) != g_run.mask) {
+            c.cleared = true;
+            flags |= g_run.mask;
+            memcpy(obj + kFlagsOffset, &flags, sizeof(flags));
+        }
+        return;  // coast: measure only
+    }
     const float v[3] = {static_cast<float>(g_run.v.x), static_cast<float>(g_run.v.y), static_cast<float>(g_run.v.z)};
     memcpy(obj + kPosOffset, &want, sizeof(want));
     memcpy(obj + kVelOffset, v, sizeof(v));
@@ -204,7 +248,21 @@ void log_stats(double t, double alt) {
         g_run.turn_sum / g_run.frames, g_run.angle_max, alt);
 }
 
+void stop_cb(const LiveAircraft* list, size_t n, void*) {
+    for (size_t i = 0; i < n; ++i) {
+        if (list[i].obj == g_run.target && list[i].created == g_run.created) {
+            char* obj = static_cast<char*>(g_run.target);
+            uint32_t flags;
+            memcpy(&flags, obj + kFlagsOffset, sizeof(flags));
+            flags &= ~(g_run.mask & ~g_run.orig_flags);  // clear only what we set
+            memcpy(obj + kFlagsOffset, &flags, sizeof(flags));
+            return;
+        }
+    }
+}
+
 void stop_run(const char* reason, double t) {
+    if (kCoast && g_run.target) probe_with_aircraft(stop_cb, nullptr);  // hand the aircraft back to the AI
     if (g_run.frames > 0) log_stats(t, g_run.last_alt);  // the last, partial second
     g_puppet_state.store(kIdle);
     g_run = Run{};  // a later "hotkey before start" must not see this run's numbers
@@ -256,6 +314,10 @@ void puppet_run_frame() {
         LOG("puppet: target destroyed");
         stop_run("target destroyed", t);
         return;
+    }
+    if (c.cleared && !g_run.cleared_logged) {
+        g_run.cleared_logged = true;
+        LOG("puppet: game cleared REMOTEOBJECT at t=%.1f s", t);
     }
     if (!g_run.first_frame_done) {
         g_run.first_frame_done = true;
