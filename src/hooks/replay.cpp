@@ -154,6 +154,17 @@ struct Run {
     double tp[2][3] = {}, tt[2] = {};
     int hist = 0;
 
+    // Diagnostics (what the game actually holds), per one-second window.
+    double last_written[3] = {};  // position we wrote on the previous target step
+    bool have_written = false;
+    double player_pos[3] = {};    // from the player's callback
+    bool have_player_pos = false;
+    double actual[3] = {};        // the target's position as read before our latest write
+    unsigned diag_cb = 0, diag_writes = 0;
+    double diag_moved = 0;
+    bool diag_cleared = false;
+    double diag_next_log = 1.0;   // recording time
+
     // Metrics for the current one-second window.
     double next_log = 1.0;  // recording time
     unsigned n = 0;
@@ -229,6 +240,7 @@ struct StartCtx {
     wchar_t name[64] = {};
     double distance = 0;
     uint32_t orig_flags = 0;
+    double target_pos[3] = {};  // before placement
 };
 
 void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the shared lock: no logging
@@ -257,6 +269,7 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sh
     c.target = list[best].obj;
     c.created = list[best].created;
     c.distance = best_d;
+    read_at(c.target, kOffPos, c.target_pos, 3);
     wcsncpy_s(c.name, list[best].name, _TRUNCATE);
     // REMOTEOBJECT on, rates zero: the aircraft now coasts, and we are the only writer.
     char* obj = static_cast<char*>(c.target);
@@ -328,13 +341,32 @@ void try_start(void* player) {
     r.pl.anchor[1] = pp[1] + 150.0 * ch - 20.0 * sh;
     r.pl.anchor[2] = pp[2] + 10.0;
     r.t_start = sim_game_time();
+    r.diag_next_log = 1.0;
     g_run = r;
     g_active.store(true);
     sim_set_run_active(true);
+    LOG("replay: diag start player %p at (%.1f, %.1f, %.1f) heading %.1f deg; target was at (%.1f, %.1f, %.1f); "
+        "first position (%.1f, %.1f, %.1f)",
+        player, pp[0], pp[1], pp[2], hp * 180.0 / kPi, c.target_pos[0], c.target_pos[1], c.target_pos[2],
+        r.pl.anchor[0], r.pl.anchor[1], r.pl.anchor[2]);
     LOG("replay: start target %p \"%ls\" (was %.0f m from the player), %u samples, %.1f s, rotated %.1f deg, "
         "first position at (%.0f, %.0f, %.0f), feed %d Hz",
         c.target, c.name, c.distance, count, rec[count - 1].t - rec[0].t, r.pl.d * 180.0 / kPi, r.pl.anchor[0],
         r.pl.anchor[1], r.pl.anchor[2], kRates[g_rate_idx.load(std::memory_order_relaxed)]);
+}
+
+// Once per second: what the game actually holds against what we wrote. Not under any lock.
+void diag_log(double t_rec, const double actual[3], bool flag_ok) {
+    const bool cleared = g_run.diag_cleared || !flag_ok;
+    const double dp = g_run.have_player_pos ? dist(g_run.player_pos, actual) : -1.0;
+    LOG("replay: diag t=%.0fs cb %u writes %u, actual (%.1f, %.1f, %.1f) vs written (%.1f, %.1f, %.1f) moved %.1f m, "
+        "flag %s, player dist %.0f m",
+        t_rec, g_run.diag_cb, g_run.diag_writes, actual[0], actual[1], actual[2], g_run.last_written[0],
+        g_run.last_written[1], g_run.last_written[2], g_run.diag_moved, cleared ? "CLEARED" : "set", dp);
+    g_run.diag_cb = g_run.diag_writes = 0;
+    g_run.diag_moved = 0;
+    g_run.diag_cleared = false;
+    g_run.diag_next_log = std::floor(t_rec) + 1.0;
 }
 
 // --- The receiver --------------------------------------------------------------------------------
@@ -372,6 +404,15 @@ void truth_at(double t, Kin* out) {
 void receive_step() {
     const double now = sim_game_time();
     const double t_rec = now - g_run.t_start;
+    // Diagnostics: the target as the game left it after its own Update, before we write.
+    double actual[3];
+    uint32_t actual_flags;
+    read_at(g_run.target, kOffPos, actual, 3);
+    read_at(g_run.target, kOffFlags, &actual_flags, 1);
+    const bool flag_ok = (actual_flags & g_run.set_bits) == g_run.set_bits;
+    ++g_run.diag_cb;
+    if (!flag_ok) g_run.diag_cleared = true;
+    if (g_run.have_written) g_run.diag_moved = std::fmax(g_run.diag_moved, dist(actual, g_run.last_written));
     const int rate = kRates[g_rate_idx.load(std::memory_order_relaxed)];
     const double period = 1.0 / rate, delay = feed_delay(rate);
     // Angles past the newest sample extrapolate with a rate estimated from the two newest received samples
@@ -445,6 +486,10 @@ void receive_step() {
     write_at(obj, kOffRates, rates, 3);
     write_at(obj, kOffMatrix, m, 9);
     write_at(obj, kOffAngles, a, 3);
+    ++g_run.diag_writes;
+    std::memcpy(g_run.last_written, shown.p, sizeof(g_run.last_written));
+    g_run.have_written = true;
+    if (t_rec >= g_run.diag_next_log) diag_log(t_rec, actual, flag_ok);
 
     // Metrics against the ground truth at the same render time.
     Kin truth;
@@ -490,6 +535,10 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         if (is_player) return;
     }
     if (!g_run.active) return;
+    if (is_player) {
+        read_at(aircraft, kOffPos, g_run.player_pos, 3);
+        g_run.have_player_pos = true;
+    }
     if (aircraft == g_run.target || is_player) {
         if (!still_live()) return;
         if (aircraft == g_run.target) receive_step();
