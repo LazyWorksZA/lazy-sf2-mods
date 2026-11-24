@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 namespace lazysf2::hooks {
 
@@ -80,5 +81,22 @@ extern std::atomic<int> g_missile_state;
 inline void missile_spawn_on_present() {
     if (g_missile_state.load(std::memory_order_relaxed) != 0) missile_spawn_run_frame();
 }
+
+// Simulation step (developer tool, part of the probe): hooks the aircraft's own Update(dt), which runs
+// once per simulation step for every aircraft on the game's main thread, and not while the game is
+// paused. sim_on_modules_loaded() installs the hook (the probe calls it); nothing is hooked with the probe off.
+// The game clock adds dt on each step of the player's aircraft (the earliest-created tracked aircraft).
+// sim_game_time() and sim_step_count() may be read from the game thread only (inside a step callback).
+void sim_on_modules_loaded();
+double sim_game_time();
+uint64_t sim_step_count();
+// "After an aircraft's Update" callback: called on the game thread, after the original returns and after the
+// clock is updated, for every aircraft. is_player is true for the player's aircraft. The aircraft is valid
+// for the duration of the call. Keep it cheap and return early for aircraft you don't care about. A fixed set
+// of 4 slots; register once at install (module watch time). Returns false if the set is full.
+using SimStepCallback = void (*)(void* aircraft, float dt, bool is_player);
+bool sim_register_step_callback(SimStepCallback cb);
+// While a developer run (recording, replay) is active, the hook logs one clock line per second of game time.
+void sim_set_run_active(bool active);
 
 }  // namespace lazysf2::hooks

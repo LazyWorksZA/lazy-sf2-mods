@@ -349,6 +349,7 @@ void probe_on_modules_loaded() {
     ok = ok && create_and_enable(at_rva(m, kDtorRva), reinterpret_cast<void*>(&h_Dtor),
                                  reinterpret_cast<void**>(&o_Dtor), "AircraftObject dtor");
     if (!ok) return;
+    sim_on_modules_loaded();  // own build check and once-flag
     if (HANDLE t = CreateThread(nullptr, 0, hotkey_thread, nullptr, 0, nullptr)) {
         CloseHandle(t);
     } else {

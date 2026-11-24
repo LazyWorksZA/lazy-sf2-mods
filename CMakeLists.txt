@@ -26,6 +26,7 @@ add_library(lazysf2 SHARED
     src/hooks/probe_hooks.cpp
     src/hooks/puppet_hooks.cpp
     src/hooks/missile_spawn.cpp
+    src/hooks/sim_hooks.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)
 target_compile_features(lazysf2 PRIVATE cxx_std_20)
