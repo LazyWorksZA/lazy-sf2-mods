@@ -2,10 +2,10 @@
 
 These are quality-of-life mods for **Strike Fighters 2**, the merged install with the final July 2013 patch.
 
-- **Display Mode and Screen** in the game's own **Options → Graphics**: Borderless or stock exclusive Fullscreen, on the monitor of your choice. Both apply immediately.
+- **Display Mode and Screen** in the game's own **Options → Graphics**: Borderless or stock exclusive Fullscreen, on the monitor of your choice.
+- **Mouse Pointer** in **Options → Controls**. The game normally builds its own pointer from raw mouse movement, so it never quite lines up with Windows' pointer and feels off (and wanders over remote desktop). "Match Windows cursor", the default, puts the game's pointer exactly on Windows' pointer.
 - **Fixes:** Alt-Tab back into Fullscreen works again (a stock bug), display scaling other than 100% no longer breaks the picture, the Windows key works in Borderless, and lock/unlock recovers.
-- **Mouse pointer that matches Windows.** The game normally builds its own pointer from raw mouse movement, so it never quite lines up with Windows' pointer and feels off (and wanders over remote desktop). The mod can make the game's pointer sit exactly on Windows' pointer. This is the default for new installs.
-- **Installer:** a Velopack `Setup.exe` with a small manager window, a clean uninstall, and an administrator prompt only when the game folder needs it.
+- **Installer:** a normal MSI wizard (license and third-party notices included) that copies one DLL into the game folder. No app, window or shortcut is left behind. Uninstall it from *Installed apps*.
 - **Later: multiplayer.** The long-term goal is to bring multiplayer back. See `docs/SF2 Network Layer — Claude Code Brief.md`.
 
 > **Status:** the borderless brief's phases 1–5 are done. Auto-update and a public release are still to come.
@@ -26,15 +26,15 @@ The full reverse-engineering notes are in [`docs/recon-notes.md`](docs/recon-not
 
 ## Quick start
 
-**Players:** run `LazySF2-win-Setup.exe`. See [`INSTALL.md`](INSTALL.md).
+**Players:** run `LazySF2-win.msi`. See [`INSTALL.md`](INSTALL.md).
 
 **Developers:** you need Windows, Visual Studio 2026 or 2022 with **Desktop development with C++** (x86 toolset), and for the installer the .NET 10 SDK plus `vpk`.
 
 ```powershell
-.\build.ps1                                # x86 build: build\Release\winmm.dll
-.\scripts\install.ps1 -MouseMode Cursor    # copy into the game folder (found from the registry)
-.\scripts\uninstall.ps1                    # remove exactly the files the mod added
-.\installer\build-installer.ps1 -Version 0.1.0   # Velopack Setup.exe -> installer\Releases\
+.\build.ps1                                       # x86 build: build\Release\winmm.dll
+.\scripts\install.ps1                             # copy into the game folder (found from the registry)
+.\scripts\uninstall.ps1                           # remove exactly the files the mod added
+.\installer\build-installer.ps1 -Version 0.1.0 -Clean   # MSI + Setup.exe -> installer\Releases\
 ```
 
 ## Repository layout
@@ -42,7 +42,7 @@ The full reverse-engineering notes are in [`docs/recon-notes.md`](docs/recon-not
 | Path | Contents |
 |---|---|
 | `src/` | The mod: winmm proxy (`proxy/`), hooks (`hooks/`), config and logging |
-| `installer/` | The LazySF2 manager app (C#, Velopack hooks and status window) and `build-installer.ps1` |
+| `installer/` | The headless LazySF2 helper (C#, Velopack install/uninstall hooks), installer texts, and `build-installer.ps1` |
 | `scripts/` | Install and uninstall for development, using a file manifest |
 | `tools/` | The winmm proxy generator, the `.cat` unpacker, Ghidra scripts, Process Monitor helpers, and the unattended test driver |
 | `docs/` | Briefs, [recon notes](docs/recon-notes.md) and the [Options-menu trace](docs/option-trace.md) |

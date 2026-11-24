@@ -13,8 +13,9 @@ public static class ModInstaller
 {
     public const string ManifestName = "lazysf2.manifest.txt";
     public const string DllName = "winmm.dll";
-    public const string IniName = "lazysf2.ini";
-    static readonly string[] ManagedFiles = [DllName, IniName, "lazysf2.log", ManifestName];
+    // lazysf2.ini held the mouse setting before it moved into the game's Options; it stays listed so
+    // uninstall also removes one left by an older version.
+    static readonly string[] ManagedFiles = [DllName, "lazysf2.ini", "lazysf2.log", ManifestName];
 
     public enum State { GameNotFound, NotInstalled, Installed, Outdated, Foreign }
     public enum Result { Ok, AccessDenied, Foreign, GameNotFound, Failed }
@@ -51,8 +52,6 @@ public static class ModInstaller
             if (File.Exists(dll) && !File.Exists(Path.Combine(gameDir, ManifestName))) return Result.Foreign;
             File.Copy(PayloadDll, dll, overwrite: true);
             File.WriteAllLines(Path.Combine(gameDir, ManifestName), ManagedFiles, new UTF8Encoding(false));
-            // New installs match the Windows cursor (the stock mouse feels off); a Repair keeps the choice.
-            if (!File.Exists(Path.Combine(gameDir, IniName))) return SetMouseMode(gameDir, "Cursor");
             return Result.Ok;
         }
         catch (UnauthorizedAccessException) { return Result.AccessDenied; }
@@ -80,26 +79,6 @@ public static class ModInstaller
             // The manifest goes last, so a partial removal can be retried.
             foreach (string f in InstalledFiles(gameDir).OrderBy(f => f.EndsWith(ManifestName)))
                 File.Delete(f);
-            return Result.Ok;
-        }
-        catch (UnauthorizedAccessException) { return Result.AccessDenied; }
-        catch (IOException) { return Result.Failed; }
-    }
-
-    /// <summary>lazysf2.ini [Mouse] Mode: "Stock" (default) or "Cursor".</summary>
-    public static string GetMouseMode(string gameDir)
-    {
-        string ini = Path.Combine(gameDir, IniName);
-        if (!File.Exists(ini)) return "Stock";
-        string? line = File.ReadAllLines(ini).FirstOrDefault(l => l.TrimStart().StartsWith("Mode=", StringComparison.OrdinalIgnoreCase));
-        return line != null && line.Trim().EndsWith("Cursor", StringComparison.OrdinalIgnoreCase) ? "Cursor" : "Stock";
-    }
-
-    public static Result SetMouseMode(string gameDir, string mode)
-    {
-        try
-        {
-            File.WriteAllLines(Path.Combine(gameDir, IniName), ["[Mouse]", $"Mode={mode}"], Encoding.ASCII);
             return Result.Ok;
         }
         catch (UnauthorizedAccessException) { return Result.AccessDenied; }

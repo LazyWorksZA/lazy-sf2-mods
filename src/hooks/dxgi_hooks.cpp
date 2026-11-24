@@ -266,7 +266,7 @@ bool dxgi_is_exclusive() {
 
 void dxgi_apply_display_mode() {
     const bool borderless = config::borderless();
-    input_apply_display_mode();  // Windows key follows the mode
+    input_apply_settings();  // Windows key follows the display mode; mouse follows its setting
     IDXGISwapChain* sc = g_swapchain;
     if (!sc || !o_SetFullscreenState || !o_ResizeTarget) {
         LOG("dxgi: live switch skipped: no swap chain yet");

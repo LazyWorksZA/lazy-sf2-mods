@@ -44,6 +44,11 @@ constexpr DWORD kGfxInitRva = 0x58f0;     // void __thiscall Init(this, int*, in
 constexpr DWORD kGfxRefreshRva = 0x5dd0;  // void __thiscall Refresh(this)
 constexpr DWORD kGfxChangedRva = 0x4e20;  // void __thiscall Changed(this)
 constexpr DWORD kGfxExitRva = 0x5da0;     // void __thiscall Exit(this)  (saves, then tears down)
+// Controls sub-menu class (vtable +0x1e9a0), same method shapes as Graphics.
+constexpr DWORD kCtlInitRva = 0x3500;     // void __thiscall Init(this, int*, int*)   (ret 8)
+constexpr DWORD kCtlExitRva = 0x1f40;     // void __thiscall Exit(this)  (saves [ControlOptions])
+constexpr DWORD kCtlRefreshRva = 0x1fa0;  // void __thiscall Refresh(this)
+constexpr DWORD kCtlChangedRva = 0x2010;  // void __thiscall Changed(this)
 constexpr DWORD kIniReadIntRva = 0xa790;  // int  __thiscall ReadInt(ini, section, key, default)
 constexpr DWORD kIniWriteIntRva = 0xa0e0; // void __thiscall WriteInt(ini, section, key, value)
 constexpr DWORD kIniGlobalRva = 0x26a90;  // Options.ini object used by the screen
@@ -71,6 +76,7 @@ constexpr wchar_t kHintText[] = L"Select fullscreen, or a borderless window for 
 // --- State ------------------------------------------------------------------------------------
 
 std::atomic<int> g_list_id{0};       // control ID assigned to our list (0 = not injected)
+std::atomic<int> g_mouse_list_id{0}; // Controls page: Mouse Pointer list ID (0 = not injected)
 int g_selected = 0;                  // current selection on the Graphics page (UI thread)
 constexpr int kMaxTracked = 8;
 std::atomic<int> g_tracked[kMaxTracked] = {};  // open handles of OptionsScreen.ini (+1, 0 = free)
@@ -149,6 +155,51 @@ void shift_rows(std::wstring& text, const std::vector<std::wstring>& names) {
         }
     }
     LOG("menu: moved %d Graphics page positions down one row", moved);
+}
+
+// Controls page: a "Mouse Pointer" row in the free slot below Keyboard Map (y=320), styled like it.
+// Nothing moves. Returns the new list's control ID, or 0 if the page isn't as expected.
+int splice_controls(std::wstring& text) {
+    constexpr wchar_t kHeader[] = L"[ControlOptionsSubMenu]";
+    size_t sec = text.find(kHeader);
+    if (sec == std::wstring::npos || text.find(L"[MouseModeList]") != std::wstring::npos) return 0;
+    size_t body = text.find(L'\n', sec);
+    if (body == std::wstring::npos) return 0;
+    ++body;
+    size_t end = text.find(L"\n[", body);
+    end = (end == std::wstring::npos) ? text.size() : end + 1;
+
+    int max_id = 0;
+    for (size_t p = text.find(L"MenuItem", body); p != std::wstring::npos && p < end; p = text.find(L"MenuItem", p + 8)) {
+        if (p > 0 && text[p - 1] != L'\n') continue;
+        int id = 0;
+        if (swscanf_s(text.c_str() + p, L"MenuItem%d=", &id) == 1 && id > max_id) max_id = id;
+    }
+    if (max_id <= 0 || max_id > 997) return 0;
+    const int id = max_id + 1;
+
+    wchar_t items[128];
+    swprintf_s(items, L"MenuItem%03d=MouseModeList\r\nMenuItem%03d=MouseModeText\r\n", id, id + 1);
+    text.insert(end, items);
+    if (!text.empty() && text.back() != L'\n') text += L"\r\n";
+    text +=
+        L"\r\n"
+        L"[MouseModeList]\r\n"
+        L"MenuItemType=LIST\r\n"
+        L"Position=200,360\r\n"
+        L"Width=240\r\n"
+        L"Height=22\r\n"
+        L"ListFieldSetting=MediumListField\r\n"
+        L"DropDownListSize=10\r\n"
+        L"InfoTextSetting=InfoTextSetting\r\n"
+        L"InfoTextStringID=TXT_LAZY_MOUSE_INFO\r\n"
+        L"\r\n"
+        L"[MouseModeText]\r\n"
+        L"MenuItemType=TEXT\r\n"
+        L"TextSetting=MediumTextLeft\r\n"
+        L"TextStringID=Mouse Pointer\r\n"
+        L"TextPosition=0,363\r\n";
+    return id;
 }
 
 // Returns the spliced text, or an empty string if the text is not what we expect.
@@ -274,6 +325,7 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
         LOG("menu: OptionsScreen.ini has no usable [GraphicsOptionsSubMenu]; Display Mode not added");
         return n;
     }
+    const int mouse_id = splice_controls(out);
     const size_t need = wide ? 2 + out.size() * 2 : out.size();
     if (need >= bytes) {
         LOG("menu: no room to add Display Mode (%zu of %u bytes)", need, bytes);
@@ -285,7 +337,9 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
         for (size_t i = 0; i < out.size(); ++i) buf[i] = static_cast<char>(out[i]);
     }
     g_list_id = list_id;
-    LOG("menu: added Display Mode list as MenuItem%03d (%d -> %zu bytes)", list_id, n, need);
+    g_mouse_list_id = mouse_id;
+    LOG("menu: added Display Mode as MenuItem%03d, Mouse Pointer as Controls MenuItem%03d (%d -> %zu bytes)",
+        list_id, mouse_id, n, need);
     return static_cast<int>(need);
 }
 
@@ -427,6 +481,71 @@ void __fastcall h_Exit(void* self, void* edx) {
     o_Exit(self, edx);
 }
 
+// --- 2b. Controls sub-menu: Mouse Pointer --------------------------------------------------------
+// Stored as Options.ini [ControlOptions] MouseMode: 1 = match the Windows cursor (also the default
+// when the key is missing), 0 = stock. List index 0 = match, 1 = stock.
+
+Init_t o_CtlInit = nullptr;
+Method_t o_CtlRefresh = nullptr;
+Method_t o_CtlChanged = nullptr;
+Method_t o_CtlExit = nullptr;
+int g_mouse_selected = 0;  // list index (UI thread)
+
+void* list_by_id(void* self, int id) {
+    void* menu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);
+    if (!id || !menu) return nullptr;
+    void* ctrl = nullptr;
+    using GetItem_t = int(__fastcall*)(void*, void*, int, int, void**);
+    reinterpret_cast<GetItem_t>(vtable_slot(menu, kMenuGetItem))(menu, nullptr, id, kItemTypeList, &ctrl);
+    return ctrl;
+}
+
+void __fastcall h_CtlInit(void* self, void* edx, int* a, int* b) {
+    o_CtlInit(self, edx, a, b);
+    void* list = list_by_id(self, g_mouse_list_id.load());
+    if (!list) return;
+    auto add = reinterpret_cast<AddItem_t>(vtable_slot(list, kListAddItem));
+    add(list, nullptr, L"Match Windows cursor", 0);
+    add(list, nullptr, L"Stock game pointer", 1);
+    void* ini = options_ini();
+    const int v = ini ? reinterpret_cast<IniReadInt_t>(at_rva(g_opts, kIniReadIntRva))(
+                            ini, nullptr, L"ControlOptions", L"MouseMode", static_cast<int>(config::MouseMode::Cursor))
+                      : static_cast<int>(config::MouseMode::Cursor);
+    g_mouse_selected = v == static_cast<int>(config::MouseMode::Stock) ? 1 : 0;
+    LOG("menu: Controls page opened, MouseMode=%d", v);
+}
+
+void __fastcall h_CtlRefresh(void* self, void* edx) {
+    o_CtlRefresh(self, edx);
+    if (void* list = list_by_id(self, g_mouse_list_id.load())) {
+        reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_mouse_selected);
+    }
+}
+
+void __fastcall h_CtlChanged(void* self, void* edx) {
+    o_CtlChanged(self, edx);
+    if (void* list = list_by_id(self, g_mouse_list_id.load())) {
+        const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
+        if (sel == 0 || sel == 1) g_mouse_selected = sel;
+    }
+}
+
+void __fastcall h_CtlExit(void* self, void* edx) {
+    if (g_mouse_list_id.load()) {
+        const auto mode = g_mouse_selected == 1 ? config::MouseMode::Stock : config::MouseMode::Cursor;
+        if (void* ini = options_ini()) {
+            reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva))(ini, nullptr, L"ControlOptions",
+                                                                              L"MouseMode", static_cast<int>(mode));
+            LOG("menu: saved [ControlOptions] MouseMode=%d", static_cast<int>(mode));
+        }
+        if (mode != config::mouse_mode()) {
+            config::set_mouse_mode(mode);
+            request_display_mode_apply();  // re-applies the mouse's cooperative level on the window thread
+        }
+    }
+    o_CtlExit(self, edx);
+}
+
 SRWLOCK g_opts_lock = SRWLOCK_INIT;
 
 // --- Text for our keys ---------------------------------------------------------------------------
@@ -441,6 +560,8 @@ const wchar_t* our_text(const wchar_t* key) {
     if (!key) return nullptr;
     if (wcscmp(key, kHintKey) == 0) return kHintText;
     if (wcscmp(key, L"TXT_LAZY_SCREEN_INFO") == 0) return L"Select the monitor to display the game on.";
+    // ~70 characters, like the longer stock hints; one line.
+    if (wcscmp(key, L"TXT_LAZY_MOUSE_INFO") == 0) return L"Match Windows puts the game's pointer exactly on the Windows cursor.";
     return nullptr;
 }
 
@@ -480,6 +601,14 @@ void hook_options_screen(HMODULE opts) {
                       reinterpret_cast<void**>(&o_Changed), "OptionsScreen Graphics Changed");
     create_and_enable(at_rva(opts, kGfxExitRva), reinterpret_cast<void*>(&h_Exit), reinterpret_cast<void**>(&o_Exit),
                       "OptionsScreen Graphics Exit");
+    create_and_enable(at_rva(opts, kCtlInitRva), reinterpret_cast<void*>(&h_CtlInit),
+                      reinterpret_cast<void**>(&o_CtlInit), "OptionsScreen Controls Init");
+    create_and_enable(at_rva(opts, kCtlRefreshRva), reinterpret_cast<void*>(&h_CtlRefresh),
+                      reinterpret_cast<void**>(&o_CtlRefresh), "OptionsScreen Controls Refresh");
+    create_and_enable(at_rva(opts, kCtlChangedRva), reinterpret_cast<void*>(&h_CtlChanged),
+                      reinterpret_cast<void**>(&o_CtlChanged), "OptionsScreen Controls Changed");
+    create_and_enable(at_rva(opts, kCtlExitRva), reinterpret_cast<void*>(&h_CtlExit),
+                      reinterpret_cast<void**>(&o_CtlExit), "OptionsScreen Controls Exit");
 }
 
 }  // namespace
@@ -513,7 +642,10 @@ void menu_on_modules_loaded() {
         if (g_opts) {
             // Forget the hooks on the previous image. If it was mapped at the same address, this just
             // writes back the original bytes; if it is gone, MinHook reports an error and we move on.
-            for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva}) MH_RemoveHook(at_rva(g_opts, rva));
+            for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva, kCtlInitRva, kCtlRefreshRva,
+                              kCtlChangedRva, kCtlExitRva}) {
+                MH_RemoveHook(at_rva(g_opts, rva));
+            }
             g_opts = nullptr;
         }
         if (is_expected_build(opts, kOptsTimestamp, kOptsImageSize, "OptionsScreen.dll")) {

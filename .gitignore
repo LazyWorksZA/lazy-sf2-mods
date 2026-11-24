@@ -36,5 +36,6 @@ out/
 # Installer build output (installer/build-installer.ps1)
 installer/publish/
 installer/Releases/
+installer/publish-meta/
 installer/**/bin/
 installer/**/obj/

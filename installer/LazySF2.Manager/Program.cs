@@ -1,20 +1,25 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Velopack;
 
 namespace LazySF2.Manager;
 
+/// <summary>
+/// Headless helper that Velopack installs with LazySF2. It has no window: it only runs Velopack's
+/// install/update/uninstall hooks, which copy the mod into the Strike Fighters 2 folder and remove it
+/// again. All settings live in the game (Options > Graphics and Options > Controls).
+/// </summary>
 static class Program
 {
     /// <summary>
-    /// Velopack's install root (%LocalAppData%\LazySF2). The app itself runs from its "current"
-    /// subfolder, which Velopack replaces on every update, so state lives one level up.
+    /// Velopack's install root. The app runs from its "current" subfolder, which Velopack replaces on
+    /// every update, so state lives one level up.
     /// </summary>
     static string StateDir => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
-    public static string PendingInstallMarker => Path.Combine(StateDir, "pending-install");
-    static string LogPath => Path.Combine(StateDir, "manager.log");
+    static string PendingInstallMarker => Path.Combine(StateDir, "pending-install");
+    static string LogPath => Path.Combine(StateDir, "lazysf2-setup.log");
 
-    [STAThread]
     static int Main(string[] args)
     {
         // Must run first: handles --veloapp-* hook invocations (which exit inside Run()).
@@ -24,36 +29,63 @@ static class Program
             .OnBeforeUninstallFastCallback(_ => HookUninstall())
             .Run();
 
-        // Elevated helpers, started by the window when the game folder needs admin rights.
-        if (args.Length > 0)
+        string? game = ModInstaller.FindGameDir();
+        switch (args.FirstOrDefault())
         {
-            string? game = ModInstaller.FindGameDir();
-            switch (args[0])
-            {
-                case "--elevated-install": return Code(ModInstaller.Install(game));
-                case "--elevated-uninstall": return Code(ModInstaller.Uninstall(game));
-                case "--elevated-mouse" when args.Length > 1 && game != null: return Code(ModInstaller.SetMouseMode(game, args[1]));
-            }
+            case "--elevated-install": return (int)ModInstaller.Install(game);
+            case "--elevated-uninstall": return (int)ModInstaller.Uninstall(game);
         }
 
-        ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
-        return 0;
+        // Started normally: by Velopack right after a per-user install, or by hand. Make sure the mod
+        // is in the game folder (with a UAC prompt if the folder needs it), then say where things are.
+        bool firstRun = Environment.GetEnvironmentVariable("VELOPACK_FIRSTRUN") != null;
+        using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
+        {
+            bool elevated = new System.Security.Principal.WindowsPrincipal(id).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+            Log($"start: user={id.Name} system={id.IsSystem} elevated={elevated} firstRun={firstRun} session={Process.GetCurrentProcess().SessionId}");
+        }
+        var result = Ensure(game);
+        File.Delete(PendingInstallMarker);
+        if (!firstRun || result != ModInstaller.Result.Ok) Report(game, result);
+        return (int)result;
     }
 
-    static int Code(ModInstaller.Result r) => (int)r;
+    static ModInstaller.Result Ensure(string? game)
+    {
+        var state = ModInstaller.GetState(game);
+        if (state is ModInstaller.State.Installed or ModInstaller.State.Foreign or ModInstaller.State.GameNotFound)
+            return state switch
+            {
+                ModInstaller.State.Foreign => ModInstaller.Result.Foreign,
+                ModInstaller.State.GameNotFound => ModInstaller.Result.GameNotFound,
+                _ => ModInstaller.Result.Ok,
+            };
+        var r = ModInstaller.Install(game);
+        return r == ModInstaller.Result.AccessDenied ? RunElevated("--elevated-install") ?? r : r;
+    }
+
+    static void Report(string? game, ModInstaller.Result r)
+    {
+        string text = r switch
+        {
+            ModInstaller.Result.Ok =>
+                $"LazySF2 is installed in:\n{game}\n\nSettings are in the game:\n" +
+                "  Options > Graphics: Display Mode, Screen\n  Options > Controls: Mouse Pointer\n\n" +
+                "To remove it, uninstall LazySF2 from Windows' Installed apps.",
+            ModInstaller.Result.GameNotFound => "Strike Fighters 2 wasn't found (no installer registry entry).",
+            ModInstaller.Result.Foreign => $"Another winmm.dll is already in\n{game}\nLazySF2 left it untouched.",
+            ModInstaller.Result.AccessDenied => "Administrator rights are needed to copy the mod into the game folder.",
+            _ => "Couldn't copy the mod into the game folder. Is Strike Fighters 2 running? Close it and run LazySF2 again.",
+        };
+        MessageBoxW(IntPtr.Zero, text, "LazySF2", r == ModInstaller.Result.Ok ? 0x40u : 0x30u);  // info / warning
+    }
 
     /// <summary>Runs this exe elevated with one argument and waits. Null if the UAC prompt was declined.</summary>
-    public static ModInstaller.Result? RunElevated(params string[] args)
+    static ModInstaller.Result? RunElevated(string arg)
     {
         try
         {
-            var psi = new ProcessStartInfo(Environment.ProcessPath!, string.Join(' ', args))
-            {
-                UseShellExecute = true,
-                Verb = "runas",
-            };
-            using var p = Process.Start(psi);
+            using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, arg) { UseShellExecute = true, Verb = "runas" });
             if (p == null) return null;
             p.WaitForExit();
             return (ModInstaller.Result)p.ExitCode;
@@ -68,8 +100,8 @@ static class Program
         string? game = ModInstaller.FindGameDir();
         var r = ModInstaller.Install(game);
         Log($"{what} hook: game={game ?? "(not found)"} -> {r}");
-        // Without write access to the game folder (e.g. under Program Files), the window finishes the
-        // install with a UAC prompt the next time it opens (Setup opens it right after installing).
+        // Per-user installs can't write a game folder under Program Files: finish on the next normal
+        // start (Setup starts us right after installing), with a UAC prompt. The MSI runs elevated.
         if (r == ModInstaller.Result.AccessDenied) File.WriteAllText(PendingInstallMarker, game);
     }
 
@@ -102,4 +134,7 @@ static class Program
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int MessageBoxW(IntPtr hwnd, string text, string caption, uint type);
 }
