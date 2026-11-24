@@ -19,4 +19,10 @@ void dxgi_on_modules_loaded();
 // Mouse "Cursor" mode: the game's cursor follows the Windows cursor. Called by the module watch.
 void mouse_on_modules_loaded();
 
+// Options menu "Display Mode" list (Graphics page), saved as Options.ini [GraphicsOptions]
+// DisplayMode. install_menu_hooks() hooks the exe's file service (call from DllMain);
+// menu_on_modules_loaded() hooks OptionsScreen.dll once it is loaded.
+bool install_menu_hooks();
+void menu_on_modules_loaded();
+
 }  // namespace lazysf2::hooks

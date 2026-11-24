@@ -23,6 +23,7 @@
 
 #include <atomic>
 
+#include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "log.h"
 
@@ -88,15 +89,6 @@ std::atomic<bool> g_read_hooked{false};
 std::atomic<bool> g_device_hooked{false};
 std::atomic<bool> g_di_hooked{false};
 SRWLOCK g_lock = SRWLOCK_INIT;
-
-void* vtable_slot(void* com_object, int slot) { return (*static_cast<void***>(com_object))[slot]; }
-
-bool create_and_enable(void* target, void* detour, void** original, const char* what) {
-    MH_STATUS s = MH_CreateHook(target, detour, original);
-    if (s == MH_OK) s = MH_EnableHook(target);
-    LOG("mouse: hook %s at %p: %s", what, target, MH_StatusToString(s));
-    return s == MH_OK;
-}
 
 // --- IDirectInputDevice8 (mouse only) -------------------------------------------------------
 
@@ -226,16 +218,6 @@ int __fastcall h_MouseRead(int* state) {
     return o_MouseRead(state);
 }
 
-bool is_expected_build(HMODULE m) {
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(m);
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS32*>(reinterpret_cast<BYTE*>(m) + dos->e_lfanew);
-    if (nt->FileHeader.TimeDateStamp == kDirectInputTimestamp && nt->OptionalHeader.SizeOfImage == kDirectInputImageSize)
-        return true;
-    LOG("mouse: DirectInput.dll build differs (timestamp 0x%08lx, size 0x%lx); Cursor mode disabled",
-        nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
-    return false;
-}
-
 }  // namespace
 
 void mouse_on_modules_loaded() {
@@ -248,8 +230,8 @@ void mouse_on_modules_loaded() {
     if (!g_read_hooked.load()) {
         g_read_hooked = true;
         g_dinput_hooked = true;  // decided together: both hooks or neither
-        if (is_expected_build(game_di)) {
-            void* read = reinterpret_cast<BYTE*>(game_di) + kMouseReadRva;
+        if (is_expected_build(game_di, kDirectInputTimestamp, kDirectInputImageSize, "DirectInput.dll")) {
+            void* read = at_rva(game_di, kMouseReadRva);
             void* create = reinterpret_cast<void*>(GetProcAddress(dinput8, "DirectInput8Create"));
             if (create && create_and_enable(read, reinterpret_cast<void*>(&h_MouseRead),
                                             reinterpret_cast<void**>(&o_MouseRead), "DirectInput.dll+0x51b0 (mouse read)")) {

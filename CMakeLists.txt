@@ -21,10 +21,11 @@ add_library(lazysf2 SHARED
     src/hooks/window_hooks.cpp
     src/hooks/dxgi_hooks.cpp
     src/hooks/mouse_hooks.cpp
+    src/hooks/menu_hooks.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)
 target_compile_features(lazysf2 PRIVATE cxx_std_20)
 target_compile_definitions(lazysf2 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(lazysf2 PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2 PRIVATE src)
-target_link_libraries(lazysf2 PRIVATE minhook::minhook)
+target_link_libraries(lazysf2 PRIVATE minhook::minhook shell32 ole32)

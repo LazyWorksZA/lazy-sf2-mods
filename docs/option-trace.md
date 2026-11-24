@@ -100,10 +100,27 @@ Everything below can be done **from our DLL, without shipping modified ThirdWire
    - `0`, missing or invalid gives stock exclusive fullscreen: no DXGI and window hooks.
    - `1` gives borderless.
 
+## Phase 4 implementation (what was actually built)
+
+The code is in `src/hooks/menu_hooks.cpp`. It differs from the recipe above in four ways:
+
+- **Hook point for menu data: the exe's file service, not MenuSystem.** The file service vtable is at exe `+0x31d0c`:
+  - `+0x10` is `Open(name, mode)` (RVA `+0x94e0`). Mode 0 looks in the mod folder first (`this+0x1c`), then the game folder (`this+0x224`), then the `.cat` files. Mode 1 is loose files only; mode 2 is cats only.
+  - `+0x14` is `Close` (`+0x9590`).
+  - `+0x18` is `Read(handle, buf, bytes)` (`+0x8270`).
+
+  MenuSystem opens `.\OptionsScreen.INI` and reads it whole into a buffer of its size plus `0xf000` characters. We change that first read before MenuSystem's ini parser (`MenuSystem.dll +0x170f0`, then `+0x16d50`) sees it. This also confirms that a loose override in the mod folder would win.
+- **No string-table hook is needed.** `TXT` slot 7 (`TextUSEnglish.dll +0x1f50`, `GetText(file, key)`, `ret 8`) returns the key itself when the key is unknown. So `TextStringID=Display Mode` displays literally. List items are passed straight to `AddItem(text, value)`.
+- **The `AddItem` signature** is `AddItem(const wchar_t* text, int value)`. The third value seen in the decompiled `GetText` call is really `AddItem`'s second argument, which the compiler pushed first.
+- **Layout.** The new row goes directly below Aspect Ratio, at `Position=200,120` and `TextPosition=0,123`, styled like Aspect Ratio. Every Graphics-page item at y≥120 moves down 40, so the lowest row now ends at y≈407 of 460. The control IDs are the next free `MenuItemNNN` numbers, which is 37 and 38 in stock.
+- **Saving.** On Exit, before the stock save, we call `WriteInt(ini, L"GraphicsOptions", L"DisplayMode", v)` (`OptionsScreen.dll +0xa0e0`, a `__thiscall` with the ini object at `+0x26a90` as `this`). The game rewrites `Options.ini` straight away, and the key lands at the end of `[GraphicsOptions]`.
+- **Startup.** `config::display_mode()` reads the key once, through `GetPrivateProfileIntW`, from `Saved Games\ThirdWire\<exe name>\Options.ini`. Only the value 1 means Borderless.
+  - **It must not run under the loader lock.** A first version called it from the module-load watch, and `SHGetKnownFolderPath` deadlocked the game at startup. Now the window and DXGI hooks are always installed, and they check the mode when they're called.
+
+**Checked on the machine** (over RustDesk): the control shows below Aspect Ratio, and the rows below it move neatly. Choosing Borderless saved `DisplayMode=1`, and the next start came up borderless. With the key missing, the game started in stock exclusive fullscreen.
+
 ## Open items
 
-- Check that `OptionsScreen.ini` is probed in the mod folder (Process Monitor while opening Options), and choose between in-memory injection and an override file.
-- Find where the menu system reads `OPTIONSSCREEN.INI` from the cat, which is the hook point for step 1. Candidates are `MenuSystem.dll` and the exe's cat service (`StrikeFighters2.exe` global `+0x49ccc`, vtable `+0x8`).
-- Find the position of a free row in the graphics sub-menu layout, from the `Position` values of the existing controls.
-- Check whether the Options screen writes Options.ini to disk on exit, or whether the exe does it at shutdown.
+- ~~Mod-folder probing, the hook point, a free row, and when Options.ini is written~~: settled in Phase 4 (above).
+- Other languages: the labels are literal English, because they don't go through the string table.
 - Side finding for the network brief: `OPTIONSSCREEN.INI` still has a `NetworkOptionsButton` and an empty `NetworkOptionsSubMenu`, and the strings include `TXT_MENU_NETWORKOPTIONS_INFO` = "Set multiplayer settings."
