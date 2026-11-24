@@ -106,12 +106,16 @@ void __fastcall h_Dtor(void* self, void* edx) {
 
 // --- Snapshot ----------------------------------------------------------------------------------
 
-bool write_file(const std::wstring& path, const void* data, size_t n) {
+bool write_file(const std::wstring& path, const void* data, size_t n, DWORD* error) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
+    if (f == INVALID_HANDLE_VALUE) {
+        *error = GetLastError();
+        return false;
+    }
     DWORD written = 0;
     bool ok = n == 0 || WriteFile(f, data, static_cast<DWORD>(n), &written, nullptr);
     ok = ok && written == n;
+    *error = ok ? 0 : (GetLastError() ? GetLastError() : ERROR_WRITE_FAULT);  // before CloseHandle
     CloseHandle(f);
     return ok;
 }
@@ -201,9 +205,10 @@ void take_snapshot() {
     unsigned aircraft = 0, dumps = 0, errors = 0;
     DWORD last_error = 0;
     auto put = [&](const std::wstring& path, const void* data, size_t n) {
-        if (write_file(path, data, n)) return true;
+        DWORD err = 0;
+        if (write_file(path, data, n, &err)) return true;
         ++errors;
-        last_error = GetLastError();
+        last_error = err;
         return false;
     };
     for (const Copy& c : copies) {
@@ -222,9 +227,11 @@ void take_snapshot() {
         // ptr created_tick vtable offsets name  (the name is last: it may contain spaces)
         uint32_t vtable;
         memcpy(&vtable, c.object.data(), 4);
-        char line[96];
-        sprintf_s(line, "%08x %llu %08x %s ", c.id, c.created, vtable, offsets.empty() ? "-" : offsets.c_str());
+        char line[64];  // fixed-size fields only; the offsets list is appended to the string directly
+        sprintf_s(line, "%08x %llu %08x ", c.id, c.created, vtable);
         index += line;
+        index += offsets.empty() ? "-" : offsets;
+        index += ' ';
         index += to_utf8(c.name);
         index += "\n";
     }
