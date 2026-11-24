@@ -17,6 +17,7 @@
 #include "acmi/acmi_format.h"
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_writer.h"
+#include "hooks/weapon_class.h"
 #include "hooks/aircraft_side.h"
 #include "bot_client.h"
 #include "bot_core.h"
@@ -1614,6 +1615,99 @@ void tacview_tests() {
         expect(o4.rfind("#", 0) == 0 && std::atof(o4.c_str() + 1) > static_cast<double>(core.last_ms()) / 1000.0 + 0.49 &&
                    o4.find("FileType") == std::string::npos,
                "tacview: a seeded core continues the time line");
+    }
+
+    // Weapons: type by class, name, parent, side from the parent, 20 Hz, its own id series, removal.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.header(out, "2026-11-24T20:15:00Z");
+        auto weapon = [](uint64_t seq, uint8_t cls, uint64_t parent, AircraftSide side, const char* name, double t, double x) {
+            TacviewRec r = make_rec(seq, false, side, name, t, x, 0, 500, 0.1f, 0.5f, 0);
+            r.obj_class = cls;
+            r.parent_seq = parent;
+            return r;
+        };
+        // Aircraft seq 1 (the player, friendly) and seq 2 (enemy); weapons have their own seq series.
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.0, 0, 0, 100, 0, 0, 0));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "E", 10.0, 0, 0, 100, 0, 0, 0));
+        core.add(weapon(1, TacviewRec::kMissile, 1, AircraftSide::Unknown, "AIM-9B", 10.0, 10));
+        core.add(weapon(2, TacviewRec::kBomb, 2, AircraftSide::Unknown, "Mk82", 10.0, 20));
+        core.add(weapon(3, TacviewRec::kRocket, 0, AircraftSide::Enemy, "Zuni", 10.0, 30));
+        core.end_frame(10.0, out);
+        const auto ls = lines_of(out);
+        expect(ls.size() == 9, "tacview weapons: header, frame and five objects");
+        expect(ls[6].rfind("1000001,T=", 0) == 0 &&
+                   ls[6].find(",Name=AIM-9B,Type=Weapon+Missile,Coalition=Allies,Color=Blue,Parent=1") != std::string::npos &&
+                   ls[6].find("Pilot") == std::string::npos,
+               "tacview weapons: missile id, name, type, the player parent as 1, coalition from the parent");
+        expect(ls[7].rfind("1000002,T=", 0) == 0 &&
+                   ls[7].find(",Name=Mk82,Type=Weapon+Bomb,Coalition=Enemies,Color=Red,Parent=10002") != std::string::npos,
+               "tacview weapons: bomb type, parent id 0x10000+seq, enemy coalition from the parent");
+        expect(ls[8].find(",Name=Zuni,Type=Weapon+Rocket,Coalition=Enemies,Color=Red") != std::string::npos &&
+                   ls[8].find("Parent") == std::string::npos,
+               "tacview weapons: rocket type, own side, no parent when parent_seq is 0");
+        // An unknown class value is written as a missile (never as an aircraft); an unseen parent still gets an id.
+        {
+            TacviewCore c2{TacviewCoreConfig{}};
+            std::string o2;
+            c2.add(weapon(9, 77, 5, AircraftSide::Unknown, "X", 1.0, 0));
+            c2.end_frame(1.0, o2);
+            expect(o2.find(",Name=X,Type=Weapon+Missile,Parent=10005") != std::string::npos,
+                   "tacview weapons: unknown class is a missile; unseen parent falls back to its aircraft id");
+        }
+
+        // 20 Hz for a weapon, 10 Hz for an aircraft, over 2 s of 100 Hz frames; then the weapon is destroyed.
+        TacviewCore c3{TacviewCoreConfig{}};
+        std::string o3;
+        for (int i = 0; i <= 200; ++i) {
+            const double t = 50.0 + i / 100.0;
+            c3.add(make_rec(1, true, AircraftSide::Friendly, "P", t, 0, 0, 100, 0, 0, 0));
+            if (i < 200) c3.add(weapon(1, TacviewRec::kMissile, 1, AircraftSide::Unknown, "AIM-9B", t, i));
+            c3.end_frame(t, o3);
+        }
+        const size_t w_lines = count_of(o3, "\n1000001,T=");
+        expect(w_lines >= 39 && w_lines <= 41, "tacview weapons: a weapon is written at 20 Hz");
+        const size_t a_lines = count_of(o3, "\n1,T=");
+        expect(a_lines >= 20 && a_lines <= 21, "tacview weapons: the aircraft stays at 10 Hz");
+        expect(count_of(o3, "\n-1000001\n") == 1, "tacview weapons: removal line when the weapon is gone");
+        expect(c3.live_objects() == 1, "tacview weapons: only the aircraft is left");
+        // Weapon seq 1 and aircraft seq 1 are different objects with different ids.
+        expect(count_of(o3, "\n10001,T=") == 0, "tacview weapons: no id collision with aircraft");
+    }
+
+    // Reviewer's two core cases: a NaN sample of an existing object, and end_frame after an empty frame.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 5.0, 0, 0, 100, 0, 0, 0));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "E", 5.0, 0, 0, 100, 0, 0, 0));
+        core.end_frame(5.0, out);
+        std::string o2;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 6.0, 1, 0, 100, 0, 0, 0));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "E", 6.0, std::nan(""), 0, 100, 0, 0, 0));
+        core.end_frame(6.0, o2);
+        expect(o2.find("-") == std::string::npos && core.live_objects() == 2 && core.stats().bad_samples == 1,
+               "tacview: an existing object with a NaN record gets no removal line");
+        std::string o3;
+        core.end_frame(7.0, o3);  // an empty frame: nothing added, so both objects are gone
+        expect(o3.find("-1\n") != std::string::npos && o3.find("-10002\n") != std::string::npos &&
+                   o3.find("#2.000") != std::string::npos && core.live_objects() == 0,
+               "tacview: end_frame with no objects writes the removal lines");
+        std::string o4;
+        core.end_frame(8.0, o4);
+        expect(o4.empty(), "tacview: a second empty frame writes nothing");
+    }
+
+    // Weapon type classification and the ring slot size.
+    {
+        using lazysf2::hooks::WeaponClass;
+        using lazysf2::hooks::classify_weapon_type;
+        expect(classify_weapon_type(0) == WeaponClass::Bomb && classify_weapon_type(1) == WeaponClass::Missile &&
+                   classify_weapon_type(7) == WeaponClass::Missile && classify_weapon_type(2) == WeaponClass::Rocket &&
+                   classify_weapon_type(-5) == WeaponClass::Missile,
+               "weapon class: 0 bomb, 1 and 7 missile, 2 rocket, anything else a missile");
+        expect(sizeof(TacviewRec) == 136, "tacview: ring slot is 136 bytes");
     }
 
     // The writer, into a temp folder: folder creation, the file name, the name clash, content, drop and cap.

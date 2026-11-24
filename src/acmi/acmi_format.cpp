@@ -96,6 +96,10 @@ void append_props(std::string& out, const ObjectProps& p) {
         out += ",Color=";
         append_escaped(out, p.color);
     }
+    if (p.parent && *p.parent) {
+        out += ",Parent=";
+        append_escaped(out, p.parent);
+    }
 }
 
 }  // namespace lazysf2::acmi

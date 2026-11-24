@@ -325,6 +325,7 @@ void aircraft_track_on_modules_loaded() {
 
 void aircraft_track_reevaluate() {
     tacview_recorder_menu_moment();  // game thread, menus: closes the recording of a flight that has ended
+    weapon_track_reevaluate();       // the weapon hooks follow the same rule, at the same moment
     HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
     const auto mu = reinterpret_cast<uintptr_t>(m);
     const bool probe = probe_output_dir() != nullptr;
@@ -355,6 +356,20 @@ void aircraft_track_reevaluate() {
         }
     } while (false);
     ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+unsigned long long aircraft_seq_for_object(const void* obj) {
+    if (!obj) return 0;
+    unsigned long long seq = 0;
+    AcquireSRWLockShared(&g_lock);
+    for (size_t i = 0; i < g_count; ++i) {
+        if (g_table[i].obj == obj) {
+            seq = g_table[i].seq;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return seq;
 }
 
 void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx) {

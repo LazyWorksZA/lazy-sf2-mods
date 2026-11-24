@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "acmi/acmi_format.h"
 
@@ -19,6 +20,7 @@ TacviewCore::TacviewCore(const TacviewCoreConfig& cfg) : cfg_(cfg) {
     lon_scale_ = m.lon_scale;
     lat_scale_ = m.lat_scale;
     min_dt_ = cfg_.max_rate > 0 ? 1.0 / cfg_.max_rate : 0.0;
+    min_dt_weapon_ = cfg_.max_rate_weapon > 0 ? 1.0 / cfg_.max_rate_weapon : 0.0;
     objs_.reserve(64);
 }
 
@@ -35,9 +37,11 @@ void TacviewCore::seed_time(double t0, long long last_ms) {
 
 void TacviewCore::add(const TacviewRec& r) {
     if (r.kind != TacviewRec::kObject) return;
+    // An aircraft and a weapon can have the same seq (each has its own counter): the class is part of the identity.
+    const bool weapon = r.obj_class != TacviewRec::kAircraft;
     State* s = nullptr;
     for (State& o : objs_) {
-        if (o.seq == r.seq) {
+        if (o.seq == r.seq && (o.obj_class != TacviewRec::kAircraft) == weapon) {
             s = &o;
             break;
         }
@@ -49,11 +53,13 @@ void TacviewCore::add(const TacviewRec& r) {
     }
     const bool is_new = s == nullptr;
     if (is_new) {
-        objs_.push_back({r.seq, r.is_player ? kPlayerId : kOtherIdBase + static_cast<uint32_t>(r.seq), -1e300, 0});
+        const uint32_t id = weapon ? kWeaponIdBase + static_cast<uint32_t>(r.seq)
+                                   : (r.is_player ? kPlayerId : kOtherIdBase + static_cast<uint32_t>(r.seq));
+        objs_.push_back({r.seq, r.obj_class, r.side, id, -1e300, 0});
         s = &objs_.back();
     }
     s->seen = frame_no_;  // present in this frame, even if its transform is skipped below
-    if (!is_new && r.t - s->last_t < min_dt_ - 1e-9) {
+    if (!is_new && r.t - s->last_t < (weapon ? min_dt_weapon_ : min_dt_) - 1e-9) {
         ++stats_.rate_limited;
         return;
     }
@@ -68,9 +74,29 @@ void TacviewCore::add(const TacviewRec& r) {
         name[kRecNameChars] = '\0';
         ObjectProps p;
         p.name = name;
-        p.pilot = r.is_player ? "Player" : name;
-        p.type = "Air+FixedWing";
-        switch (static_cast<hooks::AircraftSide>(r.side)) {
+        char parent_id[16] = {};
+        auto side = static_cast<hooks::AircraftSide>(r.side);
+        if (weapon) {
+            p.type = r.obj_class == TacviewRec::kBomb     ? "Weapon+Bomb"
+                     : r.obj_class == TacviewRec::kRocket ? "Weapon+Rocket"
+                                                           : "Weapon+Missile";
+            if (r.parent_seq != 0) {
+                uint32_t pid = kOtherIdBase + static_cast<uint32_t>(r.parent_seq);  // an aircraft we have not seen
+                for (const State& o : objs_) {
+                    if (o.seq == r.parent_seq && o.obj_class == TacviewRec::kAircraft) {
+                        pid = o.id;
+                        if (side == hooks::AircraftSide::Unknown) side = static_cast<hooks::AircraftSide>(o.side);
+                        break;
+                    }
+                }
+                std::snprintf(parent_id, sizeof(parent_id), "%x", pid);
+                p.parent = parent_id;
+            }
+        } else {
+            p.pilot = r.is_player ? "Player" : name;
+            p.type = "Air+FixedWing";
+        }
+        switch (side) {
             case hooks::AircraftSide::Friendly:
                 p.coalition = "Allies";
                 p.color = "Blue";

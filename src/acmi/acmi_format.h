@@ -45,6 +45,7 @@ struct ObjectProps {
     const char* type = nullptr;       // e.g. "Air+FixedWing"
     const char* coalition = nullptr;  // e.g. "Allies"
     const char* color = nullptr;      // e.g. "Blue"
+    const char* parent = nullptr;     // the parent object's id in hex, e.g. "10003" (weapons: the shooter)
 };
 void append_props(std::string& out, const ObjectProps& p);
 
