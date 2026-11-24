@@ -13,6 +13,7 @@
 #include <atomic>
 
 #include "config.h"
+#include "monitors.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "log.h"
@@ -69,6 +70,23 @@ LRESULT CALLBACK game_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return r;
 }
 
+// The monitor chosen in Options (Screen), or false for the stock choice.
+bool chosen_monitor_rect(RECT* r) {
+    const int n = config::display_monitor();
+    if (n <= 0) return false;
+    if (monitors::rect_of(n, r)) return true;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) LOG("window: Screen %d not found (unplugged?); using the stock monitor", n);
+    return false;
+}
+
+bool called_from_exe(const void* ret) {
+    HMODULE m = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              static_cast<LPCWSTR>(ret), &m) &&
+           m == GetModuleHandleW(nullptr);
+}
+
 HWND WINAPI h_CreateWindowExW(DWORD ex_style, LPCWSTR cls, LPCWSTR title, DWORD style, int x, int y, int w,
                               int h, HWND parent, HMENU menu, HINSTANCE inst, LPVOID param) {
     const bool game = is_game_class(cls);
@@ -77,6 +95,16 @@ HWND WINAPI h_CreateWindowExW(DWORD ex_style, LPCWSTR cls, LPCWSTR title, DWORD 
         LOG("window: game CreateWindowExW ex=0x%08lx style=0x%08lx rect=(%d,%d %dx%d)", ex_style, style, x, y, w,
             h);
         if (borderless) ex_style &= ~static_cast<DWORD>(WS_EX_TOPMOST);
+        // Screen choice: the stock full-screen popup covers the monitor holding [Window] WindowPos;
+        // put it on the chosen monitor instead (the exe's later repositioning is handled below).
+        RECT r;
+        if ((style & WS_POPUP) && !(style & WS_CAPTION) && chosen_monitor_rect(&r)) {
+            x = r.left;
+            y = r.top;
+            w = r.right - r.left;
+            h = r.bottom - r.top;
+            LOG("window: placed on Screen %d (%d,%d %dx%d)", config::display_monitor(), x, y, w, h);
+        }
     }
     HWND hwnd = o_CreateWindowExW(ex_style, cls, title, style, x, y, w, h, parent, menu, inst, param);
     if (game && hwnd) {
@@ -91,6 +119,16 @@ HWND WINAPI h_CreateWindowExW(DWORD ex_style, LPCWSTR cls, LPCWSTR title, DWORD 
 }
 
 BOOL WINAPI h_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy, UINT flags) {
+    // The exe re-applies the monitor rect it computed at start-up (+0x5790, +0x5830); keep the window
+    // on the chosen Screen. Calls from DXGI (exclusive-mode sizing) are left alone.
+    RECT r;
+    if (hwnd && hwnd == g_game_hwnd.load() && !(flags & SWP_NOMOVE) && called_from_exe(_ReturnAddress()) &&
+        chosen_monitor_rect(&r)) {
+        x = r.left;
+        y = r.top;
+        cx = r.right - r.left;
+        cy = r.bottom - r.top;
+    }
     if (hwnd && hwnd == g_game_hwnd.load() && after == HWND_TOPMOST && config::borderless()) {
         static std::atomic<int> logged{0};
         if (logged++ < 3) LOG("window: SetWindowPos HWND_TOPMOST -> HWND_NOTOPMOST (%d,%d %dx%d)", x, y, cx, cy);
@@ -138,6 +176,16 @@ bool hook_api(LPCWSTR module, LPCSTR proc, LPVOID detour, LPVOID* original) {
 }  // namespace
 
 HWND game_window() { return g_game_hwnd.load(); }
+
+bool window_chosen_screen(RECT* r) { return chosen_monitor_rect(r); }
+
+bool window_needs_move(RECT* target) {
+    HWND hwnd = g_game_hwnd.load();
+    if (!hwnd || !chosen_monitor_rect(target)) return false;
+    // Compare monitors, not exact rects: in exclusive mode DXGI may leave the window rect slightly
+    // different from the monitor rect, and a needless move would leave and re-enter exclusive mode.
+    return monitors::number_of_window(hwnd) != config::display_monitor();
+}
 
 
 void request_display_mode_apply() {

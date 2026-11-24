@@ -19,10 +19,12 @@
 #include <atomic>
 #include <cstring>
 #include <cwchar>
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "config.h"
+#include "monitors.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "log.h"
@@ -100,7 +102,7 @@ bool untrack(int handle) {
 
 // Our row goes where Detail is now (directly below Aspect Ratio); the top block uses 40-unit rows.
 constexpr int kInsertY = 120;
-constexpr int kRowStep = 40;
+constexpr int kRowStep = 80;  // two new rows (Display Mode, Screen) of 40 each
 
 // Names listed as MenuItemNNN=<name> in the section body [body, end).
 std::vector<std::wstring> item_names(const std::wstring& text, size_t body, size_t end) {
@@ -118,7 +120,8 @@ std::vector<std::wstring> item_names(const std::wstring& text, size_t body, size
     return names;
 }
 
-// Moves every listed item whose Position/TextPosition y is at or below kInsertY down one row.
+// Moves every listed item whose Position/TextPosition y is at or below kInsertY down by kRowStep.
+// (Lowest stock row: y=345 -> 425, +22 high, inside the 460-high page.)
 void shift_rows(std::wstring& text, const std::vector<std::wstring>& names) {
     int moved = 0;
     for (const std::wstring& name : names) {
@@ -173,11 +176,14 @@ std::wstring splice(const std::wstring& text, int& list_id) {
     if (max_id <= 0 || max_id > 997) return {};
     list_id = max_id + 1;
 
-    wchar_t items[128];
-    swprintf_s(items, L"MenuItem%03d=DisplayModeList\r\nMenuItem%03d=DisplayModeText\r\n", list_id, list_id + 1);
+    wchar_t items[256];
+    swprintf_s(items,
+               L"MenuItem%03d=DisplayModeList\r\nMenuItem%03d=DisplayModeText\r\n"
+               L"MenuItem%03d=ScreenList\r\nMenuItem%03d=ScreenText\r\n",
+               list_id, list_id + 1, list_id + 2, list_id + 3);
 
-    // A new row in the top block, directly below Aspect Ratio (y=80), styled like Aspect Ratio.
-    // Everything on the Graphics page at or below that row moves down by one row (see shift_rows).
+    // Two new rows in the top block, directly below Aspect Ratio (y=80), styled like Aspect Ratio.
+    // Everything on the Graphics page at or below them moves down two rows (see shift_rows).
     constexpr wchar_t kSections[] =
         L"\r\n"
         L"[DisplayModeList]\r\n"
@@ -196,7 +202,23 @@ std::wstring splice(const std::wstring& text, int& list_id) {
         L"MenuItemType=TEXT\r\n"
         L"TextSetting=MediumTextLeft\r\n"
         L"TextStringID=Display Mode\r\n"
-        L"TextPosition=0,123\r\n";
+        L"TextPosition=0,123\r\n"
+        L"\r\n"
+        L"[ScreenList]\r\n"
+        L"MenuItemType=LIST\r\n"
+        L"Position=200,160\r\n"
+        L"Width=240\r\n"
+        L"Height=22\r\n"
+        L"ListFieldSetting=MediumListField\r\n"
+        L"DropDownListSize=10\r\n"
+        L"InfoTextSetting=InfoTextSetting\r\n"
+        L"InfoTextStringID=TXT_LAZY_SCREEN_INFO\r\n"
+        L"\r\n"
+        L"[ScreenText]\r\n"
+        L"MenuItemType=TEXT\r\n"
+        L"TextSetting=MediumTextLeft\r\n"
+        L"TextStringID=Screen\r\n"
+        L"TextPosition=0,163\r\n";
 
     std::wstring out = text.substr(0, end);
     if (!out.empty() && out.back() != L'\n') out += L"\r\n";
@@ -281,15 +303,47 @@ Method_t o_Exit = nullptr;
 
 void* options_ini() { return *static_cast<void**>(at_rva(g_opts, kIniGlobalRva)); }
 
-// Our list control on the current Graphics page, or nullptr.
-void* our_list(void* self) {
+// Screen list: one entry per monitor, as "Screen N (WxH)". Labels must outlive the list control,
+// so they are kept here and rebuilt each time the page opens.
+std::vector<int> g_screen_numbers;      // list index -> \\.\DISPLAYn number
+std::vector<std::wstring> g_screen_labels;
+int g_screen_selected = 0;              // list index
+
+// A list control on the current Graphics page (offset 0 = Display Mode, 2 = Screen), or nullptr.
+void* our_list(void* self, int offset = 0) {
     const int id = g_list_id.load();
     void* menu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);
     if (!id || !menu) return nullptr;
     void* ctrl = nullptr;
     using GetItem_t = int(__fastcall*)(void*, void*, int, int, void**);
-    reinterpret_cast<GetItem_t>(vtable_slot(menu, kMenuGetItem))(menu, nullptr, id, kItemTypeList, &ctrl);
+    reinterpret_cast<GetItem_t>(vtable_slot(menu, kMenuGetItem))(menu, nullptr, id + offset, kItemTypeList, &ctrl);
     return ctrl;
+}
+constexpr int kScreenOffset = 2;
+
+using AddItem_t = void(__fastcall*)(void*, void*, const wchar_t*, int);
+using SetSel_t = void(__fastcall*)(void*, void*, int);
+using GetSel_t = int(__fastcall*)(void*, void*);
+
+void fill_screen_list(void* list) {
+    g_screen_numbers.clear();
+    g_screen_labels.clear();
+    for (const monitors::Monitor& m : monitors::list()) {
+        wchar_t label[64];
+        swprintf_s(label, L"Screen %d (%ldx%ld)", m.number, m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
+        g_screen_numbers.push_back(m.number);
+        g_screen_labels.emplace_back(label);
+    }
+    auto add = reinterpret_cast<AddItem_t>(vtable_slot(list, kListAddItem));
+    for (size_t i = 0; i < g_screen_labels.size(); ++i) add(list, nullptr, g_screen_labels[i].c_str(), static_cast<int>(i));
+
+    // Select the configured Screen, else the one the game is on now.
+    int want = config::display_monitor();
+    if (want <= 0 || std::find(g_screen_numbers.begin(), g_screen_numbers.end(), want) == g_screen_numbers.end()) {
+        want = monitors::number_of_window(game_window());
+    }
+    auto it = std::find(g_screen_numbers.begin(), g_screen_numbers.end(), want);
+    g_screen_selected = it == g_screen_numbers.end() ? 0 : static_cast<int>(it - g_screen_numbers.begin());
 }
 
 void __fastcall h_Init(void* self, void* edx, int* a, int* b) {
@@ -299,7 +353,6 @@ void __fastcall h_Init(void* self, void* edx, int* a, int* b) {
         if (g_list_id.load()) LOG("menu: Display Mode list control %d not found", g_list_id.load());
         return;
     }
-    using AddItem_t = void(__fastcall*)(void*, void*, const wchar_t*, int);
     auto add = reinterpret_cast<AddItem_t>(vtable_slot(list, kListAddItem));
     add(list, nullptr, L"Fullscreen", static_cast<int>(config::DisplayMode::Fullscreen));
     add(list, nullptr, L"Borderless", static_cast<int>(config::DisplayMode::Borderless));
@@ -307,38 +360,69 @@ void __fastcall h_Init(void* self, void* edx, int* a, int* b) {
     void* ini = options_ini();
     const int v = ini ? reinterpret_cast<IniReadInt_t>(at_rva(g_opts, kIniReadIntRva))(ini, nullptr, kSection, kKey, 0) : 0;
     g_selected = (v == static_cast<int>(config::DisplayMode::Borderless)) ? v : 0;
-    LOG("menu: Graphics page opened, DisplayMode=%d", g_selected);
+
+    if (void* screens = our_list(self, kScreenOffset)) fill_screen_list(screens);
+    LOG("menu: Graphics page opened, DisplayMode=%d, Screen=%d (%zu screens)", g_selected,
+        g_screen_numbers.empty() ? 0 : g_screen_numbers[g_screen_selected], g_screen_numbers.size());
 }
 
 void __fastcall h_Refresh(void* self, void* edx) {
     o_Refresh(self, edx);
-    if (void* list = our_list(self)) {
-        using SetSel_t = void(__fastcall*)(void*, void*, int);
-        reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_selected);
+    if (void* list = our_list(self)) reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_selected);
+    if (void* list = our_list(self, kScreenOffset)) {
+        reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_screen_selected);
     }
 }
 
 void __fastcall h_Changed(void* self, void* edx) {
     o_Changed(self, edx);
     if (void* list = our_list(self)) {
-        using GetSel_t = int(__fastcall*)(void*, void*);
         const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
         if (sel == 0 || sel == 1) g_selected = sel;
     }
+    if (void* list = our_list(self, kScreenOffset)) {
+        const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
+        if (sel >= 0 && sel < static_cast<int>(g_screen_numbers.size())) g_screen_selected = sel;
+    }
 }
+
+// The page's own resolution fields, saved by the stock Save (OptionsScreen.dll +0x5460) as
+// [GraphicsOptions] DisplayWidth/DisplayHeight. The exe reads them only at start-up (+0x3af0 from
+// init_system), so a resolution change, stock or ours, applies after a restart.
+constexpr int kPageDisplayWidth = 0x10;
+constexpr int kPageDisplayHeight = 0x14;
 
 void __fastcall h_Exit(void* self, void* edx) {
     // Write before the stock Exit (which saves the stock keys and tears the page down).
     if (g_list_id.load()) {
+        const int screen = g_screen_numbers.empty() ? 0 : g_screen_numbers[g_screen_selected];
+        // New Screen: match the game resolution to it (sharp picture from the next start; until then
+        // DXGI scales the current resolution to the new monitor).
+        RECT r;
+        if (screen > 0 && screen != monitors::number_of_window(game_window()) && monitors::rect_of(screen, &r)) {
+            auto* page = static_cast<BYTE*>(self);
+            *reinterpret_cast<int*>(page + kPageDisplayWidth) = r.right - r.left;
+            *reinterpret_cast<int*>(page + kPageDisplayHeight) = r.bottom - r.top;
+            LOG("menu: game resolution set to %ldx%ld for Screen %d (applies after a restart)", r.right - r.left,
+                r.bottom - r.top, screen);
+        }
         if (void* ini = options_ini()) {
-            reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva))(ini, nullptr, kSection, kKey, g_selected);
-            LOG("menu: saved [GraphicsOptions] DisplayMode=%d", g_selected);
+            auto write = reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva));
+            write(ini, nullptr, kSection, kKey, g_selected);
+            if (screen > 0) write(ini, nullptr, kSection, L"DisplayMonitor", screen);
+            LOG("menu: saved [GraphicsOptions] DisplayMode=%d DisplayMonitor=%d", g_selected, screen);
         }
         const auto chosen = static_cast<config::DisplayMode>(g_selected);
+        bool changed = false;
         if (chosen != config::display_mode()) {
             config::set_display_mode(chosen);
-            request_display_mode_apply();  // switched on the window thread once this page has closed
+            changed = true;
         }
+        if (screen > 0 && screen != config::display_monitor()) {
+            config::set_display_monitor(screen);
+            changed = true;
+        }
+        if (changed) request_display_mode_apply();  // applied on the window thread once this page has closed
     }
     o_Exit(self, edx);
 }
@@ -354,7 +438,10 @@ CopyText_t o_CopyText = nullptr;
 std::atomic<bool> g_text_done{false};
 
 const wchar_t* our_text(const wchar_t* key) {
-    return (key && wcscmp(key, kHintKey) == 0) ? kHintText : nullptr;
+    if (!key) return nullptr;
+    if (wcscmp(key, kHintKey) == 0) return kHintText;
+    if (wcscmp(key, L"TXT_LAZY_SCREEN_INFO") == 0) return L"Select the monitor to display the game on.";
+    return nullptr;
 }
 
 const wchar_t* __fastcall h_GetText(void* self, void* edx, const wchar_t* file, const wchar_t* key) {
