@@ -43,6 +43,10 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 - **MSVC `C1083 Cannot open compiler generated file: ''`** is the long-path limit. Keep build directories short.
 - **Runtime log:** `lazysf2.log` in the game folder. Use it to check that hooks were installed and what they did.
 - **`LAZYSF2_DISABLE=1`** runs the mod as a pure pass-through proxy.
+- **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the C# manager (`installer/LazySF2.Manager`, framework-dependent .NET 10), and runs `vpk pack`.
+  - It needs the .NET 10 SDK and `vpk`, installed with `dotnet tool install -g vpk --version 1.2.161`. Keep that version in step with the `Velopack` package version in the csproj.
+  - The output in `installer\Releases` is ignored by git.
+  - The manager's install, update and uninstall hooks use the same manifest rules as `scripts/install.ps1`. Hooks have 15–30 s and no UI: when the game folder needs admin rights, the window finishes the install with a UAC prompt, and uninstall falls back to an elevated `cmd /c del`.
 
 ## Reverse-engineering tools
 

@@ -4,7 +4,8 @@ namespace lazysf2::config {
 
 enum class MouseMode {
     Stock,   // game reads relative DirectInput deltas in exclusive mode (unchanged)
-    Cursor,  // game cursor follows the Windows cursor (for remote-control tools such as RustDesk)
+    Cursor,  // game pointer sits on the Windows cursor (stock builds its own from raw deltas, which
+             // never quite matches and wanders over remote-control tools)
 };
 
 // Values of Options.ini [GraphicsOptions] DisplayMode, as written by the Options menu.

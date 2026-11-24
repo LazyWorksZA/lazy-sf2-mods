@@ -6,7 +6,7 @@
 .EXAMPLE
   .\scripts\install.ps1                       # game folder from the registry, Release build
   .\scripts\install.ps1 -GameDir 'D:\SF2' -Config Debug
-  .\scripts\install.ps1 -MouseMode Cursor     # game cursor follows the Windows cursor (remote control)
+  .\scripts\install.ps1 -MouseMode Cursor     # game pointer matches the Windows cursor (recommended)
 #>
 param(
     [string]$GameDir,

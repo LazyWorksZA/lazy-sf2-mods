@@ -1,65 +1,67 @@
 # Install and uninstall
 
-This is a borderless fullscreen mod for Strike Fighters 2 (July 2013 patch). The project is not affiliated with ThirdWire, and you need your own copy of the game.
+LazySF2 is a mod for Strike Fighters 2 (July 2013 patch). The project is not affiliated with ThirdWire, and you need your own copy of the game.
 
-> Status: **Phase 4.** You choose the display mode in the game, under **Options → Graphics → Display Mode** (Fullscreen or Borderless). The change **applies as soon as you leave the Graphics page**. It's saved as `DisplayMode` in `[GraphicsOptions]` of `Saved Games\ThirdWire\StrikeFighters2\Options.ini`, and is used again at the next start. If the key is missing or invalid, the game runs in stock exclusive fullscreen.
+## Players: the installer
 
-## What it adds
+1. Run **`LazySF2-win-Setup.exe`**. It installs the small **LazySF2** manager for your Windows account. If the .NET 10 Desktop Runtime is missing, Setup installs it.
+2. Setup finds Strike Fighters 2 through its installer's registry entry and copies the mod into the game folder.
+   - If the game folder needs administrator rights (for example under `C:\Program Files (x86)`), the manager window asks for them once.
+   - If a different `winmm.dll` is already in the game folder, nothing is overwritten.
+3. The **LazySF2** window opens. You can reopen it from the Start menu at any time. It shows:
+   - the game folder and whether the mod is installed, with **Repair** and **Remove from game** buttons;
+   - the **Mouse pointer** choice (see below).
 
-These files go in the game folder, next to `StrikeFighters2.exe`:
+**Uninstall** LazySF2 from Windows' *Installed apps*. That removes exactly the files the mod added to the game folder, and asks for administrator rights if needed.
+
+## In the game
+
+Under **Options → Graphics** there are two new rows below Aspect Ratio:
+
+| Setting | Values | Applies |
+|---|---|---|
+| **Display Mode** | **Fullscreen**: stock exclusive fullscreen. **Borderless**: a window covering the screen, so Alt-Tab is instant and other monitors stay usable. | Immediately when you leave the page |
+| **Screen** | "Screen N (W×H)", numbered as in Windows' Settings → Display | The game moves immediately. Its resolution is set to that screen's native size, which takes effect at the next start. |
+
+Both are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini` (`DisplayMode`, `DisplayMonitor`). If they're missing or invalid, the game behaves as stock: exclusive fullscreen on the usual screen.
+
+## Mouse pointer
+
+The game normally doesn't use the Windows mouse pointer. It builds its own pointer from raw mouse movement (DirectInput), with its own speed and no Windows acceleration. So it never quite matches where Windows' pointer is and can feel off, and over remote-control tools (RustDesk, Parsec, ...) it wanders by itself.
+
+| Choice | What happens |
+|---|---|
+| **Match the Windows cursor** (recommended, default for new installs) | The game's pointer sits exactly where Windows' pointer is, at Windows' speed and acceleration. |
+| **Stock** | The game's own pointer, as without the mod. |
+
+The choice is stored in the game folder as `lazysf2.ini` (`[Mouse] Mode=Cursor` or `Stock`). Without that file, the mod uses Stock.
+
+## What the mod adds to the game folder
 
 | File | Purpose |
 |---|---|
 | `winmm.dll` | The mod. It passes all calls through to the real Windows `winmm.dll`. |
-| `lazysf2.ini` | Optional settings, only written if you choose a mouse mode. |
-| `lazysf2.log` | A log written on each start. |
+| `lazysf2.ini` | The mouse pointer setting. |
+| `lazysf2.log` | A log, rewritten each time the game starts. |
 | `lazysf2.manifest.txt` | The list of files to remove when uninstalling. |
 
-The mod changes no game files and no registry keys. The Options menu stores your Display Mode choice in your own `Options.ini`.
-
-## Build
-
-You need Visual Studio 2026 (or 2022) with the **Desktop development with C++** workload and its x86 toolset.
-
-```powershell
-.\build.ps1          # produces build\Release\winmm.dll
-```
-
-## Install
-
-```powershell
-.\scripts\install.ps1                   # reads the game folder from the registry
-.\scripts\install.ps1 -GameDir 'D:\SF2' # or pass it yourself
-```
-
-The script refuses to overwrite a `winmm.dll` that it did not install.
-
-### Playing over remote control (RustDesk, Parsec, ...)
-
-Remote-control tools send absolute mouse positions, which the game's DirectInput mouse misreads, so the menu cursor drifts. That happens without the mod too. Cursor mode makes the game's cursor follow the Windows cursor instead:
-
-```powershell
-.\scripts\install.ps1 -MouseMode Cursor   # writes lazysf2.ini: [Mouse] Mode=Cursor
-.\scripts\install.ps1 -MouseMode Stock    # back to stock mouse handling
-```
+No game files and no registry keys are changed. Removing these four files returns the game to stock. A leftover `DisplayMode` or `DisplayMonitor` key in `Options.ini` does nothing without the mod.
 
 ## How to tell it's working
 
-- **Options → Graphics** has a **Display Mode** list below Aspect Ratio.
-- With **Borderless** chosen (live, or at the next start):
-  - the game starts on the desktop and covers the monitor, without a screen-mode switch;
-  - Alt-Tab switches to other windows instantly, and back again;
-  - `lazysf2.log` contains `DisplayMode=1 -> Borderless` and `SetFullscreenState(TRUE) suppressed (borderless)`.
-- With **Fullscreen**, the game behaves exactly like stock.
+- **Options → Graphics** shows **Display Mode** and **Screen** below Aspect Ratio.
+- In **Borderless**, the game covers the screen without a mode switch, Alt-Tab is instant, and the game stays visible behind other windows.
+- `lazysf2.log` in the game folder contains lines like `DisplayMode=1 -> Borderless` and `placed on Screen 1`.
 
-The mod's only change to `Options.ini` is the `DisplayMode` key, which the game itself writes when you leave the Graphics page. A leftover `DisplayMode` key does nothing once the mod is uninstalled.
+## Developers
 
-To compare with stock behaviour without uninstalling, start the game with the environment variable `LAZYSF2_DISABLE=1`. The DLL then passes calls through and installs no hooks.
-
-## Uninstall
+Build and install from the repository without the installer:
 
 ```powershell
-.\scripts\uninstall.ps1
+.\build.ps1                                # x86 build: build\Release\winmm.dll
+.\scripts\install.ps1 -MouseMode Cursor    # copy into the game folder; Cursor or Stock (writes lazysf2.ini)
+.\scripts\uninstall.ps1                    # remove exactly the files listed in lazysf2.manifest.txt
+.\installer\build-installer.ps1 -Version 0.1.0   # Velopack installer -> installer\Releases\
 ```
 
-This removes exactly the files listed in `lazysf2.manifest.txt`, which returns the game folder to stock. To uninstall by hand, delete the files listed above.
+Start the game with the environment variable `LAZYSF2_DISABLE=1` to run the DLL as a pure pass-through, for comparing with stock behaviour.
