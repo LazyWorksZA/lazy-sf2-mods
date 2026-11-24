@@ -13,11 +13,14 @@ find_package(minhook CONFIG REQUIRED)
 # The mod is loaded as a winmm.dll proxy placed next to StrikeFighters2.exe.
 add_library(lazysf2 SHARED
     src/dllmain.cpp
+    src/config.cpp
     src/log.cpp
     src/proxy/proxy.cpp
     src/proxy/winmm.def
+    src/hooks/module_watch.cpp
     src/hooks/window_hooks.cpp
     src/hooks/dxgi_hooks.cpp
+    src/hooks/mouse_hooks.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)
 target_compile_features(lazysf2 PRIVATE cxx_std_20)
