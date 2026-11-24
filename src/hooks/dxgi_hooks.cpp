@@ -18,6 +18,8 @@
 
 #include <MinHook.h>
 
+#include <intrin.h>
+
 #include <atomic>
 
 #include "config.h"
@@ -69,12 +71,18 @@ void set_alt_enter_handling(bool borderless) {
 // --- IDXGISwapChain ---------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
+    char caller[96];
+    describe_address(_ReturnAddress(), caller, sizeof(caller));
     if (self == g_swapchain) g_game_wants_fullscreen = fullscreen != FALSE;
     if (fullscreen && config::borderless()) {
-        LOG("dxgi: SetFullscreenState(TRUE) suppressed (borderless)");
+        LOG("dxgi: SetFullscreenState(TRUE) from %s suppressed (borderless)", caller);
         return S_OK;
     }
-    return o_SetFullscreenState(self, fullscreen, target);
+    HRESULT hr = o_SetFullscreenState(self, fullscreen, target);
+    BOOL now = FALSE;
+    self->GetFullscreenState(&now, nullptr);
+    LOG("dxgi: SetFullscreenState(%d) from %s -> 0x%08lx (exclusive now %d)", fullscreen, caller, hr, now);
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* mode) {
@@ -152,6 +160,12 @@ HRESULT WINAPI h_CreateDXGIFactory(REFIID riid, void** out) {
 }
 
 }  // namespace
+
+bool dxgi_is_exclusive() {
+    BOOL exclusive = FALSE;
+    if (g_swapchain) g_swapchain->GetFullscreenState(&exclusive, nullptr);
+    return exclusive != FALSE;
+}
 
 // --- Live switching -----------------------------------------------------------------------------
 
