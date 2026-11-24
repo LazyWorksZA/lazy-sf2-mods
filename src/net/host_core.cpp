@@ -214,6 +214,8 @@ void HostCore::run() {
     port_.store(host->address.port, std::memory_order_release);
     state_.store(State::Running, std::memory_order_release);
     say("net: host on udp %s:%u", addr_, static_cast<unsigned>(host->address.port));
+    if (std::strncmp(addr_, "127.", 4) != 0)
+        say("net: WARNING host listening on %s - reachable from the network", addr_);
 
     ENetPeer* peers[kMaxClients] = {};
     bool hello_seen[kMaxClients] = {};
