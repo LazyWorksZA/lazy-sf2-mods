@@ -171,7 +171,7 @@ void do_spawn() {
     memcpy(&service, static_cast<const char*>(at_rva(am, kObjServiceRva)), sizeof(service));
     memcpy(&class_id, at_rva(am, kClassIdRva), sizeof(class_id));
     memcpy(&group_id, at_rva(am, kGroupIdRva), sizeof(group_id));
-    if (!service || class_id == 0 || class_id == -1 || group_id == 0 || group_id == -1) {
+    if (!service || class_id < 0 || group_id < 0) {  // ids are indices: 0 is valid, -1 means unset
         LOG("spawn: object service %p, class %d, group %d not ready; not spawning", service, class_id, group_id);
         g_missile_state.store(kIdle);
         return;
