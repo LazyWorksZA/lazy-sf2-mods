@@ -14,7 +14,11 @@
   .\tools\test\sf2drive.ps1 shot -Out G:\SF2-recon\shot.png
 #>
 param(
-    [ValidateSet('start', 'focus', 'shot', 'away', 'stop')] [string]$Action,
+    [ValidateSet('start', 'focus', 'shot', 'away', 'stop', 'click', 'key', 'fly', 'run')] [string]$Action,
+    [double]$X = 0, [double]$Y = 0,
+    [string]$Key = '',
+    [int]$Seconds = 90,
+    [string]$Shots = '',
     [string]$Out = '',
     [string]$GameDir = (Split-Path (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\ThirdWire\Strike Fighters 2').Path),
     [string]$DxvkLogs = ''
@@ -32,6 +36,9 @@ public static class D {
   [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string t);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint type);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   // A synthetic Alt press lets this (background) process pass the foreground lock.
   public static bool Focus(IntPtr h) {
@@ -57,6 +64,27 @@ function Get-GameWindow {
     $p.Refresh(); return $p.MainWindowHandle
 }
 
+$scan = @{ esc = 0x01; enter = 0x1C; space = 0x39; tab = 0x0F; up = 0x48; down = 0x50; left = 0x4B; right = 0x4D
+           f1 = 0x3B; f2 = 0x3C; f3 = 0x3D; f4 = 0x3E; f5 = 0x3F; f6 = 0x40; f7 = 0x41; f8 = 0x42; f9 = 0x43; f10 = 0x44
+           y = 0x15; n = 0x31; w = 0x11; a = 0x1E; s = 0x1F; d = 0x20; b = 0x30; p = 0x19; backspace = 0x0E }
+function Send-Key([string]$name) {
+    $k = $name.ToLower()
+    if (-not $scan.ContainsKey($k)) { throw "unknown key '$name'" }
+    $c = [byte]$scan[$k]
+    # KEYEVENTF_SCANCODE (8), plus KEYEVENTF_EXTENDEDKEY (1) for the arrow keys.
+    $ext = if ($k -in 'up', 'down', 'left', 'right') { 1 } else { 0 }
+    [D]::keybd_event(0, $c, (8 -bor $ext), [UIntPtr]::Zero); Start-Sleep -Milliseconds 80
+    [D]::keybd_event(0, $c, (8 -bor $ext -bor 2), [UIntPtr]::Zero); Start-Sleep -Milliseconds 120
+}
+function Click-Virtual([double]$vx, [double]$vy) {
+    $r = New-Object D+RECT; [void][D]::GetWindowRect((Get-GameWindow), [ref]$r)
+    $sx = [int]($r.L + $vx * ($r.R - $r.L) / 1024); $sy = [int]($r.T + $vy * ($r.B - $r.T) / 768)
+    [void][D]::SetCursorPos($sx - 6, $sy - 4); Start-Sleep -Milliseconds 120   # a small move first, so the game sees motion
+    [void][D]::SetCursorPos($sx, $sy); Start-Sleep -Milliseconds 150
+    [D]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80
+    [D]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 200
+}
+
 switch ($Action) {
     'start' {
         if ($DxvkLogs) {
@@ -79,5 +107,7 @@ switch ($Action) {
         $scr = [System.Windows.Forms.Screen]::FromHandle($h).Bounds
         Save-Shot $scr.X $scr.Y $scr.Width $scr.Height $Out; "shot: $Out window=($($r.L),$($r.T))-($($r.R),$($r.B)) screen=$scr"
     }
+    'click' { Click-Virtual $X $Y; "click: virtual ($X,$Y)" }
+    'key' { Send-Key $Key; "key: $Key" }
     'stop' { Get-Process StrikeFighters2 -ErrorAction SilentlyContinue | ForEach-Object { [void]$_.CloseMainWindow(); if (-not $_.WaitForExit(15000)) { Stop-Process -Id $_.Id -Force; 'force-stopped' } else { 'stopped' } } }
 }
