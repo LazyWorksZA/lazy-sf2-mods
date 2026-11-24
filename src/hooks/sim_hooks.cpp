@@ -1,5 +1,6 @@
-// Simulation step hook and game clock (developer tool, part of the object probe; see probe_hooks.cpp).
-// Inert unless the probe is on: the hook is only installed from probe_on_modules_loaded().
+// Simulation step hook and game clock. Part of the aircraft tracker (aircraft_track.cpp), which installs and
+// removes the hook (sim_install / sim_remove) only while a client needs tracking: the probe, or the Tacview
+// Recording setting. Nothing is hooked otherwise.
 //
 // Hooks the aircraft's own Update(dt) (AircraftObject.dll, main vtable slot 9). The game calls it once
 // per simulation step for every aircraft, on its main thread, and not while the game is paused. After
@@ -13,11 +14,11 @@
 // All state below is touched from the game's main thread only (the hook), except the callback slots and
 // the run-active flag, which are atomics.
 //
-// Finding the player: the probe marks it (LiveAircraft::is_player: the first aircraft constructed since the
+// Finding the player: the tracker marks it (LiveAircraft::is_player: the first aircraft constructed since the
 // table was last empty). The hook caches its pointer and construction seq. When the player is destroyed it is
 // unknown (sim_player_known() is false) until the table empties and a new one is constructed; the hook never falls
 // back to another aircraft. A step of the cached player costs one pointer compare, plus one tick read;
-// once per second, and whenever the probe's destroy generation changed, it re-checks the cache under the
+// once per second, and whenever the tracker's destroy generation changed, it re-checks the cache under the
 // probe lock (this catches an address reused by another aircraft). The step of another aircraft takes the lock only
 // when no player is cached and none was lost (or the destroy generation changed), when the destroy generation changed
 // while a player is cached, or when the cached player has not stepped for 250 ms; and then at most once per 50 ms.
@@ -34,9 +35,8 @@ namespace lazysf2::hooks {
 
 namespace {
 
-constexpr DWORD kAircraftTimestamp = 0x51d220bd, kAircraftImageSize = 0xc2000;
 constexpr DWORD kUpdateRva = 0x466c0;  // void __thiscall Update(void* aircraft, float dt)  (ret 4)
-constexpr int kMaxCallbacks = 4;
+constexpr int kMaxCallbacks = 8;
 constexpr unsigned kDtStatSteps = 300;
 constexpr ULONGLONG kRevalidateMs = 1000;  // re-check the cached player under the lock this often
 constexpr ULONGLONG kStaleMs = 250;        // no player step for this long while others update: cache suspect
@@ -45,7 +45,6 @@ constexpr ULONGLONG kRetryMs = 50;         // minimum gap between lock-taking re
 using Update_t = void(__fastcall*)(void* self, void* edx, float dt);
 Update_t o_Update = nullptr;
 
-std::atomic<bool> g_hook_tried{false};
 std::atomic<SimStepCallback> g_callbacks[kMaxCallbacks];
 std::atomic<int> g_callback_count{0};
 std::atomic<bool> g_run_active{false};
@@ -103,7 +102,7 @@ void apply_player(const PlayerCtx& c) {
         }
         g_player = c.obj;
         g_player_seq = c.seq;
-        g_player_lost = false;  // the probe logs "player chosen"
+        g_player_lost = false;  // the tracker logs "player chosen"
         return;
     }
     const bool had = g_player_seq != 0;
@@ -116,7 +115,7 @@ void apply_player(const PlayerCtx& c) {
     }
 }
 
-// Slow path: the cache is empty or suspect. Takes the probe lock, so callers throttle it by tick.
+// Slow path: the cache is empty or suspect. Takes the table lock, so callers throttle it by tick.
 void refresh_player(ULONGLONG now) {
     g_last_validate = now;
     const uint32_t gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
@@ -212,15 +211,16 @@ bool sim_register_step_callback(SimStepCallback cb) {
 
 void sim_set_run_active(bool active) { g_run_active.store(active, std::memory_order_relaxed); }
 
-void sim_on_modules_loaded() {
-    if (g_hook_tried.load()) return;
-    HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
-    if (!m || g_hook_tried.exchange(true)) return;
-    if (!is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll")) return;
-    if (create_and_enable(at_rva(m, kUpdateRva), reinterpret_cast<void*>(&h_Update),
-                          reinterpret_cast<void**>(&o_Update), "AircraftObject Update")) {
-        LOG("sim: game clock and step callbacks on (aircraft Update hook)");
-    }
+bool sim_install(HMODULE aircraft_dll) {
+    const bool ok = create_and_enable(at_rva(aircraft_dll, kUpdateRva), reinterpret_cast<void*>(&h_Update),
+                                      reinterpret_cast<void**>(&o_Update), "AircraftObject Update");
+    if (ok) LOG("sim: game clock and step callbacks on (aircraft Update hook)");
+    return ok;
+}
+
+void sim_remove(HMODULE aircraft_dll) {
+    MH_STATUS s = MH_RemoveHook(at_rva(aircraft_dll, kUpdateRva));
+    (void)s;  // MH_ERROR_NOT_CREATED is expected
 }
 
 }  // namespace lazysf2::hooks

@@ -17,11 +17,15 @@ LoadLibraryExW_t o_LoadLibraryExW = nullptr;
 
 // May run under the loader lock (DLLs loading other DLLs during start-up), so handlers must not
 // call into the shell, COM or anything else that can block. In particular they must not call
-// config::display_mode(); hooks that depend on it check it when they are called instead.
+// config::display_mode(); hooks that depend on it check it when they are called instead. The aircraft tracker only
+// peeks at the Tacview Recording setting (config::tacview_recording_peek), which never loads anything.
 void notify() {
     dxgi_on_modules_loaded();  // behaves as stock unless the display mode is Borderless
     input_on_modules_loaded();  // keyboard Windows key always; mouse only in Cursor mode
     menu_on_modules_loaded();  // the Display Mode option is offered in every mode
+    aircraft_track_on_modules_loaded();  // hooks only if the probe or Tacview Recording needs it
+    weapon_track_on_modules_loaded();  // MissileObject.dll: same rule as the aircraft tracker
+    tacview_recorder_on_modules_loaded();  // registers a step callback once; nothing runs unless tracking is on
     probe_on_modules_loaded();  // developer probe; does nothing unless LAZYSF2_PROBE_DIR is set
 }
 

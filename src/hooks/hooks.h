@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "hooks/aircraft_side.h"
+
 namespace lazysf2::hooks {
 
 // Game window: strip WS_EX_TOPMOST at creation and keep it non-topmost afterwards (Borderless).
@@ -44,26 +46,89 @@ bool install_menu_hooks();
 void menu_on_modules_loaded();
 
 // Object probe (developer tool): only active when LAZYSF2_PROBE_DIR is set. install_probe_hooks()
-// reads it once (call from DllMain); probe_on_modules_loaded() hooks AircraftObject.dll when it loads.
+// reads it once (call from DllMain); probe_on_modules_loaded() starts the developer features (recorder, replay,
+// host, hotkeys) once the aircraft tracker is active.
 void install_probe_hooks();
 void probe_on_modules_loaded();
 
-// One live aircraft object, as seen by probe_with_aircraft(). name points into the probe table and is valid
+// Aircraft tracker (src/hooks/aircraft_track.cpp), the production base of the probe and of the Tacview recorder.
+// aircraft_track_on_modules_loaded() runs on every module load. Each time a (new) AircraftObject.dll image
+// appears it installs the constructor, destructor and Update hooks, but only if a client needs them: the probe is
+// on, or the Tacview Recording setting is on (config peek; it never loads anything). When neither applies nothing is
+// hooked. It also re-hooks after the DLL is unloaded and loaded again.
+void aircraft_track_on_modules_loaded();
+// Called on the game thread when an Options page is left (menus, no live aircraft): installs the hooks if the
+// setting or the probe now needs them, and removes them if nothing does. A change of the setting applies here, or
+// at the next AircraftObject.dll load, never mid-flight.
+void aircraft_track_reevaluate();
+// True while the tracking hooks are installed on the loaded AircraftObject.dll.
+bool aircraft_track_active();
+// Why the hooks are installed: the probe, the setting, or both. Meaningful only while active.
+bool aircraft_track_for_probe();
+bool aircraft_track_for_tacview();
+// Tacview recorder (src/hooks/tacview_recorder.cpp, player-facing): with Options > Other > Tacview Recording On it
+// writes each flight's aircraft to Saved Games\ThirdWire\<exe>\Tacview\SF2 <date time>.acmi from a writer thread.
+// tacview_recorder_on_modules_loaded() registers the sim step callback (once; it only ever runs while the aircraft
+// tracker is hooked, which needs the setting or the probe). tacview_recorder_menu_moment() (game thread, an Options
+// page was left) closes a recording of a flight that has ended. tacview_recorder_shutdown() (DllMain detach, both
+// FreeLibrary and process exit) closes the file; at process exit it writes what the dead writer left in its ring.
+void tacview_recorder_on_modules_loaded();
+void tacview_recorder_menu_moment();
+// Called by the tracker (any thread, after its lock is released) when the aircraft table has just become empty: a
+// flight has ended. Only sets an atomic flag; the recorder acts on it at the next step or menu moment.
+void tacview_recorder_table_empty();
+void tacview_recorder_shutdown();
+// Hooks of the sim step (sim_hooks.cpp); the tracker calls these, after its own build check.
+bool sim_install(HMODULE aircraft_dll);
+void sim_remove(HMODULE aircraft_dll);
+
+// One live aircraft object, as seen by probe_with_aircraft(). name points into the tracker table and is valid
 // only inside the callback.
 struct LiveAircraft {
     void* obj;
-    const wchar_t* name;
+    const wchar_t* name;     // the constructor's name argument, at most 63 characters
     unsigned long long seq;  // construction sequence number: unique, increasing, never reused. Identifies the object
                              // together with obj (an address can be reused).
     bool is_player;          // the player's aircraft: the first constructed since the table was last empty. At most
                              // one entry; none once the player is destroyed (until the table empties and refills).
                              // Every "which one is the player" decision uses this flag, nothing else.
+    AircraftSide side;       // the object's FRIENDLY/ENEMY/NEUTRAL flag bit (see aircraft_side.h), read from the object's flag word when sampled; Unknown if the masks are not known
+    unsigned long long created_ms;  // GetTickCount64() at construction: coarse, only for diagnostics, never identity
+    const char* type_name;   // the aircraft type (the data record's name, e.g. "F-100D") as ASCII, at most 31 characters; empty when unknown. Read once at construction.
 };
+// The tracker's sequence number of the live aircraft whose object is at obj, or 0 if there is none (or tracking is
+// off). Takes the table's lock shared; the caller must not hold the weapon table's lock.
+unsigned long long aircraft_seq_for_object(const void* obj);
 // Runs callback while holding the aircraft table's lock shared: no listed object can be destroyed
 // until it returns (the destructor hook needs the lock exclusively). The callback must not log or
-// do file I/O. The table is empty unless the probe is on.
+// do file I/O. The table is empty unless tracking is active.
 void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx);
-// Incremented (release) each time a tracked aircraft is destroyed or its address is reused by a new one.
+// One live weapon (a missile, bomb or rocket in flight), as seen by probe_with_weapons().
+struct LiveWeapon {
+    void* obj;
+    const char* name;                // the weapon data's type name as ASCII, at most 63 characters (may be empty)
+    unsigned long long seq;          // the weapon tracker's own sequence number: unique, increasing, never reused
+    unsigned char weapon_class;      // WeaponClass
+    unsigned long long parent_seq;   // the shooting aircraft's seq (LiveAircraft::seq), or 0 if unknown
+    AircraftSide side;               // from the object's FRIENDLY/ENEMY flag bits; Unknown if neither or masks unknown
+};
+// Weapon tracker (src/hooks/weapon_track.cpp): follows weapons from the moment they are released, under the same
+// enable rule as the aircraft tracker (the probe, or the Tacview Recording setting). Same calling rules as the
+// aircraft ones above: weapon_track_on_modules_loaded() on every module load (module watch), weapon_track_reevaluate()
+// when an Options page is left (called by aircraft_track_reevaluate()).
+void weapon_track_on_modules_loaded();
+void weapon_track_reevaluate();
+bool weapon_track_active();
+// A new flight begins: forgets the count of weapons skipped because the table was full (and logs it if not zero).
+void weapon_track_new_flight();
+// Clears the weapon table (the aircraft table emptied: the flight is over); returns the live weapons dropped.
+// Takes only the weapon lock; call it with no other tracker lock held.
+size_t weapon_track_drop_all();
+// Runs callback while holding the weapon table's lock shared; the callback must not log or do file I/O. Empty
+// unless the weapon hooks are installed. Do not call while holding the aircraft table's lock exclusively.
+void probe_with_weapons(void (*callback)(const LiveWeapon* list, size_t count, void* ctx), void* ctx);
+// Incremented (release) each time a tracked aircraft is destroyed or its address is reused by a new one, and when
+// the tracker re-hooks a reloaded AircraftObject.dll.
 // A cached aircraft pointer is only trusted while this still has the value it had at the last validation.
 extern std::atomic<uint32_t> g_aircraft_generation;
 // The probe's output directory (LAZYSF2_PROBE_DIR, validated), or nullptr when the probe is off.
@@ -91,12 +156,11 @@ inline void missile_spawn_on_present() {
     if (g_missile_state.load(std::memory_order_relaxed) != 0) missile_spawn_run_frame();
 }
 
-// Simulation step (developer tool, part of the probe): hooks the aircraft's own Update(dt), which runs
-// once per simulation step for every aircraft on the game's main thread, and not while the game is
-// paused. sim_on_modules_loaded() installs the hook (the probe calls it); nothing is hooked with the probe off.
-// The game clock adds dt on each step of the player's aircraft (LiveAircraft::is_player: the first aircraft constructed since the probe table was last empty).
+// Simulation step: hooks the aircraft's own Update(dt), which runs once per simulation step for every aircraft on
+// the game's main thread, and not while the game is paused. The aircraft tracker installs the hook; nothing is
+// hooked unless a client needs tracking.
+// The game clock adds dt on each step of the player's aircraft (LiveAircraft::is_player: the first aircraft constructed since the tracker table was last empty).
 // sim_game_time() and sim_step_count() may be read from the game thread only (inside a step callback).
-void sim_on_modules_loaded();
 // Game thread; updated on any aircraft's step. The player is known while sim has a cached one.
 bool sim_player_known();
 // Incremented on every player loss and every change of player. A run stores it at its start and ends when it differs.

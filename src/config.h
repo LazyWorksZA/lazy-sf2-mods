@@ -4,6 +4,8 @@
 // Options menu (rows added by the mod). They are read once on first use and can then change while
 // the game runs. None of these may be first called from DllMain or under the loader lock (finding
 // Saved Games uses the shell); hooks check them when they are called, not when they are installed.
+#include <string>
+
 namespace lazysf2::config {
 
 // Options.ini [ControlOptions] MouseMode (Options > Controls > Mouse Pointer).
@@ -30,5 +32,15 @@ void set_display_monitor(int number);
 
 MouseMode mouse_mode();
 void set_mouse_mode(MouseMode mode);
+
+// Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off), loaded with the other settings.
+void set_tacview_recording(bool on);  // the Options page, on Exit
+// For the module watch (it can run under the loader lock): reads the loaded value only, never loads anything.
+// -1 = not loaded yet (treat as off), 0 = off, 1 = on.
+int tacview_recording_peek();
+
+// The game's per-user folder, Saved Games\ThirdWire\<exe name> (where Options.ini lives), or empty if it cannot be
+// found. A shell call: game thread at a safe moment only, never from the module watch or under a lock.
+std::wstring game_data_dir();
 
 }  // namespace lazysf2::config

@@ -72,6 +72,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             break;
         }
         case DLL_PROCESS_DETACH:
+            lazysf2::hooks::tacview_recorder_shutdown();  // also at process exit: the file stays readable
             if (reserved == nullptr) {  // FreeLibrary, not process exit
                 lazysf2::hooks::host_shutdown();
                 MH_DisableHook(MH_ALL_HOOKS);

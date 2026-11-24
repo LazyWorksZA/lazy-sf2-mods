@@ -185,7 +185,7 @@ BotResult run_bot(const BotConfig& cfg) {
 
     // Clock sync, then flight.
     const double period = 1.0 / cfg.rate;
-    double next_ping = wall_now(), next_send = 0, next_log = 0, fly_start = 0;
+    double next_ping = wall_now(), next_send = 0, next_log = 0, fly_start = 0, hold_since = 0;
     bool flying = false, was_logged_hold = false;
     uint32_t seq = 0, last_logged_sent = 0;
     std::uniform_real_distribution<double> uni(0.0, 1.0);
@@ -211,8 +211,25 @@ BotResult run_bot(const BotConfig& cfg) {
             next_ping = wall + 0.25;
         }
 
-        if (!flying && (r.clock.have_pong() || wall - r.welcome_wall > 3.0)) {
-            if (!r.clock.have_pong()) r.say("bot: no Pong after 3 s: holding until the host answers");
+        // The host never answers: no Pong within 4 s of the Welcome, or its clock held for more than 4 s on end.
+        if (!flying && !r.clock.have_pong() && wall - r.welcome_wall > 4.0) {
+            r.say("bot: host not answering: no Pong 4 s after the Welcome");
+            res.code = 4;
+            break;
+        }
+        if (flying) {
+            if (!r.clock.on_hold(wall)) {
+                hold_since = 0;
+            } else if (hold_since == 0) {
+                hold_since = wall;
+            } else if (wall - hold_since > 4.0) {
+                r.say("bot: host not answering: held for more than 4 s");
+                res.code = 4;
+                break;
+            }
+        }
+
+        if (!flying && r.clock.have_pong()) {
             const double t0 = r.clock.now(wall);
             r.flight.start(cfg.script, r.welcome.spawn_pos, static_cast<double>(r.welcome.spawn_heading), t0);
             flying = true;
