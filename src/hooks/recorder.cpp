@@ -162,9 +162,6 @@ const RecSample* recorder_latest(uint32_t* count) {
     return g_buf;
 }
 
-// Stub: replay.cpp (a later task) takes over this definition and the recorder then refuses to start during a replay.
-bool replay_active() { return false; }
-
 void recorder_on_modules_loaded() {
     static std::atomic<bool> once{false};
     if (once.exchange(true)) return;

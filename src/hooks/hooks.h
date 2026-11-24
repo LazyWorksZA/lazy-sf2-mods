@@ -123,7 +123,15 @@ void recorder_toggle();
 // The latest finished recording (game thread only), or nullptr with *count = 0 while none exists or one is
 // being recorded. Valid until the next recording starts.
 const RecSample* recorder_latest(uint32_t* count);
-// True while a replay runs. The recorder refuses to start then. Stub in recorder.cpp until replay.cpp defines it.
+
+// Replay (developer tool, part of the probe): Ctrl+Shift+T replays the latest recording onto the nearest AI aircraft
+// with network-style smoothing (simulated feed, interpolation delay, dead reckoning, correction blending);
+// Ctrl+Shift+Y cycles the feed rate 60/10/5/2 Hz. The hotkey thread only sets requests; the game thread acts.
+// See replay.cpp and replay_math.h.
+void replay_on_modules_loaded();
+void replay_toggle();
+void replay_cycle_rate();
+// True while a replay runs. The recorder refuses to start then.
 bool replay_active();
 
 }  // namespace lazysf2::hooks
