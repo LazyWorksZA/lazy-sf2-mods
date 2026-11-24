@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "acmi/acmi_convert.h"
+#include "hooks/aircraft_side.h"
 #include "bot_client.h"
 #include "bot_core.h"
 #include "net/host_core.h"
@@ -1422,6 +1423,26 @@ void acmi_tests() {
     expect(!lazysf2::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
 }
 
+void tracker_logic_tests() {
+    using lazysf2::hooks::AircraftSide;
+    using lazysf2::hooks::classify_side;
+    using lazysf2::hooks::tracking_wanted;
+    std::printf("tracker logic\n");
+    // The enable rule: hooks only if the probe is on or Tacview Recording is on.
+    expect(!tracking_wanted(false, false), "enable rule: neither client -> nothing hooked");
+    expect(tracking_wanted(true, false), "enable rule: probe -> hooked");
+    expect(tracking_wanted(false, true), "enable rule: Tacview Recording -> hooked");
+    expect(tracking_wanted(true, true), "enable rule: both -> hooked");
+    // Side classification against three single-bit masks.
+    const uint32_t fr = 0x100, en = 0x200, ne = 0x400;
+    expect(classify_side(0x1 | fr, fr, en, ne) == AircraftSide::Friendly, "side: friendly bit");
+    expect(classify_side(0x1 | en | 0x8000, fr, en, ne) == AircraftSide::Enemy, "side: enemy bit");
+    expect(classify_side(ne, fr, en, ne) == AircraftSide::Neutral, "side: neutral bit");
+    expect(classify_side(0xfffff0ff, fr, en, ne) == AircraftSide::Unknown, "side: no side bit -> unknown");
+    expect(classify_side(0xffffffff, 0, 0, 0) == AircraftSide::Unknown, "side: masks not filled in yet -> unknown");
+    expect(classify_side(en, 0, en, ne) == AircraftSide::Enemy, "side: a zero mask never matches, others still do");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -1441,6 +1462,7 @@ int main() {
     bot_loopback_tests();
     stream_tests();
     acmi_tests();
+    tracker_logic_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

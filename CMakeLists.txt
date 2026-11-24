@@ -24,6 +24,7 @@ add_library(lazysf2 SHARED
     src/hooks/dxgi_hooks.cpp
     src/hooks/input_hooks.cpp
     src/hooks/menu_hooks.cpp
+    src/hooks/aircraft_track.cpp
     src/hooks/probe_hooks.cpp
     src/hooks/puppet_hooks.cpp
     src/hooks/missile_spawn.cpp

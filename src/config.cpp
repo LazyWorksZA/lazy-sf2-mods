@@ -59,7 +59,24 @@ BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
 
 void ensure_loaded() { InitOnceExecuteOnce(&g_once, &load, nullptr, nullptr); }
 
+INIT_ONCE g_path_once = INIT_ONCE_STATIC_INIT;
+std::wstring g_options_path;  // written once under g_path_once
+BOOL CALLBACK load_path(PINIT_ONCE, PVOID, PVOID*) {
+    g_options_path = options_ini_path();
+    return TRUE;
+}
+
 }  // namespace
+
+bool tacview_recording() {
+    InitOnceExecuteOnce(&g_path_once, &load_path, nullptr, nullptr);
+    const bool on = read_int(g_options_path, L"OtherOptions", L"TacviewRecording", 0) == 1;
+    static std::atomic<int> logged{-1};
+    if (logged.exchange(on ? 1 : 0) != (on ? 1 : 0)) {
+        LOG("config: [OtherOptions] TacviewRecording -> %s", on ? "on" : "off");
+    }
+    return on;
+}
 
 DisplayMode display_mode() {
     ensure_loaded();

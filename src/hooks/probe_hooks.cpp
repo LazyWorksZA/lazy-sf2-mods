@@ -1,12 +1,10 @@
 // Object probe (developer tool, multiplayer go/no-go experiment). Inert unless the environment
 // variable LAZYSF2_PROBE_DIR names a folder.
 //
-// It tracks the live aircraft objects (AircraftObject.dll: constructor and destructor) and, on
-// Ctrl+Shift+D, dumps each object's memory and one level of the heap blocks it points to into that
+// It builds on the aircraft tracker (aircraft_track.cpp, which owns the AircraftObject.dll hooks, the table and
+// the player rule). On Ctrl+Shift+D it dumps each object's memory and one level of the heap blocks it points to into that
 // folder, so position and velocity fields can be found offline. Nothing is written to the game
 // folder, and nothing is hooked or logged when the variable is not set.
-//
-// Hooks are at fixed RVAs and only installed on the July 2013 build.
 #include <windows.h>
 
 #include <atomic>
@@ -24,109 +22,15 @@
 
 namespace lazysf2::hooks {
 
-// Bumped whenever a tracked aircraft is destroyed or its address is reused (see hooks.h).
-std::atomic<uint32_t> g_aircraft_generation{0};
-
 namespace {
 
-constexpr DWORD kAircraftTimestamp = 0x51d220bd, kAircraftImageSize = 0xc2000;
-constexpr DWORD kCtorRva = 0x48cf0;  // AircraftObjectClass* __thiscall ctor(this, const wchar_t* name)  (ret 4)
-constexpr DWORD kDtorRva = 0x41600;  // void __thiscall dtor(this)
 constexpr size_t kObjectSize = 0x9a8;  // the factory allocates this much per aircraft
 constexpr size_t kPointerDump = 0x400;
 constexpr size_t kMaxPointerDumps = 96;
-constexpr size_t kMaxTracked = 256;
 constexpr size_t kNameChars = 63;
 
-struct Entry {
-    void* obj;
-    wchar_t name[kNameChars + 1];
-    ULONGLONG created;  // GetTickCount64(); only for the snapshot index (coarse, ties): never identity
-    uint64_t seq;       // construction sequence number, from 1; unique and increasing
-};
-
 std::wstring g_dir;  // empty = probe off; written once from DllMain, read-only afterwards
-SRWLOCK g_lock = SRWLOCK_INIT;
-Entry g_table[kMaxTracked];  // guarded by g_lock
-size_t g_count = 0;          // guarded by g_lock
-bool g_full_logged = false;  // guarded by g_lock
-uint64_t g_next_seq = 1;     // guarded by g_lock
-// The player's seq, or 0 before any. THE player rule, in one place: the player is the first aircraft constructed
-// since the table was last empty. It is set in the constructor hook when the table is empty, and never changes
-// when that aircraft is destroyed; no entry then matches, so the player is unknown until the table empties and
-// a new aircraft is constructed.
-uint64_t g_player_seq = 0;   // guarded by g_lock
-std::atomic<bool> g_hook_tried{false};  // build checked and hooks attempted (once)
-
-using Ctor_t = void*(__fastcall*)(void* self, void* edx, const wchar_t* name);
-using Dtor_t = void(__fastcall*)(void* self, void* edx);
-Ctor_t o_Ctor = nullptr;
-Dtor_t o_Dtor = nullptr;
-
-void* __fastcall h_Ctor(void* self, void* edx, const wchar_t* name) {
-    void* r = o_Ctor(self, edx, name);
-    bool full = false, became_player = false;
-    uint64_t seq = 0;
-    wchar_t shown[kNameChars + 1] = {};  // the truncated copy, for the log line
-    AcquireSRWLockExclusive(&g_lock);
-    size_t slot = g_count;
-    const bool table_empty = g_count == 0;
-    for (size_t i = 0; i < g_count; ++i) {
-        if (g_table[i].obj == self) {  // address reused without a destructor call we saw
-            slot = i;
-            g_aircraft_generation.fetch_add(1, std::memory_order_release);
-            break;
-        }
-    }
-    if (slot < kMaxTracked) {
-        Entry& e = g_table[slot];
-        e.obj = self;
-        e.name[0] = L'\0';
-        if (name) {
-            // The game's string may be anything; copy at most kNameChars characters.
-            for (size_t i = 0; i < kNameChars && name[i]; ++i) {
-                e.name[i] = name[i];
-                e.name[i + 1] = L'\0';
-            }
-        }
-        e.created = GetTickCount64();
-        e.seq = seq = g_next_seq++;
-        if (table_empty) {
-            g_player_seq = seq;
-            became_player = true;
-        }
-        wcscpy_s(shown, e.name);
-        if (slot == g_count) ++g_count;
-    } else if (!g_full_logged) {
-        g_full_logged = full = true;
-    }
-    const size_t live = g_count;
-    ReleaseSRWLockExclusive(&g_lock);
-    if (full) LOG("probe: aircraft table full (%zu); further aircraft are not tracked", kMaxTracked);
-    LOG("probe: aircraft + %p \"%ls\" seq %llu (%zu live)", self, shown, static_cast<unsigned long long>(seq), live);
-    if (became_player) {
-        LOG("probe: player chosen: %p \"%ls\" seq %llu (first constructed since the table was empty)", self, shown,
-            static_cast<unsigned long long>(seq));
-    }
-    return r;
-}
-
-void __fastcall h_Dtor(void* self, void* edx) {
-    // Remove first, so a snapshot (which holds the lock while it copies) never sees an object whose
-    // destructor has started.
-    AcquireSRWLockExclusive(&g_lock);
-    for (size_t i = 0; i < g_count; ++i) {
-        if (g_table[i].obj == self) {
-            g_table[i] = g_table[--g_count];
-            g_aircraft_generation.fetch_add(1, std::memory_order_release);
-            break;
-        }
-    }
-    const size_t live = g_count;
-    ReleaseSRWLockExclusive(&g_lock);
-    LOG("probe: aircraft - %p (%zu live)", self, live);
-    o_Dtor(self, edx);
-}
+std::atomic<bool> g_dev_started{false};  // developer features (recorder, replay, host, hotkeys) started (once)
 
 // --- Snapshot ----------------------------------------------------------------------------------
 
@@ -192,38 +96,40 @@ struct Copy {
     std::vector<Block> blocks;
 };
 
-void take_snapshot() {
-    const unsigned number = ++g_snapshot;
-    std::vector<Copy> copies;
-
-    // Under the shared lock we only copy memory (ReadProcessMemory, VirtualQuery) into heap
-    // buffers. The destructor hook needs the lock exclusively to remove an object, so no tracked
-    // object can be freed while we read it. Files are written after the lock is released.
-    AcquireSRWLockShared(&g_lock);
-    for (size_t i = 0; i < g_count; ++i) {
-        const Entry& e = g_table[i];
+// Under the table's shared lock we only copy memory (ReadProcessMemory, VirtualQuery) into heap buffers. The
+// destructor hook needs the lock exclusively to remove an object, so no listed object can be freed while we read
+// it. Files are written after the lock is released.
+void copy_cb(const LiveAircraft* list, size_t n, void* vctx) {
+    auto& copies = *static_cast<std::vector<Copy>*>(vctx);
+    for (size_t i = 0; i < n; ++i) {
+        const LiveAircraft& e = list[i];
         Copy c;
         c.object.resize(kObjectSize);
         if (!read_mem(e.obj, c.object.data(), kObjectSize)) continue;
         const auto obj = reinterpret_cast<uintptr_t>(e.obj);
         c.id = static_cast<unsigned>(obj);
-        wcscpy_s(c.name, e.name);
-        c.created = e.created;
+        wcsncpy_s(c.name, e.name, _TRUNCATE);
+        c.created = e.created_ms;
         for (size_t off = 0; off + 4 <= kObjectSize && c.blocks.size() < kMaxPointerDumps; off += 4) {
             uint32_t value;
             memcpy(&value, c.object.data() + off, 4);
             if (value < 0x10000) continue;
             if (value >= obj && value < obj + kObjectSize) continue;  // the object itself or inside it
             const void* target = reinterpret_cast<const void*>(static_cast<uintptr_t>(value));
-            const size_t n = dumpable_bytes(target);
-            if (!n) continue;
-            Block b{off, std::vector<BYTE>(n)};
-            if (!read_mem(target, b.bytes.data(), n)) continue;
+            const size_t bytes = dumpable_bytes(target);
+            if (!bytes) continue;
+            Block b{off, std::vector<BYTE>(bytes)};
+            if (!read_mem(target, b.bytes.data(), bytes)) continue;
             c.blocks.push_back(std::move(b));
         }
         copies.push_back(std::move(c));
     }
-    ReleaseSRWLockShared(&g_lock);
+}
+
+void take_snapshot() {
+    const unsigned number = ++g_snapshot;
+    std::vector<Copy> copies;
+    probe_with_aircraft(copy_cb, &copies);
 
     std::string index = std::to_string(number) + " " + std::to_string(GetTickCount64()) + "\n";
     unsigned aircraft = 0, dumps = 0, errors = 0;
@@ -349,17 +255,6 @@ bool valid_probe_dir(const wchar_t* value, std::wstring& out) {
 
 const wchar_t* probe_output_dir() { return g_dir.empty() ? nullptr : g_dir.c_str(); }
 
-void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx) {
-    LiveAircraft list[kMaxTracked];  // a copy of the table, so the callback never sees Entry
-    AcquireSRWLockShared(&g_lock);
-    const size_t n = g_count;
-    for (size_t i = 0; i < n; ++i) {
-        list[i] = {g_table[i].obj, g_table[i].name, g_table[i].seq, g_table[i].seq == g_player_seq};
-    }
-    callback(list, n, ctx);  // the callback must not log or touch files
-    ReleaseSRWLockShared(&g_lock);
-}
-
 void install_probe_hooks() {
     wchar_t dir[MAX_PATH] = {};
     const DWORD n = GetEnvironmentVariableW(L"LAZYSF2_PROBE_DIR", dir, MAX_PATH);
@@ -378,16 +273,8 @@ void install_probe_hooks() {
 void probe_on_modules_loaded() {
     if (g_dir.empty()) return;
     missile_spawn_on_modules_loaded();  // own build check and once-flag
-    if (g_hook_tried.load()) return;
-    HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
-    if (!m || g_hook_tried.exchange(true)) return;
-    if (!is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll")) return;
-    bool ok = create_and_enable(at_rva(m, kCtorRva), reinterpret_cast<void*>(&h_Ctor),
-                                reinterpret_cast<void**>(&o_Ctor), "AircraftObject ctor");
-    ok = ok && create_and_enable(at_rva(m, kDtorRva), reinterpret_cast<void*>(&h_Dtor),
-                                 reinterpret_cast<void**>(&o_Dtor), "AircraftObject dtor");
-    if (!ok) return;
-    sim_on_modules_loaded();  // own build check and once-flag
+    if (g_dev_started.load() || !aircraft_track_active()) return;  // the tracker hooks the aircraft first
+    if (g_dev_started.exchange(true)) return;
     recorder_on_modules_loaded();  // registers its step callback (once)
     replay_on_modules_loaded();    // likewise
     host_on_modules_loaded();      // starts the network thread (once), only with LAZYSF2_HOST
