@@ -29,7 +29,7 @@ namespace {
 enum State { kIdle = 0, kStartRequested = 1, kRunning = 2, kStopRequested = 3 };
 
 constexpr size_t kPosOffset = 0x38, kVelOffset = 0x50, kRotOffset = 0xdc;
-constexpr double kMaxSeconds = 30.0;
+constexpr double kMaxSeconds = 120.0;
 
 struct Vec3d {
     double x, y, z;
@@ -46,6 +46,7 @@ struct Run {
     double next_log = 1.0;
     unsigned frames = 0;
     double drift_max = 0, drift_sum = 0;
+    double turn_max = 0, turn_sum = 0;  // degrees
 };
 Run g_run;
 LARGE_INTEGER g_freq{};
@@ -147,6 +148,7 @@ struct FrameCtx {
     double t = 0;
     bool destroyed = false;
     double drift = 0;
+    double turn = 0;  // degrees between the current and the held orientation
     double alt = 0;
 };
 
@@ -171,19 +173,27 @@ void frame_cb(const LiveAircraft* list, size_t n, void* vctx) {
                         (cur.z - want.z) * (cur.z - want.z));
     c.alt = cur.z;
     g_run.last_alt = cur.z;
+    float rc[9];
+    memcpy(rc, obj + kRotOffset, sizeof(rc));
+    double trace = 0;  // trace(R0^T * R) = sum of element-wise products
+    for (int i = 0; i < 9; ++i) trace += double(g_run.r0[i]) * rc[i];
+    c.turn = std::acos(std::fmin(1.0, std::fmax(-1.0, (trace - 1.0) / 2.0))) * 180.0 / 3.14159265358979323846;
     const float v[3] = {static_cast<float>(g_run.v.x), static_cast<float>(g_run.v.y), static_cast<float>(g_run.v.z)};
     memcpy(obj + kPosOffset, &want, sizeof(want));
     memcpy(obj + kVelOffset, v, sizeof(v));
     memcpy(obj + kRotOffset, g_run.r0, sizeof(g_run.r0));
 }
 
+void log_stats(double t, double alt) {
+    LOG("puppet: t=%.0fs frames=%u drift max %.2f m mean %.2f m, turn max %.3f deg mean %.3f deg (alt %.0f m)", t,
+        g_run.frames, g_run.drift_max, g_run.drift_sum / g_run.frames, g_run.turn_max,
+        g_run.turn_sum / g_run.frames, alt);
+}
+
 void stop_run(const char* reason, double t) {
-    if (g_run.frames > 0) {  // the last, partial second
-        LOG("puppet: t=%.0fs frames=%u drift max %.2f m mean %.2f m (alt %.0f m)", t, g_run.frames, g_run.drift_max,
-            g_run.drift_sum / g_run.frames, g_run.last_alt);
-    }
+    if (g_run.frames > 0) log_stats(t, g_run.last_alt);  // the last, partial second
     g_puppet_state.store(kIdle);
-    g_run.target = nullptr;
+    g_run = Run{};  // a later "hotkey before start" must not see this run's numbers
     LOG("puppet: stop (%s) after %.1f s", reason, t);
 }
 
@@ -222,7 +232,7 @@ void puppet_run_frame() {
         return;
     }
     if (t >= kMaxSeconds) {
-        stop_run("30 s limit", t);
+        stop_run("120 s limit", t);
         return;
     }
     FrameCtx c;
@@ -236,12 +246,13 @@ void puppet_run_frame() {
     ++g_run.frames;
     g_run.drift_sum += c.drift;
     if (c.drift > g_run.drift_max) g_run.drift_max = c.drift;
+    g_run.turn_sum += c.turn;
+    if (c.turn > g_run.turn_max) g_run.turn_max = c.turn;
     if (t >= g_run.next_log) {
-        LOG("puppet: t=%.0fs frames=%u drift max %.2f m mean %.2f m (alt %.0f m)", t, g_run.frames, g_run.drift_max,
-            g_run.drift_sum / g_run.frames, c.alt);
+        log_stats(t, c.alt);
         g_run.next_log = std::floor(t) + 1.0;
         g_run.frames = 0;
-        g_run.drift_max = g_run.drift_sum = 0;
+        g_run.drift_max = g_run.drift_sum = g_run.turn_max = g_run.turn_sum = 0;
     }
 }
 

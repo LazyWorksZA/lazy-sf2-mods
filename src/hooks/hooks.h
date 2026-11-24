@@ -61,7 +61,7 @@ void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count
 
 // Puppet mode (developer tool, part of the probe): drives one AI aircraft along a level path from
 // the render thread, to see whether the game lets us hold it there. Ctrl+Shift+P toggles a run of
-// at most 30 s. puppet_toggle() is called by the probe's hotkey thread; puppet_on_present() from
+// at most 120 s. puppet_toggle() is called by the probe's hotkey thread; puppet_on_present() from
 // IDXGISwapChain::Present, and costs one relaxed atomic load while no run is requested.
 void puppet_toggle();
 void puppet_run_frame();
