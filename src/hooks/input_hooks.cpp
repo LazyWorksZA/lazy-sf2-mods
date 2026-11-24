@@ -1,5 +1,11 @@
-// Mouse "Cursor" mode (lazysf2.ini [Mouse] Mode=Cursor).
+// DirectInput hooks: keyboard Windows-key handling and mouse "Cursor" mode.
 //
+// Keyboard: the game opens the system keyboard with DISCL_NONEXCLUSIVE | DISCL_FOREGROUND |
+// DISCL_NOWINKEY (0x16, DirectInput.dll +0x42a0), which disables the Windows key while the game
+// has focus. In Borderless mode we drop DISCL_NOWINKEY so the Start menu works; Fullscreen stays
+// stock. input_apply_display_mode() re-applies it after a live display-mode switch.
+//
+// Mouse "Cursor" mode (lazysf2.ini [Mouse] Mode=Cursor):
 // Stock behaviour (DirectInput.dll, July 2013): the system mouse is opened buffered, exclusive +
 // foreground. Every frame the read at DirectInput.dll+0x51b0 adds the DIMOFS_X/Y deltas from
 // GetDeviceData into the game's own cursor position (this[8], this[9]), clamps it to the screen and
@@ -23,6 +29,7 @@
 
 #include <atomic>
 
+#include "config.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "log.h"
@@ -45,13 +52,21 @@ constexpr int kStateBottom = 7;
 constexpr int kStateX = 8;
 constexpr int kStateY = 9;
 
-// {6F1D2B60-D5A0-11CF-BFC7-444553540000}; defined here to avoid linking dxguid.lib.
+// Defined here to avoid linking dxguid.lib.
 constexpr GUID kGuidSysMouse = {0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+constexpr GUID kGuidSysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
 
 // vtable slots (identical for the A and W interfaces)
 constexpr int kDiCreateDevice = 3;
+constexpr int kDevAcquire = 7;
+constexpr int kDevUnacquire = 8;
 constexpr int kDevGetDeviceData = 10;
 constexpr int kDevSetCooperativeLevel = 13;
+
+// Cursor mode is active only once its fixed-RVA read hook is installed; until then (or if the
+// DirectInput.dll build is not the one we analysed) the mouse stays completely stock.
+std::atomic<bool> g_cursor_active{false};
+bool cursor_mode() { return g_cursor_active.load(); }
 
 using DirectInput8Create_t = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
 using CreateDevice_t = HRESULT(STDMETHODCALLTYPE*)(IUnknown*, REFGUID, IUnknown**, LPUNKNOWN);
@@ -76,6 +91,15 @@ bool is_mouse(IUnknown* dev) {
     return false;
 }
 
+// Device pointers get reused (a released mouse's address can come back as a keyboard), so a
+// pointer must be forgotten as a mouse when it is created as something else.
+void remove_mouse(IUnknown* dev) {
+    for (auto& m : g_mice) {
+        IUnknown* expected = dev;
+        m.compare_exchange_strong(expected, nullptr);
+    }
+}
+
 void add_mouse(IUnknown* dev) {
     for (auto& m : g_mice) {
         IUnknown* expected = nullptr;
@@ -85,17 +109,35 @@ void add_mouse(IUnknown* dev) {
 }
 
 std::atomic<bool> g_dinput_hooked{false};
-std::atomic<bool> g_read_hooked{false};
 std::atomic<bool> g_device_hooked{false};
 std::atomic<bool> g_di_hooked{false};
 SRWLOCK g_lock = SRWLOCK_INIT;
 
-// --- IDirectInputDevice8 (mouse only) -------------------------------------------------------
+// System keyboards. The game creates more than one; the one it configures with
+// SetCooperativeLevel (g_keyboard) is the one in use, and the one re-applied on a live switch.
+std::atomic<IUnknown*> g_keyboard_created{nullptr};  // most recent CreateDevice(GUID_SysKeyboard)
+std::atomic<IUnknown*> g_keyboard{nullptr};
+HWND g_keyboard_hwnd = nullptr;
+DWORD g_keyboard_flags = 0;  // as requested by the game
+
+DWORD keyboard_flags_for_mode(DWORD requested) {
+    return config::borderless() ? (requested & ~static_cast<DWORD>(DISCL_NOWINKEY)) : requested;
+}
+
+// --- IDirectInputDevice8 ---------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE h_SetCooperativeLevel(IUnknown* self, HWND hwnd, DWORD flags) {
-    if (is_mouse(self) && (flags & DISCL_EXCLUSIVE)) {
+    if (cursor_mode() && is_mouse(self) && (flags & DISCL_EXCLUSIVE)) {
         DWORD patched = (flags & ~static_cast<DWORD>(DISCL_EXCLUSIVE)) | DISCL_NONEXCLUSIVE;
         LOG("mouse: SetCooperativeLevel 0x%lx -> 0x%lx (non-exclusive)", flags, patched);
+        flags = patched;
+    } else if (self && (self == g_keyboard_created.load() || self == g_keyboard.load())) {
+        g_keyboard = self;
+        g_keyboard_hwnd = hwnd;
+        g_keyboard_flags = flags;
+        const DWORD patched = keyboard_flags_for_mode(flags);
+        LOG("input: keyboard SetCooperativeLevel 0x%lx -> 0x%lx%s", flags, patched,
+            patched != flags ? " (Windows key allowed: borderless)" : "");
         flags = patched;
     }
     return o_SetCooperativeLevel(self, hwnd, flags);
@@ -104,7 +146,7 @@ HRESULT STDMETHODCALLTYPE h_SetCooperativeLevel(IUnknown* self, HWND hwnd, DWORD
 HRESULT STDMETHODCALLTYPE h_GetDeviceData(IUnknown* self, DWORD cb, DIDEVICEOBJECTDATA* data, DWORD* inout,
                                           DWORD flags) {
     HRESULT hr = o_GetDeviceData(self, cb, data, inout, flags);
-    if (!is_mouse(self) || FAILED(hr) || !data || !inout || cb < sizeof(DWORD) * 2) return hr;
+    if (!cursor_mode() || !is_mouse(self) || FAILED(hr) || !data || !inout || cb < sizeof(DWORD) * 2) return hr;
 
     // Drop the relative X/Y records; keep everything else in order.
     auto* bytes = reinterpret_cast<BYTE*>(data);
@@ -119,10 +161,9 @@ HRESULT STDMETHODCALLTYPE h_GetDeviceData(IUnknown* self, DWORD cb, DIDEVICEOBJE
     return hr;
 }
 
-void hook_mouse_device(IUnknown* dev) {
-    add_mouse(dev);
+void hook_device(IUnknown* dev) {
     if (g_device_hooked.exchange(true)) return;
-    // Keyboard and joystick devices share these vtables; the detours check for the mouse.
+    // Keyboard, mouse and joystick devices share these vtables; the detours check which one it is.
     create_and_enable(vtable_slot(dev, kDevSetCooperativeLevel), reinterpret_cast<void*>(&h_SetCooperativeLevel),
                       reinterpret_cast<void**>(&o_SetCooperativeLevel), "IDirectInputDevice8::SetCooperativeLevel");
     create_and_enable(vtable_slot(dev, kDevGetDeviceData), reinterpret_cast<void*>(&h_GetDeviceData),
@@ -133,9 +174,20 @@ void hook_mouse_device(IUnknown* dev) {
 
 HRESULT STDMETHODCALLTYPE h_CreateDevice(IUnknown* self, REFGUID guid, IUnknown** out, LPUNKNOWN outer) {
     HRESULT hr = o_CreateDevice(self, guid, out, outer);
-    if (SUCCEEDED(hr) && out && *out && IsEqualGUID(guid, kGuidSysMouse)) {
-        LOG("mouse: system mouse device %p", static_cast<void*>(*out));
-        hook_mouse_device(*out);
+    if (SUCCEEDED(hr) && out && *out) {
+        IUnknown* dev = *out;
+        if (dev == g_keyboard.load()) g_keyboard = nullptr;  // that keyboard was released; address reused
+        if (dev == g_keyboard_created.load()) g_keyboard_created = nullptr;
+        remove_mouse(dev);
+        if (IsEqualGUID(guid, kGuidSysMouse)) {
+            LOG("input: system mouse device %p", static_cast<void*>(dev));
+            if (cursor_mode()) add_mouse(dev);
+            hook_device(dev);
+        } else if (IsEqualGUID(guid, kGuidSysKeyboard)) {
+            LOG("input: system keyboard device %p", static_cast<void*>(dev));
+            g_keyboard_created = dev;
+            hook_device(dev);
+        }
     }
     return hr;
 }
@@ -220,27 +272,43 @@ int __fastcall h_MouseRead(int* state) {
 
 }  // namespace
 
-void mouse_on_modules_loaded() {
-    if (g_dinput_hooked.load() && g_read_hooked.load()) return;
+void input_on_modules_loaded() {
+    if (g_dinput_hooked.load()) return;
     HMODULE dinput8 = GetModuleHandleW(L"dinput8.dll");
     HMODULE game_di = GetModuleHandleW(L"DirectInput.dll");  // Core\DirectInput.dll (the game's)
     if (!dinput8 || !game_di) return;
 
     AcquireSRWLockExclusive(&g_lock);
-    if (!g_read_hooked.load()) {
-        g_read_hooked = true;
-        g_dinput_hooked = true;  // decided together: both hooks or neither
-        if (is_expected_build(game_di, kDirectInputTimestamp, kDirectInputImageSize, "DirectInput.dll")) {
-            void* read = at_rva(game_di, kMouseReadRva);
-            void* create = reinterpret_cast<void*>(GetProcAddress(dinput8, "DirectInput8Create"));
-            if (create && create_and_enable(read, reinterpret_cast<void*>(&h_MouseRead),
-                                            reinterpret_cast<void**>(&o_MouseRead), "DirectInput.dll+0x51b0 (mouse read)")) {
-                create_and_enable(create, reinterpret_cast<void*>(&h_DirectInput8Create),
-                                  reinterpret_cast<void**>(&o_DirectInput8Create), "DirectInput8Create");
+    if (!g_dinput_hooked.exchange(true)) {
+        // Mouse Cursor mode needs the fixed-RVA read hook; without it, leave the mouse stock.
+        if (config::get().mouse == config::MouseMode::Cursor) {
+            if (is_expected_build(game_di, kDirectInputTimestamp, kDirectInputImageSize, "DirectInput.dll") &&
+                create_and_enable(at_rva(game_di, kMouseReadRva), reinterpret_cast<void*>(&h_MouseRead),
+                                  reinterpret_cast<void**>(&o_MouseRead), "DirectInput.dll+0x51b0 (mouse read)")) {
+                g_cursor_active = true;
+            } else {
+                LOG("mouse: Cursor mode unavailable; mouse stays stock");
             }
+        }
+        // Device hooks (keyboard Windows key, and mouse Cursor mode when enabled).
+        if (void* create = reinterpret_cast<void*>(GetProcAddress(dinput8, "DirectInput8Create"))) {
+            create_and_enable(create, reinterpret_cast<void*>(&h_DirectInput8Create),
+                              reinterpret_cast<void**>(&o_DirectInput8Create), "DirectInput8Create");
         }
     }
     ReleaseSRWLockExclusive(&g_lock);
+}
+
+void input_apply_display_mode() {
+    IUnknown* kb = g_keyboard.load();
+    if (!kb || !g_keyboard_hwnd || !o_SetCooperativeLevel) return;
+    using Simple_t = HRESULT(STDMETHODCALLTYPE*)(IUnknown*);
+    // The cooperative level can only change while unacquired; the keyboard was acquired (in use).
+    reinterpret_cast<Simple_t>(vtable_slot(kb, kDevUnacquire))(kb);
+    const DWORD flags = keyboard_flags_for_mode(g_keyboard_flags);
+    HRESULT hr = o_SetCooperativeLevel(kb, g_keyboard_hwnd, flags);
+    HRESULT acq = reinterpret_cast<Simple_t>(vtable_slot(kb, kDevAcquire))(kb);
+    LOG("input: keyboard cooperative level 0x%lx -> 0x%08lx, Acquire -> 0x%08lx", flags, hr, acq);
 }
 
 }  // namespace lazysf2::hooks

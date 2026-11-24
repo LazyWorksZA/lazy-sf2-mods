@@ -14,6 +14,7 @@
 // works the same with the system DXGI and with DXVK.
 #include <windows.h>
 
+#include <d3d10.h>
 #include <dxgi.h>
 
 #include <MinHook.h>
@@ -33,7 +34,9 @@ namespace {
 // IDXGIFactory vtable slot
 constexpr int kFactoryCreateSwapChain = 10;
 // IDXGISwapChain vtable slots
+constexpr int kSwapPresent = 8;
 constexpr int kSwapSetFullscreenState = 10;
+constexpr int kSwapResizeBuffers = 13;
 constexpr int kSwapResizeTarget = 14;
 
 using CreateDXGIFactory_t = HRESULT(WINAPI*)(REFIID, void**);
@@ -41,11 +44,15 @@ using CreateSwapChain_t = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, 
                                                      IDXGISwapChain**);
 using SetFullscreenState_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, BOOL, IDXGIOutput*);
 using ResizeTarget_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, const DXGI_MODE_DESC*);
+using Present_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+using ResizeBuffers_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 
 CreateDXGIFactory_t o_CreateDXGIFactory = nullptr;
 CreateSwapChain_t o_CreateSwapChain = nullptr;
 SetFullscreenState_t o_SetFullscreenState = nullptr;
 ResizeTarget_t o_ResizeTarget = nullptr;
+Present_t o_Present = nullptr;
+ResizeBuffers_t o_ResizeBuffers = nullptr;
 
 std::atomic<bool> g_dxgi_hooked{false};
 std::atomic<bool> g_factory_hooked{false};
@@ -98,8 +105,59 @@ HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_D
     return S_OK;  // the window already covers the monitor; never resize it or change the mode
 }
 
+// Present runs every frame: log only when its result changes (S_OK -> OCCLUDED -> S_OK, removal, ...).
+const char* present_result_name(HRESULT hr) {
+    switch (hr) {
+        case S_OK: return "S_OK";
+        case DXGI_STATUS_OCCLUDED: return "DXGI_STATUS_OCCLUDED";
+        case DXGI_ERROR_DEVICE_REMOVED: return "DXGI_ERROR_DEVICE_REMOVED";
+        case DXGI_ERROR_DEVICE_RESET: return "DXGI_ERROR_DEVICE_RESET";
+        case DXGI_ERROR_DEVICE_HUNG: return "DXGI_ERROR_DEVICE_HUNG";
+        case DXGI_ERROR_INVALID_CALL: return "DXGI_ERROR_INVALID_CALL";
+        default: return "?";
+    }
+}
+
+HRESULT g_last_present = S_OK;
+DWORD g_last_present_tick = 0;
+unsigned g_frames_since_change = 0;
+
+HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain* self, UINT sync, UINT flags) {
+    HRESULT hr = o_Present(self, sync, flags);
+    ++g_frames_since_change;
+    if (self == g_swapchain && hr != g_last_present) {
+        const DWORD now = GetTickCount();
+        LOG("dxgi: Present -> 0x%08lx %s (was %s for %u frames, %lu ms)", hr, present_result_name(hr),
+            present_result_name(g_last_present), g_frames_since_change, now - g_last_present_tick);
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+            ID3D10Device* device = nullptr;
+            if (SUCCEEDED(self->GetDevice(__uuidof(ID3D10Device), reinterpret_cast<void**>(&device))) && device) {
+                LOG("dxgi: device removed reason 0x%08lx", device->GetDeviceRemovedReason());
+                device->Release();
+            }
+        }
+        g_last_present = hr;
+        g_last_present_tick = now;
+        g_frames_since_change = 0;
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
+    HRESULT hr = o_ResizeBuffers(self, count, w, h, fmt, flags);
+    char caller[96];
+    describe_address(_ReturnAddress(), caller, sizeof(caller));
+    LOG("dxgi: ResizeBuffers(%u, %ux%u, fmt %d, flags 0x%x) from %s -> 0x%08lx", count, w, h, fmt, flags, caller, hr);
+    return hr;
+}
+
 void hook_swapchain(IDXGISwapChain* sc) {
     if (g_swapchain_hooked.exchange(true)) return;
+    g_last_present_tick = GetTickCount();
+    create_and_enable(vtable_slot(sc, kSwapPresent), reinterpret_cast<void*>(&h_Present),
+                      reinterpret_cast<void**>(&o_Present), "IDXGISwapChain::Present");
+    create_and_enable(vtable_slot(sc, kSwapResizeBuffers), reinterpret_cast<void*>(&h_ResizeBuffers),
+                      reinterpret_cast<void**>(&o_ResizeBuffers), "IDXGISwapChain::ResizeBuffers");
     create_and_enable(vtable_slot(sc, kSwapSetFullscreenState), reinterpret_cast<void*>(&h_SetFullscreenState),
                       reinterpret_cast<void**>(&o_SetFullscreenState), "IDXGISwapChain::SetFullscreenState");
     create_and_enable(vtable_slot(sc, kSwapResizeTarget), reinterpret_cast<void*>(&h_ResizeTarget),
@@ -171,6 +229,7 @@ bool dxgi_is_exclusive() {
 
 void dxgi_apply_display_mode() {
     const bool borderless = config::borderless();
+    input_apply_display_mode();  // Windows key follows the mode
     IDXGISwapChain* sc = g_swapchain;
     if (!sc || !o_SetFullscreenState || !o_ResizeTarget) {
         LOG("dxgi: live switch skipped: no swap chain yet");
