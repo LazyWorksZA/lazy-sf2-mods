@@ -4,6 +4,9 @@
 
 #include <MinHook.h>
 
+#include <cstdio>
+#include <cstring>
+
 #include "log.h"
 
 namespace lazysf2::hooks {
@@ -30,5 +33,18 @@ inline bool is_expected_build(HMODULE m, DWORD timestamp, DWORD image_size, cons
 }
 
 inline void* at_rva(HMODULE m, DWORD rva) { return reinterpret_cast<BYTE*>(m) + rva; }
+
+// "Module.dll+0x1234" for a code address (e.g. a caller's return address), for diagnostics.
+inline void describe_address(const void* addr, char* out, size_t n) {
+    HMODULE m = nullptr;
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(addr), &m) && m) {
+        GetModuleFileNameA(m, name, MAX_PATH);
+    }
+    const char* base = strrchr(name, '\\');
+    _snprintf_s(out, n, _TRUNCATE, "%s+0x%lx", base ? base + 1 : name,
+                static_cast<unsigned long>(static_cast<const BYTE*>(addr) - reinterpret_cast<const BYTE*>(m)));
+}
 
 }  // namespace lazysf2::hooks

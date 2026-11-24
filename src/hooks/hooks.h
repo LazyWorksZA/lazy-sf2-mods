@@ -11,6 +11,8 @@ HWND game_window();
 void request_display_mode_apply();
 // Applies config::display_mode() to the game's swap chain. Window thread only.
 void dxgi_apply_display_mode();
+// True if the game's swap chain is currently in exclusive fullscreen (diagnostics).
+bool dxgi_is_exclusive();
 
 // Hooks kernelbase!LoadLibraryExW and, after every load, gives each feature a chance to hook
 // modules that have just appeared (dxgi.dll, dinput8.dll, Core\DirectInput.dll, ...).
