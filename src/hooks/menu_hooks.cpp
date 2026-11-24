@@ -56,6 +56,16 @@ constexpr int kItemTypeList = 8;
 constexpr wchar_t kSection[] = L"GraphicsOptions";
 constexpr wchar_t kKey[] = L"DisplayMode";
 
+// Text service (Core\TextUSEnglish.dll, July 2013): both lookups take (file, key) and are
+// __thiscall on the text service object.
+constexpr DWORD kTextTimestamp = 0x51d21fb5, kTextImageSize = 0x1e000;
+constexpr DWORD kGetTextRva = 0x1f50;   // const wchar_t* GetText(file, key)   (returns key if unknown)
+constexpr DWORD kCopyTextRva = 0x1ed0;  // int CopyText(file, key, wchar_t* buf, size_t n) (1 = found)
+constexpr wchar_t kHintKey[] = L"TXT_LAZY_DISPLAYMODE_INFO";
+// Match the stock hints: one "Set/Select ..." sentence, median 55 characters, 80 at most on the
+// Graphics page (longer text runs past the hint line and is cut off).
+constexpr wchar_t kHintText[] = L"Select fullscreen, or a borderless window for instant Alt-Tab.";
+
 // --- State ------------------------------------------------------------------------------------
 
 std::atomic<int> g_list_id{0};       // control ID assigned to our list (0 = not injected)
@@ -178,8 +188,9 @@ std::wstring splice(const std::wstring& text, int& list_id) {
         L"ListFieldSetting=MediumListField\r\n"
         L"DropDownListSize=10\r\n"
         L"InfoTextSetting=InfoTextSetting\r\n"
-        // Same length class as the stock hints (~55 characters); longer text is cut off.
-        L"InfoTextStringID=Select exclusive fullscreen or borderless window mode.\r\n"
+        // String IDs are cut to ~31 characters, so the hint uses a short key that our text hook
+        // answers (see kHintKey); the label is short enough to be its own literal text.
+        L"InfoTextStringID=TXT_LAZY_DISPLAYMODE_INFO\r\n"
         L"\r\n"
         L"[DisplayModeText]\r\n"
         L"MenuItemType=TEXT\r\n"
@@ -334,6 +345,45 @@ void __fastcall h_Exit(void* self, void* edx) {
 
 SRWLOCK g_opts_lock = SRWLOCK_INIT;
 
+// --- Text for our keys ---------------------------------------------------------------------------
+
+using GetText_t = const wchar_t*(__fastcall*)(void*, void*, const wchar_t*, const wchar_t*);
+using CopyText_t = int(__fastcall*)(void*, void*, const wchar_t*, const wchar_t*, wchar_t*, size_t);
+GetText_t o_GetText = nullptr;
+CopyText_t o_CopyText = nullptr;
+std::atomic<bool> g_text_done{false};
+
+const wchar_t* our_text(const wchar_t* key) {
+    return (key && wcscmp(key, kHintKey) == 0) ? kHintText : nullptr;
+}
+
+const wchar_t* __fastcall h_GetText(void* self, void* edx, const wchar_t* file, const wchar_t* key) {
+    if (const wchar_t* t = our_text(key)) return t;
+    return o_GetText(self, edx, file, key);
+}
+
+int __fastcall h_CopyText(void* self, void* edx, const wchar_t* file, const wchar_t* key, wchar_t* buf, size_t n) {
+    if (const wchar_t* t = our_text(key); t && buf && n) {
+        wcsncpy_s(buf, n, t, _TRUNCATE);
+        return 1;
+    }
+    return o_CopyText(self, edx, file, key, buf, n);
+}
+
+void hook_text_service() {
+    if (g_text_done.load()) return;
+    HMODULE text = GetModuleHandleW(L"TextUSEnglish.dll");
+    if (!text || g_text_done.exchange(true)) return;
+    if (!is_expected_build(text, kTextTimestamp, kTextImageSize, "TextUSEnglish.dll")) {
+        LOG("menu: Display Mode hint will show its key (text DLL not recognised)");
+        return;
+    }
+    create_and_enable(at_rva(text, kGetTextRva), reinterpret_cast<void*>(&h_GetText), reinterpret_cast<void**>(&o_GetText),
+                      "TextUSEnglish GetText");
+    create_and_enable(at_rva(text, kCopyTextRva), reinterpret_cast<void*>(&h_CopyText),
+                      reinterpret_cast<void**>(&o_CopyText), "TextUSEnglish CopyText");
+}
+
 void hook_options_screen(HMODULE opts) {
     create_and_enable(at_rva(opts, kGfxInitRva), reinterpret_cast<void*>(&h_Init), reinterpret_cast<void**>(&o_Init),
                       "OptionsScreen Graphics Init");
@@ -365,6 +415,7 @@ void menu_on_modules_loaded() {
     // MenuSystem loads OptionsScreen.dll when the Options screen opens and frees it when it closes,
     // so every load is a fresh, unpatched image (possibly at the same address). Re-hook whenever
     // the loaded image does not carry our patch.
+    hook_text_service();  // TextUSEnglish.dll stays loaded; hooked once
     HMODULE opts = GetModuleHandleW(L"OptionsScreen.dll");
     if (!opts) return;
     auto* init = static_cast<const BYTE*>(at_rva(opts, kGfxInitRva));
