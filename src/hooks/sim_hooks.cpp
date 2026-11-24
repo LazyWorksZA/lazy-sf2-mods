@@ -13,11 +13,14 @@
 // All state below is touched from the game's main thread only (the hook), except the callback slots and
 // the run-active flag, which are atomics.
 //
-// Finding the player: the player is the earliest-created entry of the probe table. The hook caches its
-// pointer and created tick. A step of the cached player costs one pointer compare, plus one tick read;
+// Finding the player: the probe marks it (LiveAircraft::is_player: the first aircraft constructed since the
+// table was last empty). The hook caches its pointer and construction seq. When the player is destroyed it is
+// unknown (sim_player_known() is false) until the table empties and a new one is constructed; the hook never falls
+// back to another aircraft. A step of the cached player costs one pointer compare, plus one tick read;
 // once per second, and whenever the probe's destroy generation changed, it re-checks the cache under the
-// probe lock (this catches an address reused by another aircraft). Other aircraft take the lock only when no player is cached, or none has stepped for
-// 250 ms, and then at most once per 50 ms.
+// probe lock (this catches an address reused by another aircraft). The step of another aircraft takes the lock only
+// when no player is cached and none was lost (or the destroy generation changed), when the destroy generation changed
+// while a player is cached, or when the cached player has not stepped for 250 ms; and then at most once per 50 ms.
 #include <windows.h>
 
 #include <atomic>
@@ -51,7 +54,9 @@ std::atomic<bool> g_run_active{false};
 double g_game_time = 0;
 uint64_t g_steps = 0;
 void* g_player = nullptr;  // cached player aircraft, or null
-ULONGLONG g_player_created = 0;
+uint64_t g_player_seq = 0;  // construction seq of the cached player; 0 = none cached
+bool g_player_lost = false;  // a player was cached and has been destroyed; cleared when a new one is found
+uint32_t g_player_epoch = 0;  // bumped on every loss and every change of player
 ULONGLONG g_last_player_tick = 0;  // tick of the last player step
 ULONGLONG g_last_validate = 0;     // tick of the last refresh or validation
 uint32_t g_player_gen = 0;         // g_aircraft_generation when the cache was last refreshed or validated
@@ -63,8 +68,8 @@ double g_dt_min = 0, g_dt_max = 0, g_dt_sum = 0;
 
 struct PlayerCtx {
     void* obj = nullptr;  // out when refreshing; in when validating
-    ULONGLONG created = 0;
-    bool validate = false;  // in: only check that obj and created are still listed and earliest
+    uint64_t seq = 0;
+    bool validate = false;  // in: only check that obj and seq are still listed and still the player
     bool found = false;
 };
 
@@ -72,22 +77,43 @@ struct PlayerCtx {
 void player_cb(const LiveAircraft* list, size_t n, void* vctx) {
     auto& c = *static_cast<PlayerCtx*>(vctx);
     if (c.validate) {
-        bool listed = false, earliest = true;
         for (size_t i = 0; i < n; ++i) {
-            if (list[i].obj == c.obj && list[i].created == c.created) listed = true;
-            if (list[i].created < c.created) earliest = false;
+            if (list[i].obj == c.obj && list[i].seq == c.seq && list[i].is_player) c.found = true;
         }
-        c.found = listed && earliest;
         return;
     }
-    if (n == 0) return;
-    size_t player = 0;
-    for (size_t i = 1; i < n; ++i) {
-        if (list[i].created < list[player].created) player = i;
+    for (size_t i = 0; i < n; ++i) {
+        if (list[i].is_player) {
+            c.obj = list[i].obj;
+            c.seq = list[i].seq;
+            c.found = true;
+            return;
+        }
     }
-    c.obj = list[player].obj;
-    c.created = list[player].created;
-    c.found = true;
+}
+
+// Applies the result of a table lookup to the cache. Outside the lock, so it may log.
+void apply_player(const PlayerCtx& c) {
+    if (c.found) {
+        if (g_player_seq != 0 && c.seq != g_player_seq) {
+            // The table emptied and refilled while no step noticed (mission end, then a new load): a loss, then a
+            // new player.
+            ++g_player_epoch;
+            LOG("sim: player lost (destroyed); a new player was chosen");
+        }
+        g_player = c.obj;
+        g_player_seq = c.seq;
+        g_player_lost = false;  // the probe logs "player chosen"
+        return;
+    }
+    const bool had = g_player_seq != 0;
+    g_player = nullptr;
+    g_player_seq = 0;
+    if (had) {
+        g_player_lost = true;
+        ++g_player_epoch;
+        LOG("sim: player lost (destroyed); unknown until the aircraft table empties and a new one is constructed");
+    }
 }
 
 // Slow path: the cache is empty or suspect. Takes the probe lock, so callers throttle it by tick.
@@ -97,8 +123,7 @@ void refresh_player(ULONGLONG now) {
     PlayerCtx c;
     probe_with_aircraft(player_cb, &c);
     g_player_gen = gen;
-    g_player = c.found ? c.obj : nullptr;
-    g_player_created = c.found ? c.created : 0;
+    apply_player(c);
     g_last_player_tick = now;
 }
 
@@ -122,18 +147,23 @@ void __fastcall h_Update(void* self, void* edx, float dt) {
             g_player_gen = gen;
             PlayerCtx c;
             c.obj = g_player;
-            c.created = g_player_created;
+            c.seq = g_player_seq;
             c.validate = true;
             probe_with_aircraft(player_cb, &c);
-            if (!c.found) {  // gone, or no longer the earliest: drop the cache, find it again on a later step
-                g_player = nullptr;
+            if (!c.found) {  // destroyed (or its address was reused): the player is now unknown
+                apply_player(c);
                 is_player = false;
             }
         }
     } else {
-        // Another aircraft: go to the lock only when no player is cached or none stepped lately.
+        // Another aircraft: go to the lock only when no player is cached, none stepped lately, or an aircraft was
+        // destroyed since the last check (the cached player may be the one that went: it never steps again).
         const ULONGLONG now = GetTickCount64();
-        if ((!g_player || now - g_last_player_tick >= kStaleMs) && now - g_last_validate >= kRetryMs) {
+        const bool changed = g_aircraft_generation.load(std::memory_order_acquire) != g_player_gen;
+        // After a loss, look again only when the generation changed: a new player needs the table to empty and
+        // refill, and both bump it.
+        const bool need = g_player ? (changed || now - g_last_player_tick >= kStaleMs) : (!g_player_lost || changed);
+        if (need && now - g_last_validate >= kRetryMs) {
             refresh_player(now);
             is_player = self == g_player && self;
         }
@@ -161,6 +191,8 @@ void __fastcall h_Update(void* self, void* edx, float dt) {
 
 }  // namespace
 
+bool sim_player_known() { return g_player != nullptr; }
+uint32_t sim_player_epoch() { return g_player_epoch; }
 double sim_game_time() { return g_game_time; }
 uint64_t sim_step_count() { return g_steps; }
 

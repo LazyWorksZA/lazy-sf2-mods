@@ -7,6 +7,7 @@ software below, whose notices must travel with it.
 |---|---|---|
 | MinHook 1.3.4 (with Hacker Disassembler Engine 32/64) | statically linked into `winmm.dll` (the mod) | BSD 2-Clause |
 | Velopack 1.2.161 | `Velopack.dll` in the LazySF2 manager, and the installer's `Setup.exe` / `Update.exe` | MIT |
+| ENet 1.3.18 | statically linked into `winmm.dll` (the mod) and the synthetic client (developer tools) | MIT |
 
 Not distributed by this project, so not covered here:
 - **The .NET 10 Desktop Runtime.** When it's missing, Setup downloads and installs it from Microsoft.
@@ -130,4 +131,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+---
+
+## ENet
+
+Source: https://github.com/lsalzman/enet (version 1.3.18, from the vcpkg port `enet`)
+
+```
+Copyright (c) 2002-2024 Lee Salzman
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```

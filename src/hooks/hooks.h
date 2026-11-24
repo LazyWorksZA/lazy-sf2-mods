@@ -53,7 +53,11 @@ void probe_on_modules_loaded();
 struct LiveAircraft {
     void* obj;
     const wchar_t* name;
-    unsigned long long created;  // GetTickCount64() at construction
+    unsigned long long seq;  // construction sequence number: unique, increasing, never reused. Identifies the object
+                             // together with obj (an address can be reused).
+    bool is_player;          // the player's aircraft: the first constructed since the table was last empty. At most
+                             // one entry; none once the player is destroyed (until the table empties and refills).
+                             // Every "which one is the player" decision uses this flag, nothing else.
 };
 // Runs callback while holding the aircraft table's lock shared: no listed object can be destroyed
 // until it returns (the destructor hook needs the lock exclusively). The callback must not log or
@@ -90,9 +94,13 @@ inline void missile_spawn_on_present() {
 // Simulation step (developer tool, part of the probe): hooks the aircraft's own Update(dt), which runs
 // once per simulation step for every aircraft on the game's main thread, and not while the game is
 // paused. sim_on_modules_loaded() installs the hook (the probe calls it); nothing is hooked with the probe off.
-// The game clock adds dt on each step of the player's aircraft (the earliest-created tracked aircraft).
+// The game clock adds dt on each step of the player's aircraft (LiveAircraft::is_player: the first aircraft constructed since the probe table was last empty).
 // sim_game_time() and sim_step_count() may be read from the game thread only (inside a step callback).
 void sim_on_modules_loaded();
+// Game thread; updated on any aircraft's step. The player is known while sim has a cached one.
+bool sim_player_known();
+// Incremented on every player loss and every change of player. A run stores it at its start and ends when it differs.
+uint32_t sim_player_epoch();
 double sim_game_time();
 uint64_t sim_step_count();
 // "After an aircraft's Update" callback: called on the game thread, after the original returns and after the
@@ -133,5 +141,18 @@ void replay_toggle();
 void replay_cycle_rate();
 // True while a replay runs. The recorder refuses to start then.
 bool replay_active();
+
+// Host mode (developer tool, part of the probe; src/net/host.cpp): LAZYSF2_HOST=port or address:port makes the mod
+// listen for remote clients over UDP (ENet) and drive one AI aircraft per client as its avatar. Inert unless
+// LAZYSF2_HOST is set and the probe is on; the address defaults to 127.0.0.1.
+// host_install() reads the variable once (call from DllMain, after install_probe_hooks()) and logs "net: host off"
+// or that it is pending. host_on_modules_loaded() starts the network thread and registers the step callback (the
+// probe calls it). host_shutdown() stops the thread and gives every avatar back to the AI (DLL unload only).
+void host_install();
+void host_on_modules_loaded();
+void host_shutdown();
+// True while any client holds an avatar. Puppet and replay refuse to start then, and the host refuses clients
+// while one of them runs.
+bool host_has_clients();
 
 }  // namespace lazysf2::hooks

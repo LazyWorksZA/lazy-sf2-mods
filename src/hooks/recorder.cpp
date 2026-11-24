@@ -48,6 +48,7 @@ std::atomic<bool> g_toggle_request{false};
 RecSample* g_buf = nullptr;  // allocated once, on the first start
 uint32_t g_count = 0;        // samples in g_buf
 bool g_recording = false;
+uint32_t g_start_epoch = 0;  // sim_player_epoch() at the start
 double g_start_time = 0;
 
 template <typename T>
@@ -120,13 +121,28 @@ void start_recording() {
     }
     g_count = 0;  // the previous recording is discarded: only the latest is kept
     g_start_time = sim_game_time();
+    g_start_epoch = sim_player_epoch();
     g_recording = true;
     sim_set_run_active(true);
     LOG("recorder: started (max %.0f s, %u samples)", kMaxSeconds, kCapacity);
 }
 
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
-    if (!is_player) return;
+    // The destroyed player never steps again, so any aircraft's step is where we notice.
+    if (g_recording && sim_player_epoch() != g_start_epoch) {
+        stop_recording("player lost");
+        // A hotkey press that arrived in the same moment was most likely meant to stop it: it is spent, and must not
+        // be answered later with "not started, player unknown".
+        if (g_toggle_request.exchange(false, std::memory_order_relaxed))
+            LOG("recorder: hotkey ignored, the recording had just ended (player lost)");
+        return;
+    }
+    if (!is_player) {
+        if (!sim_player_known() && g_toggle_request.exchange(false, std::memory_order_relaxed)) {
+            LOG("recorder: not started, player unknown");
+        }
+        return;
+    }
     if (g_toggle_request.exchange(false, std::memory_order_relaxed)) {
         if (g_recording) {
             stop_recording("hotkey");

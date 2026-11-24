@@ -5,6 +5,7 @@
 //
 // Conventions: positions in metres (x east, y north, z up), time in seconds, angles in radians
 // (pitch, heading, roll). Heading runs from north toward east.
+#include <cmath>
 #include <cstddef>
 
 namespace lazysf2::hooks::replay_math {
@@ -119,6 +120,21 @@ constexpr bool sample_at(const Samp* s, int n, double t, Kin* out) {
         interpolate(s[i], s[i + 1], t, out);
     }
     return true;
+}
+
+// Rotation matrix rows (right, forward, up) from pitch, heading, roll. Verified from live dumps: pitch nose-up
+// positive, roll right-wing-down positive, heading in (-pi, pi]. Heading is from north toward east.
+inline void build_matrix(const double a[3], float m[9]) {
+    const double cp = std::cos(a[0]), sp = std::sin(a[0]), ch = std::cos(a[1]), sh = std::sin(a[1]);
+    const double cr = std::cos(a[2]), sr = std::sin(a[2]);
+    const double f[3] = {sh * cp, ch * cp, sp};
+    const double r0[3] = {ch, -sh, 0.0};
+    const double u0[3] = {-sh * sp, -ch * sp, cp};  // r0 x f
+    for (int i = 0; i < 3; ++i) {
+        m[i] = static_cast<float>(r0[i] * cr - u0[i] * sr);
+        m[3 + i] = static_cast<float>(f[i]);
+        m[6 + i] = static_cast<float>(u0[i] * cr + r0[i] * sr);
+    }
 }
 
 // --- Self-check (compile time) -------------------------------------------------------------------

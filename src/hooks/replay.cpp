@@ -71,21 +71,6 @@ Samp place(const RecSample& r, const Placement& pl) {
     return o;
 }
 
-// Rotation matrix rows (right, forward, up) from pitch, heading, roll. Verified from live dumps: pitch nose-up
-// positive, roll right-wing-down positive, heading in (-pi, pi]. Heading is from north toward east.
-void build_matrix(const double a[3], float m[9]) {
-    const double cp = std::cos(a[0]), sp = std::sin(a[0]), ch = std::cos(a[1]), sh = std::sin(a[1]);
-    const double cr = std::cos(a[2]), sr = std::sin(a[2]);
-    const double f[3] = {sh * cp, ch * cp, sp};
-    const double r0[3] = {ch, -sh, 0.0};
-    const double u0[3] = {-sh * sp, -ch * sp, cp};  // r0 x f
-    for (int i = 0; i < 3; ++i) {
-        m[i] = static_cast<float>(r0[i] * cr - u0[i] * sr);
-        m[3 + i] = static_cast<float>(f[i]);
-        m[6 + i] = static_cast<float>(u0[i] * cr + r0[i] * sr);
-    }
-}
-
 template <typename T>
 void read_at(const void* obj, size_t off, T* out, size_t n) {
     std::memcpy(out, static_cast<const char*>(obj) + off, n * sizeof(T));
@@ -123,9 +108,9 @@ double accel_g(const double p[3], double t, const double p1[3], double t1, const
 struct Run {
     bool active = false;
     void* target = nullptr;
-    unsigned long long target_created = 0;
+    unsigned long long target_seq = 0;
     void* player = nullptr;
-    unsigned long long player_created = 0;
+    unsigned long long player_seq = 0;
     uint32_t gen = 0;  // g_aircraft_generation when both aircraft were last confirmed live
     uint32_t set_bits = 0;  // REMOTEOBJECT bits that we set (mask & ~original flags)
 
@@ -176,17 +161,17 @@ Run g_run;
 
 struct LiveCtx {
     void* target;
-    unsigned long long target_created;
+    unsigned long long target_seq;
     void* player;
-    unsigned long long player_created;
+    unsigned long long player_seq;
     bool target_live = false, player_live = false;
 };
 
 void live_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the shared lock: no logging
     auto& c = *static_cast<LiveCtx*>(vctx);
     for (size_t i = 0; i < n; ++i) {
-        if (list[i].obj == c.target && list[i].created == c.target_created) c.target_live = true;
-        if (list[i].obj == c.player && list[i].created == c.player_created) c.player_live = true;
+        if (list[i].obj == c.target && list[i].seq == c.target_seq) c.target_live = true;
+        if (list[i].obj == c.player && list[i].seq == c.player_seq) c.player_live = true;
     }
 }
 
@@ -214,7 +199,7 @@ void stop_run(const char* reason, bool target_live) {
 bool still_live() {
     const uint32_t gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
     if (gen == g_run.gen) return true;
-    LiveCtx c{g_run.target, g_run.target_created, g_run.player, g_run.player_created};
+    LiveCtx c{g_run.target, g_run.target_seq, g_run.player, g_run.player_seq};
     probe_with_aircraft(live_cb, &c);
     if (!c.target_live) {
         stop_run("target destroyed", false);
@@ -236,7 +221,7 @@ struct StartCtx {
     const double* pp;   // in: player position
     int result = 0;     // 0 ok, 1 fewer than 2 aircraft
     void* target = nullptr;
-    unsigned long long created = 0, player_created = 0;
+    unsigned long long seq = 0, player_seq = 0;
     wchar_t name[64] = {};
     double distance = 0;
     uint32_t orig_flags = 0;
@@ -249,9 +234,9 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sh
     double best_d = 0;
     bool player_listed = false;
     for (size_t i = 0; i < n; ++i) {
-        if (list[i].obj == c.player) {
+        if (list[i].obj == c.player && list[i].is_player) {
             player_listed = true;
-            c.player_created = list[i].created;
+            c.player_seq = list[i].seq;
             continue;
         }
         double p[3];
@@ -267,7 +252,7 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sh
         return;
     }
     c.target = list[best].obj;
-    c.created = list[best].created;
+    c.seq = list[best].seq;
     c.distance = best_d;
     read_at(c.target, kOffPos, c.target_pos, 3);
     wcsncpy_s(c.name, list[best].name, _TRUNCATE);
@@ -281,6 +266,10 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sh
 }
 
 void try_start(void* player) {
+    if (host_has_clients()) {
+        LOG("replay: not started, host mode has clients");
+        return;
+    }
     if (g_puppet_state.load() != 0) {
         LOG("replay: not started, a puppet run is active");
         return;
@@ -322,9 +311,9 @@ void try_start(void* player) {
     Run r;
     r.active = true;
     r.target = c.target;
-    r.target_created = c.created;
+    r.target_seq = c.seq;
     r.player = player;
-    r.player_created = c.player_created;
+    r.player_seq = c.player_seq;
     r.gen = gen;
     r.set_bits = mask & ~c.orig_flags;
     r.rec = rec;

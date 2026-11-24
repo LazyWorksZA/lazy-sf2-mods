@@ -9,6 +9,7 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 find_package(minhook CONFIG REQUIRED)
+find_package(unofficial-enet CONFIG REQUIRED)
 
 # The mod is loaded as a winmm.dll proxy placed next to StrikeFighters2.exe.
 add_library(lazysf2 SHARED
@@ -29,10 +30,62 @@ add_library(lazysf2 SHARED
     src/hooks/sim_hooks.cpp
     src/hooks/recorder.cpp
     src/hooks/replay.cpp
+    src/net/protocol.cpp
+    src/net/host_core.cpp
+    src/net/host.cpp
+    src/net/stream_format.cpp
+    src/net/stream_record.cpp
+    src/net/enet_winmm_shim.cpp
 )
 set_target_properties(lazysf2 PROPERTIES OUTPUT_NAME winmm)
 target_compile_features(lazysf2 PRIVATE cxx_std_20)
 target_compile_definitions(lazysf2 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(lazysf2 PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2 PRIVATE src)
-target_link_libraries(lazysf2 PRIVATE minhook::minhook shell32 ole32)
+# ENet is linked statically. Do NOT link winmm here: this DLL is itself winmm.dll, and ENet's three winmm imports
+# are satisfied by src/net/enet_winmm_shim.cpp (they call the real system DLL).
+target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet ws2_32 delayimp shell32 ole32)
+# ws2_32 is delay-loaded: it is only touched by ENet (enet_initialize, on the network thread, which only exists in
+# host mode), so a player with host mode off never has it loaded into the game.
+target_link_options(lazysf2 PRIVATE /DELAYLOAD:ws2_32.dll)
+
+# Network protocol and host-core tests (console, not shipped, no game needed). ENet comes from vcpkg.
+add_executable(lazysf2-net-tests
+    tests/net_tests.cpp
+    src/net/protocol.cpp
+    src/net/host_core.cpp
+    src/net/stream_format.cpp
+    src/net/stream_record.cpp
+    tools/bot/bot_client.cpp
+    tools/acmi/acmi_convert.cpp
+)
+target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
+target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)
+target_include_directories(lazysf2-net-tests PRIVATE src tools tools/bot)
+target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet ws2_32 winmm)
+# The developer tools go to their own folder (build\<Config>	ools): next to the proxy they would load it as their winmm.dll.
+set_target_properties(lazysf2-net-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
+
+# The synthetic client (console, developer tool, not shipped). A normal exe, so it links winmm and ws2_32 as usual.
+add_executable(lazysf2-bot
+    tools/bot/main.cpp
+    tools/bot/bot_client.cpp
+    src/net/protocol.cpp
+)
+target_compile_features(lazysf2-bot PRIVATE cxx_std_20)
+target_compile_options(lazysf2-bot PRIVATE /W4 /permissive-)
+target_include_directories(lazysf2-bot PRIVATE src tools/bot)
+target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet ws2_32 winmm)
+set_target_properties(lazysf2-bot PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
+
+# Converts a recorded host stream to Tacview ACMI text (console, developer tool, not shipped).
+add_executable(lazysf2-acmi
+    tools/acmi/main.cpp
+    tools/acmi/acmi_convert.cpp
+    src/net/stream_format.cpp
+    src/net/protocol.cpp
+)
+target_compile_features(lazysf2-acmi PRIVATE cxx_std_20)
+target_compile_options(lazysf2-acmi PRIVATE /W4 /permissive-)
+target_include_directories(lazysf2-acmi PRIVATE src tools)
+set_target_properties(lazysf2-acmi PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")

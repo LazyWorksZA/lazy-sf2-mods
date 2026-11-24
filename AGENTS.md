@@ -45,6 +45,7 @@ The test project is only for development: it is not published or shipped.
 - **Toolchain:** VS 2026 (v18), generator `"Visual Studio 18 2026" -A Win32`, triplet `x86-windows-static`, with a static CRT (`CMAKE_MSVC_RUNTIME_LIBRARY`).
 - **vcpkg:** use the copy bundled with VS. It requires `builtin-baseline` in `vcpkg.json`.
 - **MSVC `C1083 Cannot open compiler generated file: ''`** is the long-path limit. Keep build directories short.
+- **Developer tools** (`lazysf2-bot`, `lazysf2-acmi`, `lazysf2-net-tests`) build into `build\Release\tools\`, not next to `winmm.dll`, so they never load the proxy as their own winmm. The installer copies only `build\Release\winmm.dll`.
 - **Runtime log:** `lazysf2.log` in the game folder. Use it to check that hooks were installed and what they did.
 - **`LAZYSF2_DISABLE=1`** runs the mod as a pure pass-through proxy.
 - **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the headless C# helper (`installer/LazySF2.Manager`, framework-dependent .NET 10, no WinForms), and runs `vpk pack --msi`.
