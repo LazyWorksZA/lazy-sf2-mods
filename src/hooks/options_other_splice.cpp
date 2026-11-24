@@ -79,11 +79,11 @@ int splice_other_page(std::wstring& text) {
     if (max_id <= 0 || max_id > 997) return 0;
     const int id = max_id + 1;
 
-    // The five visible tabs, in order. The Network tab stays hidden.
+    // The five visible tabs, in order (positions: see kTabX/kTabY). The Network tab stays hidden.
     static const wchar_t* const kTabs[5] = {L"GameplayOptionsButton", L"GraphicsOptionsButton", L"SoundOptionsButton",
                                             L"ControlOptionsButton", L"OtherOptionsButton"};
     for (int i = 0; i < 5; ++i) {
-        if (!set_key(t, kTabs[i], L"TextPosition", std::to_wstring(kTabX[i]) + L"," + std::to_wstring(kTabY))) return 0;
+        if (!set_key(t, kTabs[i], L"TextPosition", std::to_wstring(kTabX[i]) + L"," + std::to_wstring(kTabY[i]))) return 0;
     }
     // The tab reaches its page by order (button ID 7 -> page ID 14), like the stock tabs: DestinationMenu stays empty.
     if (!remove_key(t, L"OtherOptionsButton", L"Active")) return 0;

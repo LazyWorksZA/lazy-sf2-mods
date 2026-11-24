@@ -4,10 +4,11 @@
 
 namespace lazysf2::hooks {
 
-// X of the five visible tab labels (centred text, y = 120): Gameplay, Graphics, Sound, Controls, Other.
-// Tune these live; the stock tabs sit at 597, 711, 824 and 938 with the Network tab hidden.
-inline constexpr int kTabX[5] = {560, 660, 760, 860, 960};
-inline constexpr int kTabY = 120;
+// Tab label positions (centred text): Gameplay, Graphics, Sound, Controls, Other. The underline bars under the four
+// stock tabs are part of the background image, so the stock tabs keep their x (597, 711, 824, 938) and move up a
+// little; "Other" sits on a second row under Gameplay, at the stock tab height. Tune these live.
+inline constexpr int kTabX[5] = {597, 711, 824, 938, 597};
+inline constexpr int kTabY[5] = {94, 94, 94, 94, 120};
 
 // Keys answered by the text hook (see menu_hooks.cpp).
 inline constexpr wchar_t kOtherTabKey[] = L"TXT_LAZY_OTHER_OPTIONS";

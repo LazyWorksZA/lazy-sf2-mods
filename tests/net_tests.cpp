@@ -1862,11 +1862,12 @@ void other_page_splice_tests() {
     expect(button.find(L"DestinationMenu=\r") != std::wstring::npos, "DestinationMenu stays empty, like the stock tabs");
     bool spaced = true;
     for (int i = 0; i < 5; ++i) {
-        const std::wstring want = L"TextPosition=" + std::to_wstring(lazysf2::hooks::kTabX[i]) + L",120\r\n";
+        const std::wstring want = L"TextPosition=" + std::to_wstring(lazysf2::hooks::kTabX[i]) + L"," +
+                                 std::to_wstring(lazysf2::hooks::kTabY[i]) + L"\r\n";
         const size_t b = t.find(std::wstring(L"[") + names[i] + L"]");
         spaced &= b != std::wstring::npos && t.substr(b, t.find(L"\n[", b) - b).find(want) != std::wstring::npos;
     }
-    expect(spaced, "five tabs re-spaced at the named x positions, y=120");
+    expect(spaced, "five tabs placed at the named positions");
     expect(lazysf2::hooks::splice_other_page(t) == 0, "second splice is refused");
     std::wstring bad = L"[OptionsScreen]\r\n";
     expect(lazysf2::hooks::splice_other_page(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
