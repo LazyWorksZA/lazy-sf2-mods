@@ -59,19 +59,21 @@ std::atomic<bool> g_factory_hooked{false};
 std::atomic<bool> g_swapchain_hooked{false};
 SRWLOCK g_install_lock = SRWLOCK_INIT;
 
-// The game's swap chain and what it last asked for. Not reference-counted: the game keeps its
-// swap chain for the whole session, and we only use it from the window thread.
-IDXGISwapChain* g_swapchain = nullptr;
-IDXGIFactory* g_factory = nullptr;
+// The game's swap chain and factory, and what it last asked for. Not reference-counted (holding
+// a reference would move the game's final Release): the Release hooks below clear these when the
+// game's last reference goes. Every user loads the atomic once into a local and null-checks it.
+std::atomic<IDXGISwapChain*> g_swapchain{nullptr};
+std::atomic<IDXGIFactory*> g_factory{nullptr};
 HWND g_output_window = nullptr;
 DXGI_MODE_DESC g_target_mode = {};
 bool g_have_target_mode = false;
 bool g_game_wants_fullscreen = false;  // the game's own fullscreen flag, as seen through its calls
 
 void set_alt_enter_handling(bool borderless) {
-    if (!g_factory || !g_output_window) return;
+    IDXGIFactory* factory = g_factory.load();
+    if (!factory || !g_output_window) return;
     const UINT flags = borderless ? (DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES) : 0;  // 0 = stock
-    HRESULT hr = g_factory->MakeWindowAssociation(g_output_window, flags);
+    HRESULT hr = factory->MakeWindowAssociation(g_output_window, flags);
     LOG("dxgi: MakeWindowAssociation(0x%x) -> 0x%08lx", flags, hr);
 }
 
@@ -80,7 +82,7 @@ void set_alt_enter_handling(bool borderless) {
 HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
     char caller[96];
     describe_address(_ReturnAddress(), caller, sizeof(caller));
-    if (self == g_swapchain) g_game_wants_fullscreen = fullscreen != FALSE;
+    if (self == g_swapchain.load()) g_game_wants_fullscreen = fullscreen != FALSE;
     if (fullscreen && config::borderless()) {
         LOG("dxgi: SetFullscreenState(TRUE) from %s suppressed (borderless)", caller);
         return S_OK;
@@ -93,7 +95,8 @@ HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullsc
 }
 
 HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* mode) {
-    if (mode && self == g_swapchain && !g_have_target_mode) {
+    IDXGISwapChain* const tracked = g_swapchain.load();
+    if (mode && self == tracked && !g_have_target_mode) {
         g_target_mode = *mode;  // the mode the game wants for exclusive fullscreen
         g_have_target_mode = true;
     }
@@ -101,7 +104,7 @@ HRESULT STDMETHODCALLTYPE h_ResizeTarget(IDXGISwapChain* self, const DXGI_MODE_D
         // Fullscreen on a chosen Screen whose size differs from the game's mode: switch that
         // monitor to its own size (DXGI scales the back buffer) instead of growing the window past it.
         RECT r;
-        if (mode && self == g_swapchain && window_chosen_screen(&r)) {
+        if (mode && self == tracked && window_chosen_screen(&r)) {
             const UINT w = static_cast<UINT>(r.right - r.left), h = static_cast<UINT>(r.bottom - r.top);
             if (mode->Width != w || mode->Height != h) {
                 DXGI_MODE_DESC m = *mode;
@@ -141,7 +144,7 @@ unsigned g_frames_since_change = 0;
 HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain* self, UINT sync, UINT flags) {
     HRESULT hr = o_Present(self, sync, flags);
     ++g_frames_since_change;
-    if (self == g_swapchain && hr != g_last_present) {
+    if (self == g_swapchain.load() && hr != g_last_present) {
         const DWORD now = GetTickCount();
         LOG("dxgi: Present -> 0x%08lx %s (was %s for %u frames, %lu ms)", hr, present_result_name(hr),
             present_result_name(g_last_present), g_frames_since_change, now - g_last_present_tick);
@@ -171,7 +174,7 @@ HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT
     char caller[96];
     describe_address(_ReturnAddress(), caller, sizeof(caller));
     const UINT asked_w = w, asked_h = h;
-    if (self == g_swapchain) {
+    if (self == g_swapchain.load()) {
         if (w && h) {
             g_game_buffer_w = w;
             g_game_buffer_h = h;
@@ -186,6 +189,37 @@ HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT
     return hr;
 }
 
+// --- Forgetting released objects ----------------------------------------------------------------
+// IUnknown::Release is vtable slot 2. When the game's final Release returns 0 the object is gone,
+// so we drop our pointer. No locks and no allocation here: Release can run on any thread, even
+// under the loader lock at exit. After the original returns 0 `self` is only compared, never used.
+// The swap chain and the factory may share one Release function (DXVK can), and MinHook allows
+// one hook per address: a shared address gets a single hook, and each detour checks both pointers.
+constexpr int kReleaseSlot = 2;
+using Release_t = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
+Release_t o_SwapRelease = nullptr;
+Release_t o_FactoryRelease = nullptr;
+void* g_factory_release_addr = nullptr;  // set before the swap chain is hooked
+
+void forget_released(IUnknown* self) {
+    IDXGISwapChain* sc = static_cast<IDXGISwapChain*>(self);
+    if (g_swapchain.compare_exchange_strong(sc, nullptr)) LOG("dxgi: game released the swap chain; forgetting it");
+    IDXGIFactory* f = static_cast<IDXGIFactory*>(self);
+    if (g_factory.compare_exchange_strong(f, nullptr)) LOG("dxgi: game released the factory; forgetting it");
+}
+
+ULONG STDMETHODCALLTYPE h_SwapRelease(IUnknown* self) {
+    const ULONG refs = o_SwapRelease(self);
+    if (refs == 0) forget_released(self);
+    return refs;
+}
+
+ULONG STDMETHODCALLTYPE h_FactoryRelease(IUnknown* self) {
+    const ULONG refs = o_FactoryRelease(self);
+    if (refs == 0) forget_released(self);
+    return refs;
+}
+
 void hook_swapchain(IDXGISwapChain* sc) {
     if (g_swapchain_hooked.exchange(true)) return;
     g_last_present_tick = GetTickCount();
@@ -197,6 +231,13 @@ void hook_swapchain(IDXGISwapChain* sc) {
                       reinterpret_cast<void**>(&o_SetFullscreenState), "IDXGISwapChain::SetFullscreenState");
     create_and_enable(vtable_slot(sc, kSwapResizeTarget), reinterpret_cast<void*>(&h_ResizeTarget),
                       reinterpret_cast<void**>(&o_ResizeTarget), "IDXGISwapChain::ResizeTarget");
+    void* release = vtable_slot(sc, kReleaseSlot);
+    if (release == g_factory_release_addr) {
+        LOG("dxgi: swap chain and factory share one Release; hooked once");
+    } else {
+        create_and_enable(release, reinterpret_cast<void*>(&h_SwapRelease), reinterpret_cast<void**>(&o_SwapRelease),
+                          "IDXGISwapChain::Release");
+    }
 }
 
 // --- IDXGIFactory -----------------------------------------------------------------------------
@@ -243,6 +284,11 @@ void hook_factory(IUnknown* obj) {
     if (!g_factory_hooked.exchange(true)) {
         create_and_enable(vtable_slot(factory, kFactoryCreateSwapChain), reinterpret_cast<void*>(&h_CreateSwapChain),
                           reinterpret_cast<void**>(&o_CreateSwapChain), "IDXGIFactory::CreateSwapChain");
+        void* release = vtable_slot(factory, kReleaseSlot);
+        if (create_and_enable(release, reinterpret_cast<void*>(&h_FactoryRelease),
+                              reinterpret_cast<void**>(&o_FactoryRelease), "IDXGIFactory::Release")) {
+            g_factory_release_addr = release;
+        }
     }
     factory->Release();
 }
@@ -258,7 +304,7 @@ HRESULT WINAPI h_CreateDXGIFactory(REFIID riid, void** out) {
 
 bool dxgi_is_exclusive() {
     BOOL exclusive = FALSE;
-    if (g_swapchain) g_swapchain->GetFullscreenState(&exclusive, nullptr);
+    if (IDXGISwapChain* sc = g_swapchain.load()) sc->GetFullscreenState(&exclusive, nullptr);
     return exclusive != FALSE;
 }
 
@@ -267,7 +313,7 @@ bool dxgi_is_exclusive() {
 void dxgi_apply_display_mode() {
     const bool borderless = config::borderless();
     input_apply_settings();  // Windows key follows the display mode; mouse follows its setting
-    IDXGISwapChain* sc = g_swapchain;
+    IDXGISwapChain* sc = g_swapchain.load();
     if (!sc || !o_SetFullscreenState || !o_ResizeTarget) {
         LOG("dxgi: live switch skipped: no swap chain yet");
         return;
