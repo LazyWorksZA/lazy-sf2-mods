@@ -21,6 +21,11 @@ double wall_now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - origin).count();
 }
 
+/// Seconds without anything from the host before the bot gives up: no ENet connection (exit code 3), or silence after the Welcome (4).
+constexpr double kSilenceLimit = 4.0;
+/// Seconds a connected host may take to send the Welcome (its game thread may be busy loading) before exit code 3.
+constexpr double kWelcomeWait = 15.0;
+
 struct Runner {
     const BotConfig& cfg;
     BotResult res;
@@ -28,7 +33,7 @@ struct Runner {
     ENetPeer* peer = nullptr;
     bool connected = false, disconnected = false, welcomed = false;
     WelcomeMsg welcome{};
-    double welcome_wall = 0;
+    double last_rx = 0;  // wall time of the last packet from the host
     ClockSync clock;
     Flight flight;
     std::mt19937 rng;
@@ -65,6 +70,7 @@ struct Runner {
             disconnected = true;
         } else if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
             const double rx = wall_now();
+            last_rx = rx;
             MsgType type{};
             if (peek_type(ev.packet->data, ev.packet->dataLength, type) == Status::Ok) {
                 if (type == MsgType::Welcome && ev.channelID == kChannelReliable && !welcomed) {
@@ -72,7 +78,6 @@ struct Runner {
                     if (decode(ev.packet->data, ev.packet->dataLength, w) == Status::Ok) {
                         welcome = w;
                         welcomed = true;
-                        welcome_wall = rx;
                         res.client_id = w.client_id;
                         // The connect RTT: ENet's smoothed value for the peer (ms), as half a trip.
                         clock.on_welcome(rx, w.host_game_time, 0.0005 * static_cast<double>(peer->roundTripTime));
@@ -157,12 +162,19 @@ BotResult run_bot(const BotConfig& cfg) {
     }
 
     // Connect.
-    for (double t0 = wall_now(); !r.connected && !r.disconnected && wall_now() - t0 < 5.0 && !r.cancelled();) r.service(10);
+    for (double t0 = wall_now(); !r.connected && !r.disconnected && wall_now() - t0 < kSilenceLimit && !r.cancelled();)
+        r.service(10);
     if (!r.connected) {
-        r.say("bot: cannot connect to %s", cfg.host.c_str());
-        res.code = 2;
+        if (r.disconnected || r.cancelled()) {
+            r.say("bot: cannot connect to %s", cfg.host.c_str());
+            res.code = 2;
+        } else {
+            r.say("bot: no answer from %s to the connect request after %.0f s", cfg.host.c_str(), kSilenceLimit);
+            res.code = 3;
+        }
         return res;
     }
+    r.last_rx = wall_now();
     HelloMsg hello{};
     set_str(hello.callsign, cfg.callsign.c_str());
     set_str(hello.aircraft, cfg.aircraft.c_str());
@@ -171,7 +183,8 @@ BotResult run_bot(const BotConfig& cfg) {
     enet_host_flush(r.host);
 
     // Welcome.
-    for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < 5.0 && !r.cancelled();) r.service(10);
+    for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < kWelcomeWait && !r.cancelled();)
+        r.service(10);
     if (!r.welcomed) {
         r.say("bot: no Welcome from the host (%s)", r.disconnected ? "it closed the connection" : "timed out");
         res.code = r.disconnected ? 4 : 3;
@@ -195,6 +208,7 @@ BotResult run_bot(const BotConfig& cfg) {
     };
 
     for (;;) {
+        r.service(0);  // count what already arrived before judging silence
         const double wall = wall_now();
         if (r.disconnected) {
             r.say("bot: the host closed the connection");
@@ -211,12 +225,12 @@ BotResult run_bot(const BotConfig& cfg) {
             next_ping = wall + 0.25;
         }
 
-        // The host never answers: no Pong within 4 s of the Welcome, or its clock held for more than 4 s on end.
-        if (!flying && !r.clock.have_pong() && wall - r.welcome_wall > 4.0) {
-            r.say("bot: host not answering: no Pong 4 s after the Welcome");
+        if (wall - r.last_rx > kSilenceLimit) {
+            r.say("bot: the host went silent: nothing received for %.0f s", kSilenceLimit);
             res.code = 4;
             break;
         }
+        // The host answers Pings but its clock held for more than 4 s on end.
         if (flying) {
             if (!r.clock.on_hold(wall)) {
                 hold_since = 0;

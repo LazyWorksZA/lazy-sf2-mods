@@ -9,6 +9,11 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 - **Smaller Tacview recordings.** Each aircraft, weapon and ground-object line now holds only the position and attitude values that changed since the last one, and lines that change nothing are left out. A finished recording is also packed into `SF2 <date>.zip.acmi`, which Tacview opens directly. Together this made one measured 19.6 MB recording about 14 times smaller (about 1.4 MB). While a flight runs, the recording stays a plain `.acmi`. The packing runs in the background after the flight ends. If the game exits or crashes before it finishes (or the write fails), the recording stays a plain `.acmi` that Tacview opens as before.
 
+### Developer tools (off unless enabled)
+
+- **`lazysf2-bot` gives up on a silent host.** After 4 s with nothing from the host it prints one line and exits: code 3 when the connection is not established within 4 s or the Welcome has not come 15 s after connecting (the host may be loading), code 4 when the host goes silent or closes the connection later. Code 2 now means only a bad address or a refused connection.
+- The loopback tests no longer fail on a slow or busy machine.
+
 ## 1.0.0 (2026-11-25)
 
 ### Player features
