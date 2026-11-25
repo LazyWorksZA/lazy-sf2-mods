@@ -197,7 +197,7 @@ int splice_controls(std::wstring& text) {
         L"Width=240\r\n"
         L"Height=22\r\n"
         L"ListFieldSetting=MediumListField\r\n"
-        L"DropDownListSize=10\r\n"
+        L"DropDownListSize=2\r\n"
         L"InfoTextSetting=InfoTextSetting\r\n"
         L"InfoTextStringID=TXT_LAZY_PILOT_TWIST_INFO\r\n"
         L"\r\n"
@@ -583,7 +583,8 @@ void __fastcall h_CtlExit(void* self, void* edx) {
             reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva))(ini, nullptr, L"ControlOptions",
                                                                               L"PilotTwist", on ? 1 : 0);
         }
-        config::set_pilot_twist(on);  // logs a change; the view hooks read it every frame
+        config::set_pilot_twist(on);  // logs a change
+        pilot_twist_apply_setting();  // in the menus: no view update is running
     }
     o_CtlExit(self, edx);
     aircraft_track_reevaluate();  // as in h_Exit

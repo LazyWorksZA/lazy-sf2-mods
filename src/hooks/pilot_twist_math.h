@@ -43,12 +43,25 @@ constexpr float smoothstep01(float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-/// <summary>Signed effect strength in [-1, 1] for a head yaw: 0 up to kStartYaw, 1 from kFullYaw, sign of the yaw.</summary>
-inline float target_weight(float head_yaw) {
-    const float y = wrap_pi(head_yaw);
+/// <summary>
+/// Signed effect strength in [-1, 1] for a (continuous) head yaw: 0 up to kStartYaw, 1 from kFullYaw, sign of the
+/// yaw. Not wrapped: a yaw past +-180 degrees keeps its side (see continuous_yaw).
+/// </summary>
+inline float target_weight(float yaw) {
+    if (!(std::fabs(yaw) < 1e4f)) return 0.0f;
+    const float s = smoothstep01((std::fabs(yaw) - kStartYaw) / (kFullYaw - kStartYaw));
+    return yaw < 0 ? -s : s;
+}
+
+/// <summary>
+/// The head yaw unwrapped against last frame's (prev), so turning past +-180 degrees keeps the side the pilot turned
+/// to instead of flipping. Re-anchored to the wrapped yaw whenever the head is back inside kStartYaw.
+/// </summary>
+inline float continuous_yaw(float prev, float yaw) {
+    const float y = wrap_pi(yaw);
     if (!(std::fabs(y) <= kPi)) return 0.0f;
-    const float s = smoothstep01((std::fabs(y) - kStartYaw) / (kFullYaw - kStartYaw));
-    return y < 0 ? -s : s;
+    if (!(std::fabs(prev) < 4.0f * kPi) || std::fabs(y) < kStartYaw) return y;
+    return prev + wrap_pi(y - prev);
 }
 
 /// <summary>One first-order low-pass step over dt seconds. A gap of kSnapAfterSeconds or more jumps to the target.</summary>
@@ -59,21 +72,44 @@ inline float filter_step(float current, float target, float dt) {
 }
 
 /// <summary>
-/// The view yaw for this frame's camera: head yaw plus weight * kMaxTwist, kept within the seat limits widened by
-/// kMaxTwist (when the view limits yaw) and within +-kYawCap.
+/// Extra view yaw for this frame's camera: weight * kMaxTwist, keeping yaw + extra within the seat limits widened by
+/// kMaxTwist (when the view limits yaw) and within +-kYawCap. Never pulls back a yaw the game already has past them.
 /// </summary>
-inline float twisted_yaw(float head_yaw, float weight, float min_yaw, float max_yaw, bool limited) {
+inline float twist_delta(float yaw, float weight, float min_yaw, float max_yaw, bool limited) {
+    if (!(std::fabs(yaw) < 1e4f) || !(std::fabs(weight) <= 1.0f)) return 0.0f;
     float lo = -kYawCap, hi = kYawCap;
     if (limited && min_yaw <= max_yaw) {
         lo = clampf(min_yaw - kMaxTwist, -kYawCap, kYawCap);
         hi = clampf(max_yaw + kMaxTwist, -kYawCap, kYawCap);
     }
-    const float y = wrap_pi(head_yaw);
-    if (!(std::fabs(y) <= kPi) || !(std::fabs(weight) <= 1.0f)) return head_yaw;
-    // Never pull a view back that the game already has past the widened limit.
-    const float t = y + weight * kMaxTwist;
-    return clampf(t, y < lo ? y : lo, y > hi ? y : hi);
+    const float t = clampf(yaw + weight * kMaxTwist, yaw < lo ? yaw : lo, yaw > hi ? yaw : hi);
+    return t - yaw;
 }
+
+/// <summary>Per-view filter state, owned by the hook.</summary>
+struct TwistState {
+    float weight = 0.0f;  // filtered signed strength
+    float yaw = 0.0f;     // continuous head yaw
+    bool have = false;    // false: the next frame starts at its target
+};
+
+/// <summary>
+/// Advances the state with this frame's head yaw (the game's smoothed view yaw) and returns the yaw to build this
+/// frame's camera with. The head yaw itself must be put back afterwards (restore_yaw).
+/// </summary>
+inline float camera_yaw(TwistState& s, float head, float dt, float min_yaw, float max_yaw, bool limited) {
+    s.yaw = continuous_yaw(s.have ? s.yaw : 1e9f, head);
+    const float target = target_weight(s.yaw);
+    s.weight = s.have ? filter_step(s.weight, target, dt) : target;
+    s.have = true;
+    return head + twist_delta(s.yaw, s.weight, min_yaw, max_yaw, limited);
+}
+
+/// <summary>
+/// The yaw to leave in the view after the camera is built: the head yaw, unless the game changed the value we wrote
+/// (then its write stands).
+/// </summary>
+constexpr float restore_yaw(float current, float written, float head) { return current == written ? head : current; }
 
 /// <summary>
 /// Lean offset in body axes for a weight. native_bound is the largest head movement the tracker itself may add

@@ -6,6 +6,7 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 
 #include "config.h"
@@ -35,6 +36,7 @@ constexpr int kTracker = 0xe4;   // non-zero while a head tracker drives the vie
 constexpr int kEye = 0x90;       // double[3], world
 // View definition.
 constexpr int kDefInsideView = 0x20;  // short
+constexpr int kDefYawControl = 0x10;  // int, -1 = the view has no yaw control
 constexpr int kDefFlags = 0x24;
 constexpr uint32_t kFlagSnapView = 0x2, kFlagLimitYaw = 0x2000;
 // Interfaces (vtable byte offsets / 4).
@@ -49,27 +51,29 @@ Update_t o_Update = nullptr;
 Camera_t o_Camera = nullptr;
 Eye_t o_Eye = nullptr;
 
+// Install state, under g_install_lock. g_view_dll and g_enabled are also read without it (fast path, detours).
 SRWLOCK g_install_lock = SRWLOCK_INIT;
-HMODULE g_view_dll = nullptr;  // image carrying our hooks
-HMODULE g_bad_base = nullptr;  // image already found unusable (checked once)
-std::atomic<bool> g_logged_on{false};
+std::atomic<HMODULE> g_view_dll{nullptr};  // image our (created) hooks belong to
+HMODULE g_bad_base = nullptr;              // image already found unusable (checked once)
+std::atomic<bool> g_enabled{false};        // hooks enabled (Pilot Twist on)
 
-// Game thread only (the view update).
-void* g_updating = nullptr;   // the inside view whose update is running, else nullptr
+// View state. The three detours run on the one thread that updates the views (the game thread); nothing else
+// touches these while the hooks are enabled, so they are plain variables.
+void* g_updating = nullptr;  // the inside view whose update is running, else nullptr
 const void* g_last_view = nullptr;
-float g_weight = 0.0f;        // filtered signed strength
+pt::TwistState g_state;
 LARGE_INTEGER g_last_tick{};
-bool g_have_state = false;
 
 template <typename T>
 T& at(void* p, int offset) {
     return *reinterpret_cast<T*>(static_cast<BYTE*>(p) + offset);
 }
 
-// The view is an inside (cockpit) view that the player turns with hat or tracker, not a fixed snap view.
+// An inside (cockpit) view the player turns (it has a yaw control: hat or tracker), not a fixed snap view.
 bool applies_to(void* view) {
     BYTE* def = at<BYTE*>(view, kViewDef);
-    return def && at<short>(def, kDefInsideView) != 0 && (at<uint32_t>(def, kDefFlags) & kFlagSnapView) == 0;
+    return def && at<short>(def, kDefInsideView) != 0 && (at<uint32_t>(def, kDefFlags) & kFlagSnapView) == 0 &&
+           at<int>(def, kDefYawControl) != -1;
 }
 
 float seconds_since_last() {
@@ -77,50 +81,43 @@ float seconds_since_last() {
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    const float dt = g_have_state ? static_cast<float>(now.QuadPart - g_last_tick.QuadPart) / freq.QuadPart : pt::kSnapAfterSeconds;
+    const float dt = g_state.have ? static_cast<float>(now.QuadPart - g_last_tick.QuadPart) / freq.QuadPart : 0.0f;
     g_last_tick = now;
     return dt;
 }
 
 void __fastcall h_Update(void* view, void* edx, float dt) {
-    const bool on = config::pilot_twist();
-    if (on != g_logged_on.exchange(on)) LOG("pilot twist: %s", on ? "on" : "off");
-    if (!on) {
-        g_have_state = false;
-        o_Update(view, edx, dt);
-        return;
-    }
+    void* const outer = g_updating;  // survives a nested update
     g_updating = applies_to(view) ? view : nullptr;
     o_Update(view, edx, dt);
-    g_updating = nullptr;
+    g_updating = outer;
 }
 
-// Twist without feedback: the extra yaw is written into the view's yaw only while the original builds this frame's
-// camera matrix, then the head yaw is put back, so the game's smoothing and limits never see it.
+// Twist without feedback: the extra yaw is in the view's yaw only while the original builds this frame's camera
+// matrix; then the head yaw is put back, so the game's smoothing and limits never see it.
 void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
-    if (view != g_updating) {
+    if (!view || view != g_updating) {
         o_Camera(view, edx, aircraft);
         return;
     }
+    if (view != g_last_view) g_state.have = false;  // another view: start at the target
+    g_last_view = view;
     float& yaw = at<float>(view, kYaw);
     const float head = yaw;
     const float dt = seconds_since_last();
-    const float target = pt::target_weight(head);
-    g_weight = (g_have_state && view == g_last_view) ? pt::filter_step(g_weight, target, dt) : target;
-    g_last_view = view;
-    g_have_state = true;
-
     BYTE* def = at<BYTE*>(view, kViewDef);
     const bool limited = (at<uint32_t>(def, kDefFlags) & kFlagLimitYaw) != 0;
-    yaw = pt::twisted_yaw(head, g_weight, at<float>(view, kMinYaw), at<float>(view, kMaxYaw), limited);
+    const float written = pt::camera_yaw(g_state, head, dt, at<float>(view, kMinYaw), at<float>(view, kMaxYaw), limited);
+    yaw = written;
     o_Camera(view, edx, aircraft);
-    yaw = head;
+    yaw = pt::restore_yaw(yaw, written, head);
 }
 
 // Largest head movement the tracker may add (seat MinMovement/MaxMovement), 0 without a tracker.
 float tracker_bound(void* view) {
-    if (!at<int>(view, kTracker) || !g_view_dll) return 0.0f;
-    void* om = *static_cast<void**>(at_rva(g_view_dll, kObjectManagerRva));
+    HMODULE vm = g_view_dll.load(std::memory_order_acquire);
+    if (!at<int>(view, kTracker) || !vm) return 0.0f;
+    void* om = *static_cast<void**>(at_rva(vm, kObjectManagerRva));
     if (!om) return 0.0f;
     void* seat = nullptr;
     using GetInterface_t = int(__fastcall*)(void*, void*, int, int, void**);
@@ -136,21 +133,23 @@ float tracker_bound(void* view) {
 
 void __fastcall h_Eye(void* view, void* edx, const float* aircraft, void* iface) {
     o_Eye(view, edx, aircraft, iface);
-    if (view != g_updating || view != g_last_view || !aircraft || g_weight == 0.0f) return;
-    const pt::Vec3 d = pt::body_to_world(aircraft, pt::lean_body(g_weight, tracker_bound(view)));
+    if (!view || view != g_updating || view != g_last_view || !aircraft || !g_state.have || g_state.weight == 0.0f) return;
+    const pt::Vec3 d = pt::body_to_world(aircraft, pt::lean_body(g_state.weight, tracker_bound(view)));
     at<double>(view, kEye) += d.x;
     at<double>(view, kEye + 8) += d.y;
     at<double>(view, kEye + 16) += d.z;
 }
 
+constexpr DWORD kRvas[] = {kUpdateRva, kCameraRva, kEyeRva};
+
 void remove_view_hooks(HMODULE base) {
-    for (DWORD rva : {kUpdateRva, kCameraRva, kEyeRva}) {
+    for (DWORD rva : kRvas) {
         MH_STATUS s = MH_RemoveHook(at_rva(base, rva));
         (void)s;  // MH_ERROR_NOT_CREATED is expected
     }
 }
 
-// True if base is still a loaded image (not freed). Compared by handle only: the name was checked when hooked.
+// True if base is still the loaded ViewManager.dll image (not freed). The build was checked when it was hooked.
 bool still_loaded(HMODULE base) {
     HMODULE h = nullptr;
     return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -158,45 +157,76 @@ bool still_loaded(HMODULE base) {
            h == base && GetModuleHandleW(L"ViewManager.dll") == base;
 }
 
+// Creates the three hooks on vm, disabled. False (and nothing left behind) if any fails.
+bool create_view_hooks(HMODULE vm) {
+    remove_view_hooks(vm);  // entries left by an earlier image at this base
+    MH_STATUS s = MH_CreateHook(at_rva(vm, kUpdateRva), reinterpret_cast<void*>(&h_Update),
+                                reinterpret_cast<void**>(&o_Update));
+    if (s == MH_OK) {
+        s = MH_CreateHook(at_rva(vm, kCameraRva), reinterpret_cast<void*>(&h_Camera), reinterpret_cast<void**>(&o_Camera));
+    }
+    if (s == MH_OK) s = MH_CreateHook(at_rva(vm, kEyeRva), reinterpret_cast<void*>(&h_Eye), reinterpret_cast<void**>(&o_Eye));
+    LOG("pilot twist: hooks at ViewManager.dll+0x3360/+0x3070/+0x2ec0 created (disabled): %s", MH_StatusToString(s));
+    if (s != MH_OK) remove_view_hooks(vm);
+    return s == MH_OK;
+}
+
+// Enables or disables the three hooks together. MinHook's queued apply suspends the other threads once, patches the
+// three entries in one go and moves any thread stopped inside a patched prologue, so no frame sees only some of
+// them; a detour that is already running keeps its trampoline and finishes normally. Caller holds g_install_lock.
+void set_enabled_locked(bool on) {
+    HMODULE vm = g_view_dll.load();
+    if (!vm || on == g_enabled.load()) return;
+    for (DWORD rva : kRvas) {
+        MH_STATUS q = on ? MH_QueueEnableHook(at_rva(vm, rva)) : MH_QueueDisableHook(at_rva(vm, rva));
+        (void)q;  // reported by MH_ApplyQueued
+    }
+    const MH_STATUS s = MH_ApplyQueued();
+    if (s == MH_OK) g_enabled = on;
+    LOG("pilot twist: %s (view hooks %s: %s)", on ? "on" : "off", on ? "enabled" : "disabled", MH_StatusToString(s));
+}
+
 }  // namespace
 
-// Runs under the module watch (maybe under the loader lock): no settings are read here. The hooks stay in place
-// and check the setting per call.
+// Module watch (maybe under the loader lock): reads only the setting already loaded (peek), never loads it.
 void pilot_twist_on_modules_loaded() {
     HMODULE vm = GetModuleHandleW(L"ViewManager.dll");
     if (!vm) return;
     const auto* entry = static_cast<const BYTE*>(at_rva(vm, kUpdateRva));
-    if (vm == g_view_dll && *entry == 0xE9) return;  // already hooked (MinHook writes a JMP rel32)
-    if (vm == g_bad_base) return;
+    const bool want = config::pilot_twist_peek() == 1;
+    // Fast path: our hooks belong to this image (an enabled one shows its JMP) and match the setting.
+    if (vm == g_view_dll.load() && (!g_enabled.load() || *entry == 0xE9) && want == g_enabled.load()) return;
 
     AcquireSRWLockExclusive(&g_install_lock);
-    if (!(vm == g_view_dll && *entry == 0xE9) && vm != g_bad_base) {
-        const bool build_ok = is_expected_build(vm, kViewTimestamp, kViewImageSize, "ViewManager.dll");
-        if (g_view_dll) {
-            // MinHook restores the original bytes on removal: only while the old image is still this verified DLL.
-            if (build_ok && still_loaded(g_view_dll)) remove_view_hooks(g_view_dll);
-            g_view_dll = nullptr;
-        }
-        if (build_ok) {
-            remove_view_hooks(vm);  // entries left by an earlier image at this base
-            g_view_dll = vm;
-            bool ok = create_and_enable(at_rva(vm, kUpdateRva), reinterpret_cast<void*>(&h_Update),
-                                        reinterpret_cast<void**>(&o_Update), "ViewManager.dll+0x3360 (inside view update)");
-            ok = ok && create_and_enable(at_rva(vm, kCameraRva), reinterpret_cast<void*>(&h_Camera),
-                                         reinterpret_cast<void**>(&o_Camera), "ViewManager.dll+0x3070 (view camera)");
-            ok = ok && create_and_enable(at_rva(vm, kEyeRva), reinterpret_cast<void*>(&h_Eye),
-                                         reinterpret_cast<void**>(&o_Eye), "ViewManager.dll+0x2ec0 (view eye)");
-            if (!ok) {
-                remove_view_hooks(vm);
+    do {
+        if (vm == g_bad_base) break;
+        HMODULE old = g_view_dll.load();
+        // An enabled hook without its JMP: the DLL was freed and loaded again at the same base.
+        const bool reloaded_here = vm == old && g_enabled.load() && *entry != 0xE9;
+        if (vm != old || reloaded_here) {
+            const bool build_ok = is_expected_build(vm, kViewTimestamp, kViewImageSize, "ViewManager.dll");
+            if (old) {
+                // MinHook restores the original bytes on removal: only while the old image is still this verified DLL.
+                if (build_ok && still_loaded(old)) remove_view_hooks(old);
                 g_view_dll = nullptr;
-                g_bad_base = vm;
-                LOG("pilot twist: unavailable (hooks not installed)");
+                g_enabled = false;
             }
-        } else {
-            g_bad_base = vm;
-            LOG("pilot twist: unavailable (ViewManager.dll not recognised)");
+            if (!build_ok || !create_view_hooks(vm)) {
+                g_bad_base = vm;
+                LOG("pilot twist: unavailable (%s)", build_ok ? "hooks not created" : "ViewManager.dll not recognised");
+                break;
+            }
+            g_view_dll = vm;
         }
-    }
+        set_enabled_locked(want);
+    } while (false);
+    ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+// Called when Options > Controls is left (game thread, in the menus, so no view update is running).
+void pilot_twist_apply_setting() {
+    AcquireSRWLockExclusive(&g_install_lock);
+    set_enabled_locked(config::pilot_twist());
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 

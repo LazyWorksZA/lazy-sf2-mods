@@ -50,10 +50,12 @@ void input_on_modules_loaded();
 void input_apply_settings();
 
 /// <summary>
-/// Pilot Twist (pilot_twist.cpp): hooks ViewManager.dll's inside view once it is loaded. The hooks stay in place and
-/// act only while config::pilot_twist() is on. Module watch callback.
+/// Pilot Twist (pilot_twist.cpp): creates the ViewManager.dll inside-view hooks once it is loaded, and enables them
+/// only while the setting is on (no detour runs while it is off). Module watch callback.
 /// </summary>
 void pilot_twist_on_modules_loaded();
+/// <summary>Options &gt; Controls was left: enables or disables the view hooks to match config::pilot_twist(). Game thread.</summary>
+void pilot_twist_apply_setting();
 
 /// <summary>
 /// Hooks the exe's file service so the Options menu can offer Display Mode (Options.ini [GraphicsOptions]
