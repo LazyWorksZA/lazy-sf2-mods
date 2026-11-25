@@ -3307,15 +3307,17 @@ void pilot_twist_tests() {
     expect(twisted_yaw(30.0f * d, 0.0f, lo, hi, true) == 30.0f * d, "twist: none at zero weight");
     expect(close_to(twisted_yaw(100.0f * d, 0.5f, lo, hi, true), 100.0f * d + 0.5f * pt::kMaxTwist, 1e-5),
            "twist: weight times the maximum");
-    expect(close_to(twisted_yaw(152.0f * d, 1.0f, lo, hi, true), 180.0f * d, 1e-5), "twist: capped at 180 degrees");
-    expect(close_to(twisted_yaw(-152.0f * d, -1.0f, lo, hi, true), -180.0f * d, 1e-5), "twist: capped at -180 degrees");
-    expect(close_to(twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 153.0f * d, 1e-4),
+    expect(close_to(pt::kMaxTwist, 15.0f * d, 1e-6), "twist: at most 15 degrees extra");
+    expect(close_to(twisted_yaw(152.0f * d, 1.0f, lo, hi, true), 167.0f * d, 1e-4), "twist: the seat MaxYaw plus 15 at most");
+    expect(close_to(twisted_yaw(-152.0f * d, -1.0f, lo, hi, true), -167.0f * d, 1e-4), "twist: the seat MinYaw minus 15 at most");
+    expect(close_to(twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 135.0f * d, 1e-4),
            "twist: within the seat limit plus the twist");
-    expect(close_to(twisted_yaw(130.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 133.0f * d, 1e-4),
+    expect(close_to(twisted_yaw(110.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 115.0f * d, 1e-4),
            "twist: stops at the narrow seat limit plus the twist");
     expect(close_to(twisted_yaw(140.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 140.0f * d, 1e-4),
            "twist: never pulls back a yaw already past the widened limit");
-    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 173.0f * d, 1e-4), "twist: unlimited view, +-180 only");
+    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 155.0f * d, 1e-4), "twist: unlimited view, full twist");
+    expect(close_to(twisted_yaw(175.0f * d, 1.0f, 0.0f, 0.0f, false), 180.0f * d, 1e-4), "twist: unlimited view, +-180 only");
     // No compounding: the game smooths its stored yaw (+0xdc) toward the head target every frame; the hook writes the
     // twisted yaw only around the camera build and restores it. The stored yaw must settle on the target and the
     // rendered one on target + twist. Without the restore the stored yaw would run off past the target.

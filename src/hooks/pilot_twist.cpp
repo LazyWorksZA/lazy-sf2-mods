@@ -25,6 +25,7 @@ constexpr DWORD kUpdateRva = 0x3360;  // inside view per-frame update: thiscall(
 constexpr DWORD kCameraRva = 0x3070;  // builds the camera matrix from the view angles: thiscall(view, const float* aircraft)
 constexpr DWORD kEyeRva = 0x2ec0;     // eye position: thiscall(view, const float* aircraft, void* aircraft_iface)
 constexpr DWORD kObjectManagerRva = 0x356ec;  // object manager pointer
+constexpr DWORD kInputManagerRva = 0x356e8;   // input manager pointer (diagnostics: tracker axes)
 
 // View object.
 constexpr int kViewDef = 0x0c;   // view definition*
@@ -32,7 +33,9 @@ constexpr int kObjectId = 0x1c;  // viewed object id
 constexpr int kMaxYaw = 0xc0;    // float, rad (current limits)
 constexpr int kMinYaw = 0xcc;
 constexpr int kYaw = 0xdc;       // float, rad: smoothed seat-relative yaw (pitch, yaw, roll at +0xd8)
+constexpr int kTargetYaw = 0xac;  // float, rad: yaw target (hat-integrated, or the tracker yaw in tracker mode)
 constexpr int kTracker = 0xe4;   // non-zero while a head tracker drives the view
+constexpr int kTrackerMode = 0xe8;  // short: 1 while the tracker (not the hat) sets the angles
 constexpr int kEye = 0x90;       // double[3], world
 // View definition.
 constexpr int kDefInsideView = 0x20;  // short
@@ -43,6 +46,7 @@ constexpr uint32_t kFlagSnapView = 0x2, kFlagLimitYaw = 0x2000;
 constexpr int kGetInterface = 0x40 / 4;  // object manager: (id, kind, void** out)
 constexpr int kSeatKind = 0xb;
 constexpr int kSeatMovement = 0x1c / 4;  // seat: (float min[3], float max[3]) tracker head movement limits
+constexpr int kReadAxis = 0x8c / 4;      // input manager: int (int axis), tracker axes 0..4 = x, z, y, yaw, pitch
 
 using Update_t = void(__fastcall*)(void* view, void* edx, float dt);
 using Camera_t = void(__fastcall*)(void* view, void* edx, const float* aircraft);
@@ -64,6 +68,15 @@ void* g_updating = nullptr;  // the inside view whose update is running, else nu
 const void* g_last_view = nullptr;
 pt::TwistState g_state;
 LARGE_INTEGER g_last_tick{};
+
+// Developer diagnostics (LAZYSF2_PROBE_DIR set): one log line per second while an inside view updates.
+struct Diag {
+    bool camera, eye;
+    float head, yaw, weight, delta, bound;
+    double lean[3];
+};
+Diag g_diag{};
+ULONGLONG g_diag_next = 0;
 
 template <typename T>
 T& at(void* p, int offset) {
@@ -87,11 +100,16 @@ float seconds_since_last() {
     return dt;
 }
 
+void diag_log(void* view);
+
 void __fastcall h_Update(void* view, void* edx, float dt) {
     void* const outer = g_updating;  // survives a nested update
     g_updating = applies_to(view) ? view : nullptr;
+    const bool probe = probe_output_dir() != nullptr;
+    if (probe) g_diag = {};
     o_Update(view, edx, dt);
     g_updating = outer;
+    if (probe) diag_log(view);
 }
 
 // Twist without feedback: the extra yaw is in the view's yaw only while the original builds this frame's camera
@@ -113,30 +131,78 @@ void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
     yaw = written;
     o_Camera(view, edx, aircraft);
     yaw = pt::restore_yaw(yaw, written, head);
+    g_diag.camera = true;
+    g_diag.head = head;
+    g_diag.yaw = g_state.yaw;
+    g_diag.weight = g_state.weight;
+    g_diag.delta = written - head;
 }
 
-// Largest head movement the tracker may add (seat MinMovement/MaxMovement), 0 without a tracker.
-float tracker_bound(void* view) {
+// The seat's tracker head movement limits (MinMovement/MaxMovement x and z); false if the seat can't be asked.
+bool seat_movement(void* view, float lo[3], float hi[3]) {
     HMODULE vm = g_view_dll.load(std::memory_order_acquire);
-    if (!at<int>(view, kTracker) || !vm) return 0.0f;
-    void* om = *static_cast<void**>(at_rva(vm, kObjectManagerRva));
-    if (!om) return 0.0f;
+    void* om = vm ? *static_cast<void**>(at_rva(vm, kObjectManagerRva)) : nullptr;
+    if (!om) return false;
     void* seat = nullptr;
     using GetInterface_t = int(__fastcall*)(void*, void*, int, int, void**);
     reinterpret_cast<GetInterface_t>(vtable_slot(om, kGetInterface))(om, nullptr, at<int>(view, kObjectId), kSeatKind, &seat);
-    if (!seat) return pt::kCapSide;  // unknown: leave no room for the lean rather than guess
-    float lo[3] = {}, hi[3] = {};
+    if (!seat) return false;
     using Movement_t = int(__fastcall*)(void*, void*, float*, float*);
     reinterpret_cast<Movement_t>(vtable_slot(seat, kSeatMovement))(seat, nullptr, lo, hi);
+    return true;
+}
+
+// Largest head movement the tracker may add, 0 without a tracker.
+float tracker_bound(void* view) {
+    if (!at<int>(view, kTracker)) return 0.0f;
+    float lo[3] = {}, hi[3] = {};
+    if (!seat_movement(view, lo, hi)) return pt::kCapSide;  // unknown: leave no room for the lean rather than guess
     float b = 0.0f;
     for (float v : {lo[0], lo[2], hi[0], hi[2]}) b = std::fabs(v) > b ? std::fabs(v) : b;
     return b;
 }
 
+void diag_log(void* view) {
+    const ULONGLONG now = GetTickCount64();
+    BYTE* def = at<BYTE*>(view, kViewDef);
+    if (now < g_diag_next || !def || at<short>(def, kDefInsideView) == 0) return;
+    g_diag_next = now + 1000;
+    int axis[5] = {};
+    float native_x = 0.0f, native_z = 0.0f;  // the game's own tracker head offset, camera axes, metres (as +0x2ec0)
+    HMODULE vm = g_view_dll.load();
+    void* im = vm ? *static_cast<void**>(at_rva(vm, kInputManagerRva)) : nullptr;
+    if (im && at<int>(view, kTracker)) {
+        using ReadAxis_t = int(__fastcall*)(void*, void*, int);
+        for (int i = 0; i < 5; ++i) axis[i] = reinterpret_cast<ReadAxis_t>(vtable_slot(im, kReadAxis))(im, nullptr, i);
+        float lo[3] = {}, hi[3] = {};
+        if (seat_movement(view, lo, hi)) {
+            const float kx = -axis[0] / 16383.0f, kz = axis[1] / 16383.0f;
+            native_x = kx * (kx < 0 ? lo[0] : hi[0]);
+            native_z = kz * (kz < 0 ? lo[2] : hi[2]);
+        }
+    }
+    constexpr float r2d = 180.0f / pt::kPi;
+    LOG("pilot twist probe: view %p applies=%d (snap=%d yawctl=%d limit=%d) yaw +0xdc=%.1f +0xac=%.1f pitch +0xd8=%.1f "
+        "lim %.1f..%.1f tracker=%d mode=%d axes x=%d z=%d y=%d yaw=%d pitch=%d | camera=%d head=%.1f cont=%.1f "
+        "weight=%.3f twist=%.1f eye=%d bound=%.3f lean=(%.3f,%.3f,%.3f) native tracker offset x=%.3f z=%.3f",
+        view, applies_to(view) ? 1 : 0, (at<uint32_t>(def, kDefFlags) & kFlagSnapView) ? 1 : 0, at<int>(def, kDefYawControl),
+        (at<uint32_t>(def, kDefFlags) & kFlagLimitYaw) ? 1 : 0, at<float>(view, kYaw) * r2d, at<float>(view, kTargetYaw) * r2d,
+        at<float>(view, kYaw - 4) * r2d, at<float>(view, kMinYaw) * r2d, at<float>(view, kMaxYaw) * r2d,
+        at<int>(view, kTracker), at<short>(view, kTrackerMode), axis[0], axis[1], axis[2], axis[3], axis[4],
+        g_diag.camera ? 1 : 0, g_diag.head * r2d, g_diag.yaw * r2d, g_diag.weight, g_diag.delta * r2d, g_diag.eye ? 1 : 0,
+        g_diag.bound, g_diag.lean[0], g_diag.lean[1], g_diag.lean[2], native_x, native_z);
+}
+
 void __fastcall h_Eye(void* view, void* edx, const float* aircraft, void* iface) {
     o_Eye(view, edx, aircraft, iface);
     if (!view || view != g_updating || view != g_last_view || !aircraft || !g_state.have || g_state.weight == 0.0f) return;
-    const pt::Vec3 d = pt::body_to_world(aircraft, pt::lean_body(g_state.weight, tracker_bound(view)));
+    const float bound = tracker_bound(view);
+    const pt::Vec3 d = pt::body_to_world(aircraft, pt::lean_body(g_state.weight, bound));
+    g_diag.eye = true;
+    g_diag.bound = bound;
+    g_diag.lean[0] = d.x;
+    g_diag.lean[1] = d.y;
+    g_diag.lean[2] = d.z;
     at<double>(view, kEye) += d.x;
     at<double>(view, kEye + 8) += d.y;
     at<double>(view, kEye + 16) += d.z;
