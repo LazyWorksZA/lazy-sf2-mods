@@ -538,7 +538,7 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
 
 namespace {
 
-constexpr uint32_t kSummaryMaxObjects = 8192;
+constexpr uint32_t kSummaryMaxObjects = 2000;  // lines of live objects: bounds the frame the walk runs in
 
 // Header of the manager: group count and table. False if the vtable is not the expected one.
 bool read_manager(uintptr_t base, uint32_t* n, uintptr_t* arr) {
@@ -593,7 +593,7 @@ void world_walk_summary(std::string& out) {
     }
     sprintf_s(line, "objects: %u groups\n", ngroups);
     out += line;
-    uint32_t listed = 0;
+    uint32_t listed = 0, omitted = 0;
     for (uint32_t gi = 0; gi < ngroups; ++gi) {
         const uintptr_t grp = arr + gi * kGroupStride;
         GroupHead head;
@@ -611,7 +611,10 @@ void world_walk_summary(std::string& out) {
             ++in_use;
             if (!h.active) continue;
             ++active;
-            if (listed >= kSummaryMaxObjects) continue;
+            if (listed >= kSummaryMaxObjects) {
+                ++omitted;
+                continue;
+            }
             ++listed;
             const char* cls = "?";
             bool ground = true;
@@ -633,7 +636,10 @@ void world_walk_summary(std::string& out) {
         out += line;
         out += objects;
     }
-    if (listed >= kSummaryMaxObjects) out += "objects: list cut at the cap\n";
+    if (omitted) {
+        sprintf_s(line, "objects: %u more live objects not listed (cap %u)\n", omitted, kSummaryMaxObjects);
+        out += line;
+    }
 }
 
 void world_walk_frame_dropped(const TacviewRec* recs, size_t n) {

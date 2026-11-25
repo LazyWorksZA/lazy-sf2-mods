@@ -757,9 +757,13 @@ void run_job(Job job) {
 
 static bool capture_impl(TerrainInfo& out, bool basics_only) {
     static bool build_known = false, build_ok = false;
+    // The snapshot probe must not use up the recorder's once-only lines.
+    auto note = [basics_only](unsigned bit, const char* msg) {
+        if (!basics_only) log_once(bit, msg);
+    };
     HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
     if (!m) {
-        log_once(8, "tacview terrain: TerrainEngine.dll is not loaded; no Theater= for this recording");
+        note(8, "tacview terrain: TerrainEngine.dll is not loaded; no Theater= for this recording");
         return false;
     }
     if (!build_known) {
@@ -770,17 +774,17 @@ static bool capture_impl(TerrainInfo& out, bool basics_only) {
 
     Raw raw;
     const int rc = read_raw(m, &raw);
-    if (rc == 2) log_once(0, "tacview terrain: the terrain engine's memory is not as expected; no Theater= for this recording");
-    if (rc == 1) log_once(9, "tacview terrain: no theatre is loaded; no Theater= for this recording");
+    if (rc == 2) note(0, "tacview terrain: the terrain engine's memory is not as expected; no Theater= for this recording");
+    if (rc == 1) note(9, "tacview terrain: no theatre is loaded; no Theater= for this recording");
     if (rc != 0) return false;
     if (raw.w < 2 || raw.h < 2 || raw.w > kMaxDim || raw.h > kMaxDim || !std::isfinite(raw.spacing) ||
         raw.spacing < 1.0 || raw.spacing > 100000.0) {
-        log_once(1, "tacview terrain: the heightfield size or spacing is out of range; no Theater= for this recording");
+        note(1, "tacview terrain: the heightfield size or spacing is out of range; no Theater= for this recording");
         return false;
     }
     out.id = acmi::terrain_id(raw.base);
     if (out.id.empty()) {
-        log_once(2, "tacview terrain: the theatre has no name; no Theater= for this recording");
+        note(2, "tacview terrain: the theatre has no name; no Theater= for this recording");
         return false;
     }
     out.full_name = narrow(raw.full, 100);
@@ -796,7 +800,7 @@ static bool capture_impl(TerrainInfo& out, bool basics_only) {
     settle();
     if (g_exported.count(out.id)) return true;
     if (g_busy.load(std::memory_order_acquire)) {
-        log_once(10, "tacview terrain: an export is still running; this flight does not start another");
+        note(10, "tacview terrain: an export is still running; this flight does not start another");
         if (g_pending_id != out.id) mark_no_aerodromes(out.id);  // same theatre: its running job publishes the list
         return true;
     }
@@ -804,12 +808,12 @@ static bool capture_impl(TerrainInfo& out, bool basics_only) {
     const size_t count = static_cast<size_t>(raw.w) * static_cast<size_t>(raw.h);
     std::unique_ptr<uint16_t[]> buf(new (std::nothrow) uint16_t[count]);
     if (!buf) {
-        log_once(3, "tacview terrain: out of memory for the heightmap copy; no export");
+        note(3, "tacview terrain: out of memory for the heightmap copy; no export");
         mark_no_aerodromes(out.id);
         return true;
     }
     if (!copy_samples(buf.get(), raw.samples, count * 2)) {
-        log_once(4, "tacview terrain: the heightfield could not be read; no export");
+        note(4, "tacview terrain: the heightfield could not be read; no export");
         mark_no_aerodromes(out.id);
         return true;
     }

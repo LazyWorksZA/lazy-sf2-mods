@@ -49,7 +49,7 @@ bool terrain_capture(TerrainInfo& out);
 
 /// <summary>
 /// Game thread. As terrain_capture, but fills only id, full_name, w, h, spacing and the geo point: no sample or tile
-/// copy and no export state touched (its once-only failure log lines still apply).
+/// copy, no export state touched and no log lines.
 /// </summary>
 bool terrain_basics(TerrainInfo& out);
 

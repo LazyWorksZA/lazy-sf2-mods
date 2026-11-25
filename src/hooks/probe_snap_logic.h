@@ -9,9 +9,24 @@
 
 namespace LazyWorks::SF2Patch::hooks {
 
+namespace detail {
+inline bool is_lower_hex(const wchar_t* p, size_t n) {
+    for (size_t i = 0; i < n; ++i)
+        if (!((p[i] >= L'0' && p[i] <= L'9') || (p[i] >= L'a' && p[i] <= L'f'))) return false;
+    return true;
+}
+inline bool is_text(const wchar_t* p, const wchar_t* t) {
+    size_t i = 0;
+    for (; t[i]; ++i)
+        if (p[i] != t[i]) return false;
+    return p[i] == L'\0';
+}
+}  // namespace detail
+
 /// <summary>
-/// The snapshot number in a probe file name (snap, 3 or more digits, then anything), or -1 if the name is not one of
-/// ours. *is_auto is true only for snapNNN_auto followed by the end of the name, '.' or '_'.
+/// The snapshot number in a probe file name (snap, 3 to 9 digits, then anything), or -1 if the name is not one of
+/// ours. *is_auto is true only for the four shapes the automatic snapshot writes after snapNNN_auto: .txt, _world.txt,
+/// _&lt;8 hex&gt;.bin and _&lt;8 hex&gt;_f&lt;4 hex&gt;.bin (lower case). Anything else is left alone.
 /// </summary>
 inline long probe_snapshot_number(const wchar_t* name, bool* is_auto) {
     *is_auto = false;
@@ -30,8 +45,14 @@ inline long probe_snapshot_number(const wchar_t* name, bool* is_auto) {
     size_t k = 0;
     for (; kAuto[k]; ++k)
         if (name[i + k] != kAuto[k]) return n;
-    const wchar_t end = name[i + k];
-    *is_auto = end == L'\0' || end == L'.' || end == L'_';
+    const wchar_t* rest = name + i + k;
+    if (detail::is_text(rest, L".txt") || detail::is_text(rest, L"_world.txt")) {
+        *is_auto = true;
+    } else if (rest[0] == L'_' && detail::is_lower_hex(rest + 1, 8)) {
+        const wchar_t* tail = rest + 9;
+        *is_auto = detail::is_text(tail, L".bin") ||
+                   (tail[0] == L'_' && tail[1] == L'f' && detail::is_lower_hex(tail + 2, 4) && detail::is_text(tail + 6, L".bin"));
+    }
     return n;
 }
 

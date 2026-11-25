@@ -3264,6 +3264,15 @@ void probe_snapshot_tests() {
     expect(probe_snapshot_number(L"snap012_0a1b2c3d.bin", &a) == 12 && !a, "probe snap: manual dump is not auto");
     expect(probe_snapshot_number(L"snap012.txt", &a) == 12 && !a, "probe snap: manual index is not auto");
     expect(probe_snapshot_number(L"snap012_automatic.txt", &a) == 12 && !a, "probe snap: _automatic is not auto");
+    const wchar_t* const kNotOurs[] = {L"snap012_auto.bak",       L"snap012_auto_keep.txt",       L"snap012_auto.txt.old",
+                                       L"snap012_auto_world.txt.bak", L"snap012_auto_0a1b2c3.bin",  L"snap012_auto_0a1b2c3d.bin.old",
+                                       L"snap012_auto_0A1B2C3D.bin",  L"snap012_auto_0a1b2c3d_f001.bin", L"snap012_auto_0a1b2c3d_f00100.bin",
+                                       L"snap012_auto_0a1b2c3d_g0010.bin", L"snap012_auto_.bin", L"snap012_auto"};
+    for (const wchar_t* nm : kNotOurs) {
+        a = true;
+        expect(probe_snapshot_number(nm, &a) == 12 && !a, "probe snap: only the exact shapes we write are auto");
+    }
+    expect(probe_snapshot_number(L"snap012_auto_0a1b2c3d.bin", &a) == 12 && a, "probe snap: auto aircraft dump");
     expect(probe_snapshot_number(L"snap12_auto.txt", &a) == -1 && !a, "probe snap: too few digits");
     expect(probe_snapshot_number(L"rec_001.bin", &a) == -1 && !a, "probe snap: other files are not ours");
     expect(probe_snapshot_number(L"xsnap012_auto.txt", &a) == -1, "probe snap: prefix must start the name");

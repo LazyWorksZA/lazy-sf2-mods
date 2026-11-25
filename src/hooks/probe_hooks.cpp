@@ -100,35 +100,61 @@ struct Copy {
 // Under the table's shared lock we only copy memory (ReadProcessMemory, VirtualQuery) into heap buffers. The
 // destructor hook needs the lock exclusively to remove an object, so no listed object can be freed while we read
 // it. Files are written after the lock is released.
+struct CopyCtx {
+    std::vector<Copy> copies;
+    size_t limit = SIZE_MAX;  // most aircraft to copy: the player first, then the others in table order
+    size_t omitted = 0;
+    bool failed = false;      // an allocation failed: copies was cleared
+};
+
+void copy_one(const LiveAircraft& e, std::vector<Copy>& copies) {
+    Copy c;
+    c.object.resize(kObjectSize);
+    if (!read_mem(e.obj, c.object.data(), kObjectSize)) return;
+    const auto obj = reinterpret_cast<uintptr_t>(e.obj);
+    c.id = static_cast<unsigned>(obj);
+    wcsncpy_s(c.name, e.name, _TRUNCATE);
+    c.created = e.created_ms;
+    for (size_t off = 0; off + 4 <= kObjectSize && c.blocks.size() < kMaxPointerDumps; off += 4) {
+        uint32_t value;
+        memcpy(&value, c.object.data() + off, 4);
+        if (value < 0x10000) continue;
+        if (value >= obj && value < obj + kObjectSize) continue;  // the object itself or inside it
+        const void* target = reinterpret_cast<const void*>(static_cast<uintptr_t>(value));
+        const size_t bytes = dumpable_bytes(target);
+        if (!bytes) continue;
+        Block b{off, std::vector<BYTE>(bytes)};
+        if (!read_mem(target, b.bytes.data(), bytes)) continue;
+        c.blocks.push_back(std::move(b));
+    }
+    copies.push_back(std::move(c));
+}
+
+// No exception may leave this function: the caller releases the table lock only after it returns normally.
 void copy_cb(const LiveAircraft* list, size_t n, void* vctx) {
-    auto& copies = *static_cast<std::vector<Copy>*>(vctx);
-    for (size_t i = 0; i < n; ++i) {
-        const LiveAircraft& e = list[i];
-        Copy c;
-        c.object.resize(kObjectSize);
-        if (!read_mem(e.obj, c.object.data(), kObjectSize)) continue;
-        const auto obj = reinterpret_cast<uintptr_t>(e.obj);
-        c.id = static_cast<unsigned>(obj);
-        wcsncpy_s(c.name, e.name, _TRUNCATE);
-        c.created = e.created_ms;
-        for (size_t off = 0; off + 4 <= kObjectSize && c.blocks.size() < kMaxPointerDumps; off += 4) {
-            uint32_t value;
-            memcpy(&value, c.object.data() + off, 4);
-            if (value < 0x10000) continue;
-            if (value >= obj && value < obj + kObjectSize) continue;  // the object itself or inside it
-            const void* target = reinterpret_cast<const void*>(static_cast<uintptr_t>(value));
-            const size_t bytes = dumpable_bytes(target);
-            if (!bytes) continue;
-            Block b{off, std::vector<BYTE>(bytes)};
-            if (!read_mem(target, b.bytes.data(), bytes)) continue;
-            c.blocks.push_back(std::move(b));
+    auto& ctx = *static_cast<CopyCtx*>(vctx);
+    try {
+        size_t taken = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            for (size_t i = 0; i < n; ++i) {
+                if (list[i].is_player != (pass == 0)) continue;
+                if (taken >= ctx.limit) {
+                    ++ctx.omitted;
+                    continue;
+                }
+                ++taken;
+                copy_one(list[i], ctx.copies);
+            }
         }
-        copies.push_back(std::move(c));
+    } catch (...) {
+        ctx.copies.clear();
+        ctx.copies.shrink_to_fit();
+        ctx.failed = true;
     }
 }
 
 /// <summary>Writes snapshot number: the index, the aircraft dumps and, for an automatic one, world (the object table and terrain text).</summary>
-void write_snapshot(unsigned number, const wchar_t* tag, const std::vector<Copy>& copies, const std::string* world) {
+unsigned write_snapshot(unsigned number, const wchar_t* tag, const std::vector<Copy>& copies, const std::string* world) {
     std::string index = std::to_string(number) + " " + std::to_string(GetTickCount64()) + "\n";
     unsigned aircraft = 0, dumps = 0, errors = 0;
     DWORD last_error = 0;
@@ -173,18 +199,25 @@ void write_snapshot(unsigned number, const wchar_t* tag, const std::vector<Copy>
     } else {
         LOG("probe: %ssnapshot %u: %u aircraft, %u pointer dumps -> %ls", kind, number, aircraft, dumps, g_dir.c_str());
     }
+    return errors;
 }
 
 void take_snapshot() {
     const unsigned number = ++g_snapshot;
-    std::vector<Copy> copies;
-    probe_with_aircraft(copy_cb, &copies);
-    write_snapshot(number, L"", copies, nullptr);
+    CopyCtx ctx;
+    probe_with_aircraft(copy_cb, &ctx);
+    if (ctx.failed) {
+        LOG("probe: snapshot %u: out of memory; dropped", number);
+        return;
+    }
+    write_snapshot(number, L"", ctx.copies, nullptr);
 }
 
 // Automatic snapshot, ten seconds into each flight.
 constexpr double kAutoDelaySeconds = 10.0;
 constexpr size_t kAutoKeepFlights = 5;
+constexpr size_t kAutoMaxAircraft = 32;     // the player and the first others: bounds the work done in one frame
+constexpr unsigned kMaxSnapshotNumber = 99999;  // a larger number in the folder is not ours: ignored when seeding
 
 // Highest snapshot number already in the folder, so a new session never overwrites an old snapshot.
 unsigned scan_highest_snapshot() {
@@ -195,7 +228,7 @@ unsigned scan_highest_snapshot() {
     do {
         bool is_auto;
         const long n = probe_snapshot_number(fd.cFileName, &is_auto);
-        if (n > 0 && static_cast<unsigned>(n) > highest) highest = static_cast<unsigned>(n);
+        if (n > 0 && static_cast<unsigned>(n) <= kMaxSnapshotNumber && static_cast<unsigned>(n) > highest) highest = static_cast<unsigned>(n);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return highest;
@@ -221,9 +254,18 @@ void prune_auto_snapshots() {
         if (std::find(old.begin(), old.end(), f.first) != old.end()) DeleteFileW(f.second.c_str());
 }
 
-std::atomic<HANDLE> g_auto_writer{nullptr};  // the latest writer thread; older ones are waited for when replaced
+std::atomic<HANDLE> g_auto_writer{nullptr};  // the latest writer thread; closed once it has ended
 
-// Closes a writer handle, waiting at most 1 s for the thread to end (then it is left to finish on its own).
+// True if no writer is running. Never waits: the game thread must not stall on a slow disk.
+bool writer_idle() {
+    HANDLE h = g_auto_writer.load();
+    if (!h) return true;
+    if (WaitForSingleObject(h, 0) != WAIT_OBJECT_0) return false;
+    CloseHandle(g_auto_writer.exchange(nullptr));
+    return true;
+}
+
+// DLL detach: waits at most 1 s for a running writer (none if it has already ended), then leaves it.
 void retire_writer(HANDLE h) {
     if (!h) return;
     WaitForSingleObject(h, 1000);
@@ -238,42 +280,60 @@ struct AutoJob {
 
 DWORD WINAPI auto_snapshot_thread(LPVOID p) {
     std::unique_ptr<AutoJob> job(static_cast<AutoJob*>(p));
-    write_snapshot(job->number, L"_auto", job->copies, &job->world);
-    prune_auto_snapshots();
+    if (write_snapshot(job->number, L"_auto", job->copies, &job->world) == 0) prune_auto_snapshots();
     return 0;
 }
 
 // Game thread: the memory is read here (the object table and terrain readers are game-thread only); the files are
-// written by a short-lived thread. See lazy-sf2-recon: recon-notes ยง20.
+// written by a short-lived thread. Developer-only: the copy of up to kAutoMaxAircraft aircraft (about 100 KB and 200
+// system calls each) and the world text (capped lines) run in one frame, so the frame may hitch. An exception drops
+// the snapshot. See lazy-sf2-recon: recon-notes ง20.
 void take_auto_snapshot(double game_time) {
-    std::unique_ptr<AutoJob> job(new (std::nothrow) AutoJob);
-    if (!job) return;
-    job->number = ++g_snapshot;
-    probe_with_aircraft(copy_cb, &job->copies);
-    char line[160];
-    sprintf_s(line, "auto snapshot %u at game time %.1f s\n", job->number, game_time);
-    job->world = line;
-    world_walk_summary(job->world);
-    TerrainInfo terrain;
-    if (terrain_basics(terrain)) {
-        sprintf_s(line, "terrain: id=%s size=%dx%d spacing=%.1f geo=%s", terrain.id.c_str(), terrain.w, terrain.h,
-                  terrain.spacing, terrain.has_geo ? "yes" : "no");
-        job->world += line;
-        if (terrain.has_geo) {
-            sprintf_s(line, " lon=%.5f lat=%.5f", terrain.geo_lon, terrain.geo_lat);
+    static std::atomic<bool> logged_busy{false}, logged_fail{false};
+    if (!writer_idle()) {  // a slow disk: skip this flight rather than stall or pile up writers
+        if (!logged_busy.exchange(true)) LOG("probe: the previous auto snapshot is still being written; skipping this one");
+        return;
+    }
+    try {
+        std::unique_ptr<AutoJob> job(new AutoJob);
+        job->number = ++g_snapshot;
+        CopyCtx ctx;
+        ctx.limit = kAutoMaxAircraft;
+        probe_with_aircraft(copy_cb, &ctx);
+        if (ctx.failed) throw std::bad_alloc();
+        job->copies = std::move(ctx.copies);
+        char line[160];
+        sprintf_s(line, "auto snapshot %u at game time %.1f s\n", job->number, game_time);
+        job->world = line;
+        if (ctx.omitted) {
+            sprintf_s(line, "aircraft: %zu copied, %zu omitted (cap %zu, the player first)\n", job->copies.size(),
+                      ctx.omitted, kAutoMaxAircraft);
             job->world += line;
         }
-        job->world += " name=" + terrain.full_name + "\n";
-    } else {
-        job->world += "terrain: not available\n";
-    }
-    job->world += "mission (MSN): not read (no safe accessor yet)\n";
-    const unsigned number = job->number;
-    if (HANDLE t = CreateThread(nullptr, 0, auto_snapshot_thread, job.get(), 0, nullptr)) {
-        job.release();
-        retire_writer(g_auto_writer.exchange(t));
-    } else {
-        LOG("probe: auto snapshot %u: could not start the writer thread (error %lu)", number, GetLastError());
+        world_walk_summary(job->world);
+        TerrainInfo terrain;
+        if (terrain_basics(terrain)) {
+            sprintf_s(line, "terrain: id=%s size=%dx%d spacing=%.1f geo=%s", terrain.id.c_str(), terrain.w, terrain.h,
+                      terrain.spacing, terrain.has_geo ? "yes" : "no");
+            job->world += line;
+            if (terrain.has_geo) {
+                sprintf_s(line, " lon=%.5f lat=%.5f", terrain.geo_lon, terrain.geo_lat);
+                job->world += line;
+            }
+            job->world += " name=" + terrain.full_name + "\n";
+        } else {
+            job->world += "terrain: not available\n";
+        }
+        job->world += "mission (MSN): not read (no safe accessor yet)\n";
+        const unsigned number = job->number;
+        if (HANDLE t = CreateThread(nullptr, 0, auto_snapshot_thread, job.get(), 0, nullptr)) {
+            job.release();
+            g_auto_writer.store(t);
+        } else {
+            LOG("probe: auto snapshot %u: could not start the writer thread (error %lu)", number, GetLastError());
+        }
+    } catch (...) {
+        if (!logged_fail.exchange(true)) LOG("probe: an auto snapshot ran out of memory and was dropped");
     }
 }
 

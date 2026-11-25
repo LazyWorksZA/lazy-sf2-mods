@@ -7,7 +7,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Developer tools (off unless enabled)
 
-- **Automatic probe snapshot.** With the probe on, a world snapshot is taken 10 s into each flight (`snapNNN_auto*` in the probe folder: aircraft dumps, the object table and the theatre). The newest 5 flights are kept.
+- **Automatic probe snapshot.** With the probe on, a world snapshot is taken 10 s into each flight (`snapNNN_auto*` in the probe folder: aircraft dumps, the object table and the theatre). The newest 5 flights are kept. Developer-only; it copies up to 32 aircraft and lists up to 2000 objects in one frame, so it may hitch for a frame.
 - **Probe hotkeys for the Phase 4 recon.** Ctrl+Shift+J moves the player's own jet 1 km ahead and turns it 90 degrees right; Ctrl+Shift+K moves it 1 km ahead only. Either then logs the jet's state once a second for 5 s. The probe also logs once per flight whether the player's aircraft steps before or after the other aircraft in a frame.
 
 ## 1.0.0 (2026-11-25)
