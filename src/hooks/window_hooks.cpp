@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "monitors.h"
+#include "hooks/cursor_clip_logic.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "log.h"
@@ -41,6 +42,26 @@ bool is_game_class(LPCWSTR cls) {
 UINT g_apply_msg = 0;
 WNDPROC g_game_wndproc = nullptr;
 
+std::atomic<bool> g_app_active{false};  // from WM_ACTIVATEAPP; GetForegroundWindow lags behind that message
+SRWLOCK g_clip_lock = SRWLOCK_INIT;
+bool g_clip_set = false;  // guarded by g_clip_lock: we hold the system clip, and it is g_clip_rect
+RECT g_clip_rect{};
+
+bool same_rect(const RECT& a, const RECT& b) { return memcmp(&a, &b, sizeof(RECT)) == 0; }
+
+// Releases the clip only if it is still ours; another app's clip is left alone.
+void release_clip_locked(const char* why) {
+    if (!g_clip_set) return;
+    g_clip_set = false;
+    RECT cur{};
+    if (GetClipCursor(&cur) && same_rect(cur, g_clip_rect)) {
+        ClipCursor(nullptr);
+        LOG("cursor: clip off (%s)", why);
+    } else {
+        LOG("cursor: clip no longer ours, left alone (%s)", why);
+    }
+}
+
 // One line per focus change (WM_ACTIVATEAPP is rare), for Alt-Tab diagnostics.
 void log_window_state(const char* when, HWND hwnd) {
     RECT r{};
@@ -53,7 +74,14 @@ void log_window_state(const char* when, HWND hwnd) {
 LRESULT CALLBACK game_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == g_apply_msg && g_apply_msg != 0) {
         dxgi_apply_display_mode();
+        cursor_clip_update("display mode applied");
         return 0;
+    }
+    if (msg == WM_ACTIVATEAPP) g_app_active = wp != 0;
+    if (msg == WM_DESTROY) {
+        AcquireSRWLockExclusive(&g_clip_lock);
+        release_clip_locked("window destroyed");
+        ReleaseSRWLockExclusive(&g_clip_lock);
     }
     if (msg == WM_DISPLAYCHANGE) {
         LOG("window: WM_DISPLAYCHANGE %ux%u @ %u bpp", LOWORD(lp), HIWORD(lp), static_cast<unsigned>(wp));
@@ -63,6 +91,14 @@ LRESULT CALLBACK game_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     LRESULT r = CallWindowProcW(g_game_wndproc, hwnd, msg, wp, lp);
     if (msg == WM_ACTIVATEAPP) log_window_state(wp ? "after activate" : "after deactivate", hwnd);
     if (msg == WM_DISPLAYCHANGE) log_window_state("after display change", hwnd);
+    switch (msg) {
+        case WM_ACTIVATEAPP: cursor_clip_update(wp ? "activated" : "deactivated"); break;
+        case WM_ACTIVATE: cursor_clip_update("WM_ACTIVATE"); break;
+        case WM_SIZE: cursor_clip_update("WM_SIZE"); break;
+        case WM_WINDOWPOSCHANGED: cursor_clip_update("WM_WINDOWPOSCHANGED"); break;
+        case WM_DISPLAYCHANGE: cursor_clip_update("WM_DISPLAYCHANGE"); break;
+        default: break;
+    }
     return r;
 }
 
@@ -169,6 +205,37 @@ bool hook_api(LPCWSTR module, LPCSTR proc, LPVOID detour, LPVOID* original) {
 }  // namespace
 
 HWND game_window() { return g_game_hwnd.load(); }
+
+void cursor_clip_update(const char* why) {
+    HWND hwnd = g_game_hwnd.load();
+    if (!hwnd) return;
+    RECT rc{};
+    POINT tl{}, br{};
+    bool have_rect = false;
+    if (GetClientRect(hwnd, &rc) && rc.right > rc.left && rc.bottom > rc.top) {
+        br = {rc.right, rc.bottom};
+        have_rect = ClientToScreen(hwnd, &tl) && ClientToScreen(hwnd, &br);
+        rc = {tl.x, tl.y, br.x, br.y};
+    }
+    const ClipInputs in{!config::borderless(), mouse_cursor_mode_active(), g_app_active.load(), IsIconic(hwnd) != FALSE,
+                        have_rect};
+    AcquireSRWLockExclusive(&g_clip_lock);
+    if (want_clip(in)) {
+        RECT cur{};
+        if (!g_clip_set || !same_rect(rc, g_clip_rect) || !GetClipCursor(&cur) || !same_rect(cur, rc)) {
+            const bool changed = !g_clip_set || !same_rect(rc, g_clip_rect);
+            if (ClipCursor(&rc)) {
+                g_clip_set = true;
+                g_clip_rect = rc;
+                if (changed)
+                    LOG("cursor: clip on (%s) (%ld,%ld)-(%ld,%ld)", why, rc.left, rc.top, rc.right, rc.bottom);
+            }
+        }
+    } else {
+        release_clip_locked(why);
+    }
+    ReleaseSRWLockExclusive(&g_clip_lock);
+}
 
 bool window_chosen_screen(RECT* r) { return chosen_monitor_rect(r); }
 

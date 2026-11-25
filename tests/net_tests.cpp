@@ -29,6 +29,7 @@
 #include "hooks/weapon_class.h"
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
+#include "hooks/cursor_clip_logic.h"
 #include "bot_client.h"
 #include <miniz.h>
 
@@ -1532,6 +1533,26 @@ void acmi_tests() {
     std::vector<uint8_t> bad(f.begin(), f.begin() + 60);
     bad[0] = 'X';
     expect(!lazysf2::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
+}
+
+void cursor_clip_tests() {
+    using lazysf2::hooks::ClipInputs;
+    using lazysf2::hooks::want_clip;
+    std::printf("cursor clip\n");
+    const ClipInputs on{true, true, true, false, true};
+    expect(want_clip(on), "clip: fullscreen + match cursor + foreground -> clip");
+    expect(!want_clip({false, true, true, false, true}), "clip: borderless -> never");
+    expect(!want_clip({true, false, true, false, true}), "clip: stock mouse -> never");
+    expect(!want_clip({true, true, false, false, true}), "clip: not foreground -> release");
+    expect(!want_clip({true, true, true, true, true}), "clip: minimized -> release");
+    expect(!want_clip({true, true, true, false, false}), "clip: no rect -> release");
+    int clipping = 0;
+    for (int m = 0; m < 32; ++m) {
+        const bool v = want_clip({(m & 1) != 0, (m & 2) != 0, (m & 4) != 0, (m & 8) != 0, (m & 16) != 0});
+        if (v) ++clipping;
+        if (v) expect(m == 1 + 2 + 4 + 16, "clip: only one input combination clips");
+    }
+    expect(clipping == 1, "clip: exactly one of 32 combinations clips");
 }
 
 void tracker_logic_tests() {
@@ -3253,6 +3274,7 @@ int main() {
     stream_tests();
     acmi_tests();
     tracker_logic_tests();
+    cursor_clip_tests();
     tacview_tests();
     terrain_tests();
     texture_tests();

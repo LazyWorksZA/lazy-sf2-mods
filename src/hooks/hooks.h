@@ -23,6 +23,13 @@ void request_display_mode_apply();
 void dxgi_apply_display_mode();
 /// <summary>True if the swap chain is in exclusive fullscreen (diagnostics).</summary>
 bool dxgi_is_exclusive();
+/// <summary>
+/// Confines the cursor to the game's client area in Fullscreen with "Match Windows cursor" (while the game is the
+/// active app) and releases it otherwise, only ever releasing a clip this mod set. Any thread; logs on change.
+/// </summary>
+void cursor_clip_update(const char* why);
+/// <summary>True while "Match Windows cursor" is active (chosen in Options and the mouse read hook is in place).</summary>
+bool mouse_cursor_mode_active();
 
 /// <summary>
 /// Hooks kernelbase!LoadLibraryExW. After every load each feature gets a chance to hook the modules that
