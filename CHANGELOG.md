@@ -12,6 +12,7 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
   - missiles, bombs and rockets at 20 Hz, each linked to the aircraft that fired it.
   
   The file is flushed to disk every 200 ms or 32 KB and capped at 512 MB.
+- **Tacview terrain.** With Tacview Recording on, the first flight in each theatre also exports that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre (`Theater=`), so Tacview shows the SF2 terrain under the flight. The theatre is placed as its own map on an equatorial patch of open Atlantic, with game distances kept to within about 0.3%. Elevation only for now; a ground texture comes later. Not yet checked in-game.
 - **Options › Other page.** A new fifth tab under Gameplay holds the mod's own settings. The four stock tabs move up to make room.
 - **Mouse Pointer** (Options › Controls). In Cursor mode the game's pointer follows the Windows cursor, which fixes pointer drift with remote-control tools such as RustDesk.
 - **Screen** (Options › Graphics) picks the monitor the game runs on.
