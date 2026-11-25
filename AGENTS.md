@@ -8,6 +8,10 @@ This is the repo's **only** instructions file. Don't add a `CLAUDE.md` or tool-s
 
 This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a 32-bit x86 D3D10 game with a D3D9 fallback. The mod is a `winmm.dll` proxy that hooks the game with MinHook. The briefs in `docs/` set the scope and the phases. The reverse-engineering notes live in a separate private repo, `lazy-sf2-recon` (check it out next to this one, at `../lazy-sf2-recon`). Its `recon-notes.md` is the living findings file; read the section that concerns you before starting.
 
+## Machine-specific locations
+
+These locations differ per machine, so this repo doesn't name them: the game install, the game backup, the tools folder (Ghidra, x64dbg, DXVK and the like), the recon scratch folder (logs, captures, decompiles, extracted data), the Ghidra project, and the junction to the game used for Ghidra imports. Keep them in your local agent memory, and ask the user for any you don't have.
+
 ## Ground rules (non-negotiable)
 
 1. **Never put game files in the repo.** That includes ThirdWire binaries, `.cat` contents, extracted inis, STR files, textures, the EULA text and decompiled game code.
@@ -16,14 +20,14 @@ This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a
 2. **Never patch the game on disk.** No byte patches to the exe or DLLs, and no edits to game ini or cat files that you leave behind.
    - The mod may only add its own files to the game folder, and must list them in `lazysf2.manifest.txt` (see `scripts/install.ps1`). Running `scripts/uninstall.ps1` must return the folder to stock.
    - Temporary experiments on a game file must be restored from the game backup, then hash-checked.
-3. **Test against the original install. Don't run a copy of the game.** EULA 3(b) allows copies only as backups. The game backup exists only to restore files. Its location is specific to the machine, so it is not in this repo: keep it in your local agent memory, and ask the user if you don't have it.
+3. **Test against the original install. Don't run a copy of the game.** EULA 3(b) allows copies only as backups. The game backup exists only to restore files.
 4. **Stay compatible with DXVK, but don't vendor it.** Don't assume we own `d3d9.dll`, `dxgi.dll` or the `d3d10*.dll` files. Hook the COM objects the game actually gets, rather than replacing system DLLs.
    - DXVK isn't part of this project: never commit it, ship it, or install it with the mod. We only make sure the mod works when a player has installed it.
-   - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `lazy-sf2-recon`, `recon-notes.md` §15).
+   - For compatibility tests, keep it outside the repo (in the tools folder), add it to the game folder only for the test, and remove it afterwards (see `lazy-sf2-recon`, `recon-notes.md` §15).
 5. **Stop at each phase checkpoint** listed in the brief, report, and wait for review. If something contradicts the brief, stop and say so; don't work around it.
 6. **Write findings down as you go** in the `lazy-sf2-recon` repo, never in this one: addresses as RVAs (offsets from the module base), function roles, file formats and open questions.
 7. **Third-party notices.** Every third-party component we *distribute* (statically linked libraries such as MinHook; shipped assemblies and binaries such as Velopack's) must be listed in `THIRD_PARTY_NOTICES.md` with its full license text, taken from the package itself rather than from memory. The installer ships that file with `LICENSE`. When you add, upgrade or remove a dependency, update the file in the same change.
-8. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
+8. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in the recon scratch folder, and keep them out of commits.
 
 ## Fixed-address hooks
 
@@ -61,15 +65,15 @@ The test project is only for development: it is not published or shipped.
 
 | Tool | Use |
 |---|---|
-| Ghidra 12.2 (`G:\DevTools\ghidra_12.2_PUBLIC`, needs JDK 25) | Analysed project at `G:\GhidraProjects\SF2`: the exe at the root, then `/Core`, `/Flight`, `/Menu`, `/Objects`. |
+| Ghidra 12.2 (in the tools folder, needs JDK 25) | The analysed Ghidra project: the exe at the root, then `/Core`, `/Flight`, `/Menu`, `/Objects`. |
 | `tools/ghidra/Invoke-Ghidra.ps1` | Runs a script from `tools/ghidra/` read-only, for example `-Folder /Core -Program MenuSystem.dll -Script StringXrefs.java -ScriptArgs foo`. Only one run at a time, because the project locks. |
-| `tools/ghidra/*.java` | Cross-references from strings, wide tags, imports and addresses; vtable dump; decompile everything. Write output to `G:\SF2-recon\decomp`. |
+| `tools/ghidra/*.java` | Cross-references from strings, wide tags, imports and addresses; vtable dump; decompile everything. Write output to `decomp` in the recon scratch folder. |
 | `tools/catx.py` | Lists and extracts `.cat` archives. It refuses to extract into the repo. |
 | `tools/recon/` | Inventory of PE imports and exports, a Process Monitor filter generator, and a capture summariser. |
 | `tools/test/sf2drive.ps1` | Unattended game checks: start (optionally with DXVK logs and HUD), focus, screenshot, switch away and back, stop, and `run -Seconds N -Shots DIR`, a full Single Mission flight (Strike by default, `-MissionType`) from launch to quit that prints the new `lazysf2.log` lines. It sends input to the desktop, so use it only with the user's OK. |
 | `tools/gen_winmm_proxy.py` | Regenerates `src/proxy/winmm.def` and `winmm_exports.inc` from the system `winmm.dll`. |
 
-**Gotcha:** Ghidra's `.bat` breaks on `(x86)` in a path, so import the game through the junction `G:\SF2-game`.
+**Gotcha:** Ghidra's `.bat` breaks on `(x86)` in a path, so import the game through a junction whose path has no parentheses.
 
 ## Code conventions
 

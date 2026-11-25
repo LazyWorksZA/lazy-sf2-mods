@@ -17,8 +17,8 @@
 
 .EXAMPLE
   .\tools\test\sf2drive.ps1 start; .\tools\test\sf2drive.ps1 focus
-  .\tools\test\sf2drive.ps1 shot -Out G:\SF2-recon\shot.png
-  .\tools\test\sf2drive.ps1 run -Seconds 30 -Shots G:\SF2-recon\drive   # launch, fly a Strike mission 30 s, debrief, quit; prints the log lines
+  .\tools\test\sf2drive.ps1 shot -Out <scratch>\shot.png
+  .\tools\test\sf2drive.ps1 run -Seconds 30 -Shots <scratch>\drive   # launch, fly a Strike mission 30 s, debrief, quit; prints the log lines
   .\tools\test\sf2drive.ps1 fly -Seconds 30                             # from the main menu, back to the main menu
 #>
 param(
