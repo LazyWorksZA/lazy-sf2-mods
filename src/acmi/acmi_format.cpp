@@ -69,6 +69,9 @@ void append_header(std::string& out, const char* reference_time, double ref_lon,
     if (theater && *theater) {
         out += ",Theater=";
         append_escaped(out, theater);
+        // The add-on reads this one first: Tacview may not expose a global property named Theater to Lua.
+        out += ",LazySF2Theater=";
+        append_escaped(out, theater);
     }
     out += '\n';
 }

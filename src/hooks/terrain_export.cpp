@@ -13,6 +13,7 @@
 #include <mutex>
 #include <new>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "hooks/game_files.h"
 #include "hooks/hook_util.h"
 #include "hooks/wic_jpeg.h"
+#include "tacview_addon_lua.h"
 #include "log.h"
 
 namespace lazysf2::hooks {
@@ -667,6 +669,45 @@ int remove_legacy_files(const std::wstring& dir, const std::string& id) {
     return removed;
 }
 
+// Writes the embedded Tacview add-on to %APPDATA%\Tacview\AddOns\LazySF2\main.lua, only when the content differs.
+// Once per session: the export thread runs one job at a time, so a plain static is enough.
+void install_addon(const std::wstring& appdata) {
+    static bool done = false;
+    if (done) return;
+    const std::string_view text(kTacviewAddonLua, sizeof(kTacviewAddonLua) - 1);
+    std::wstring dir = appdata + L"\\Tacview";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    dir += L"\\AddOns";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    dir += L"\\LazySF2";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring path = dir + L"\\main.lua", tmp = path + L".tmp";
+    std::string current;
+    if (HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        h != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER size{};
+        if (GetFileSizeEx(h, &size) && size.QuadPart == static_cast<LONGLONG>(text.size())) {
+            current.resize(text.size());
+            DWORD got = 0;
+            if (!ReadFile(h, current.data(), static_cast<DWORD>(current.size()), &got, nullptr) || got != current.size()) current.clear();
+        }
+        CloseHandle(h);
+    }
+    done = true;  // one attempt per session: a failure is logged once, not retried every flight
+    if (current == text) return;
+    bool ok = false;
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        DWORD put = 0;
+        ok = WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &put, nullptr) && put == text.size();
+        CloseHandle(h);
+        ok = ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!ok) DeleteFileW(tmp.c_str());
+    }
+    if (ok) log_once(16, "tacview terrain: wrote the Tacview add-on (AddOns\\LazySF2\\main.lua)");
+    else log_once(17, "tacview terrain: could not write the Tacview add-on");
+}
+
 // True when the heightmap is in place. The texture and the airfields are best-effort.
 bool export_files(Job& job) {
     PWSTR roaming = nullptr;
@@ -677,6 +718,7 @@ bool export_files(Job& job) {
         LOG("tacview terrain: %s: the AppData folder was not found", job.id.c_str());
         return false;
     }
+    install_addon(root);
     root += L"\\Tacview\\Data\\Terrain";
     const int removed = remove_legacy_files(root + L"\\Custom\\LazySF2", job.id) +
                         remove_legacy_files(root + L"\\Textures\\LazySF2", job.id);

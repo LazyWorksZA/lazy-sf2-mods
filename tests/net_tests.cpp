@@ -17,6 +17,7 @@
 #include "acmi/acmi_convert.h"
 #include "acmi/acmi_format.h"
 #include "acmi/airfields.h"
+#include "tacview_addon_lua.h"
 #include "acmi/ini.h"
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_terrain.h"
@@ -1575,14 +1576,20 @@ void terrain_tests() {
     std::string h1, h2;
     TacviewCore{cfg}.header(h1, "2026-11-24T20:15:00Z");
     expect(h1 == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=LazySF2,Theater=LazySF2.DESERT\n",
-           "header: Theater= after the title");
+                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=LazySF2,Theater=LazySF2.DESERT,LazySF2Theater=LazySF2.DESERT\n",
+           "header: Theater= and LazySF2Theater= after the title");
     TacviewCore{TacviewCoreConfig{}}.header(h2, "2026-11-24T20:15:00Z");
     expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2,DataSource=") != std::string::npos,
            "header: no Theater= by default");
 }
 
+void addon_embed_test() {
+    const std::string lua = kTacviewAddonLua;
+    expect(!lua.empty() && lua.rfind("-- LazySF2 terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
+}
+
 void tacview_tests() {
+    addon_embed_test();
     using namespace lazysf2::acmi;
     using lazysf2::hooks::AircraftSide;
     std::printf("tacview recorder\n");
