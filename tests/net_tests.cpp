@@ -3216,6 +3216,125 @@ void aerodrome_core_tests() {
     static_assert(TacviewRec::kSeriesAerodrome != TacviewRec::kSeriesBullet && (TacviewRec::kSeriesAerodrome & 0x3f) == 0, "series bit is its own");
 }
 
+void structure_tests() {
+    using namespace LazyWorks::SF2Patch::acmi;
+    using LazyWorks::SF2Patch::hooks::AircraftSide;
+    std::printf("tacview structures\n");
+    const double deg = kPi / 180;
+    const auto targets = utf16le(
+        L"[TargetArea001]\r\nName=Base\r\nPosition=100000,200000\r\nAirfieldDataFile=af.ini\r\n"
+        L"Target[001].Type=Runway1\r\nTarget[001].Offset=0,0\r\nTarget[001].Heading=90\r\n"
+        L"Target[002].Type=Hangar1\r\nTarget[002].Offset=0,1000\r\nTarget[002].Heading=0\r\n"
+        L"Target[003].Type=AAA\r\nTarget[003].Offset=5,5\r\nTarget[003].Heading=0\r\n"
+        L"Target[004].Type=Unlisted1\r\nTarget[004].Offset=100,0\r\nTarget[004].Heading=-90\r\n\r\n"
+        L"[TargetArea002]\r\nName=USS Somebody\r\nPosition=5,5\r\nCarrierStation=TRUE\r\n"
+        L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,0\r\n\r\n"
+        L"[TargetArea003]\r\nName=Far Away\r\nPosition=5,5\r\nOffMapAirBase=1\r\n"
+        L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,0\r\n\r\n"
+        L"[TargetArea004]\r\nName=River\r\nPosition=5000,6000\r\nRotateToRunwayHeading=0\r\n"
+        L"Target[001].Type=Runway2\r\nTarget[001].Heading=90\r\n"
+        L"Target[002].Type=vBridge1\r\nTarget[002].Offset=10,20\r\nTarget[002].Heading=45\r\n\r\n"
+        L"[TargetArea005]\r\nName=Village\r\nPosition=1000,1000\r\n"
+        L"Target[001].Type=hangar1\r\nTarget[001].Offset=-100,50\r\nTarget[001].Heading=30\r\n");
+    const auto types = ansi(
+        "[TargetType001]\r\nName=Hangar1\r\nFullName=Hangar\r\nTargetType=HANGAR\r\nUseGroundObject=FALSE\r\n"
+        "[TargetType002]\r\nName=AAA\r\nFullName=AAA Site\r\nTargetType=AAA\r\nUseGroundObject=TRUE\r\n"
+        "[TargetType003]\r\nName=Runway1\r\nFullName=Runway\r\nTargetType=MEDIUM_RUNWAY\r\nUseGroundObject=FALSE\r\n"
+        "[TargetType004]\r\nName=vBridge1\r\nFullName=Paul Doumer Bridge\r\nTargetType=BRIDGE\r\nUseGroundObject=FALSE\r\n");
+    const Ini t = parse_ini(targets.data(), targets.size());
+    const Ini ty = parse_ini(types.data(), types.size());
+    const auto s = structures_from(t, ty);
+    expect(s.size() == 4, "structures: runways, live types, carriers and off-map bases left out");
+    if (s.size() == 4) {
+        // A = 90 (the runway's heading): offset (0, 1000) turns to (+1000, 0), the heading to 90.
+        expect(s[0].name == "Hangar" && std::fabs(s[0].x - 101000) < 1e-6 && std::fabs(s[0].y - 200000) < 1e-6 &&
+                   std::fabs(s[0].heading - 90 * deg) < 1e-9 && !s[0].bridge,
+               "structures: an airfield's object is turned by the area heading, named by FullName");
+        // Offset (100, 0) at A = 90: (0, -100); heading 90 - 90 = 0.
+        expect(s[1].name == "Unlisted1" && std::fabs(s[1].x - 100000) < 1e-6 && std::fabs(s[1].y - 199900) < 1e-6 &&
+                   std::fabs(s[1].heading) < 1e-9,
+               "structures: a type the types ini does not list keeps its type id");
+        expect(s[2].bridge && s[2].name == "Paul Doumer Bridge" && std::fabs(s[2].x - 5010) < 1e-6 && std::fabs(s[2].y - 6020) < 1e-6 &&
+                   std::fabs(s[2].heading - 45 * deg) < 1e-9,
+               "structures: RotateToRunwayHeading=0 keeps offsets and headings as given; a BRIDGE type is a bridge");
+        expect(s[3].name == "Hangar" && std::fabs(s[3].x - 900) < 1e-6 && std::fabs(s[3].y - 1050) < 1e-6 &&
+                   std::fabs(s[3].heading - 30 * deg) < 1e-9,
+               "structures: an area without a runway has heading 0; type names match without case");
+    }
+    const Ini none = parse_ini(nullptr, 0);
+    const auto bare = structures_from(t, none);
+    expect(bare.size() == 5 && bare[1].name == "AAA" && !bare[3].bridge && bare[3].name == "vBridge1",
+           "structures: without a types ini, only runways (by name) are left out");
+    expect(structures_from(none, ty).empty(), "structures: an empty targets ini has none");
+
+    const auto theatre = ansi("[Terrain]\r\nTargetFile=desert_targets.ini\r\nTargetTypeFile=desert_types.ini\r\n");
+    const Ini th = parse_ini(theatre.data(), theatre.size());
+    expect(types_file_name(th, "x_TARGETS.INI") == "desert_types.ini", "types file: the theatre ini names it");
+    expect(types_file_name(none, "GermanyCE_targets.INI") == "GermanyCE_TYPES.INI" && types_file_name(none, "foo.ini").empty(),
+           "types file: else from the targets ini's name, or none");
+
+    // The core: dedupe against live ground objects, the line format, written once, removed only by the final frame.
+    TacviewCoreConfig cfg;
+    cfg.ref_lat = -4.5;
+    cfg.ref_lon = -25.0;
+    TacviewCore core{cfg};
+    auto structure = [](uint64_t seq, const char* name, double x, double y, float heading, bool bridge) {
+        TacviewRec r = make_rec(seq, false, AircraftSide::Unknown, name, 2.0, x, y, 0, 0.0f, heading, 0.0f);
+        r.obj_class = bridge ? TacviewRec::kBridge : TacviewRec::kStructure;
+        return r;
+    };
+    std::string out;
+    TacviewRec gun = make_rec(7, false, AircraftSide::Enemy, "AAA", 1.0, 1000, 1000, 0, 0, 0, 0);
+    gun.obj_class = TacviewRec::kGroundStatic;
+    TacviewRec truck = make_rec(8, false, AircraftSide::Enemy, "Truck", 1.0, 3000, 3000, 0, 0, 0, 0);
+    truck.obj_class = TacviewRec::kGroundVehicle;
+    core.add(gun);
+    core.add(truck);
+    core.end_frame(1.0, out, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile);
+    std::string o1;
+    core.add(structure(1, "Hangar", 1010, 1000, 0.0f, false));          // 10 m from the gun: the game's own object
+    core.add(structure(2, "Hangar", 1020, 1000, static_cast<float>(kPi / 2), false));  // 20 m: kept
+    core.add(structure(3, "Bridge", 5000, 5000, 0.0f, true));
+    core.add(structure(4, "Shed", 3005, 3000, 0.0f, false));            // next to a vehicle: kept
+    core.end_frame(2.0, o1, 0);
+    const auto m = make_mapping(-4.5);
+    const std::string want2 = "7000002,T=" + num(1020 * m.lon_scale, 9) + "|" + num(1000 * m.lat_scale, 9) +
+                              "|0|0|0|90|1020|1000|90,Name=Hangar,Type=Ground+Static+Building";
+    const auto l1 = lines_of(o1);
+    expect(l1.size() == 4 && l1[0] == "#1.000" && l1[1] == want2, "structures: one line each, id 0x7000000+seq, Ground+Static+Building, no coalition");
+    expect(o1.find("7000001,") == std::string::npos, "structures: one within 15 m of a live ground object is skipped");
+    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Bridge\n") != std::string::npos,
+           "structures: a bridge is Ground+Static+Bridge");
+    expect(o1.find("7000004,T=") != std::string::npos, "structures: vehicles do not hide them");
+    // The next chunk: a repeat writes nothing; a new one is added; the earlier ones stay.
+    std::string o2;
+    core.add(structure(2, "Hangar", 1020, 1000, static_cast<float>(kPi / 2), false));
+    core.add(structure(5, "Barn", 8000, 8000, 0.0f, false));
+    core.end_frame(3.0, o2, 0);
+    expect(count_of(o2, "7000002") == 0 && count_of(o2, "\n7000005,T=") == 1 && o2.find("-700000") == std::string::npos,
+           "structures: written once; a later chunk does not remove the earlier ones");
+    expect(core.stats().structures == 4 && core.stats().structures_skipped == 1, "structures: the counts");
+    // Other series' frames leave them alone, even when the gun goes.
+    std::string o3;
+    core.add(make_rec(1, true, AircraftSide::Friendly, "P", 4.0, 0, 0, 100, 0, 0, 0));
+    core.end_frame(4.0, o3, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+    core.end_frame(5.0, o3, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile | TacviewRec::kSeriesAerodrome);
+    expect(o3.find("-2000007\n") != std::string::npos && o3.find("-700000") == std::string::npos,
+           "structures: frames of other series never remove them");
+    std::string o4;
+    core.end_frame(6.0, o4);
+    expect(count_of(o4, "\n-700000") + (o4.rfind("-700000", 0) == 0 ? 1 : 0) == 4 && core.live_objects() == 0,
+           "structures: the final frame removes all of them");
+    static_assert(TacviewRec::series_of(TacviewRec::kStructure) == TacviewRec::kSeriesStructure &&
+                      TacviewRec::series_of(TacviewRec::kBridge) == TacviewRec::kSeriesStructure,
+                  "series");
+    static_assert((TacviewRec::kSeriesStructure & 0x7f) == 0 && (TacviewRec::kSeriesAll & TacviewRec::kSeriesStructure) != 0,
+                  "the structure series bit is its own, and the final frame names it");
+
+    TacviewWriter w(64);
+    expect(!w.can_take(1), "tacview writer: can_take is false while nothing is open");
+}
+
 void placement_tests() {
     using namespace LazyWorks::SF2Patch::acmi;
     const Placement none = place_theatre(false, 10.817, 51.111, 1000000.0, 1000000.0);
@@ -3279,6 +3398,7 @@ int main() {
     terrain_tests();
     texture_tests();
     aerodrome_core_tests();
+    structure_tests();
     placement_tests();
     gameplay_row_splice_tests();
 

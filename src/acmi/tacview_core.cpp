@@ -40,6 +40,10 @@ void TacviewCore::add(const TacviewRec& r) {
     if (r.kind != TacviewRec::kObject) return;
     // Each family has its own seq counter: the family is part of the identity.
     const auto family = TacviewRec::family_of(r.obj_class);
+    if (family == TacviewRec::Family::Structure) {
+        add_structure(r);
+        return;
+    }
     const bool weapon = family == TacviewRec::Family::Weapon;
     State* s = nullptr;
     for (State& o : objs_) {
@@ -192,6 +196,43 @@ void TacviewCore::add(const TacviewRec& r) {
     ++stats_.transforms;
 }
 
+void TacviewCore::add_structure(const TacviewRec& r) {
+    if (r.destroyed) return;
+    const auto known = static_index_.find(r.seq);
+    if (known != static_index_.end()) {
+        statics_[known->second].seen = frame_no_;  // already written: Tacview keeps it
+        return;
+    }
+    if (!std::isfinite(r.t) || !finite3(r.pos) || !finite3(r.ang)) {
+        ++stats_.bad_samples;
+        return;
+    }
+    constexpr double kNear2 = kStructureDedupeMetres * kStructureDedupeMetres;
+    for (const State& o : objs_) {
+        if (o.obj_class != TacviewRec::kGroundStatic || !o.has_last) continue;
+        const double dx = o.last_pos[0] - r.pos[0], dy = o.last_pos[1] - r.pos[1];
+        if (dx * dx + dy * dy <= kNear2) {
+            ++stats_.structures_skipped;
+            return;
+        }
+    }
+    const uint32_t id = kStructureIdBase + static_cast<uint32_t>(r.seq);
+    static_index_.emplace(r.seq, statics_.size());
+    statics_.push_back({r.seq, id, frame_no_});
+    append_transform(pending_, id, r.pos, r.ang, Mapping{lon_scale_, lat_scale_});
+    char name[kRecNameChars + 1];
+    std::copy(r.name, r.name + kRecNameChars, name);
+    name[kRecNameChars] = '\0';
+    ObjectProps p;
+    p.name = name;
+    p.type = r.obj_class == TacviewRec::kBridge ? "Ground+Static+Bridge" : "Ground+Static+Building";
+    append_props(pending_, p);
+    pending_ += '\n';
+    ++stats_.objects;
+    ++stats_.transforms;
+    ++stats_.structures;
+}
+
 void TacviewCore::add_explosion(const double pos[3], double radius, double t) {
     const uint32_t id = kExplosionIdBase + next_explosion_++;
     append_position(pending_, id, pos, Mapping{lon_scale_, lat_scale_});
@@ -212,6 +253,20 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
         } else {
             ++i;
         }
+    }
+    if ((series_mask & TacviewRec::kSeriesStructure) && !statics_.empty()) {
+        size_t kept = 0;
+        for (const Static& st : statics_) {
+            if (st.seen == frame_no_) {
+                statics_[kept++] = st;
+                continue;
+            }
+            append_removal(removals, st.id);
+            ++stats_.removals;
+        }
+        statics_.resize(kept);
+        static_index_.clear();
+        for (size_t i = 0; i < statics_.size(); ++i) static_index_.emplace(statics_[i].seq, i);
     }
     ++frame_no_;
     // Explosions that are due, or all older ones when the frame lists every series (the last frame).

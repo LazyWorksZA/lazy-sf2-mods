@@ -1,4 +1,4 @@
-// The theatre's airfields, from its targets ini and the airfield inis they name. Pure: no Windows or game calls.
+// The theatre's airfields and placed structures, from its targets ini, types ini and the airfield inis they name. Pure: no Windows or game calls.
 // See lazy-sf2-recon: recon-notes §21.5.
 #pragma once
 
@@ -34,6 +34,27 @@ using AirfieldLoader = std::function<std::vector<uint8_t>(const std::string& nam
 /// ini cannot be read is kept, without runways.
 /// </summary>
 std::vector<Airfield> airfields_from(const Ini& targets, const AirfieldLoader& loader);
+
+/// <summary>A placed object of a target area: a building, bridge or other scenery.</summary>
+struct Structure {
+    std::string name;      // UTF-8: the type's FullName, or the type id when the types ini does not list it
+    double x = 0, y = 0;   // world metres
+    double heading = 0;    // radians clockwise from north
+    bool bridge = false;
+};
+
+/// <summary>
+/// Every Target[NNN] of every [TargetAreaNNN], except in carrier stations and off-map bases, turned into the world
+/// frame like the runways (Position + R(A)·Offset, heading A + Heading, A only with RotateToRunwayHeading, default on).
+/// Skips runways and the types the types ini marks UseGroundObject (the game makes those live objects).
+/// </summary>
+std::vector<Structure> structures_from(const Ini& targets, const Ini& types);
+
+/// <summary>
+/// The types ini's name: the theatre ini's [Terrain] TargetTypeFile, else the targets ini's name with its "_TARGETS"
+/// suffix turned into "_TYPES". Empty when neither gives one.
+/// </summary>
+std::string types_file_name(const Ini& theatre, const std::string& targets_file);
 
 /// <summary>
 /// The height at (x, y) metres from a south-row-first grid of w x h samples spacing metres apart, interpolated between

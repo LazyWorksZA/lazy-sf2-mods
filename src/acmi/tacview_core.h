@@ -23,6 +23,10 @@
 // Ground+Static+Building, Ground+Vehicle or Sea+Watercraft with the type name as Name; flares and chaff are Misc+Decoy+...
 // An aerodrome (0x6000000+seq) is a static Ground+Static+Aerodrome with its name and heading, written once: the recorder
 // lists it in one frame of its own, and only the final frame (every series) removes it.
+// A structure (0x7000000+seq) is a placed building or bridge from the theatre's inis: Ground+Static+Building or
+// Ground+Static+Bridge, written once and never updated; the recorder lists them over several frames that name no series,
+// so only the final frame removes them. A structure within kStructureDedupeMetres of a live ground object (a
+// GroundObject the core already has a position for) is skipped: the game made that one a real object.
 // A transform line writes only the T components whose text changed since the last line of that object (ACMI 2.2 lets a
 // component stay empty); every '|' is kept, and an object's first line is complete.
 // A frame says which series it lists completely (end_frame's series_mask), so a 1 Hz series is not removed in between.
@@ -32,6 +36,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "acmi/acmi_format.h"
@@ -47,6 +52,8 @@ constexpr uint32_t kCounterMeasureIdBase = 0x3000000;  // flares and chaff
 constexpr uint32_t kBulletIdBase = 0x4000000;  // tracer rounds
 constexpr uint32_t kExplosionIdBase = 0x5000000;  // explosion objects, numbered by the core
 constexpr uint32_t kAerodromeIdBase = 0x6000000;  // airfields, written once per recording
+constexpr uint32_t kStructureIdBase = 0x7000000;  // placed buildings and bridges, written once per recording
+constexpr double kStructureDedupeMetres = 15.0;    // horizontal distance
 // Explosion size (the Radius property, metres) by what blew up, and how long the object stays (game seconds).
 constexpr double kExplosionRadiusBomb = 30, kExplosionRadiusRocket = 8, kExplosionRadiusMissile = 12;
 constexpr double kExplosionRadiusAircraft = 20, kExplosionRadiusGround = 25;
@@ -59,20 +66,21 @@ struct TacviewRec {
     static constexpr uint8_t kObject = 0, kEndFrame = 1;
     static constexpr uint8_t kAircraft = 0, kMissile = 1, kBomb = 2, kRocket = 3;
     static constexpr uint8_t kGroundStatic = 4, kGroundVehicle = 5, kShip = 6, kFlare = 7, kChaff = 8, kBullet = 9,
-                             kAerodrome = 10;
+                             kAerodrome = 10, kStructure = 11, kBridge = 12;
     /// <summary>The kinds of object that share an id range and a sequence counter.</summary>
-    enum class Family : uint8_t { Aircraft, Weapon, Ground, CounterMeasure, Bullet, Aerodrome };
+    enum class Family : uint8_t { Aircraft, Weapon, Ground, CounterMeasure, Bullet, Aerodrome, Structure };
     static constexpr Family family_of(uint8_t cls) {
         if (cls == kAircraft) return Family::Aircraft;
         if (cls >= kGroundStatic && cls <= kShip) return Family::Ground;
         if (cls == kFlare || cls == kChaff) return Family::CounterMeasure;
         if (cls == kBullet) return Family::Bullet;
         if (cls == kAerodrome) return Family::Aerodrome;
+        if (cls == kStructure || cls == kBridge) return Family::Structure;
         return Family::Weapon;  // missile, bomb, rocket, and any unknown value
     }
     /// <summary>Frame series: a frame lists some series completely, and only those can lose objects (removal).</summary>
     static constexpr uint8_t kSeriesAircraft = 1, kSeriesWeapon = 2, kSeriesGroundStatic = 4, kSeriesGroundMobile = 8,
-                             kSeriesCounterMeasure = 16, kSeriesBullet = 32, kSeriesAerodrome = 64,
+                             kSeriesCounterMeasure = 16, kSeriesBullet = 32, kSeriesAerodrome = 64, kSeriesStructure = 128,
                              kSeriesAll = 0xff;
     static constexpr uint8_t series_of(uint8_t cls) {
         switch (family_of(cls)) {
@@ -81,6 +89,7 @@ struct TacviewRec {
             case Family::CounterMeasure: return kSeriesCounterMeasure;
             case Family::Bullet: return kSeriesBullet;
             case Family::Aerodrome: return kSeriesAerodrome;
+            case Family::Structure: return kSeriesStructure;
             default: return kSeriesWeapon;
         }
     }
@@ -121,6 +130,8 @@ struct TacviewCoreStats {
     uint64_t objects = 0;       // distinct objects described
     uint64_t rate_limited = 0;  // transforms skipped by the rate limit
     uint64_t bad_samples = 0;   // objects skipped for a non-finite value
+    uint64_t structures = 0;          // structures written
+    uint64_t structures_skipped = 0;  // structures not written: a live ground object stands there
 };
 
 class TacviewCore {
@@ -149,7 +160,7 @@ public:
     double origin() const { return t0_; }
     long long last_ms() const { return last_ms_; }
     const TacviewCoreStats& stats() const { return stats_; }
-    size_t live_objects() const { return objs_.size(); }
+    size_t live_objects() const { return objs_.size() + statics_.size(); }
 
 private:
     struct State {
@@ -170,6 +181,14 @@ private:
     double lon_scale_ = 0, lat_scale_ = 0;
     double min_dt_ = 0, min_dt_weapon_ = 0;
     std::vector<State> objs_;
+    struct Static {
+        uint64_t seq;
+        uint32_t id;
+        uint64_t seen;
+    };
+    std::vector<Static> statics_;  // structures: kept out of objs_, so their thousands never slow the per-object lookup
+    std::unordered_map<uint64_t, size_t> static_index_;  // seq to index in statics_
+    void add_structure(const TacviewRec& r);
     std::string pending_;  // transform lines of the current frame
     struct Explosion {
         uint32_t id;

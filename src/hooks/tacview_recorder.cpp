@@ -34,6 +34,12 @@ constexpr size_t kOffActive = 0x04;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
 constexpr size_t kMaxAerodromes = 512;
+// Structures go out in chunks of their own, a few steps apart, so a theatre's thousands never fill the ring at once.
+constexpr size_t kMaxStructures = 32768;
+constexpr size_t kStructuresPerFrame = 512;
+// They wait for the first world walk that listed the ground objects, so the core can leave out those the game made live.
+// Without one by then (no ground group), they go out anyway.
+constexpr double kStructureWaitSeconds = 5.0;
 
 static_assert(static_cast<uint8_t>(WeaponClass::Missile) == acmi::TacviewRec::kMissile &&
                   static_cast<uint8_t>(WeaponClass::Bomb) == acmi::TacviewRec::kBomb &&
@@ -57,6 +63,11 @@ size_t g_wdead_n = 0;
 bool g_walk_on = false;                          // the walker started with this recording
 std::string g_theater;       // the theatre id of this recording; empty when the terrain was not captured
 bool g_aero_pending = false;  // this recording's aerodromes are not written yet
+bool g_struct_pending = false;  // this recording's structures are not all written yet
+std::shared_ptr<const std::vector<StructureMark>> g_struct_list;  // held while the chunks go out (the map keeps it too)
+size_t g_struct_next = 0;        // the first structure not written yet
+bool g_ground_walked = false;    // a world frame that lists the ground objects is in the ring
+double g_struct_wait_from = 0;   // game time of this recording's first step; NaN before it
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -212,6 +223,8 @@ void stop_recording(const char* why, bool final_frame = false) {
     g_recording = false;
     if (g_walk_on) world_walk_stop();
     g_walk_on = false;
+    g_struct_pending = false;
+    g_struct_list.reset();  // never the last owner: the export's map keeps the list
     if (final_frame && g_writer->accepting() && g_writer->begin_frame(0)) g_writer->commit_frame(0, sim_game_time());
     g_writer->close(false, why);  // the thread logs the summary
 }
@@ -268,6 +281,11 @@ StartResult start_recording(uint32_t epoch) {
     }
     terrain_export_start(terrain, place);
     g_aero_pending = !g_theater.empty();
+    g_struct_pending = !g_theater.empty();
+    g_struct_list.reset();
+    g_struct_next = 0;
+    g_ground_walked = false;
+    g_struct_wait_from = std::nan("");
     g_table_empty.store(false, std::memory_order_relaxed);
     g_recording = true;
     g_epoch = epoch;
@@ -287,9 +305,9 @@ StartResult start_recording(uint32_t epoch) {
 void write_aerodromes(double t) {
     std::shared_ptr<const std::vector<AerodromeMark>> shared;
     switch (terrain_aerodromes(g_theater, shared)) {
-        case AerodromeList::Pending: return;
-        case AerodromeList::None: g_aero_pending = false; return;
-        case AerodromeList::Ready: break;
+        case StaticList::Pending: return;
+        case StaticList::None: g_aero_pending = false; return;
+        case StaticList::Ready: break;
     }
     const std::vector<AerodromeMark>& list = *shared;
     const size_t n = std::min(list.size(), kMaxAerodromes);
@@ -333,6 +351,57 @@ void write_world_frame(double t) {
     }
     for (size_t i = 0; i < n; ++i) g_writer->slot(i) = g_walk_buf[i];
     g_writer->commit_frame(n, t, mask);
+    if (mask & acmi::TacviewRec::kSeriesGroundStatic) g_ground_walked = true;
+}
+
+// The theatre's placed structures, one chunk per step, after the first ground walk. The chunks name no series, so
+// later frames never remove them; only the final frame (every series) does. Game thread.
+void write_structures(double t) {
+    if (std::isnan(g_struct_wait_from)) g_struct_wait_from = t;
+    if (g_walk_on && !g_ground_walked && t - g_struct_wait_from < kStructureWaitSeconds) return;
+    if (!g_struct_list) {
+        switch (terrain_structures(g_theater, g_struct_list)) {
+            case StaticList::Pending: return;
+            case StaticList::None: g_struct_pending = false; return;
+            case StaticList::Ready: break;
+        }
+    }
+    const std::vector<StructureMark>& list = *g_struct_list;
+    const size_t total = std::min(list.size(), kMaxStructures);
+    const size_t n = std::min(kStructuresPerFrame, total - g_struct_next);
+    if (!g_writer->can_take(n) || !g_writer->begin_frame(n)) return;  // the ring is busy: the next step tries again
+    for (size_t i = 0; i < n; ++i) {
+        const StructureMark& m = list[g_struct_next + i];
+        acmi::TacviewRec& r = g_writer->slot(i);
+        r.kind = acmi::TacviewRec::kObject;
+        r.obj_class = m.bridge ? acmi::TacviewRec::kBridge : acmi::TacviewRec::kStructure;
+        r.side = 0;
+        r.is_player = 0;
+        r.parent_class = acmi::TacviewRec::kAircraft;
+        r.destroyed = 0;
+        r.seq = g_struct_next + i + 1;
+        r.parent_seq = 0;
+        r.t = t;
+        r.pos[0] = m.x;
+        r.pos[1] = m.y;
+        r.pos[2] = m.z;
+        r.ang[0] = 0;
+        r.ang[1] = static_cast<float>(m.heading);
+        r.ang[2] = 0;
+        size_t k = 0;
+        for (; k < acmi::kRecNameChars && k < m.name.size(); ++k) r.name[k] = m.name[k];
+        r.name[k] = '\0';
+        r.type[0] = '\0';
+    }
+    g_writer->commit_frame(n, t, 0);
+    g_struct_next += n;
+    if (g_struct_next < total) return;
+    if (list.size() > kMaxStructures)
+        LOG("tacview: %zu structures queued (%zu over the cap left out)", total, list.size() - total);
+    else
+        LOG("tacview: %zu structures queued", total);
+    g_struct_pending = false;
+    g_struct_list.reset();
 }
 
 // A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
@@ -371,6 +440,7 @@ void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
         probe_with_aircraft(snapshot_cb, &c);
     }
     write_world_frame(t);
+    if (g_struct_pending) write_structures(t);
 }
 
 }  // namespace
