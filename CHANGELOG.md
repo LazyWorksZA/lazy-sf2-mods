@@ -7,7 +7,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Player features
 
-- **Pilot Twist** (Options › Controls, default Off): in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 15 degrees further, as if you twist in the seat, and leans you a few centimetres toward that side.
+- **Pilot Twist** (Options › Controls, default Off): in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 20 degrees further, as if you twist in the seat, and leans you a few centimetres toward that side.
 
 ### Developer tools (off unless enabled)
 
