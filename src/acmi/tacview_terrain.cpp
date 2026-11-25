@@ -42,8 +42,8 @@ void corner(std::string& x, const char* tag, double lon, double lat) {
 }  // namespace
 
 std::string terrain_xml(const std::string& id, const std::string& raw_file, int w, int h, double spacing, double ref_lon,
-                        double ref_lat) {
-    const Mapping m = make_mapping(ref_lat);
+                        double ref_lat, double scale_lat) {
+    const Mapping m = make_mapping(scale_lat);
     const double west = ref_lon, east = ref_lon + (w - 1) * spacing * m.lon_scale;
     const double south = ref_lat, north = ref_lat + (h - 1) * spacing * m.lat_scale;
     std::string x = "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?>\n<Resources>\n\t<CustomHeightmapList>\n";

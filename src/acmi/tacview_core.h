@@ -27,7 +27,9 @@
 #pragma once
 
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -101,6 +103,7 @@ static_assert(sizeof(TacviewRec) == 168, "TacviewRec is copied through the ring:
 struct TacviewCoreConfig {
     double ref_lat = 0;    // degrees; origin of the local flat mapping
     double ref_lon = 0;
+    double scale_lat = std::numeric_limits<double>::quiet_NaN();  // latitude of the longitude scale; NaN means ref_lat
     double max_rate = 10;         // aircraft: transforms per second per object at most; 0 or less means no limit
     double max_rate_weapon = 20;  // weapons: the same, for every object that is not an aircraft
     std::string title = "Strike Fighters 2";

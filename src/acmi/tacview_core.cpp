@@ -17,7 +17,7 @@ bool finite3(const float* p) { return std::isfinite(p[0]) && std::isfinite(p[1])
 TacviewCore::TacviewCore(const TacviewCoreConfig& cfg) : cfg_(cfg) {
     cfg_.ref_lat = std::clamp(cfg_.ref_lat, -89.0, 89.0);
     cfg_.ref_lon = std::clamp(cfg_.ref_lon, -180.0, 180.0);
-    const Mapping m = make_mapping(cfg_.ref_lat);
+    const Mapping m = make_mapping(std::isnan(cfg_.scale_lat) ? cfg_.ref_lat : std::clamp(cfg_.scale_lat, -89.0, 89.0));
     lon_scale_ = m.lon_scale;
     lat_scale_ = m.lat_scale;
     min_dt_ = cfg_.max_rate > 0 ? 1.0 / cfg_.max_rate : 0.0;

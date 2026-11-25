@@ -17,10 +17,10 @@ std::string terrain_id(std::wstring_view base_name);
 void terrain_raw_north_first(const uint16_t* south_first, int w, int h, std::vector<uint8_t>& out);
 
 /// <summary>
-/// A Tacview CustomHeightmapList for one raw file. The corners use the recorder's flat mapping from (ref_lon, ref_lat),
-/// the south-west sample being at the reference point.
+/// A Tacview CustomHeightmapList for one raw file. The corners use the recorder's flat mapping from (ref_lon, ref_lat) with the
+/// longitude scale taken at scale_lat, the south-west sample being at the reference point.
 /// </summary>
 std::string terrain_xml(const std::string& id, const std::string& raw_file, int w, int h, double spacing, double ref_lon,
-                        double ref_lat);
+                        double ref_lat, double scale_lat);
 
 }  // namespace lazysf2::acmi

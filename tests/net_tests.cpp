@@ -1545,7 +1545,7 @@ void terrain_tests() {
     const uint8_t want[12] = {0x04, 0x01, 5, 0, 0xcd, 0xab, 1, 0, 2, 0, 3, 0};
     expect(raw.size() == 12 && std::memcmp(raw.data(), want, 12) == 0, "terrain raw: north row first, little-endian");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2000, 2000, 500.0, -25.0, -4.5);
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
     const auto m = make_mapping(-4.5);
     const std::string east = num(-25.0 + 1999 * 500.0 * m.lon_scale, 9);
     const std::string north = num(-4.5 + 1999 * 500.0 * m.lat_scale, 9);
@@ -2625,7 +2625,7 @@ void texture_tests() {
 
     // texture xml
     {
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5);
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
         const auto m = make_mapping(-4.5);
         const std::string east = num(-25.0 + 1000000.0 * m.lon_scale, 9), north = num(-4.5 + 1000000.0 * m.lat_scale, 9);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
@@ -2715,7 +2715,7 @@ void texture_tests() {
 
         const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2.T.AF001.png", 1000, 2000, 3000},
                                                {"LazySF2.T.AF002", "LazySF2.T.AF002.png", 5000, 6000, 2000}};
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, extra);
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
         const auto m = make_mapping(-4.5);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
         const size_t base = xml.find("Id=\"LazySF2.T\""), p1 = xml.find("Id=\"LazySF2.T.AF001\""), p2 = xml.find("Id=\"LazySF2.T.AF002\"");
@@ -2781,6 +2781,26 @@ void aerodrome_core_tests() {
     static_assert(TacviewRec::kSeriesAerodrome != TacviewRec::kSeriesBullet && (TacviewRec::kSeriesAerodrome & 0x3f) == 0, "series bit is its own");
 }
 
+void placement_tests() {
+    using namespace lazysf2::acmi;
+    const Placement none = place_theatre(false, 10.817, 51.111, 1000000.0, 1000000.0);
+    expect(none.ref_lon == -25.0 && none.ref_lat == -4.5 && none.scale_lat == -4.5, "placement: no geo is the default frame");
+
+    const Placement p = place_theatre(true, 10.817, 51.111, 1000000.0, 1000000.0);
+    const Mapping m = make_mapping(51.111);
+    expect(p.scale_lat == 51.111, "placement: scale latitude is the ini latitude");
+    expect(std::fabs(m.lon_scale - 1.0 / (kMetresPerDegree * std::cos(51.111 * kPi / 180.0))) < 1e-15,
+           "placement: lon_scale uses cos(51.111)");
+    expect(std::fabs(p.ref_lon + 500000.0 * m.lon_scale - 10.817) < 1e-6 &&
+               std::fabs(p.ref_lat + 500000.0 * m.lat_scale - 51.111) < 1e-6,
+           "placement: the square's centre maps back to the geo point");
+    expect(p.ref_lon < 10.817 && p.ref_lat < 51.111, "placement: the corner is south-west of the centre");
+
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
+    expect(xml.find(num(p.ref_lon + 1000.0 * m.lon_scale, 9)) != std::string::npos,
+           "placement: terrain_xml uses the scale latitude");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -2805,6 +2825,7 @@ int main() {
     terrain_tests();
     texture_tests();
     aerodrome_core_tests();
+    placement_tests();
     other_page_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

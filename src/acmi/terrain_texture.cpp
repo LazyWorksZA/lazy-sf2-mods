@@ -318,9 +318,10 @@ bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, dou
 }
 
 std::string texture_xml(const std::string& id, const std::string& file, int /*w_px*/, int /*h_px*/, double extent_x_m,
-                        double extent_y_m, double ref_lon, double ref_lat, const std::vector<PatchEntry>& patches) {
+                        double extent_y_m, double ref_lon, double ref_lat, double scale_lat,
+                        const std::vector<PatchEntry>& patches) {
     // The extent is the tiles' outer edges; the heightmap's corners are sample points, which is a different thing.
-    const Mapping m = make_mapping(ref_lat);
+    const Mapping m = make_mapping(scale_lat);
     std::string x =
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?>\n<Resources>\n\t<CustomTextureList>\n";
     const auto entry = [&](const std::string& eid, const std::string& efile, double ex0, double ey0, double w_m, double h_m) {

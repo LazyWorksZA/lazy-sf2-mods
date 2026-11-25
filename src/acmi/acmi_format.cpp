@@ -9,6 +9,12 @@ Mapping make_mapping(double ref_lat_deg) {
     return {1.0 / (kMetresPerDegree * std::cos(ref_lat_deg / kRadToDeg)), 1.0 / kMetresPerDegree};
 }
 
+Placement place_theatre(bool has_geo, double lon, double lat, double extent_x_m, double extent_y_m) {
+    if (!has_geo) return {kDefaultRefLon, kDefaultRefLat, kDefaultRefLat};
+    const Mapping m = make_mapping(lat);
+    return {lon - extent_x_m / 2 * m.lon_scale, lat - extent_y_m / 2 * m.lat_scale, lat};
+}
+
 std::string num(double v, int decimals) {
     char b[64];
     std::snprintf(b, sizeof(b), "%.*f", decimals, v);

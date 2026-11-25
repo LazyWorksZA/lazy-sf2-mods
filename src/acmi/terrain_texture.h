@@ -81,6 +81,7 @@ struct PatchEntry {
 /// per patch.
 /// </summary>
 std::string texture_xml(const std::string& id, const std::string& file, int w_px, int h_px, double extent_x_m,
-                        double extent_y_m, double ref_lon, double ref_lat, const std::vector<PatchEntry>& patches = {});
+                        double extent_y_m, double ref_lon, double ref_lat, double scale_lat,
+                        const std::vector<PatchEntry>& patches = {});
 
 }  // namespace lazysf2::acmi

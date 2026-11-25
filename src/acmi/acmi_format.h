@@ -18,6 +18,23 @@ struct Mapping {
 };
 Mapping make_mapping(double ref_lat_deg);
 
+/// <summary>Where a theatre's local frame sits: the south-west corner, and the latitude the longitude scale uses.</summary>
+struct Placement {
+    double ref_lon = 0;
+    double ref_lat = 0;
+    double scale_lat = 0;
+};
+
+/// <summary>The open-Atlantic default frame used when the theatre has no real-world position.</summary>
+constexpr double kDefaultRefLon = -25.0;
+constexpr double kDefaultRefLat = -4.5;
+
+/// <summary>
+/// With geo, (lon, lat) is the centre of the extent_x_m by extent_y_m square and the corner is placed from it; without,
+/// the default frame.
+/// </summary>
+Placement place_theatre(bool has_geo, double lon, double lat, double extent_x_m, double extent_y_m);
+
 /// <summary>Fixed decimals with trailing zeros trimmed (smaller files); "-0" becomes "0".</summary>
 std::string num(double v, int decimals);
 /// <summary>Degrees into [0, 360); a value that would print as 360.00 becomes 0, and -0.0 becomes +0.0.</summary>
