@@ -16,6 +16,7 @@ currentAddOn.SetNotes("Shows the terrain of the Strike Fighters 2 theatre of the
 -- false: not applied yet; nil: no LazySF2 theatre; text: the theatre applied.
 local lastTheatre = false
 local reapply = false
+local releasePending = false
 
 local function IsSwitchEnabled()
 	return currentAddOn.Settings.GetBoolean(SettingName, true)
@@ -24,7 +25,8 @@ end
 local function OnToggle()
 	local enabled = not IsSwitchEnabled()
 	currentAddOn.Settings.SetBoolean(SettingName, enabled)
-	-- Forget the last theatre so the next update applies (or releases) the switch at once.
+	-- Switched off: the next update shows every LazySF2 terrain again. Switched on: it applies the theatre again.
+	releasePending = not enabled
 	lastTheatre = false
 end
 
@@ -65,10 +67,10 @@ end
 
 local function OnUpdate(dt, absoluteTime)
 	if not IsSwitchEnabled() then
-		if lastTheatre ~= false then
+		if releasePending then
+			releasePending = false
 			ApplyAll(nil)
 		end
-		lastTheatre = false
 		return
 	end
 

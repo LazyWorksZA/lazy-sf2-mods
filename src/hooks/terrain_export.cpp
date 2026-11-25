@@ -552,7 +552,7 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
             plans.push_back(std::move(p));
         }
     } catch (...) {
-        log_once(16, "tacview terrain: airfield patches stopped: out of memory");
+        log_once(19, "tacview terrain: airfield patches stopped: out of memory");
         plans.clear();
     }
     const bool patches_to_write =
@@ -599,7 +599,7 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
             tile_px = load_patch_tiles(t, want_patch, cache);
         } catch (...) {
             cache_ok = false;
-            log_once(16, "tacview terrain: airfield patches stopped: out of memory");
+            log_once(20, "tacview terrain: airfield patches stopped: out of memory");
         }
     }
     for (PatchPlan& p : plans) {
@@ -704,8 +704,8 @@ void install_addon(const std::wstring& appdata) {
         ok = ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
         if (!ok) DeleteFileW(tmp.c_str());
     }
-    if (ok) log_once(16, "tacview terrain: wrote the Tacview add-on (AddOns\\LazySF2\\main.lua)");
-    else log_once(17, "tacview terrain: could not write the Tacview add-on");
+    if (ok) log_once(21, "tacview terrain: wrote the Tacview add-on (AddOns\\LazySF2\\main.lua)");
+    else log_once(22, "tacview terrain: could not write the Tacview add-on");
 }
 
 // True when the heightmap is in place. The texture and the airfields are best-effort.
@@ -730,7 +730,7 @@ bool export_files(Job& job) {
         publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
         export_texture(job, airfields, root + L"\\Textures\\LazySF2");
     } catch (...) {  // the heightmap is done: only the texture and the airfields are lost
-        log_once(15, "tacview terrain: no texture: out of memory");
+        log_once(18, "tacview terrain: no texture: out of memory");
     }
     return ok;
 }

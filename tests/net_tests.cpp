@@ -1586,6 +1586,8 @@ void terrain_tests() {
 void addon_embed_test() {
     const std::string lua = kTacviewAddonLua;
     expect(!lua.empty() && lua.rfind("-- LazySF2 terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
+    expect(lua.find("LazySF2Theater") != std::string::npos && lua.find("SetTitle(\"LazySF2\")") != std::string::npos,
+           "tacview add-on: embedded text reads LazySF2Theater and sets the add-on title");
 }
 
 void tacview_tests() {
