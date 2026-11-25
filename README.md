@@ -73,8 +73,8 @@ The release notes also list each file's SHA-256.
 3. ~~Synthetic client and recording~~: host mode, a bot client, stream recording, ACMI export (developer-only).
 4. **Two real players** (next): replicated player jets, a shared clock, smoothing; the game keeps running (and optionally keeps its sound) without focus; the cursor stays on the game screen in Fullscreen.
 5. Weapons and damage.
-6. Sessions: handshake, content hashing, our own multiplayer screens, master server. Spawns use a theatre's dogfight file when it has one, otherwise a runway or air start.
-7. Public multiplayer release: NAT traversal with relay.
+6. Sessions: handshake, content hashing, our own multiplayer screens, master server, encrypted and authenticated traffic (key exchange at connect, sealed packets), and bandwidth savings (send only what changed; packet compression). Spawns use a theatre's dogfight file when it has one, otherwise a runway or air start.
+7. Public multiplayer release: NAT traversal with a relay that only ever sees encrypted traffic.
 
 **Quality of life** (the [QoL brief](docs/SF2%20Quality-of-Life%20Follow-up%20%E2%80%94%20Claude%20Code%20Brief.md); each item ships on its own)
 
@@ -88,6 +88,8 @@ Smaller items:
 - Automatic pilot lean when looking far to the side or behind (the view now only turns in place).
 - Ramp starts, using the airfields' parking spots.
 - Esc in flight pauses first instead of ending the flight.
+- Rebind controls while flying (needs our own in-flight pause screen, like the Esc item).
+- Voice commands to wingmen through a FoxVox plugin.
 - Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
 - Tacview: non-ASCII aerodrome names show as "?".
 
