@@ -2759,12 +2759,31 @@ void texture_tests() {
         expect(shrunk.px.empty(), "resize_box_rgb: never enlarges");
         expect(patch_tile_px(1024, 4, kPatchCacheBytes) == 512, "patch_tile_px: capped at 512");
         expect(patch_tile_px(256, 4, kPatchCacheBytes) == 256, "patch_tile_px: a smaller native size is kept");
-        // 64 MB holds 85 tiles of 512 px as RGB (786432 bytes each), 341 of 256 px
-        expect(patch_tile_px(1024, 85, kPatchCacheBytes) == 512 && patch_tile_px(1024, 86, kPatchCacheBytes) == 256,
+        // 64 MB holds 64 tiles of 512 px as RGBA (1 MiB each), 256 of 256 px
+        expect(patch_tile_px(1024, 64, kPatchCacheBytes) == 512 && patch_tile_px(1024, 65, kPatchCacheBytes) == 256,
                "patch_tile_px: halved when the set exceeds the budget");
-        expect(patch_tile_px(1024, 342, kPatchCacheBytes) == 128 && patch_tile_px(1024, 100000, kPatchCacheBytes) == 64,
+        expect(patch_tile_px(1024, 257, kPatchCacheBytes) == 128 && patch_tile_px(1024, 100000, kPatchCacheBytes) == 64,
                "patch_tile_px: halved again, never below 64");
         expect(patch_tile_px(32, 100000, kPatchCacheBytes) == 32, "patch_tile_px: a tiny native size is not enlarged");
+        expect(patch_tile_px(512, 64, kPatchCacheBytes) * patch_tile_px(512, 64, kPatchCacheBytes) * 4u * 64u <= kPatchCacheBytes,
+               "patch_tile_px: the bytes held fit the budget");
+        expect(patch_compose_px(512, 3, 2) == 512 && patch_compose_px(512, 10, 10) == 204 && patch_compose_px(512, 5000, 1) == 1,
+               "patch_compose_px: a big patch is composed from smaller tiles, never below 1 px");
+        {
+            std::vector<Image> cache(4);
+            cache[0] = solid(512, 512, 10, 20, 30);
+            cache[1] = solid(256, 256, 40, 50, 60);
+            cache[3] = solid(512, 512, 70, 80, 90);  // [2] stays empty: a texture that did not decode
+            const int sz = unify_tile_size(cache, 512);
+            expect(sz == 256 && cache[0].w == 256 && cache[0].h == 256 && cache[3].w == 256 && cache[2].w == 0 && cache[1].w == 256,
+                   "unify_tile_size: all tiles brought to the smallest size, an empty one stays empty");
+            expect(cache[0].px[0] == 10 && cache[3].px[1] == 80 && cache[1].px[2] == 60, "unify_tile_size: the colours are kept");
+            std::vector<Image> empty_cache(2);
+            expect(unify_tile_size(empty_cache, 128) == 128, "unify_tile_size: nothing decoded gives the cap");
+            std::vector<Image> capped(1);
+            capped[0] = solid(64, 64, 1, 2, 3);
+            expect(unify_tile_size(capped, 32) == 32 && capped[0].w == 32, "unify_tile_size: a tile above the cap is brought down to it");
+        }
 
         const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2-T-AF001.jpg", 1000, 2000, 3000, 3000},
                                                {"LazySF2.T.AF002", "LazySF2-T-AF002.jpg", 5000, 6000, 2000, 2000}};

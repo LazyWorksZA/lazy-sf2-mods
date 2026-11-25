@@ -298,7 +298,7 @@ int patch_tile_px(int native, size_t texture_count, size_t budget_bytes) {
     int px = std::min(native, kPatchTileMaxPx);
     if (px < 1) return 0;
     while (px > kPatchTileMinPx &&
-           static_cast<uint64_t>(texture_count) * static_cast<uint64_t>(px) * static_cast<uint64_t>(px) * 3 > budget_bytes)
+           static_cast<uint64_t>(texture_count) * static_cast<uint64_t>(px) * static_cast<uint64_t>(px) * 4 > budget_bytes)
         px = std::max(kPatchTileMinPx, px / 2);
     return px;
 }
@@ -327,6 +327,28 @@ void fit_patch_size(int w, int h, int& out_w, int& out_h) {
     const double f = static_cast<double>(kPatchMaxSidePx) / side;
     out_w = std::clamp(static_cast<int>(std::lround(w * f)), 1, kPatchMaxSidePx);
     out_h = std::clamp(static_cast<int>(std::lround(h * f)), 1, kPatchMaxSidePx);
+}
+
+int patch_compose_px(int tile_px, int nx, int ny) {
+    const int across = std::max({nx, ny, 1});
+    return std::max(1, std::min(tile_px, kPatchMaxSidePx / across));
+}
+
+int unify_tile_size(std::vector<Image>& tiles, int cap) {
+    int smallest = cap;
+    for (const Image& im : tiles)
+        if (im.w > 0) smallest = std::min(smallest, im.w);
+    for (Image& im : tiles) {
+        if (im.w == 0 || im.w == smallest) continue;
+        try {
+            Image shrunk;
+            box_downsample(im, smallest, shrunk);
+            im = std::move(shrunk);
+        } catch (...) {
+            im = Image{};
+        }
+    }
+    return smallest;
 }
 
 void resize_box_rgb(const RGBImage& in, int w, int h, RGBImage& out) {

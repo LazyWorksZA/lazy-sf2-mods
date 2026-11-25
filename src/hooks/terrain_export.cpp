@@ -400,71 +400,65 @@ struct PatchPlan {
     bool present = false;
 };
 
-/// <summary>The decoded tiles: the base texture's 8 x 8 squares and the full-size squares the patches need.</summary>
-struct TileImages {
-    std::vector<acmi::Image> base;     // by texture index; empty unless the base is wanted
-    std::vector<acmi::Image> patches;  // by texture index; all patch_px x patch_px
-    int patch_px = 0;
-};
+/// <summary>Export thread: the theatre's texture list (index to file name); empty when it cannot be read.</summary>
+acmi::Ini read_texture_list(const TextureCapture& t, std::vector<uint8_t>& bytes) {
+    return read_game_file(t.folder + L"\\" + t.data_ini, bytes) ? acmi::parse_ini(bytes.data(), bytes.size()) : acmi::Ini{};
+}
 
-/// <summary>
-/// Export thread: reads and decodes each wanted texture once. want_base needs it as kTexturePixelsPerTile squares; for
-/// want_patch it is also kept at min(native, 512) pixels, halved to fit the cache budget, then all brought to one size.
-/// </summary>
-void load_tile_textures(const TextureCapture& t, bool want_base, const std::vector<bool>& want_patch, TileImages& out,
-                        TextureStats& stats) {
-    const size_t count = t.entries.size();
-    out.base.assign(want_base ? count : 0, acmi::Image{});
-    out.patches.assign(count, acmi::Image{});
-    std::vector<bool> needed(count, false);
-    size_t patch_count = 0;
-    for (size_t k = 0; k < count; ++k) {
-        if (want_patch[k]) ++patch_count;
-        needed[k] = want_patch[k];
-    }
-    if (want_base)
-        for (const uint16_t k : t.index) needed[k] = true;
-    const int cap = acmi::patch_tile_px(acmi::kPatchTileMaxPx, patch_count, acmi::kPatchCacheBytes);
-    int smallest = cap;
+/// <summary>Export thread: reads and decodes texture k. False when it has no file or cannot be decoded.</summary>
+bool decode_texture(const TextureCapture& t, const acmi::Ini& list, size_t k, std::vector<uint8_t>& bytes, acmi::Image& full) {
+    char section[16];
+    std::snprintf(section, sizeof(section), "Texture%03zu", k + 1);
+    const std::string* file = list.get(section, "Filename");
+    return file && !file->empty() && read_game_file(t.folder + L"\\" + widen_utf8(*file), bytes) &&
+           acmi::decode_image(bytes.data(), bytes.size(), full);
+}
+
+/// <summary>Export thread: each texture the tile field uses, as kTexturePixelsPerTile squares (by texture index).</summary>
+void load_base_tiles(const TextureCapture& t, std::vector<acmi::Image>& by_index, TextureStats& stats) {
+    by_index.assign(t.entries.size(), acmi::Image{});
+    std::vector<bool> needed(t.entries.size(), false);
+    for (const uint16_t k : t.index)
+        if (k < needed.size()) needed[k] = true;
     std::vector<uint8_t> bytes;
-    const acmi::Ini data = read_game_file(t.folder + L"\\" + t.data_ini, bytes) ? acmi::parse_ini(bytes.data(), bytes.size())
-                                                                                  : acmi::Ini{};
-    for (size_t k = 0; k < count; ++k) {
+    const acmi::Ini list = read_texture_list(t, bytes);
+    for (size_t k = 0; k < t.entries.size(); ++k) {
         if (!needed[k]) continue;
-        char section[16];
-        std::snprintf(section, sizeof(section), "Texture%03zu", k + 1);
-        const std::string* file = data.get(section, "Filename");
         bool done = false;
         try {
             acmi::Image full;
-            if (file && !file->empty() && read_game_file(t.folder + L"\\" + widen_utf8(*file), bytes) &&
-                acmi::decode_image(bytes.data(), bytes.size(), full)) {
-                if (want_base) acmi::box_downsample(full, kTexturePixelsPerTile, out.base[k]);
-                if (want_patch[k]) {
-                    const int px = std::min({full.w, full.h, cap});
-                    acmi::box_downsample(full, px, out.patches[k]);
-                    smallest = std::min(smallest, px);
-                }
+            if (decode_texture(t, list, k, bytes, full)) {
+                acmi::box_downsample(full, kTexturePixelsPerTile, by_index[k]);
                 done = true;
             }
         } catch (...) {  // out of memory: this tile uses its colour
-            if (want_base) out.base[k] = acmi::Image{};
-            out.patches[k] = acmi::Image{};
+            by_index[k] = acmi::Image{};
         }
         ++(done ? stats.decoded : stats.fallback);
     }
-    out.patch_px = smallest;
-    for (size_t k = 0; k < count; ++k) {
-        acmi::Image& im = out.patches[k];
-        if (im.w == 0 || im.w == smallest) continue;
+}
+
+/// <summary>
+/// Export thread: re-reads the textures the patches need, each kept at min(native, 512) pixels (halved to fit the
+/// cache budget), then all brought to the smallest size. Returns that size.
+/// </summary>
+int load_patch_tiles(const TextureCapture& t, const std::vector<bool>& want, std::vector<acmi::Image>& by_index) {
+    by_index.assign(t.entries.size(), acmi::Image{});
+    const size_t patch_count = static_cast<size_t>(std::count(want.begin(), want.end(), true));
+    const int cap = acmi::patch_tile_px(acmi::kPatchTileMaxPx, patch_count, acmi::kPatchCacheBytes);
+    std::vector<uint8_t> bytes;
+    const acmi::Ini list = read_texture_list(t, bytes);
+    for (size_t k = 0; k < t.entries.size(); ++k) {
+        if (!want[k]) continue;
         try {
-            acmi::Image shrunk;
-            acmi::box_downsample(im, smallest, shrunk);
-            im = std::move(shrunk);
-        } catch (...) {
-            im = acmi::Image{};
+            acmi::Image full;
+            if (decode_texture(t, list, k, bytes, full))
+                acmi::box_downsample(full, std::min({full.w, full.h, cap}), by_index[k]);
+        } catch (...) {  // out of memory: this tile uses its colour
+            by_index[k] = acmi::Image{};
         }
     }
+    return acmi::unify_tile_size(by_index, cap);
 }
 
 std::vector<acmi::RGB> entry_colours(const TextureCapture& t) {
@@ -487,11 +481,25 @@ bool write_jpeg_file(const acmi::RGBImage& img, const std::wstring& path) {
     return ok;
 }
 
-/// <summary>Composes one patch from the cached tiles at their own size, shrinks it to fit and paints the runways.</summary>
-void build_patch(const TextureCapture& t, const PatchPlan& p, const acmi::Airfield& a, const TileImages& tiles,
-                 const std::vector<acmi::RGB>& colours, acmi::RGBImage& img) {
+/// <summary>Composes one patch from the cached tiles, shrinks it to fit and paints the runways.</summary>
+void build_patch(const TextureCapture& t, const PatchPlan& p, const acmi::Airfield& a, const std::vector<acmi::Image>& cache,
+                 int cache_px, const std::vector<acmi::RGB>& colours, acmi::RGBImage& img) {
     const acmi::PatchTiles& pt = p.tiles;
-    acmi::compose_patch(pt, t.tiles_w, tiles.patch_px, t.index.data(), t.rot.data(), tiles.patches, colours, img);
+    // A big patch is composed from smaller tiles, so it never allocates more than the size cap.
+    const int px = acmi::patch_compose_px(cache_px, pt.nx, pt.ny);
+    std::vector<acmi::Image> reduced;
+    const std::vector<acmi::Image>* use = &cache;
+    if (px != cache_px) {
+        reduced.assign(cache.size(), acmi::Image{});
+        for (int y = 0; y < pt.ny; ++y)
+            for (int x = 0; x < pt.nx; ++x) {
+                const size_t k = t.index[static_cast<size_t>(pt.ty0 + y) * static_cast<size_t>(t.tiles_w) +
+                                         static_cast<size_t>(pt.tx0 + x)];
+                if (k < cache.size() && cache[k].w == cache_px && reduced[k].w == 0) acmi::box_downsample(cache[k], px, reduced[k]);
+            }
+        use = &reduced;
+    }
+    acmi::compose_patch(pt, t.tiles_w, px, t.index.data(), t.rot.data(), *use, colours, img);
     int w = img.w, h = img.h;
     acmi::fit_patch_size(img.w, img.h, w, h);
     if (w != img.w || h != img.h) {
@@ -534,9 +542,11 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
             p.present = exists(p.path);
             if (!p.present)
                 for (int y = 0; y < p.tiles.ny; ++y)
-                    for (int x = 0; x < p.tiles.nx; ++x)
-                        want_patch[t.index[static_cast<size_t>(p.tiles.ty0 + y) * static_cast<size_t>(t.tiles_w) +
-                                           static_cast<size_t>(p.tiles.tx0 + x)]] = true;
+                    for (int x = 0; x < p.tiles.nx; ++x) {
+                        const size_t k = t.index[static_cast<size_t>(p.tiles.ty0 + y) * static_cast<size_t>(t.tiles_w) +
+                                                 static_cast<size_t>(p.tiles.tx0 + x)];
+                        if (k < want_patch.size()) want_patch[k] = true;
+                    }
             plans.push_back(std::move(p));
         }
     } catch (...) {
@@ -546,56 +556,62 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
     const bool patches_to_write =
         std::any_of(plans.begin(), plans.end(), [](const PatchPlan& p) { return !p.present; });
 
-    TileImages tiles;
     const std::vector<acmi::RGB> colours = entry_colours(t);
-    if (!have_jpg || patches_to_write) {
+    // Phase 1, the base texture: its tiles, image and encoder buffers are gone before the patch cache is built.
+    if (!have_jpg) {
         TextureStats stats;
         try {
-            load_tile_textures(t, !have_jpg, want_patch, tiles, stats);
+            std::vector<acmi::Image> base;
+            load_base_tiles(t, base, stats);
+            acmi::RGBImage img;
+            acmi::compose(t.tiles_w, t.tiles_h, n, t.index.data(), t.rot.data(), base, colours, img);
+            base = {};
+            if (img.px.empty()) {
+                LOG("tacview terrain: %s: could not compose the texture", job.id.c_str());
+                return;
+            }
+            const double mpp = t.tile_m / n;
+            for (const acmi::Airfield& a : airfields)
+                for (const acmi::Runway& r : a.runways) acmi::paint_runway(img, mpp, r.x, r.y, r.heading, r.length, r.width);
+            if (!write_jpeg_file(img, stem + L".jpg")) {
+                LOG("tacview terrain: %s: could not encode the texture; there will be none", job.id.c_str());
+                return;
+            }
+            LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
+                job.id.c_str(), img.w, img.h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
         } catch (...) {
             log_once(15, "tacview terrain: no texture: out of memory");
             return;
         }
-        if (!have_jpg) {
-            try {
-                acmi::RGBImage img;
-                acmi::compose(t.tiles_w, t.tiles_h, n, t.index.data(), t.rot.data(), tiles.base, colours, img);
-                tiles.base = {};
-                if (img.px.empty()) {
-                    LOG("tacview terrain: %s: could not compose the texture", job.id.c_str());
-                    return;
-                }
-                const double mpp = t.tile_m / n;
-                for (const acmi::Airfield& a : airfields)
-                    for (const acmi::Runway& r : a.runways)
-                        acmi::paint_runway(img, mpp, r.x, r.y, r.heading, r.length, r.width);
-                if (!write_jpeg_file(img, stem + L".jpg")) {
-                    LOG("tacview terrain: %s: could not encode the texture; there will be none", job.id.c_str());
-                    return;
-                }
-                LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
-                    job.id.c_str(), img.w, img.h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
-            } catch (...) {
-                log_once(15, "tacview terrain: no texture: out of memory");
-                return;
-            }
+    } else {
+        LOG("tacview terrain: the %s texture is already present in %ls", job.id.c_str(), shown.c_str());
+    }
+
+    // Phase 2, the patches. They depend only on the airfields, so they are made whether or not the base texture was.
+    std::vector<acmi::PatchEntry> patches;
+    int written = 0, present = 0, failed = 0, tile_px = 0;
+    std::vector<acmi::Image> cache;
+    bool cache_ok = true;
+    if (patches_to_write) {
+        try {
+            tile_px = load_patch_tiles(t, want_patch, cache);
+        } catch (...) {
+            cache_ok = false;
+            log_once(16, "tacview terrain: airfield patches stopped: out of memory");
         }
     }
-    if (have_jpg) LOG("tacview terrain: the %s texture is already present in %ls", job.id.c_str(), shown.c_str());
-
-    // The patches depend only on the airfields, so they are made whether or not the base texture was.
-    std::vector<acmi::PatchEntry> patches;
-    int written = 0, present = 0, failed = 0;
     for (PatchPlan& p : plans) {
         if (p.present) {
             ++present;
         } else {
             bool ok = false;
-            try {
-                acmi::RGBImage img;
-                build_patch(t, p, airfields[p.airfield], tiles, colours, img);
-                ok = !img.px.empty() && write_jpeg_file(img, p.path);
-            } catch (...) {
+            if (cache_ok) {
+                try {
+                    acmi::RGBImage img;
+                    build_patch(t, p, airfields[p.airfield], cache, tile_px, colours, img);
+                    ok = !img.px.empty() && write_jpeg_file(img, p.path);
+                } catch (...) {
+                }
             }
             if (!ok) {
                 ++failed;
@@ -607,8 +623,7 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
         }
         patches.push_back(std::move(p.entry));
     }
-    const int tile_px = tiles.patch_px;
-    tiles = TileImages{};
+    cache = {};
     if (written + present + failed > 0)
         LOG("tacview terrain: %s: %d airfield patches (%d written, %d already present, %d failed), %d px tiles", job.id.c_str(),
             written + present, written, present, failed, tile_px);

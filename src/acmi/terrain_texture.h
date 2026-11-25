@@ -56,7 +56,7 @@ void paint_runway(RGBImage& img, double metres_per_px, double cx, double cy, dou
 
 constexpr double kPatchMarginM = 400.0, kPatchMinSideM = 2000.0;
 constexpr int kPatchTileMaxPx = 512, kPatchTileMinPx = 64, kPatchMaxSidePx = 2048;
-constexpr size_t kPatchCacheBytes = 64u * 1024u * 1024u;  // the decoded tiles the patches need, as RGB
+constexpr size_t kPatchCacheBytes = 64u * 1024u * 1024u;  // the decoded tiles the patches need, as held (RGBA)
 
 /// <summary>An airfield patch: a rectangle of whole tiles (tx0, ty0 from the south-west tile) and its world extent.</summary>
 struct PatchTiles {
@@ -71,7 +71,7 @@ struct PatchTiles {
 bool patch_tiles(const Airfield& a, double tile_m, int tiles_w, int tiles_h, PatchTiles& out);
 
 /// <summary>
-/// The pixel size of a cached tile: min(native, 512), halved (down to 64) until texture_count tiles fit budget_bytes as RGB.
+/// The pixel size of a cached tile: min(native, 512), halved (down to 64) until texture_count tiles fit budget_bytes (held as RGBA, 4 bytes a pixel).
 /// </summary>
 int patch_tile_px(int native, size_t texture_count, size_t budget_bytes);
 
@@ -84,6 +84,15 @@ void compose_patch(const PatchTiles& pt, int tiles_w, int n, const uint16_t* ind
 
 /// <summary>The size a w x h patch is shrunk to so that neither side is over kPatchMaxSidePx. Unchanged when it fits.</summary>
 void fit_patch_size(int w, int h, int& out_w, int& out_h);
+
+/// <summary>The per-tile size to compose a nx x ny patch at, so that neither side is over kPatchMaxSidePx (at least 1).</summary>
+int patch_compose_px(int tile_px, int nx, int ny);
+
+/// <summary>
+/// Brings every non-empty tile to the smallest tile size (at most cap) and returns it; cap when there are none. A tile
+/// that cannot be shrunk (out of memory) is emptied.
+/// </summary>
+int unify_tile_size(std::vector<Image>& tiles, int cap);
 
 /// <summary>A box resize of an RGB image to w x h, each at most the source size.</summary>
 void resize_box_rgb(const RGBImage& in, int w, int h, RGBImage& out);
