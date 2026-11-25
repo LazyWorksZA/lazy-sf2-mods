@@ -4,7 +4,7 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 
 ## Players: the installer
 
-1. Run **`LazySF2-win.msi`**. It's a normal installer wizard: a welcome page, the license (ours plus the [third-party notices](THIRD_PARTY_NOTICES.md)), an administrator prompt, and a finish page.
+1. Run **`Lazy-SF2-Patch-<version>.msi`** from the Releases page. It's a normal installer wizard: a welcome page, the license (ours plus the [third-party notices](THIRD_PARTY_NOTICES.md)), an administrator prompt, and a finish page.
    - If the .NET 10 runtime is missing, the installer adds it.
 2. The installer finds Strike Fighters 2 through the game's own registry entry and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
 3. That's all. There's no app, window or shortcut. Start the game as usual; the settings are in the game (below).
