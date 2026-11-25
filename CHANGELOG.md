@@ -5,6 +5,11 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Developer tools (off unless enabled)
+
+- **`lazysf2-bot` gives up on a silent host.** After 4 s with nothing from the host it prints one line and exits: code 3 when the connect or the Welcome gets no answer, code 4 when the host goes silent or closes the connection later. Code 2 now means only a bad address or a refused connection.
+- The loopback tests no longer fail on a slow or busy machine.
+
 ## 1.0.0 (2026-11-25)
 
 ### Player features
