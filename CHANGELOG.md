@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Player features
+
+- **Smaller Tacview recordings.** Each aircraft, weapon and ground-object line now holds only the position and attitude values that changed since the last one, and lines that change nothing are left out. A finished recording is also packed into `SF2 <date>.zip.acmi`, which Tacview opens directly. Together this is roughly 14 times smaller (a 19.6 MB recording came to about 1.4 MB). While a flight runs, the recording stays a plain `.acmi`. If the game exits abnormally, or a write fails, the recording stays a plain `.acmi` that Tacview opens as before.
+
 ## 1.0.0 (2026-11-25)
 
 ### Player features
