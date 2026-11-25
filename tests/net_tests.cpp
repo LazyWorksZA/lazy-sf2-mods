@@ -215,7 +215,12 @@ struct TestClient {
             }
         }
     }
+    bool throttle_off = false;
     void send(const uint8_t* d, size_t n, uint8_t channel) {
+        if (connected && !throttle_off) {  // a starved machine inflates the RTT, and ENet's throttle would then drop unreliable States
+            enet_peer_throttle_configure(peer, 5000, 0, 0);
+            throttle_off = true;
+        }
         ENetPacket* p = enet_packet_create(d, n, channel == kChannelReliable ? ENET_PACKET_FLAG_RELIABLE : 0);
         if (p && enet_peer_send(peer, channel, p) != 0) enet_packet_destroy(p);
         enet_host_flush(host);
@@ -431,7 +436,11 @@ void host_core_tests() {
     b.idle(300);
     expect(!b.disconnected && b.got.empty(), "stale-generation Bye and disconnect do not reach the new client");
     expect(core.send(0, gen_b, buf, enc(stale, buf), kChannelReliable, true), "a current-generation Bye is queued");
-    b.idle(300);
+    {  // wait for the Bye itself rather than for a fixed time: the network thread may be starved
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (b.got.empty() && !b.disconnected && std::chrono::steady_clock::now() < until) b.idle(1);
+        b.idle(100);
+    }
     expect(!b.disconnected && b.got.size() == 1, "the current-generation Bye is delivered");
 
     // Control events survive a flood of States while the game does not drain the queue.
