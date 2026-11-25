@@ -9,7 +9,7 @@
 
 namespace lazysf2::acmi {
 
-constexpr int kMaxImageDim = 4096;
+constexpr int kMaxImageDim = 2048;
 constexpr uint8_t kTarmac[3] = {64, 64, 64};
 constexpr double kMinRunwayPixels = 2.0;  // a runway is painted at least this wide
 
@@ -29,7 +29,7 @@ struct RGB {
     uint8_t r = 0, g = 0, b = 0;
 };
 
-/// <summary>TGA (type 2 and 10, 16/24/32 bpp) and BMP (8/24/32 bpp), up to 4096 x 4096. False for anything else.</summary>
+/// <summary>TGA (type 2 and 10, 16/24/32 bpp) and BMP (8/24/32 bpp), up to 2048 x 2048. False for anything else.</summary>
 bool decode_image(const uint8_t* data, size_t n, Image& out);
 
 /// <summary>An n x n box filter. A source smaller than n repeats its pixels.</summary>

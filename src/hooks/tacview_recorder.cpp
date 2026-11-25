@@ -273,12 +273,13 @@ StartResult start_recording(uint32_t epoch) {
 
 // The theatre's airfields, as one frame of their own, once the export thread has read them. Game thread.
 void write_aerodromes(double t) {
-    std::vector<AerodromeMark> list;
-    switch (terrain_aerodromes(g_theater, list)) {
+    std::shared_ptr<const std::vector<AerodromeMark>> shared;
+    switch (terrain_aerodromes(g_theater, shared)) {
         case AerodromeList::Pending: return;
         case AerodromeList::None: g_aero_pending = false; return;
         case AerodromeList::Ready: break;
     }
+    const std::vector<AerodromeMark>& list = *shared;
     const size_t n = std::min(list.size(), kMaxAerodromes);
     if (!g_writer->begin_frame(n)) return;  // the ring was full (counted): tried again at the next step
     for (size_t i = 0; i < n; ++i) {

@@ -48,7 +48,7 @@ bool decode_tga(const uint8_t* d, size_t n, Image& out) {
     size_t pos = 18 + id_len + cmap_bytes;
     if (pos > n) return false;
     const size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
-    std::vector<uint8_t> px(count * 4);
+    std::vector<uint8_t> px(count * 4);  // the only full-size buffer: flipped in place below
     if (type == 2) {
         if ((n - pos) / bytes < count) return false;
         for (size_t i = 0; i < count; ++i) put_pixel(&px[i * 4], d + pos + i * bytes, bytes);
@@ -73,18 +73,24 @@ bool decode_tga(const uint8_t* d, size_t n, Image& out) {
             i += run;
         }
     }
-    // Stored bottom-up unless bit 0x20; right to left when bit 0x10. Make it top-down, left to right.
+    // Stored bottom-up unless bit 0x20; right to left when bit 0x10. Make it top-down, left to right, in place.
     const bool top_down = (desc & 0x20) != 0, right_to_left = (desc & 0x10) != 0;
-    out.w = w;
-    out.h = h;
-    out.px.resize(px.size());
-    for (int y = 0; y < h; ++y) {
-        const int sy = top_down ? y : h - 1 - y;
-        for (int x = 0; x < w; ++x) {
-            const int sx = right_to_left ? w - 1 - x : x;
-            std::memcpy(&out.px[(static_cast<size_t>(y) * w + x) * 4], &px[(static_cast<size_t>(sy) * w + sx) * 4], 4);
+    const size_t row_bytes = static_cast<size_t>(w) * 4;
+    if (!top_down)
+        for (int y = 0; y < h / 2; ++y)
+            std::swap_ranges(px.begin() + static_cast<std::ptrdiff_t>(y * row_bytes),
+                             px.begin() + static_cast<std::ptrdiff_t>((y + 1) * row_bytes),
+                             px.begin() + static_cast<std::ptrdiff_t>((h - 1 - y) * row_bytes));
+    if (right_to_left) {
+        for (int y = 0; y < h; ++y) {
+            uint8_t* row = &px[static_cast<size_t>(y) * row_bytes];
+            for (int x = 0; x < w / 2; ++x)
+                std::swap_ranges(row + x * 4, row + x * 4 + 4, row + (w - 1 - x) * 4);
         }
     }
+    out.w = w;
+    out.h = h;
+    out.px = std::move(px);
     return true;
 }
 

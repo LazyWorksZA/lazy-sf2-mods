@@ -139,17 +139,19 @@ int copy_tile_field(const BYTE* tfd, size_t count, int tex_count, uint16_t* inde
     }
 }
 
-bool copy_texture_entries(const BYTE* tex, int count, TextureEntry* out) {
+// 0 ok, 1 unreadable, 2 an entry does not hold its own index at +0 (the layout is not what we think). No C++ objects (SEH).
+int copy_texture_entries(const BYTE* tex, int count, TextureEntry* out) {
     __try {
         for (int k = 0; k < count; ++k) {
             const BYTE* e = tex + static_cast<size_t>(k) * kTexEntryBytes;
+            if (field<int>(e, 0) != k) return 2;
             for (int c = 0; c < 3; ++c) out[k].color[c] = field<float>(e, kOffTexColor + static_cast<size_t>(c) * 4);
             out[k].used = field<uint8_t>(e, kOffTexUsed) != 0;
             out[k].has_water = field<uint8_t>(e, kOffTexWater) != 0;
         }
-        return true;
+        return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        return 1;
     }
 }
 
@@ -171,12 +173,25 @@ std::atomic<bool> g_busy{false};    // set by the game thread at start, cleared 
 std::atomic<bool> g_job_ok{false};  // the last job's result, stored before g_busy is cleared
 
 std::mutex g_aero_lock;
-std::map<std::string, std::vector<AerodromeMark>> g_aero;  // by theatre id: present once the export thread has read them
+// By theatre id: present once the export thread has read them (or it was decided that none will come).
+std::map<std::string, std::shared_ptr<const std::vector<AerodromeMark>>> g_aero;
 
-void publish_aerodromes(const std::string& id, std::vector<AerodromeMark>&& list, bool only_if_absent) {
+// An empty list marks "none"; it never replaces a good non-empty one (a failed retry must not lose it).
+void publish_aerodromes(const std::string& id, std::vector<AerodromeMark>&& list) {
+    const bool empty = list.empty();
+    auto shared = std::make_shared<const std::vector<AerodromeMark>>(std::move(list));  // allocated outside the lock
     std::lock_guard<std::mutex> g(g_aero_lock);
-    if (only_if_absent && g_aero.count(id)) return;
-    g_aero[id].swap(list);
+    const auto it = g_aero.find(id);
+    if (it != g_aero.end() && empty && !it->second->empty()) return;
+    g_aero[id] = std::move(shared);
+}
+
+// No job will run for this theatre now: the recorder stops waiting. The next flight tries again.
+void mark_no_aerodromes(const std::string& id) {
+    try {
+        publish_aerodromes(id, {});
+    } catch (...) {
+    }
 }
 
 /// <summary>Game thread: once the last job has ended, records its id as exported if it succeeded.</summary>
@@ -208,10 +223,20 @@ std::unique_ptr<TextureCapture> capture_texture(const Raw& raw) {
         std::vector<uint8_t> rot(tiles);
         std::vector<TextureEntry> entries(static_cast<size_t>(raw.tex_count));
         const int rc = copy_tile_field(raw.tfd, tiles, raw.tex_count, index.data(), rot.data());
-        if (rc != 0 || !copy_texture_entries(raw.tex, raw.tex_count, entries.data())) {
+        if (rc != 0) {
             log_once(13, rc == 2 ? "tacview terrain: a tile's texture index or rotation is out of range; no texture"
                                  : "tacview terrain: the tile field could not be read; no texture");
             return t;
+        }
+        const int ec = copy_texture_entries(raw.tex, raw.tex_count, entries.data());
+        if (ec != 0) {
+            // The texture list is not laid out as expected: no colours, but the tile files can still load by name.
+            log_once(16, ec == 2 ? "tacview terrain: the texture list layout is not as expected; tiles without an image are grey"
+                                 : "tacview terrain: the texture list could not be read; tiles without an image are grey");
+            for (TextureEntry& e : entries) {
+                e = TextureEntry{};
+                e.color[0] = e.color[1] = e.color[2] = 0.5f;
+            }
         }
         t->tiles_w = raw.tfd_w;
         t->tiles_h = raw.tfd_h;
@@ -351,7 +376,7 @@ void publish_airfields(const Job& job, const std::vector<acmi::Airfield>& airfie
         m.heading = a.heading;
         list.push_back(std::move(m));
     }
-    publish_aerodromes(job.id, std::move(list), false);
+    publish_aerodromes(job.id, std::move(list));
 }
 
 struct TextureStats {
@@ -371,14 +396,18 @@ void load_tile_textures(const TextureCapture& t, std::vector<acmi::Image>& by_in
         char section[16];
         std::snprintf(section, sizeof(section), "Texture%03zu", k + 1);
         const std::string* file = data.get(section, "Filename");
-        acmi::Image full;
-        if (file && !file->empty() && read_game_file(t.folder + L"\\" + widen_utf8(*file), bytes) &&
-            acmi::decode_image(bytes.data(), bytes.size(), full)) {
-            acmi::box_downsample(full, kTexturePixelsPerTile, by_index[k]);
-            ++stats.decoded;
-        } else {
-            ++stats.fallback;
+        bool done = false;
+        try {
+            acmi::Image full;
+            if (file && !file->empty() && read_game_file(t.folder + L"\\" + widen_utf8(*file), bytes) &&
+                acmi::decode_image(bytes.data(), bytes.size(), full)) {
+                acmi::box_downsample(full, kTexturePixelsPerTile, by_index[k]);
+                done = true;
+            }
+        } catch (...) {  // out of memory: this tile uses its colour
+            by_index[k] = acmi::Image{};
         }
+        ++(done ? stats.decoded : stats.fallback);
     }
 }
 
@@ -396,38 +425,43 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
                                               kTerrainRefLon, kTerrainRefLat);
     const bool have_jpg = exists(stem + L".jpg");
     if (!have_jpg) {
-        TextureStats stats;
-        acmi::RGBImage img;
-        {
-            std::vector<acmi::Image> by_index;
-            load_tile_textures(t, by_index, stats);
-            std::vector<acmi::RGB> colours(t.entries.size());
-            for (size_t k = 0; k < colours.size(); ++k) {
-                const auto to_byte = [](float c) {
-                    return static_cast<uint8_t>(std::isfinite(c) ? std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f) : 128);
-                };
-                colours[k] = {to_byte(t.entries[k].color[0]), to_byte(t.entries[k].color[1]), to_byte(t.entries[k].color[2])};
+        try {
+            TextureStats stats;
+            acmi::RGBImage img;
+            {
+                std::vector<acmi::Image> by_index;
+                load_tile_textures(t, by_index, stats);
+                std::vector<acmi::RGB> colours(t.entries.size());
+                for (size_t k = 0; k < colours.size(); ++k) {
+                    const auto to_byte = [](float c) {
+                        return static_cast<uint8_t>(std::isfinite(c) ? std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f) : 128);
+                    };
+                    colours[k] = {to_byte(t.entries[k].color[0]), to_byte(t.entries[k].color[1]), to_byte(t.entries[k].color[2])};
+                }
+                acmi::compose(t.tiles_w, t.tiles_h, n, t.index.data(), t.rot.data(), by_index, colours, img);
             }
-            acmi::compose(t.tiles_w, t.tiles_h, n, t.index.data(), t.rot.data(), by_index, colours, img);
-        }
-        if (img.px.empty()) {
-            LOG("tacview terrain: %s: could not compose the texture", job.id.c_str());
+            if (img.px.empty()) {
+                LOG("tacview terrain: %s: could not compose the texture", job.id.c_str());
+                return;
+            }
+            const double mpp = t.tile_m / n;
+            for (const acmi::Airfield& a : airfields)
+                for (const acmi::Runway& r : a.runways) acmi::paint_runway(img, mpp, r.x, r.y, r.heading, r.length, r.width);
+            // The encoder opens the file itself: temporary name first, then moved into place.
+            const std::wstring tmp = stem + L".jpg.tmp";
+            bool ok = write_jpeg_wic(img, tmp, kJpegQuality);
+            if (ok) ok = MoveFileExW(tmp.c_str(), (stem + L".jpg").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+            if (!ok) DeleteFileW(tmp.c_str());
+            if (!ok) {
+                LOG("tacview terrain: %s: could not encode the texture; there will be none", job.id.c_str());
+                return;
+            }
+            LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
+                job.id.c_str(), img.w, img.h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
+        } catch (...) {
+            log_once(15, "tacview terrain: no texture: out of memory");
             return;
         }
-        const double mpp = t.tile_m / n;
-        for (const acmi::Airfield& a : airfields)
-            for (const acmi::Runway& r : a.runways) acmi::paint_runway(img, mpp, r.x, r.y, r.heading, r.length, r.width);
-        // The encoder opens the file itself: temporary name first, then moved into place.
-        const std::wstring tmp = stem + L".jpg.tmp";
-        bool ok = write_jpeg_wic(img, tmp, kJpegQuality);
-        if (ok) ok = MoveFileExW(tmp.c_str(), (stem + L".jpg").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-        if (!ok) DeleteFileW(tmp.c_str());
-        if (!ok) {
-            LOG("tacview terrain: %s: could not encode the texture; there will be none", job.id.c_str());
-            return;
-        }
-        LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
-            job.id.c_str(), img.w, img.h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
     } else {
         LOG("tacview terrain: the %s texture is already present in %ls", job.id.c_str(), shown.c_str());
     }
@@ -448,9 +482,13 @@ bool export_files(Job& job) {
     root += L"\\Tacview\\Data\\Terrain";
     const bool ok = export_heightmap(job, root + L"\\Custom\\LazySF2");
     if (!job.texture) return ok;
-    const std::vector<acmi::Airfield> airfields = read_airfields(job);
-    publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
-    export_texture(job, airfields, root + L"\\Textures\\LazySF2");
+    try {
+        const std::vector<acmi::Airfield> airfields = read_airfields(job);
+        publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
+        export_texture(job, airfields, root + L"\\Textures\\LazySF2");
+    } catch (...) {  // the heightmap is done: only the texture and the airfields are lost
+        log_once(15, "tacview terrain: no texture: out of memory");
+    }
     return ok;
 }
 
@@ -465,7 +503,7 @@ void run_job(Job job) {
         log_once(6, "tacview terrain: the export failed with an exception");
     }
     if (com) CoUninitialize();
-    publish_aerodromes(job.id, {}, true);  // a recording must never wait for a list that will not come
+    mark_no_aerodromes(job.id);  // a recording must never wait for a list that will not come
     job.samples.reset();
     job.texture.reset();
     g_job_ok.store(ok, std::memory_order_relaxed);
@@ -512,6 +550,7 @@ static bool capture_impl(TerrainInfo& out) {
     if (g_exported.count(out.id)) return true;
     if (g_busy.load(std::memory_order_acquire)) {
         log_once(10, "tacview terrain: an export is still running; this flight does not start another");
+        mark_no_aerodromes(out.id);
         return true;
     }
 
@@ -519,10 +558,12 @@ static bool capture_impl(TerrainInfo& out) {
     std::unique_ptr<uint16_t[]> buf(new (std::nothrow) uint16_t[count]);
     if (!buf) {
         log_once(3, "tacview terrain: out of memory for the heightmap copy; no export");
+        mark_no_aerodromes(out.id);
         return true;
     }
     if (!copy_samples(buf.get(), raw.samples, count * 2)) {
         log_once(4, "tacview terrain: the heightfield could not be read; no export");
+        mark_no_aerodromes(out.id);
         return true;
     }
     out.samples = std::move(buf);
@@ -543,7 +584,10 @@ bool terrain_capture(TerrainInfo& out) {
 
 void terrain_export_start(TerrainInfo& info) {
     if (!info.samples) return;
-    if (g_busy.load(std::memory_order_acquire)) return;
+    if (g_busy.load(std::memory_order_acquire)) {
+        mark_no_aerodromes(info.id);
+        return;
+    }
     if (g_thread.joinable()) g_thread.join();  // its job has ended (g_busy is clear): this returns at once
     g_job_ok.store(false, std::memory_order_relaxed);
     g_busy.store(true, std::memory_order_release);
@@ -554,6 +598,7 @@ void terrain_export_start(TerrainInfo& info) {
     } catch (...) {  // not marked exported: the next flight may try again
         g_pending_id.clear();
         g_busy.store(false, std::memory_order_release);
+        mark_no_aerodromes(info.id);
         log_once(5, "tacview terrain: could not start the export thread");
     }
 }
@@ -569,11 +614,11 @@ void terrain_export_shutdown() {
     g_thread.detach();
 }
 
-AerodromeList terrain_aerodromes(const std::string& id, std::vector<AerodromeMark>& out) {
+AerodromeList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out) {
     std::lock_guard<std::mutex> g(g_aero_lock);
     const auto it = g_aero.find(id);
     if (it == g_aero.end()) return AerodromeList::Pending;
-    if (it->second.empty()) return AerodromeList::None;
+    if (it->second->empty()) return AerodromeList::None;
     out = it->second;
     return AerodromeList::Ready;
 }

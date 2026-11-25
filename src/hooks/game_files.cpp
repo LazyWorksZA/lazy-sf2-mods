@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <new>
 
@@ -101,31 +102,44 @@ bool read_game_file(const std::wstring& full_path, std::vector<uint8_t>& out) {
     try {
         const int size = call_size(s, name);
         if (size < 0 || static_cast<size_t>(size) > kMaxGameFileBytes) return false;
+        out.resize(size > 0 ? static_cast<size_t>(size) : kChunk);  // before Open: a throw cannot leak the handle
         const int h = call_open(s, name);
-        if (h == -1) return false;
+        if (h == -1) {
+            out.clear();
+            return false;
+        }
         bool ok = true;
+        size_t have = 0;
         if (size > 0) {
-            out.resize(static_cast<size_t>(size));
-            const int got = call_read(s, h, out.data(), static_cast<unsigned>(size));
-            if (got <= 0) {
-                ok = false;
-            } else {
-                out.resize(static_cast<size_t>(got));
+            // Read until all of it is in; a read of 0 or less before that is a failure.
+            while (have < out.size()) {
+                const size_t want = std::min<size_t>(out.size() - have, kChunk);
+                const int got = call_read(s, h, out.data() + have, static_cast<unsigned>(want));
+                if (got <= 0) break;
+                have += static_cast<size_t>(got);
             }
+            ok = have == out.size();
         } else {
             // The size query found nothing (it may not see every file): read until the end, up to the cap.
             for (;;) {
-                const size_t at = out.size();
-                if (at + kChunk > kMaxGameFileBytes) {
-                    ok = false;
-                    break;
+                if (have == out.size()) {
+                    if (out.size() + kChunk > kMaxGameFileBytes) {
+                        ok = false;
+                        break;
+                    }
+                    try {
+                        out.resize(out.size() + kChunk);
+                    } catch (...) {
+                        ok = false;
+                        break;
+                    }
                 }
-                out.resize(at + kChunk);
-                const int got = call_read(s, h, out.data() + at, kChunk);
-                out.resize(at + static_cast<size_t>(got > 0 ? got : 0));
+                const int got = call_read(s, h, out.data() + have, static_cast<unsigned>(out.size() - have));
                 if (got <= 0) break;
+                have += static_cast<size_t>(got);
             }
-            ok = ok && !out.empty();
+            out.resize(have);
+            ok = ok && have > 0;
         }
         call_close(s, h);
         if (!ok) out.clear();

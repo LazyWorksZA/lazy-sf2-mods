@@ -63,9 +63,9 @@ struct AerodromeMark {
 enum class AerodromeList { Pending, Ready, None };
 
 /// <summary>
-/// The airfields of theatre id: Pending until the export thread has read them, then Ready (out filled) or None.
-/// Any thread.
+/// The airfields of theatre id: Pending until the export thread has read them, then Ready (out shares the list) or
+/// None. The list is never copied under the lock. Any thread.
 /// </summary>
-AerodromeList terrain_aerodromes(const std::string& id, std::vector<AerodromeMark>& out);
+AerodromeList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out);
 
 }  // namespace lazysf2::hooks
