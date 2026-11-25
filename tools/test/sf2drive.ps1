@@ -13,7 +13,7 @@
   Accepts, clicks Fly! in the hangar, waits -Seconds in the cockpit, presses Esc (which goes straight to
   the debrief), clicks Accept and Exit, and waits for the main menu. (The game starts the flight in the air.) 'run' is start + fly + EXIT on the main menu, and prints the new lazysf2.log lines.
   Screens are recognised by sampling the menus' tan text colour; each wait has a timeout, and on any
-  failure 'run' stops the game (killing it if it won't close). With -Shots DIR, each stage is saved there.
+  failure 'run' stops the game it started (killing it if it won't close). start and run refuse to touch a game that is already running unless -Force. With -Shots DIR, each stage is saved there.
 
 .EXAMPLE
   .\tools\test\sf2drive.ps1 start; .\tools\test\sf2drive.ps1 focus
@@ -29,6 +29,7 @@ param(
     [ValidateSet('Strike', 'CloseAirSupport', 'AirDefenseSuppression', 'ArmedRecon', 'AntiShipping', 'Recon')] [string]$MissionType = 'Strike',
     [string]$Shots = '',
     [string]$Out = '',
+    [switch]$Force,   # start/run: close a game that is already running (it may be the user's) instead of refusing
     [string]$GameDir = (Split-Path (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\ThirdWire\Strike Fighters 2').Path),
     [string]$DxvkLogs = ''
 )
@@ -176,12 +177,19 @@ function Fly-Mission([int]$secs, [string]$dir, [string]$type) {
     Click-Virtual 48 694    # Exit: back to the main menu
     Wait-Screen 'main' 40 $dir '9-back-at-main'
 }
-function Stop-Game {
-    Get-Process StrikeFighters2 -ErrorAction SilentlyContinue | ForEach-Object {
+function Stop-Game([int]$OnlyId = 0) {
+    Get-Process StrikeFighters2 -ErrorAction SilentlyContinue | Where-Object { -not $OnlyId -or $_.Id -eq $OnlyId } | ForEach-Object {
         [void]$_.CloseMainWindow()
         if (-not $_.WaitForExit(15000)) { Stop-Process -Id $_.Id -Force; 'force-stopped' } else { 'stopped' } }
 }
+function Assert-NoGame {   # never touch a game this script did not start, unless -Force
+    $p = Get-Process StrikeFighters2 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $p) { return }
+    if (-not $Force) { throw "a game is already running (pid $($p.Id), started $($p.StartTime)); close it, or pass -Force" }
+    Stop-Game | Out-Null
+}
 function Start-Game {
+    Assert-NoGame
     Start-Process "$game\StrikeFighters2.exe" -WorkingDirectory $game | Out-Null
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep 1; $p = Get-Process StrikeFighters2 -ErrorAction SilentlyContinue
@@ -216,10 +224,11 @@ switch ($Action) {
     'fly' { Fly-Mission $Seconds $Shots $MissionType; 'fly: done, back at the main menu' }
     'run' {
         $ok = $false
-        Stop-Game | Out-Null
         $mark = Get-LogLength
+        $mine = 0
         try {
             Start-Game
+            $mine = (Get-Process StrikeFighters2 -ErrorAction SilentlyContinue | Select-Object -First 1).Id
             Fly-Mission $Seconds $Shots $MissionType
             Click-Virtual 894 654   # EXIT on the main menu
             $p = Get-Process StrikeFighters2 -ErrorAction SilentlyContinue
@@ -227,7 +236,7 @@ switch ($Action) {
             $ok = $true; 'run: done, the game quit from the main menu'
         }
         catch { Write-Warning "run failed: $_" }
-        finally { $r = Stop-Game; if ($r) { "cleanup: $r" } }
+        finally { if ($mine) { $r = Stop-Game $mine; if ($r) { "cleanup: $r" } } }
         '--- new lazysf2.log lines ---'
         Read-LogFrom $mark
         if (-not $ok) { exit 1 }
