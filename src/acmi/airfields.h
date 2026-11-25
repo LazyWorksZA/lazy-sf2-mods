@@ -35,4 +35,10 @@ using AirfieldLoader = std::function<std::vector<uint8_t>(const std::string& nam
 /// </summary>
 std::vector<Airfield> airfields_from(const Ini& targets, const AirfieldLoader& loader);
 
+/// <summary>
+/// The height at (x, y) metres from a south-row-first grid of w x h samples spacing metres apart, interpolated between
+/// the four nearest samples. 0 when the point is outside the grid or the grid is empty.
+/// </summary>
+double height_at(const uint16_t* samples, int w, int h, double spacing, double x, double y);
+
 }  // namespace lazysf2::acmi

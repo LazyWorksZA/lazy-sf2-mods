@@ -1,5 +1,6 @@
 #include "acmi/airfields.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -98,6 +99,16 @@ std::vector<Airfield> airfields_from(const Ini& targets, const AirfieldLoader& l
         out.push_back(std::move(af));
     }
     return out;
+}
+
+double height_at(const uint16_t* samples, int w, int h, double spacing, double x, double y) {
+    if (!samples || w < 2 || h < 2 || !(spacing > 0) || !std::isfinite(x) || !std::isfinite(y)) return 0;
+    const double fx = x / spacing, fy = y / spacing;
+    if (fx < 0 || fy < 0 || fx > w - 1 || fy > h - 1) return 0;
+    const int i = std::min(static_cast<int>(fx), w - 2), j = std::min(static_cast<int>(fy), h - 2);
+    const double u = fx - i, v = fy - j;
+    const auto s = [&](int xx, int yy) { return static_cast<double>(samples[static_cast<size_t>(yy) * static_cast<size_t>(w) + static_cast<size_t>(xx)]); };
+    return (s(i, j) * (1 - u) + s(i + 1, j) * u) * (1 - v) + (s(i, j + 1) * (1 - u) + s(i + 1, j + 1) * u) * v;
 }
 
 }  // namespace lazysf2::acmi

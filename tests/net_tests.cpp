@@ -2612,6 +2612,13 @@ void texture_tests() {
                "airfields: the second runway");
         expect(std::fabs(a.heading - 90 * deg) < 1e-9, "airfields: the airfield heading is the first runway's");
         expect(af[1].runways.empty() && std::fabs(af[1].heading - 30 * deg) < 1e-9 && af[1].x == 300, "airfields: an unreadable ini keeps the airfield, with the area heading");
+        // height_at: a 3x2 grid, south row first, 500 m apart.
+        const uint16_t grid[6] = {0, 100, 200, 1000, 1100, 1200};
+        expect(height_at(grid, 3, 2, 500.0, 0, 0) == 0 && height_at(grid, 3, 2, 500.0, 1000, 500) == 1200, "height_at: the corner samples");
+        expect(std::fabs(height_at(grid, 3, 2, 500.0, 250, 250) - 550) < 1e-9 && std::fabs(height_at(grid, 3, 2, 500.0, 750, 0) - 150) < 1e-9,
+               "height_at: interpolates between the four nearest samples");
+        expect(height_at(grid, 3, 2, 500.0, -1, 0) == 0 && height_at(grid, 3, 2, 500.0, 1001, 0) == 0 && height_at(nullptr, 3, 2, 500.0, 0, 0) == 0,
+               "height_at: outside the grid, or no grid, is 0");
         const Ini none = parse_ini(nullptr, 0);
         expect(airfields_from(none, loader).empty(), "airfields: an empty ini has none");
     }
