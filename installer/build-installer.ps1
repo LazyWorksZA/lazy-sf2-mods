@@ -52,7 +52,7 @@ $licenseText = "# Lazy SF2 Patch`n`n" + (Get-Content (Join-Path $root 'LICENSE')
 if ($Clean -and (Test-Path $releases)) { Remove-Item $releases -Recurse -Force }
 if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { $env:Path += ";$env:USERPROFILE\.dotnet\tools" }
 vpk pack --packId LazySF2 --packVersion $Version --packDir $publish --mainExe LazySF2.exe `
-    --packTitle 'Lazy SF2 Patch' --packAuthors 'Lazy Works' --runtime win-x64 --framework net10.0-x64-runtime --shortcuts '' `
+    --packTitle 'Lazy SF2 Patch' --packAuthors 'Lazy Works' --icon (Join-Path $PSScriptRoot 'assets\app.ico') --runtime win-x64 --framework net10.0-x64-runtime --shortcuts '' `
     --msi --instLocation PerMachine `
     --instWelcome (Join-Path $PSScriptRoot 'welcome.txt') --instLicense $license `
     --instConclusion (Join-Path $PSScriptRoot 'conclusion.txt') `

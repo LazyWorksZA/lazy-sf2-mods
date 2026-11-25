@@ -1,6 +1,6 @@
 # Third-party notices
 
-LazySF2 is MIT licensed (see [LICENSE](LICENSE)). The parts it distributes include the third-party
+The Lazy SF2 Patch is MIT licensed (see [LICENSE](LICENSE)). The parts it distributes include the third-party
 software below, whose notices must travel with it.
 
 | Component | Where it ends up | License |
@@ -9,6 +9,7 @@ software below, whose notices must travel with it.
 | Velopack 1.2.161 | `Velopack.dll` in the LazySF2 manager, and the installer's `Setup.exe` / `Update.exe` | MIT |
 | ENet 1.3.18 | statically linked into `winmm.dll` (the mod) and the synthetic client (developer tools) | MIT |
 | miniz 3.1.2 | statically linked into `winmm.dll` (the mod): packs finished Tacview recordings into `.zip.acmi` | MIT |
+| "Jet fighter" icon by Delapouite (game-icons.net) | the installer and app icon (`installer/assets/app.ico`), recoloured | CC BY 3.0 |
 
 Not distributed by this project, so not covered here:
 - **The .NET 10 Desktop Runtime.** When it's missing, Setup downloads and installs it from Microsoft.
@@ -180,3 +181,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
+
+---
+
+## "Jet fighter" icon
+
+"Jet fighter" by Delapouite, from game-icons.net: https://game-icons.net/1x1/delapouite/jet-fighter.html
+
+Licensed under the Creative Commons Attribution 3.0 Unported licence (CC BY 3.0): https://creativecommons.org/licenses/by/3.0/
+
+Changes: recoloured to #e8a832 on a transparent background, and rendered to a Windows .ico (`installer/make-icon.ps1`).
