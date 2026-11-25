@@ -83,7 +83,7 @@ The release notes also list each file's SHA-256.
 3. Per-mission start position, with end-of-runway starts.
 4. Clickable cockpits (feasibility first).
 
-Smaller items: Esc in flight pauses first instead of ending the flight; Tacview: move old recordings to a theatre's current position, non-ASCII aerodrome names.
+Smaller items: head tracking with body movement (lean to check six); Esc in flight pauses first instead of ending the flight; Tacview: move old recordings to a theatre's current position, non-ASCII aerodrome names.
 
 **Later**
 
