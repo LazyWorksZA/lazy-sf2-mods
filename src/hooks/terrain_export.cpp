@@ -679,7 +679,7 @@ void install_addon(const std::wstring& appdata) {
     CreateDirectoryW(dir.c_str(), nullptr);
     dir += L"\\AddOns";
     CreateDirectoryW(dir.c_str(), nullptr);
-    dir += L"\\azysf2patch";
+    dir += L"\\LazySF2Patch";
     CreateDirectoryW(dir.c_str(), nullptr);
     const std::wstring path = dir + L"\\main.lua", tmp = path + L".tmp";
     std::string current;
@@ -720,15 +720,15 @@ bool export_files(Job& job) {
     }
     install_addon(root);
     root += L"\\Tacview\\Data\\Terrain";
-    const int removed = remove_legacy_files(root + L"\\Custom\\azysf2patch", job.id) +
-                        remove_legacy_files(root + L"\\Textures\\azysf2patch", job.id);
+    const int removed = remove_legacy_files(root + L"\\Custom\\LazySF2Patch", job.id) +
+                        remove_legacy_files(root + L"\\Textures\\LazySF2Patch", job.id);
     if (removed > 0) LOG("tacview terrain: %s: removed %d old file(s) (dotted names Tacview could not load, or old png patches)", job.id.c_str(), removed);
-    const bool ok = export_heightmap(job, root + L"\\Custom\\azysf2patch");
+    const bool ok = export_heightmap(job, root + L"\\Custom\\LazySF2Patch");
     if (!job.texture) return ok;
     try {
         const std::vector<acmi::Airfield> airfields = read_airfields(job);
         publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
-        export_texture(job, airfields, root + L"\\Textures\\azysf2patch");
+        export_texture(job, airfields, root + L"\\Textures\\LazySF2Patch");
     } catch (...) {  // the heightmap is done: only the texture and the airfields are lost
         log_once(18, "tacview terrain: no texture: out of memory");
     }
