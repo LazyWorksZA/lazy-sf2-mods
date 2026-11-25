@@ -56,6 +56,7 @@ SRWLOCK g_install_lock = SRWLOCK_INIT;
 std::atomic<HMODULE> g_view_dll{nullptr};  // image our (created) hooks belong to
 HMODULE g_bad_base = nullptr;              // image already found unusable (checked once)
 std::atomic<bool> g_enabled{false};        // hooks enabled (Pilot Twist on)
+std::atomic<bool> g_reset{false};          // set on disable: the next camera build starts from a clean state
 
 // View state. The three detours run on the one thread that updates the views (the game thread); nothing else
 // touches these while the hooks are enabled, so they are plain variables.
@@ -100,7 +101,8 @@ void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
         o_Camera(view, edx, aircraft);
         return;
     }
-    if (view != g_last_view) g_state.have = false;  // another view: start at the target
+    if (g_reset.exchange(false)) g_last_view = nullptr;  // turned off and on again: forget the old filter and side
+    if (view != g_last_view) g_state = {};  // another view: start at the target
     g_last_view = view;
     float& yaw = at<float>(view, kYaw);
     const float head = yaw;
@@ -177,12 +179,19 @@ bool create_view_hooks(HMODULE vm) {
 void set_enabled_locked(bool on) {
     HMODULE vm = g_view_dll.load();
     if (!vm || on == g_enabled.load()) return;
+    if (!still_loaded(vm)) {  // freed since: never patch whatever is mapped there now
+        g_view_dll = nullptr;
+        g_enabled = false;
+        LOG("pilot twist: ViewManager.dll image gone; its hooks are dropped");
+        return;
+    }
     for (DWORD rva : kRvas) {
         MH_STATUS q = on ? MH_QueueEnableHook(at_rva(vm, rva)) : MH_QueueDisableHook(at_rva(vm, rva));
         (void)q;  // reported by MH_ApplyQueued
     }
     const MH_STATUS s = MH_ApplyQueued();
     if (s == MH_OK) g_enabled = on;
+    if (s == MH_OK && !on) g_reset = true;
     LOG("pilot twist: %s (view hooks %s: %s)", on ? "on" : "off", on ? "enabled" : "disabled", MH_StatusToString(s));
 }
 
@@ -223,7 +232,8 @@ void pilot_twist_on_modules_loaded() {
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 
-// Called when Options > Controls is left (game thread, in the menus, so no view update is running).
+// Game thread, never under the loader lock: at game window creation (the settings are loaded by then) and whenever an
+// Options page is left (in the menus, so no view update is running). Idempotent.
 void pilot_twist_apply_setting() {
     AcquireSRWLockExclusive(&g_install_lock);
     set_enabled_locked(config::pilot_twist());

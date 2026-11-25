@@ -487,6 +487,7 @@ void __fastcall h_Exit(void* self, void* edx) {
     }
     o_Exit(self, edx);
     aircraft_track_reevaluate();  // leaving an Options page: no aircraft exist; apply a changed Tacview setting
+    pilot_twist_apply_setting();
 }
 
 // --- Controls sub-menu: Mouse Pointer. Options.ini [ControlOptions] MouseMode: 1 = match the Windows cursor
@@ -584,10 +585,10 @@ void __fastcall h_CtlExit(void* self, void* edx) {
                                                                               L"PilotTwist", on ? 1 : 0);
         }
         config::set_pilot_twist(on);  // logs a change
-        pilot_twist_apply_setting();  // in the menus: no view update is running
     }
     o_CtlExit(self, edx);
     aircraft_track_reevaluate();  // as in h_Exit
+    pilot_twist_apply_setting();  // in the menus: no view update is running
 }
 
 // --- Gameplay sub-menu: Tacview Recording. Options.ini [OtherOptions] TacviewRecording: 0 = Off (default), 1 = On.
@@ -644,6 +645,7 @@ void __fastcall h_GplExit(void* self, void* edx) {
     }
     o_GplExit(self, edx);
     aircraft_track_reevaluate();  // after config is updated: installs or removes the aircraft/weapon hooks
+    pilot_twist_apply_setting();
 }
 
 SRWLOCK g_opts_lock = SRWLOCK_INIT;

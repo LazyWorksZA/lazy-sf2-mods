@@ -54,7 +54,10 @@ void input_apply_settings();
 /// only while the setting is on (no detour runs while it is off). Module watch callback.
 /// </summary>
 void pilot_twist_on_modules_loaded();
-/// <summary>Options &gt; Controls was left: enables or disables the view hooks to match config::pilot_twist(). Game thread.</summary>
+/// <summary>
+/// Enables or disables the view hooks to match config::pilot_twist(). Game thread, never under the loader lock: at
+/// game window creation and when an Options page is left. Idempotent.
+/// </summary>
 void pilot_twist_apply_setting();
 
 /// <summary>
