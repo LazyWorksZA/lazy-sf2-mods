@@ -130,6 +130,9 @@ public:
     /// frame, so times stay monotonic. Objects are described again, which ACMI allows.
     /// </summary>
     void seed_time(double t0, long long last_ms);
+    /// <summary>For the same fresh core: continue the explosion numbering, so no id of the lost core is reused.</summary>
+    void seed_explosions(uint32_t next) { if (next > next_explosion_) next_explosion_ = next; }
+    uint32_t next_explosion() const { return next_explosion_; }
     bool has_origin() const { return have_t0_; }
     double origin() const { return t0_; }
     long long last_ms() const { return last_ms_; }

@@ -73,6 +73,7 @@ bool TacviewWriter::open(const std::wstring& dir, const SYSTEMTIME& t, const cha
     transforms_.store(0);
     t0_set_.store(false);
     last_ms_.store(-1);
+    next_explosion_.store(1);
     stop_.store(false);
     finished_.store(false);
     failed_.store(false);
@@ -145,6 +146,7 @@ void TacviewWriter::flush_orphaned(const char* why) {
     try {
         TacviewCore core(cfg_);
         if (t0_set_.load(std::memory_order_acquire)) core.seed_time(t0_.load(), last_ms_.load());
+        core.seed_explosions(next_explosion_.load(std::memory_order_acquire));
         std::string buf;
         const uint64_t total = written_.load(std::memory_order_relaxed);
         if (total == 0) buf = header_;  // nothing was ever written
@@ -277,6 +279,7 @@ void TacviewWriter::run() {
                             t0_set_.store(true, std::memory_order_release);
                         }
                         last_ms_.store(core.last_ms(), std::memory_order_relaxed);
+                        next_explosion_.store(core.next_explosion(), std::memory_order_release);
                         transforms_.store(core.stats().transforms, std::memory_order_relaxed);
                         if (buf.size() >= kFlushBytes) flush();
                     }
