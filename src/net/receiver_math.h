@@ -4,6 +4,7 @@
 //
 // The interpolation, extrapolation and blend math itself is in hooks/replay_math.h.
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 
 #include "net/protocol.h"
@@ -22,6 +23,14 @@ inline constexpr double kDelayMin = 0.05, kDelayMax = 0.6;
 inline constexpr double kDelayFactor = 1.5;         // delay = 1.5 * median packet interval
 inline constexpr double kDelayRampFraction = 0.05;  // the delay moves by at most 5% of the elapsed game time
 inline constexpr int kIntervalWindow = 16;
+
+/// <summary>32-bit FNV-1a of a NUL-terminated string (the theatre hash). 0 for null; callers map "unknown" to 0.</summary>
+constexpr uint32_t fnv1a(const char* s) {
+    if (!s) return 0;
+    uint32_t h = 2166136261u;
+    for (; *s; ++s) h = (h ^ static_cast<uint8_t>(*s)) * 16777619u;
+    return h;
+}
 
 constexpr bool finite(double x) { return x == x && x - x == 0.0; }  // false for NaN and infinities
 constexpr double abs_(double x) { return x < 0 ? -x : x; }

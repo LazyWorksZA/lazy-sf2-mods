@@ -289,7 +289,7 @@ void HostCore::run() {
                 bye_seen[slot] = true;
                 break;
             }
-            default:  // Welcome and Pong only travel from the host to a client
+            default:  // Welcome, Pong, PeerInfo and PeerLeft only travel from the host to a client
                 return drop(n_format_);
         }
         HostEvent e;

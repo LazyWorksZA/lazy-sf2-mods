@@ -31,6 +31,7 @@
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
 #include "bot_client.h"
+#include "net/receiver_math.h"
 #include <miniz.h>
 
 #include "bot_core.h"
@@ -384,13 +385,22 @@ void host_core_tests() {
         buf[0] = 'X';
         c.send(buf, n, kChannelUnreliable);  // wrong magic
         enc(good_state(18, 100.5), buf);
-        buf[2] = 2;
-        c.send(buf, n, kChannelUnreliable);  // wrong version
+        buf[2] = 1;
+        c.send(buf, n, kChannelUnreliable);  // wrong version (v1)
         enc(good_state(19, 100.5), buf);
         c.send(buf, n, kChannelReliable);  // a State on the reliable channel
     }
     c.send(buf, enc(w, buf), kChannelUnreliable);  // a Welcome from a client
     c.send(buf, enc(h, buf), kChannelUnreliable);  // a Hello on the unreliable channel
+    {
+        PeerInfoMsg pi{};
+        c.send(buf, enc(pi, buf), kChannelReliable);  // PeerInfo only travels host to client
+        PeerLeftMsg pl{};
+        c.send(buf, enc(pl, buf), kChannelReliable);  // PeerLeft likewise
+        enc(h, buf);
+        buf[2] = 1;
+        c.send(buf, 52, kChannelReliable);  // a v1 Hello (52 bytes, version 1)
+    }
     c.send(buf, enc(h, buf), kChannelReliable);    // a second Hello
     PingMsg nanping{};
     nanping.client_send_time = std::numeric_limits<double>::quiet_NaN();
@@ -407,8 +417,8 @@ void host_core_tests() {
     const uint32_t format = after.dropped_format - before.dropped_format;
     const uint32_t state = after.dropped_state - before.dropped_state;
     std::printf("  dropped: %u out of range, %u malformed, %u wrong phase\n", range, format, state);
-    expect(range == 6 && format == 8 && state == 1 && queue_empty(core),
-           "6 out of range, 8 malformed, 1 repeated Hello, and nothing else queued");
+    expect(range == 6 && format == 11 && state == 1 && queue_empty(core),
+           "6 out of range, 11 malformed, 1 repeated Hello, and nothing else queued");
 
     // Bye: the game thread frees the slot and asks for the disconnect.
     ByeMsg bye{};
@@ -3259,6 +3269,31 @@ int main() {
     const char* why = nullptr;
     bool ok = protocol_selftest(&why);
     expect(ok, ok ? "round trips and rejections" : why);
+
+    {  // protocol v2 helpers
+        static_assert(fnv1a("") == 0x811C9DC5u && fnv1a("a") == 0xE40C292Cu && fnv1a("foobar") == 0xBF9CF968u);
+        expect(fnv1a("") == 0x811C9DC5u && fnv1a("a") == 0xE40C292Cu && fnv1a("foobar") == 0xBF9CF968u &&
+                   fnv1a(nullptr) == 0 && fnv1a("Korea") != fnv1a("korea"),
+               "fnv1a of known strings");
+        char f[8];
+        std::memset(f, 'z', sizeof(f));
+        set_str(f, "abc");
+        expect(std::memcmp(f, "abc\0\0\0\0\0", 8) == 0, "set_str zero-pads the field");
+        set_str(f, "0123456789");
+        expect(std::memcmp(f, "0123456\0", 8) == 0, "set_str truncates to N-1 and terminates");
+        set_str(f, nullptr);
+        expect(std::all_of(f, f + 8, [](char ch) { return ch == 0; }), "set_str(null) clears the field");
+        uint8_t b[96];
+        HelloMsg v1{};
+        const size_t n = encode(v1, b, sizeof(b));
+        b[2] = 1;
+        MsgType t{};
+        expect(n == 56 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
+                   decode(b, n, v1) == Status::BadVersion,
+               "a v1 Hello is rejected with BadVersion");
+        expect(kVersion == 2 && sizeof(WelcomeMsg) == 58 && sizeof(PeerInfoMsg) == 54 && sizeof(PeerLeftMsg) == 7,
+               "v2 sizes");
+    }
 
     loopback();
     parse_tests();

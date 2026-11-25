@@ -48,7 +48,7 @@ The payloads of kinds 1 to 4 are the protocol messages **byte for byte as on the
 |---|---|---|---|
 | 1 | StateReceived | `StateMsg`, 78 bytes, `client_id` 1 to 4 | every State from a welcomed client that the host passed on to the client's avatar (already checked by the network thread) |
 | 2 | HostState | `StateMsg`, 78 bytes, `client_id` 0 | the host player's state (position, velocity, angles, rates), once per player step. `seq` counts from 1 in each file. `game_time` equals `time` |
-| 3 | WelcomeSent | `WelcomeMsg`, 42 bytes | the Welcome was queued for a client |
+| 3 | WelcomeSent | `WelcomeMsg`, 58 bytes (protocol v2) | the Welcome was queued for a client |
 | 4 | ByeReceived | `ByeMsg`, 7 bytes | a client sent Bye |
 | 5 | ClientJoined | `ClientJoinedPayload`, 50 bytes | a client was given an avatar; just before its Welcome |
 | 6 | ClientLeft | `ClientLeftPayload`, 3 bytes | a client's avatar was released |

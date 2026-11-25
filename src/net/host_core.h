@@ -37,7 +37,7 @@ struct HostEvent {
     uint8_t reason = 0;   // Disconnect: 0 the peer left (or ENet's own timeout), 1 no packets for kTimeoutMs
     uint8_t channel = 0;  // Message
     uint16_t len = 0;     // Message: bytes in data
-    uint8_t data[80] = {};  // Message: a checked Hello, Ping, State or Bye, exactly as received
+    uint8_t data[96] = {};  // Message: a checked Hello, Ping, State or Bye, exactly as received
 };
 
 struct HostCounters {
@@ -86,7 +86,7 @@ public:
     /// <summary>Moves up to max queued events into out. One atomic load when the queue is empty.</summary>
     size_t poll(HostEvent* out, size_t max);
     /// <summary>
-    /// Queues a message (at most 63 bytes) for a slot. False if the queue is full or the message too large.
+    /// Queues a message (at most 96 bytes) for a slot. False if the queue is full or the message too large.
     /// gen is the connection generation from the HostEvent that introduced the client: a message for a slot
     /// reassigned since is dropped, never delivered to the new client.
     /// </summary>
@@ -117,8 +117,10 @@ private:
         Op op = Send;
         uint8_t slot = 0, channel = 0, reliable = 0, len = 0;
         uint32_t gen = 0;
-        uint8_t data[63] = {};
+        uint8_t data[96] = {};
     };
+    static_assert(sizeof(HostEvent::data) >= kMaxMessage && sizeof(OutMsg::data) >= kMaxMessage,
+                  "every protocol message must fit the queues");
     static constexpr size_t kInCap = 512, kOutCap = 256;
     /// <summary>
     /// Entries of the in ring that only control events may use: States are refused once the ring is this close to
