@@ -145,11 +145,21 @@ function Wait-Screen([string]$want, [int]$timeout, [string]$dir, [string]$name) 
     }
     Save-Stage $dir "$name-TIMEOUT"; throw "timed out after ${timeout}s waiting for the '$want' screen"
 }
+# Awards (e.g. a Purple Heart from an earlier flight) show one per visit on the way to the Single Mission screen;
+# a click dismisses each. Click through them for up to 60 s until the Single Mission screen shows.
+function Skip-Awards {
+    $end = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $end -and (Get-Screen) -ne 'single') {
+        Start-Sleep -Seconds 2
+        if ((Get-Screen) -eq 'other') { Click-Virtual 512 700 }
+    }
+}
 function Fly-Mission([int]$secs, [string]$dir, [string]$type) {
     [void][D]::Focus((Get-GameWindow))
     Wait-Screen 'main' 90 $dir '1-main'
     $mark = Get-LogLength
     Click-Virtual 790 330   # Single Mission
+    Skip-Awards
     Wait-Screen 'single' 30 $dir '2-single-mission'
     Click-Virtual 653 120   # Create Mission tab
     # Mission Type dropdown: open it, then click the wanted row (rows are 15 px apart in the 1280x720 space).
@@ -173,6 +183,7 @@ function Fly-Mission([int]$secs, [string]$dir, [string]$type) {
     Send-Key esc   # in flight Esc goes straight to the debrief
     Wait-Screen 'debrief' 40 $dir '7-debrief'
     Click-Virtual 950 695   # Accept: back to the Single Mission screen
+    Skip-Awards
     Wait-Screen 'single' 40 $dir '8-single-mission'
     Click-Virtual 48 694    # Exit: back to the main menu
     Wait-Screen 'main' 40 $dir '9-back-at-main'
