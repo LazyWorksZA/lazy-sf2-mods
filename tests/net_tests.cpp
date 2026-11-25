@@ -2279,6 +2279,7 @@ void tacview_tests() {
         expect(!w.begin_frame(100) && w.dropped_frames() == dropped_before + 1,
                "tacview writer: a frame that cannot fit is dropped and counted");
         w.close_and_join("test");
+        expect(zip_queue_wait_idle(10000), "tacview writer: the compressor finishes");
         std::string entry1;
         const std::string c1 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-12.zip.acmi", entry1);
         {
@@ -2295,7 +2296,7 @@ void tacview_tests() {
                "tacview writer: the file is named SF2 <date time>.zip.acmi and starts with the header");
         expect(entry1 == "SF2 2026-11-24 10-11-12.acmi" && !exists(dir + L"\\SF2 2026-11-24 10-11-12.acmi"),
                "tacview writer: one entry named <name>.acmi, and the plain file is gone");
-        expect(tv_logged.find(" zipped)") != std::string::npos, "tacview writer: the stop line reports the zipped size");
+        expect(tv_logged.find("tacview: packed the recording as ") != std::string::npos, "tacview writer: the compressor logs the packed file");
         expect(count_of(c1, "\n1,T=") == 30 && count_of(c1, "\n10002,T=") == 20 && count_of(c1, "\n-10002\n") == 1,
                "tacview writer: all frames and the removal reach the file");
         expect(tv_logged.find("tacview: recording to ") != std::string::npos &&
@@ -2307,6 +2308,7 @@ void tacview_tests() {
         TacviewWriter w2(64);
         expect(w2.open(dir, st, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview writer: second open");
         w2.close_and_join("test");
+        zip_queue_wait_idle(10000);
         expect(exists(dir + L"\\SF2 2026-11-24 10-11-12 (2).zip.acmi"),
                "tacview writer: a name clash appends (2)");
 
@@ -2328,6 +2330,7 @@ void tacview_tests() {
         for (int i = 0; i < 100 && w3.accepting(); ++i) Sleep(10);
         expect(!w3.accepting(), "tacview writer: the size cap stops the recording");
         w3.close_and_join("cap test");
+        zip_queue_wait_idle(10000);
         std::string entry3;
         const std::string c3 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-40.zip.acmi", entry3);
         expect(!c3.empty() && c3.size() <= 600 && c3.back() == '\n' && count_of(tv_logged, "byte cap") == 1,
@@ -2342,6 +2345,80 @@ void tacview_tests() {
         expect(!w4.accepting() && count_of(tv_logged, "not recording") == 1,
                "tacview writer: folder failure logged once, recording off");
         w4.close_and_join("test");
+
+        // close(true) (shutdown) never zips: the plain file stays. A stale temp file is deleted at the next start.
+        {
+            tv_logged.clear();
+            SYSTEMTIME st5 = st;
+            st5.wSecond = 50;
+            const std::wstring stale = dir + L"\\old.zip.acmi.tmp";
+            FILE* sf = nullptr;
+            _wfopen_s(&sf, stale.c_str(), L"wb");
+            if (sf) std::fclose(sf);
+            TacviewWriter w5(64);
+            expect(w5.open(dir, st5, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview shutdown: opens");
+            while (w5.begin_frame(1) == false) Sleep(5);
+            w5.slot(0) = make_rec(1, true, AircraftSide::Friendly, "P", 0.0, 1, 0, 100, 0, 0, 0);
+            w5.commit_frame(1, 0.0);
+            for (int i = 0; i < 200 && tv_logged.find("recording to") == std::string::npos; ++i) Sleep(10);
+            expect(tv_logged.find("deleted 1 unfinished") != std::string::npos && !exists(stale),
+                   "tacview zip: a stale .zip.acmi.tmp is deleted when a recording starts");
+            w5.close(true, "shutdown test");
+            for (int i = 0; i < 200 && !w5.idle(); ++i) Sleep(10);
+            zip_queue_wait_idle(5000);
+            expect(w5.idle() && exists(dir + L"\\SF2 2026-11-24 10-11-50.acmi") &&
+                       !exists(dir + L"\\SF2 2026-11-24 10-11-50.zip.acmi"),
+                   "tacview zip: close(true) skips the zip and keeps the plain file");
+        }
+
+        // Two recordings closing back to back: the writer is free at once, the compressor queue packs both.
+        {
+            tv_logged.clear();
+            TacviewWriter w6(64);
+            bool all_ok = true;
+            for (unsigned k = 0; k < 2; ++k) {
+                SYSTEMTIME s6 = st;
+                s6.wSecond = static_cast<WORD>(20 + k);
+                all_ok = all_ok && w6.open(dir, s6, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr);
+                for (int i = 0; i < 50; ++i) {
+                    while (!w6.begin_frame(1)) Sleep(1);
+                    w6.slot(0) = make_rec(1, true, AircraftSide::Friendly, "P", i * 0.1, i, 0, 100, 0, 0, 0);
+                    w6.commit_frame(1, i * 0.1);
+                }
+                w6.close(false, "back to back");
+                for (int i = 0; i < 500 && !w6.idle(); ++i) Sleep(2);
+                all_ok = all_ok && w6.idle();
+            }
+            expect(all_ok, "tacview zip: the writer is idle again without waiting for the compressor");
+            expect(zip_queue_wait_idle(10000), "tacview zip: the queue drains");
+            std::string e1, e2;
+            const std::string z1 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-20.zip.acmi", e1);
+            const std::string z2 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-21.zip.acmi", e2);
+            expect(!z1.empty() && !z2.empty() && e1 == "SF2 2026-11-24 10-11-20.acmi" && e2 == "SF2 2026-11-24 10-11-21.acmi" &&
+                       !exists(dir + L"\\SF2 2026-11-24 10-11-20.acmi") && !exists(dir + L"\\SF2 2026-11-24 10-11-21.acmi") &&
+                       count_of(tv_logged, "packed the recording as") == 2,
+                   "tacview zip: two back-to-back recordings are both packed and logged");
+        }
+
+        // A zip that fails midway (the read stops after 1000 bytes): the plain file stays and the temp file is removed.
+        {
+            const std::wstring plain = dir + L"\\zt4.acmi";
+            std::string big(300000, 'x');
+            FILE* pf = nullptr;
+            _wfopen_s(&pf, plain.c_str(), L"wb");
+            if (pf) {
+                std::fwrite(big.data(), 1, big.size(), pf);
+                std::fclose(pf);
+            }
+            zip_test_fail_after(1000);
+            std::wstring zp;
+            uint64_t zb = 0;
+            std::string err;
+            const bool ok = compress_acmi(plain, zp, zb, err);
+            zip_test_fail_after(0);
+            expect(!ok && !err.empty() && exists(plain) && !exists(dir + L"\\zt4.zip.acmi") && !exists(dir + L"\\zt4.zip.acmi.tmp"),
+                   "tacview zip: a mid-stream failure keeps the plain file and removes the temp file");
+        }
 
         // The zip step on its own: streamed (a file larger than the read chunk), exact bytes, plain file gone.
         {

@@ -70,7 +70,7 @@ bool aircraft_track_for_tacview();
 
 /// <summary>
 /// Tacview recorder (tacview_recorder.cpp): with Options > Other > Tacview Recording On, writes each flight to
-/// Saved Games\ThirdWire\&lt;exe&gt;\Tacview\SF2 &lt;date time&gt;.acmi from a writer thread. Registers the sim step
+/// Saved Games\ThirdWire\&lt;exe&gt;\Tacview\SF2 &lt;date time&gt;.acmi from a writer thread (packed to .zip.acmi afterwards). Registers the sim step
 /// callback once.
 /// </summary>
 void tacview_recorder_on_modules_loaded();

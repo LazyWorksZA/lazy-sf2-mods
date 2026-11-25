@@ -117,7 +117,7 @@ struct TacviewCoreStats {
     uint64_t removals = 0;
     uint64_t destroyed_events = 0;
     uint64_t explosions = 0;
-    uint64_t unchanged = 0;     // ground transforms skipped because the pose had not changed
+    uint64_t unchanged = 0;     // transforms skipped because no formatted component had changed
     uint64_t objects = 0;       // distinct objects described
     uint64_t rate_limited = 0;  // transforms skipped by the rate limit
     uint64_t bad_samples = 0;   // objects skipped for a non-finite value
@@ -161,7 +161,7 @@ private:
         uint32_t id;
         double last_t;
         uint64_t seen;  // number of the last frame it was in
-        double last_pos[3];  // the pose last written (ground objects: an unchanged pose is not written again)
+        double last_pos[3];  // the pose last sampled (where an explosion goes)
         float last_ang[3];
         bool has_last;
         TransformText text;  // the last written text of each T component (delta encoding)

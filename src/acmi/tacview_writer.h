@@ -9,10 +9,11 @@
 // Failure: any failure (folder, file, write) is logged once by the thread and sets failed(); accepting() turns
 // false, the producer should stop and call close(). The size cap does the same. The partial file is kept.
 //
-// Zip: when a recording ends through close(false) (a normal stop or the cap, not a failed write), the thread packs
-// the plain .acmi into "<name>.zip.acmi" (acmi_zip.h) and deletes the plain file; any failure keeps the plain file
-// and is logged once. close(true) (shutdown) and the orphan path never compress: time is short, and a detached
-// thread must not outlive the DLL.
+// Zip: when a recording ends through close(false) (a normal stop or the cap, not a failed write), the thread closes the
+// plain file, logs the summary and queues the path for the background compressor (acmi_zip.h), then finishes: idle()
+// does not wait for the zip. The compressor packs it into "<name>.zip.acmi" and deletes the plain file; any failure
+// keeps the plain file and is logged once. close(true) (shutdown) and the orphan path never queue a zip. A recording
+// start deletes stale "*.zip.acmi.tmp" files of an earlier session.
 //
 // Exit: close(true) is for the DLL's shutdown. On process exit ExitProcess has killed the writer thread already:
 // close(true) sees that, does not wait, and appends the ring's frames itself (with a fresh core seeded with the
@@ -85,14 +86,14 @@ public:
 
     uint32_t dropped_frames() const { return dropped_.load(std::memory_order_relaxed); }
     uint64_t bytes_written() const { return written_.load(std::memory_order_relaxed); }
-    /// <summary>The file path (after the thread has created it; the .zip.acmi once compressed), empty before. Not for the game thread's hot path.</summary>
+    /// <summary>The plain .acmi path (after the thread has created it), empty before, empty before. Not for the game thread's hot path.</summary>
     std::wstring path() const;
 
 private:
     void run();
     void join_previous();
     void flush_orphaned(const char* why);
-    void log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t zip_bytes = 0);
+    void log_summary(uint64_t transforms, uint64_t bytes, const char* why);
 
     std::thread thread_;
     std::unique_ptr<TacviewRec[]> ring_;

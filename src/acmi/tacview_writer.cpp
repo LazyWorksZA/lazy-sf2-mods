@@ -132,15 +132,13 @@ void TacviewWriter::close(bool wait_and_detach, const char* why) {
     thread_.detach();
 }
 
-void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t zip_bytes) {
+void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why) {
     if (summary_logged_.exchange(true)) return;
     char line[512];
     const std::string shown = narrow(display_ ? display_(path()) : path());
-    char zipped[48] = {};
-    if (zip_bytes) std::snprintf(zipped, sizeof(zipped), " (%llu zipped)", static_cast<unsigned long long>(zip_bytes));
-    std::snprintf(line, sizeof(line), "tacview: stopped (%s): %s, %llu transforms, %llu bytes%s, %u frame(s) dropped",
+    std::snprintf(line, sizeof(line), "tacview: stopped (%s): %s, %llu transforms, %llu bytes, %u frame(s) dropped",
                   why ? why : "closed", shown.c_str(), static_cast<unsigned long long>(transforms),
-                  static_cast<unsigned long long>(bytes), zipped, dropped_.load(std::memory_order_relaxed));
+                  static_cast<unsigned long long>(bytes), dropped_.load(std::memory_order_relaxed));
     log_(line);
 }
 
@@ -185,13 +183,21 @@ void TacviewWriter::flush_orphaned(const char* why) {
 void TacviewWriter::run() {
     char line[512];
     // 1. The folder and the file.
-    if (!CreateDirectoryW(dir_.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+    const bool dir_made = CreateDirectoryW(dir_.c_str(), nullptr) != 0;
+    if (!dir_made && GetLastError() != ERROR_ALREADY_EXISTS) {
         std::snprintf(line, sizeof(line), "tacview: could not create the folder %s (error %lu); not recording",
                       narrow(display_ ? display_(dir_) : dir_).c_str(), GetLastError());
         log_(line);
         failed_.store(true, std::memory_order_release);
         finished_.store(true, std::memory_order_release);
         return;
+    }
+    if (!dir_made) {
+        const unsigned stale = delete_stale_zip_temps(dir_);  // from a zip cut short by a process exit
+        if (stale) {
+            std::snprintf(line, sizeof(line), "tacview: deleted %u unfinished .zip.acmi.tmp file(s) from an earlier session", stale);
+            log_(line);
+        }
     }
     HANDLE f = INVALID_HANDLE_VALUE;
     std::wstring path;
@@ -305,21 +311,9 @@ void TacviewWriter::run() {
     flush();
     CloseHandle(f);
     file_ = nullptr;
-    uint64_t zip_bytes = 0;
-    if (!failed && !no_zip_.load(std::memory_order_acquire)) {
-        std::wstring zip_path;
-        std::string error;
-        if (compress_acmi(path, zip_path, zip_bytes, error)) {
-            AcquireSRWLockExclusive(&path_lock_);
-            path_ = zip_path;
-            ReleaseSRWLockExclusive(&path_lock_);
-            if (!error.empty()) log_(("tacview: " + error).c_str());
-        } else {
-            zip_bytes = 0;
-            log_(("tacview: could not compress the recording (" + error + "); the plain .acmi is kept").c_str());
-        }
-    }
-    log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed), zip_bytes);
+    log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed));
+    // Hand the closed file to the background compressor: this thread, and so the next recording, never waits for it.
+    if (!failed && !no_zip_.load(std::memory_order_acquire)) zip_queue_submit(path, log_, display_);
     finished_.store(true, std::memory_order_release);
 }
 

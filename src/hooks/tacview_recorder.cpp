@@ -1,4 +1,4 @@
-// Tacview recorder (player-facing): with Options > Other > Tacview Recording On, writes one .acmi per flight.
+// Tacview recorder (player-facing): with Options > Other > Tacview Recording On, writes one recording per flight (.acmi, packed to .zip.acmi afterwards).
 // Inert while Off (no hooks, thread, memory or file). Game thread only copies into a ring: no allocation, I/O or logging.
 #include <windows.h>
 
@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "acmi/tacview_core.h"
+#include "acmi/acmi_zip.h"
 #include "acmi/tacview_writer.h"
 #include "config.h"
 #include "hooks/hooks.h"
@@ -415,6 +416,7 @@ void tacview_recorder_menu_moment() {
 
 void tacview_recorder_shutdown() {
     terrain_export_shutdown();
+    acmi::zip_queue_shutdown();
     if (!g_writer) return;
     g_recording = false;
     g_writer->close(true, "process exit");
