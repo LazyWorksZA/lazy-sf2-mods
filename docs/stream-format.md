@@ -1,6 +1,6 @@
 # Host stream recording format (`stream_NNN.lzst`)
 
-Developer tool. With host mode on (`LAZYSF2_HOST`, see `docs/network-recon.md`), the mod records what the host sees to `LAZYSF2_PROBE_DIR\stream_NNN.lzst`. `NNN` is the first free number from 001, and the file is created with `CREATE_NEW`. The code is `src/net/stream_format.*` (format and reader) and `src/net/stream_record.*` (writer).
+Developer tool. With host mode on (`LAZYSF2_HOST`, see `lazy-sf2-recon`, `network-recon.md`), the mod records what the host sees to `LAZYSF2_PROBE_DIR\stream_NNN.lzst`. `NNN` is the first free number from 001, and the file is created with `CREATE_NEW`. The code is `src/net/stream_format.*` (format and reader) and `src/net/stream_record.*` (writer).
 
 All numbers are little-endian. Structures are packed. A reader is in `src/net/stream_format.h` (`StreamReader`): it works on bytes in memory and never reads past the end.
 

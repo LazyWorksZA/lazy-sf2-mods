@@ -8,14 +8,14 @@
 
 namespace lazysf2::config {
 
-// Options.ini [ControlOptions] MouseMode (Options > Controls > Mouse Pointer).
+/// <summary>Options.ini [ControlOptions] MouseMode (Options &gt; Controls &gt; Mouse Pointer).</summary>
 enum class MouseMode : int {
     Stock = 0,   // the game builds its own pointer from raw DirectInput deltas, exclusive mouse
     Cursor = 1,  // the game pointer sits on the Windows cursor (default, also when the key is missing:
                  // the stock pointer never quite matches Windows' and wanders over remote desktop)
 };
 
-// Options.ini [GraphicsOptions] DisplayMode (Options > Graphics > Display Mode).
+/// <summary>Options.ini [GraphicsOptions] DisplayMode (Options &gt; Graphics &gt; Display Mode).</summary>
 enum class DisplayMode : int {
     Fullscreen = 0,  // stock exclusive fullscreen (also used when the key is missing or invalid)
     Borderless = 1,
@@ -25,22 +25,28 @@ DisplayMode display_mode();
 void set_display_mode(DisplayMode mode);
 inline bool borderless() { return display_mode() == DisplayMode::Borderless; }
 
-// Options.ini [GraphicsOptions] DisplayMonitor: n = Windows display number (\\.\DISPLAYn) to run
-// on; 0 / missing = stock (the game picks the monitor).
+/// <summary>
+/// Options.ini [GraphicsOptions] DisplayMonitor: n = Windows display number (\\.\DISPLAYn) to run
+/// on; 0 / missing = stock (the game picks the monitor).
+/// </summary>
 int display_monitor();
 void set_display_monitor(int number);
 
 MouseMode mouse_mode();
 void set_mouse_mode(MouseMode mode);
 
-// Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off), loaded with the other settings.
+/// <summary>Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off), loaded with the other settings.</summary>
 void set_tacview_recording(bool on);  // the Options page, on Exit
-// For the module watch (it can run under the loader lock): reads the loaded value only, never loads anything.
-// -1 = not loaded yet (treat as off), 0 = off, 1 = on.
+/// <summary>
+/// For the module watch (it can run under the loader lock): reads the loaded value only, never loads anything.
+/// -1 = not loaded yet (treat as off), 0 = off, 1 = on.
+/// </summary>
 int tacview_recording_peek();
 
-// The game's per-user folder, Saved Games\ThirdWire\<exe name> (where Options.ini lives), or empty if it cannot be
-// found. A shell call: game thread at a safe moment only, never from the module watch or under a lock.
+/// <summary>
+/// The game's per-user folder, Saved Games\ThirdWire\&lt;exe name&gt; (where Options.ini lives), or empty if it cannot be
+/// found. A shell call: game thread at a safe moment only, never from the module watch or under a lock.
+/// </summary>
 std::wstring game_data_dir();
 
 }  // namespace lazysf2::config

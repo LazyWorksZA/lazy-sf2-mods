@@ -1,27 +1,6 @@
-// Simulation step hook and game clock. Part of the aircraft tracker (aircraft_track.cpp), which installs and
-// removes the hook (sim_install / sim_remove) only while a client needs tracking: the probe, or the Tacview
-// Recording setting. Nothing is hooked otherwise.
-//
-// Hooks the aircraft's own Update(dt) (AircraftObject.dll, main vtable slot 9). The game calls it once
-// per simulation step for every aircraft, on its main thread, and not while the game is paused. After
-// the original returns, the hook adds dt to a game clock when the aircraft is the player's, and then
-// calls the registered "after Update" callbacks. Features that need game time (recorder, replay) use
-// the clock and the callbacks instead of wall time, so they pause with the game.
-//
-// Calling convention: __thiscall(void* aircraft, float dt), one 4-byte stack argument, the callee pops
-// it ("ret 4"). The repo's __fastcall(self, edx, float dt) pattern matches that exactly.
-//
-// All state below is touched from the game's main thread only (the hook), except the callback slots and
-// the run-active flag, which are atomics.
-//
-// Finding the player: the tracker marks it (LiveAircraft::is_player: the first aircraft constructed since the
-// table was last empty). The hook caches its pointer and construction seq. When the player is destroyed it is
-// unknown (sim_player_known() is false) until the table empties and a new one is constructed; the hook never falls
-// back to another aircraft. A step of the cached player costs one pointer compare, plus one tick read;
-// once per second, and whenever the tracker's destroy generation changed, it re-checks the cache under the
-// probe lock (this catches an address reused by another aircraft). The step of another aircraft takes the lock only
-// when no player is cached and none was lost (or the destroy generation changed), when the destroy generation changed
-// while a player is cached, or when the cached player has not stepped for 250 ms; and then at most once per 50 ms.
+// Simulation step hook and game clock: hooks the aircraft's Update(dt) (once per sim step, game thread, not while
+// paused), advances the clock for the player's aircraft and calls the registered "after Update" callbacks.
+// Installed and removed by the aircraft tracker; state is game-thread only except the callback slots.
 #include <windows.h>
 
 #include <atomic>
@@ -35,7 +14,7 @@ namespace lazysf2::hooks {
 
 namespace {
 
-constexpr DWORD kUpdateRva = 0x466c0;  // void __thiscall Update(void* aircraft, float dt)  (ret 4)
+constexpr DWORD kUpdateRva = 0x466c0;  // AircraftObject::Update
 constexpr int kMaxCallbacks = 8;
 constexpr unsigned kDtStatSteps = 300;
 constexpr ULONGLONG kRevalidateMs = 1000;  // re-check the cached player under the lock this often
@@ -131,6 +110,8 @@ void report_dt_stats() {
         g_dt_min * 1000.0, g_dt_max * 1000.0, g_dt_sum / kDtStatSteps * 1000.0);
 }
 
+// The player is cached from the tracker's is_player flag and never replaced by another aircraft. Re-check it under
+// the probe lock only when needed (once per second, destroy generation changed, or it stopped stepping), throttled.
 void __fastcall h_Update(void* self, void* edx, float dt) {
     o_Update(self, edx, dt);
     bool is_player = false;

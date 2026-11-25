@@ -10,7 +10,7 @@ namespace lazysf2::net {
 inline constexpr uint16_t kMagic = 0x5A4C;  // bytes 'L','Z' on the wire (little-endian)
 inline constexpr uint8_t kVersion = 1;
 
-// ENet channels.
+/// <summary>ENet channels.</summary>
 inline constexpr uint8_t kChannelReliable = 0;    // Hello, Welcome, Bye
 inline constexpr uint8_t kChannelUnreliable = 1;  // State, Ping, Pong (unreliable, sequenced)
 inline constexpr uint8_t kChannelCount = 2;
@@ -86,7 +86,7 @@ static_assert(sizeof(PongMsg) == 20);     // 4:8 client send time, 12:8 host tim
 static_assert(sizeof(StateMsg) == 78);    // 4:2 id, 6:4 seq, 10:8 time, 18:24 pos, 42:12 vel, 54:12 ang, 66:12 rates
 static_assert(sizeof(ByeMsg) == 7);       // 4:2 id, 6:1 reason
 
-// Encoders fill in the header and write the message to out. They return the byte count, or 0 if cap is too small.
+/// <summary>Encoders fill in the header and write the message to out. They return the byte count, or 0 if cap is too small.</summary>
 size_t encode(const HelloMsg& m, uint8_t* out, size_t cap);
 size_t encode(const WelcomeMsg& m, uint8_t* out, size_t cap);
 size_t encode(const PingMsg& m, uint8_t* out, size_t cap);
@@ -94,11 +94,13 @@ size_t encode(const PongMsg& m, uint8_t* out, size_t cap);
 size_t encode(const StateMsg& m, uint8_t* out, size_t cap);
 size_t encode(const ByeMsg& m, uint8_t* out, size_t cap);
 
-// Reads the type of a packet after checking length, magic and version.
+/// <summary>Reads the type of a packet after checking length, magic and version.</summary>
 Status peek_type(const uint8_t* data, size_t len, MsgType& type);
 
-// Decoders require the exact message size, magic, version and type. out is only written on Ok.
-// Hello strings are always NUL-terminated after decoding.
+/// <summary>
+/// Decoders require the exact message size, magic, version and type. out is only written on Ok.
+/// Hello strings are always NUL-terminated after decoding.
+/// </summary>
 Status decode(const uint8_t* data, size_t len, HelloMsg& out);
 Status decode(const uint8_t* data, size_t len, WelcomeMsg& out);
 Status decode(const uint8_t* data, size_t len, PingMsg& out);
@@ -106,7 +108,7 @@ Status decode(const uint8_t* data, size_t len, PongMsg& out);
 Status decode(const uint8_t* data, size_t len, StateMsg& out);
 Status decode(const uint8_t* data, size_t len, ByeMsg& out);
 
-// Copies at most N-1 bytes of src into a fixed field and always NUL-terminates it (zero-fills the rest).
+/// <summary>Copies at most N-1 bytes of src into a fixed field and always NUL-terminates it (zero-fills the rest).</summary>
 template <size_t N>
 void set_str(char (&dst)[N], const char* src) {
     size_t i = 0;
@@ -117,8 +119,10 @@ void set_str(char (&dst)[N], const char* src) {
 
 const char* status_name(Status s);
 
-// Round-trips every message and rejects bad input. Returns true on success; on failure writes a
-// description to *why if non-null.
+/// <summary>
+/// Round-trips every message and rejects bad input. Returns true on success; on failure writes a
+/// description to *why if non-null.
+/// </summary>
 bool protocol_selftest(const char** why = nullptr);
 
 }  // namespace lazysf2::net

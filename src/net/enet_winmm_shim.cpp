@@ -1,12 +1,5 @@
-// Satisfies ENet's winmm imports from inside our own winmm.dll.
-//
-// The mod IS winmm.dll (a proxy, src/proxy/). ENet's win32 time code calls timeGetTime, timeBeginPeriod and
-// timeEndPeriod, which a normal build gets by linking winmm.lib: that would make this DLL import from its own
-// name. So winmm.lib is not linked into the lazysf2 target, and the three import slots ENet's object code asks
-// for (__imp__timeGetTime@0, __imp__timeBeginPeriod@4, __imp__timeEndPeriod@4) are defined here, each holding
-// the address of a small wrapper that calls the same function in the real system winmm.dll that proxy::init()
-// loaded. /ALTERNATENAME makes the linker use these when the symbols are otherwise undefined, so a build that
-// does link winmm.lib (the unit tests) is unaffected.
+// Satisfies ENet's winmm imports from inside our own winmm.dll (the mod is winmm.dll, so winmm.lib is not linked).
+// The import slots forward to the real system winmm loaded by proxy::init(); /ALTERNATENAME keeps the tests unaffected.
 #include <windows.h>
 
 #include "proxy/proxy.h"

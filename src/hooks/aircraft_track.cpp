@@ -1,25 +1,5 @@
-// Aircraft tracker: the production base of the object probe and of the Tacview recorder.
-//
-// It follows the live aircraft objects (AircraftObject.dll: constructor and destructor hooks) in a small table
-// and, through sim_hooks.cpp, the per-step Update hook, the game clock and the after-step callbacks.
-//
-// Nothing here runs unless a client needs it: the probe is on (LAZYSF2_PROBE_DIR) or the Tacview Recording
-// setting is on. The decision is taken only at two moments when no aircraft can exist: when a new
-// AircraftObject.dll image appears (module watch), and when an Options page is left (aircraft_track_reevaluate,
-// which also removes the hooks if nothing needs them any more). Never mid-flight: with aircraft already live, an
-// empty table would make an AI aircraft the player. The module watch may run under the loader lock, so it only
-// peeks at the setting (config::tacview_recording_peek); it never reads a file. When nothing needs tracking,
-// nothing is hooked and the game behaves as stock. Whether AircraftObject.dll is really freed and loaded again
-// between flights is not verified yet; both paths are handled.
-//
-// The game can free AircraftObject.dll and load it again (possibly at the same address); every load is a fresh,
-// unpatched image. As the menu hooks do for OptionsScreen.dll, we re-hook whenever the loaded image does not carry
-// our patch, remove the hooks of the previous image only while that image is still the verified DLL, and remove
-// stale MinHook entries at the new base before creating the hooks again.
-//
-// The player rule, in one place: the player is the first aircraft constructed since the table was last empty.
-//
-// Hooks are at fixed RVAs and only installed on the July 2013 build.
+// Aircraft tracker: follows live aircraft objects (ctor/dtor hooks) for the probe and the Tacview recorder.
+// Fixed RVAs, July 2013 build only; nothing is hooked unless a client needs it.
 #include <windows.h>
 
 #include <atomic>
@@ -41,11 +21,10 @@ std::atomic<uint32_t> g_aircraft_generation{0};
 namespace {
 
 constexpr DWORD kAircraftTimestamp = 0x51d220bd, kAircraftImageSize = 0xc2000;
-constexpr DWORD kCtorRva = 0x48cf0;  // AircraftObjectClass* __thiscall ctor(this, const wchar_t* name)  (ret 4)
-constexpr DWORD kDtorRva = 0x41600;  // void __thiscall dtor(this)
-// Module globals filled at load by the object manager (OBJ vtable +0x2c, flag name -> bit mask). Together with the
-// ENEMY and NEUTRAL masks they are the side bits of an object's flag word (object +0x0c); the game keeps them as
-// the local view of sides (it preserves them when it loads a saved state and leaves them out of the state it saves).
+constexpr DWORD kCtorRva = 0x48cf0;  // AircraftObject ctor
+constexpr DWORD kDtorRva = 0x41600;  // AircraftObject dtor
+// Module globals holding the FRIENDLY, ENEMY and NEUTRAL flag masks: the side bits of an object's flag word
+// (object +0x0c).
 constexpr DWORD kFriendlyMaskRva = 0xac460;
 constexpr DWORD kEnemyMaskRva = 0xac464;
 constexpr DWORD kNeutralMaskRva = 0xac468;
@@ -69,9 +48,8 @@ Entry g_table[kMaxTracked];  // guarded by g_lock
 size_t g_count = 0;          // guarded by g_lock
 bool g_full_logged = false;  // guarded by g_lock
 uint64_t g_next_seq = 1;     // guarded by g_lock
-// The player's seq, or 0 before any. Set in the constructor hook when the table is empty, and never changes
-// when that aircraft is destroyed; no entry then matches, so the player is unknown until the table empties and
-// a new aircraft is constructed.
+// The player is the first aircraft constructed since the table was last empty. Its seq stays set after it is
+// destroyed (no entry matches), so the player is unknown until the table empties and refills.
 uint64_t g_player_seq = 0;   // guarded by g_lock
 
 // Install state. Writers hold g_install_lock; the fast path reads the atomics without it.
@@ -217,8 +195,6 @@ void clear_table() {
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-// --- Install and re-hook -------------------------------------------------------------------------
-
 void remove_track_hooks(HMODULE base) {
     for (DWORD rva : {kCtorRva, kDtorRva}) {
         MH_STATUS s = MH_RemoveHook(at_rva(base, rva));
@@ -298,6 +274,8 @@ bool aircraft_track_active() { return g_base.load(std::memory_order_acquire) != 
 bool aircraft_track_for_probe() { return g_for_probe.load(); }
 bool aircraft_track_for_tacview() { return g_for_tacview.load(); }
 
+// Hook only at module load or Options exit, when no aircraft exist (else an AI aircraft would become the player).
+// Runs under the loader lock: never read a file here. Re-hooks when the DLL is freed and loaded again.
 void aircraft_track_on_modules_loaded() {
     HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
     if (!m) return;
@@ -349,6 +327,7 @@ void aircraft_track_on_modules_loaded() {
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 
+// Game thread, menus only: no aircraft exist, so hooks can be installed or removed.
 void aircraft_track_reevaluate() {
     tacview_recorder_menu_moment();  // game thread, menus: closes the recording of a flight that has ended
     weapon_track_reevaluate();       // the weapon hooks follow the same rule, at the same moment

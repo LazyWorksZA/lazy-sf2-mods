@@ -16,8 +16,10 @@ inline constexpr uint32_t kStreamMaxPayload = 96;
 inline constexpr uint32_t kStreamRecordMax = kStreamRecordMin + kStreamMaxPayload;  // largest valid `length`
 inline constexpr uint64_t kStreamMaxFileBytes = 512ull * 1024 * 1024;
 
-// What a record holds. The payload of the first four is the protocol message exactly as it was on the wire
-// (see protocol.h); the other two are defined below. A reader skips kinds it does not know.
+/// <summary>
+/// What a record holds. The payload of the first four is the protocol message exactly as it was on the wire
+/// (see protocol.h); the other two are defined below. A reader skips kinds it does not know.
+/// </summary>
 enum class StreamKind : uint8_t {
     StateReceived = 1,  // StateMsg from a client (client_id 1..4)
     HostState = 2,      // StateMsg of the host player, client_id 0, once per player step
@@ -57,15 +59,19 @@ static_assert(sizeof(StreamHeader) == 48);
 static_assert(sizeof(ClientJoinedPayload) == 50);
 static_assert(sizeof(ClientLeftPayload) == 3);
 
-// Record layout: uint32 length (the bytes that follow it: kind + time + payload, 9 to 105), uint8 kind,
-// double host game time, then length - 9 payload bytes.
+/// <summary>
+/// Record layout: uint32 length (the bytes that follow it: kind + time + payload, 9 to 105), uint8 kind,
+/// double host game time, then length - 9 payload bytes.
+/// </summary>
 inline constexpr size_t kStreamRecordHeadBytes = 4 + 1 + 8;  // length + kind + time
 inline constexpr size_t kStreamRecordTotalMax = 4 + kStreamRecordMax;
 
-// Writes a header (theatre may be null) into out. Returns sizeof(StreamHeader), or 0 if cap is too small.
+/// <summary>Writes a header (theatre may be null) into out. Returns sizeof(StreamHeader), or 0 if cap is too small.</summary>
 size_t encode_stream_header(double start_game_time, const char* theatre, uint8_t* out, size_t cap);
-// Writes one record into out. Returns its total size (4 + length), or 0 if payload_len is above
-// kStreamMaxPayload or cap is too small.
+/// <summary>
+/// Writes one record into out. Returns its total size (4 + length), or 0 if payload_len is above
+/// kStreamMaxPayload or cap is too small.
+/// </summary>
 size_t encode_stream_record(StreamKind kind, double time, const uint8_t* payload, size_t payload_len, uint8_t* out,
                             size_t cap);
 
@@ -86,14 +92,16 @@ struct StreamRecord {
     uint32_t payload_len = 0;
 };
 
-// Parses a stream held in memory. It never reads outside [data, data + size), and never allocates.
+/// <summary>Parses a stream held in memory. It never reads outside [data, data + size), and never allocates.</summary>
 class StreamReader {
 public:
     StreamReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
-    // Call once, first. The header is only written on Ok.
+    /// <summary>Call once, first. The header is only written on Ok.</summary>
     StreamStatus read_header(StreamHeader& out);
-    // Next record. Ok fills rec; anything else means stop (End is the normal end). After a failure the
-    // reader keeps returning the same status.
+    /// <summary>
+    /// Next record. Ok fills rec; anything else means stop (End is the normal end). After a failure the
+    /// reader keeps returning the same status.
+    /// </summary>
     StreamStatus next(StreamRecord& rec);
 
 private:

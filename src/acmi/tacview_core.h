@@ -29,7 +29,7 @@ constexpr uint32_t kWeaponIdBase = 0x1000000;
 constexpr size_t kRecNameChars = 63;
 constexpr size_t kRecTypeChars = 31;  // aircraft type name (Tacview model key), e.g. "F-100D"
 
-// One object's state in a frame, as copied by the game thread: plain data.
+/// <summary>One object's state in a frame, as copied by the game thread: plain data.</summary>
 struct TacviewRec {
     static constexpr uint8_t kObject = 0, kEndFrame = 1;
     static constexpr uint8_t kAircraft = 0, kMissile = 1, kBomb = 2, kRocket = 3;
@@ -66,15 +66,17 @@ class TacviewCore {
 public:
     explicit TacviewCore(const TacviewCoreConfig& cfg);
 
-    // "FileType...Title" text. reference_time is the real UTC start, e.g. 2026-11-24T20:15:00Z.
+    /// <summary>"FileType...Title" text. reference_time is the real UTC start, e.g. 2026-11-24T20:15:00Z.</summary>
     void header(std::string& out, const char* reference_time) const;
-    // One object of the current frame. Only kObject records.
+    /// <summary>One object of the current frame. Only kObject records.</summary>
     void add(const TacviewRec& r);
-    // Ends the frame at game time t and appends its text to out.
+    /// <summary>Ends the frame at game time t and appends its text to out.</summary>
     void end_frame(double t, std::string& out);
 
-    // For a fresh core that continues a file whose first core was lost (process exit): same time origin, same last
-    // frame, so times stay monotonic. Objects are described again, which ACMI allows.
+    /// <summary>
+    /// For a fresh core that continues a file whose first core was lost (process exit): same time origin, same last
+    /// frame, so times stay monotonic. Objects are described again, which ACMI allows.
+    /// </summary>
     void seed_time(double t0, long long last_ms);
     bool has_origin() const { return have_t0_; }
     double origin() const { return t0_; }

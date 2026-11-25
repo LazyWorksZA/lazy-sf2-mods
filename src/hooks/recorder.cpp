@@ -1,23 +1,5 @@
-// Recorder (developer tool, part of the object probe; see probe_hooks.cpp).
-// Inert unless the probe is on: recorder_on_modules_loaded() is only called from probe_on_modules_loaded(),
-// and the hotkey thread only exists with the probe on.
-//
-// Ctrl+Shift+R starts and stops a recording of the player's aircraft: on every player step (the "after
-// Update" callback from sim_hooks.cpp) one RecSample is appended to a preallocated buffer. A recording
-// ends on the hotkey, after 180 s of game time, or when the buffer is full (180 x 120 samples).
-// The recorder only reads the aircraft; it never writes to it.
-//
-// Threads: the hotkey thread only sets g_toggle_request. Everything else runs on the game thread, inside
-// the step callback, so there are no locks here.
-//
-// File format of rec_NNN.bin (little endian):
-//   offset 0   char[4]   "LZRC"
-//   offset 4   uint32    version (1)
-//   offset 8   uint32    count
-//   offset 12  RecSample[count], each 68 bytes, packed (see hooks.h):
-//       double t; double pos[3]; float vel[3]; float ang[3]; float rate[3]
-// t is game time in seconds (sim_game_time() when the step ended), pos is world metres (x east, y north,
-// z up), vel is world m/s, ang is pitch/heading/roll in radians, rate is the angular rates the game keeps.
+// Recorder (developer tool, part of the probe): Ctrl+Shift+R records the player's aircraft each player step for up
+// to 180 s. Game thread only; the hotkey thread just sets a request. File format: see hooks.h (RecSample).
 #include <windows.h>
 
 #include <atomic>

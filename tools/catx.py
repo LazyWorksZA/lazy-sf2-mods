@@ -1,6 +1,6 @@
 """List or extract entries from a ThirdWire .cat archive (SF2, July 2013 format).
 
-Format (all little-endian; see docs/option-trace.md):
+Format (all little-endian; see lazy-sf2-recon: option-trace.md):
   0x00  wchar[4]  L"CAT\\0"
   0x08  u32       version (4)
   0x0c  u32       entry count

@@ -1,14 +1,5 @@
-// Puppet mode (developer tool, part of the object probe; see probe_hooks.cpp). Inert unless the probe
-// is on: the hotkey that starts a run lives in the probe's hotkey thread, which only exists then.
-//
-// A run takes the AI aircraft nearest to the player, freezes a level path from its start position
-// and velocity, and every Present writes position, velocity and orientation back onto that path.
-// The distance it finds the object from where we last put it ("drift") shows how much the game
-// moves it between our writes. This is the multiplayer go/no-go test: can we hold an aircraft?
-//
-// All run state is owned by the thread that calls puppet_run_frame() (the Present thread). The
-// hotkey thread only touches g_puppet_state. Every access to an aircraft object happens inside
-// probe_with_aircraft(), i.e. under the table's shared lock.
+// Puppet mode (developer tool, part of the probe): holds the nearest AI aircraft on a level path to test whether
+// the game lets us drive it. Run state belongs to the Present thread; aircraft access is under probe_with_aircraft().
 #include <windows.h>
 
 #include <atomic>
@@ -65,8 +56,6 @@ LARGE_INTEGER g_freq{};
 bool g_thread_logged = false;
 
 void read_pos(const void* obj, Vec3d* p) { memcpy(p, static_cast<const char*>(obj) + kPosOffset, sizeof(*p)); }
-
-// --- Start (callback runs under the shared lock) --------------------------------------------------
 
 struct StartCtx {
     int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 player too slow, 3 no player
@@ -197,8 +186,6 @@ void start_run() {
     int expected = kStartRequested;
     g_puppet_state.compare_exchange_strong(expected, kRunning);
 }
-
-// --- One frame (callback runs under the shared lock) ----------------------------------------------
 
 struct FrameCtx {
     double t = 0;

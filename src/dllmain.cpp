@@ -1,7 +1,5 @@
-// lazysf2: Strike Fighters 2 borderless fullscreen mod, loaded as a winmm.dll proxy.
-//
-// Set the environment variable LAZYSF2_DISABLE=1 to load as a plain pass-through proxy
-// (no hooks), for comparing against stock behaviour.
+// lazysf2: Strike Fighters 2 mod, loaded as a winmm.dll proxy.
+// LAZYSF2_DISABLE=1 loads it as a plain pass-through proxy (no hooks).
 #include <windows.h>
 
 #include <MinHook.h>
@@ -24,10 +22,8 @@ void log_host() {
     LOG("lazysf2 " __DATE__ " " __TIME__ " loaded into %ls", lazysf2::log::log_path(exe).c_str());
 }
 
-// The exe is DPI-unaware. At display scaling other than 100% Windows gives it a virtual desktop
-// (e.g. 2048x1152 for 2560x1440 at 125%), and a scaling change while it runs leaves the game in
-// part of the screen. Declaring the process per-monitor DPI aware before the game creates its
-// window makes it always see real pixels. Applies in every display mode (stock is broken there).
+// The exe is DPI-unaware: at scaling other than 100% Windows gives it a virtual desktop. Declaring the process
+// per-monitor DPI aware before any window exists makes it see real pixels, in every display mode.
 void make_dpi_aware() {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     using SetCtx_t = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);

@@ -1,25 +1,5 @@
-// DirectInput hooks: the Windows key in Borderless, and the "Mouse Pointer" setting.
-//
-// Keyboard: the game opens the system keyboard with DISCL_NONEXCLUSIVE | DISCL_FOREGROUND |
-// DISCL_NOWINKEY (0x16, DirectInput.dll +0x42a0), which disables the Windows key while the game
-// has focus. In Borderless mode we drop DISCL_NOWINKEY so the Start menu works; Fullscreen stays
-// stock.
-//
-// Mouse: stock (DirectInput.dll, July 2013) opens the system mouse buffered, exclusive +
-// foreground, and every frame the read at DirectInput.dll+0x51b0 adds the DIMOFS_X/Y deltas to the
-// game's own pointer position (this[8], this[9]), clamps it and dispatches it. That pointer never
-// quite matches the Windows cursor (own speed, no acceleration), and remote-control tools, which
-// inject absolute positions, make it wander. With "Match the Windows cursor" (the default):
-//   * the mouse device is non-exclusive (foreground), so Windows keeps moving its cursor;
-//   * GetDeviceData drops the X/Y delta records for the mouse (buttons and wheel pass through);
-//   * just before each read we set the game's pointer to the Windows cursor, scaled to the game's
-//     cursor space; the read clamps and dispatches it as usual;
-//   * the Windows cursor is hidden over the game window (the game draws its own).
-//
-// All of this is decided when the hooks are called, so the Options menu can change both settings
-// while the game runs; input_apply_settings() re-applies the devices' cooperative levels.
-// The read hook targets a fixed RVA, so it is only installed on the exact DirectInput.dll build we
-// analysed; without it the mouse always stays stock.
+// DirectInput hooks: Windows key in Borderless, and the "Mouse Pointer" (Cursor) setting. Settings are read when
+// the hooks run, so Options can change them live. See lazy-sf2-recon: recon-notes §10.
 #include <windows.h>
 
 #define DIRECTINPUT_VERSION 0x0800
@@ -40,10 +20,9 @@ namespace {
 // Core\DirectInput.dll, July 2013 build.
 constexpr DWORD kDirectInputTimestamp = 0x51d21fcc;
 constexpr DWORD kDirectInputImageSize = 0x30000;
-constexpr DWORD kMouseReadRva = 0x51b0;  // __fastcall int read(MouseState* this)
-// MouseState layout (int-sized fields): [0] device, [4..7] range left/top/right/bottom (inclusive;
-// set by the game through DirectInput.dll+0x2840, so it is a virtual space, not screen pixels),
-// [8] x, [9] y, [10] wheel.
+constexpr DWORD kMouseReadRva = 0x51b0;  // per-frame mouse read
+// MouseState layout (int-sized fields): [0] device, [4..7] range left/top/right/bottom (inclusive, a virtual
+// space, not screen pixels), [8] x, [9] y, [10] wheel.
 constexpr int kStateDevice = 0;
 constexpr int kStateLeft = 4;
 constexpr int kStateTop = 5;
@@ -88,11 +67,8 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 // "Match the Windows cursor" is active: chosen in Options and technically possible.
 bool cursor_mode() { return g_read_hooked.load() && config::mouse_mode() == config::MouseMode::Cursor; }
 
-// --- Device tracking ----------------------------------------------------------------------------
-// The game creates more than one keyboard and mouse; the one it configures with
-// SetCooperativeLevel is the one in use (and the one re-applied on a live switch). Device pointers
-// get reused (a released mouse's address can come back as a keyboard), so a pointer is forgotten
-// whenever it is created again.
+// --- Device tracking. The game creates several keyboards and mice; the one it passes to SetCooperativeLevel
+// is in use. Device pointers get reused, so a pointer is forgotten whenever it is created again.
 
 struct Device {
     std::atomic<IUnknown*> created{nullptr};  // most recent CreateDevice for this kind
@@ -125,8 +101,6 @@ DWORD mouse_flags(DWORD requested) {
                ? (requested & ~static_cast<DWORD>(DISCL_EXCLUSIVE)) | DISCL_NONEXCLUSIVE
                : requested;
 }
-
-// --- IDirectInputDevice8 -------------------------------------------------------------------------
 
 // Records the configured device and returns the flags to really use.
 DWORD configure(Device& d, IUnknown* self, HWND hwnd, DWORD flags, DWORD patched, const char* what) {
@@ -186,8 +160,6 @@ void hook_device(IUnknown* dev) {
                       reinterpret_cast<void**>(&o_Release), "IDirectInputDevice8::Release");
 }
 
-// --- IDirectInput8 -------------------------------------------------------------------------------
-
 HRESULT STDMETHODCALLTYPE h_CreateDevice(IUnknown* self, REFGUID guid, IUnknown** out, LPUNKNOWN outer) {
     HRESULT hr = o_CreateDevice(self, guid, out, outer);
     if (SUCCEEDED(hr) && out && *out) {
@@ -215,8 +187,6 @@ HRESULT WINAPI h_DirectInput8Create(HINSTANCE inst, DWORD version, REFIID riid, 
     return hr;
 }
 
-// --- Hide the Windows cursor over the game while matching it (the game draws its own) -------------
-
 WNDPROC g_orig_wndproc = nullptr;
 
 LRESULT CALLBACK cursor_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -235,11 +205,8 @@ void subclass_for_cursor(HWND hwnd) {
     LOG("mouse: game window subclassed for the cursor setting (%s)", g_orig_wndproc ? "ok" : "FAILED");
 }
 
-// --- DirectInput.dll per-frame mouse read --------------------------------------------------------
-
-// The menu system lays screens out in a 1024x768 virtual space (MenuSystem.ini Width/Height) and
-// sets the cursor range to that space minus the cursor image, e.g. (0,0)-(1007,751). The game's
-// own read clamps x/y to the range afterwards.
+// The menu lays screens out in a 1024x768 virtual space and sets the cursor range to that space minus the
+// cursor image; the game clamps x/y to the range afterwards.
 constexpr int kMenuVirtualWidth = 1024;
 constexpr int kMenuVirtualHeight = 768;
 
