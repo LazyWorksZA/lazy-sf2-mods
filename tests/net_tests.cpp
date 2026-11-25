@@ -225,18 +225,20 @@ struct TestClient {
         if (p && enet_peer_send(peer, channel, p) != 0) enet_packet_destroy(p);
         enet_host_flush(host);
     }
-    void idle(int ms) {  // service the client for about ms milliseconds
-        for (int i = 0; i < ms; ++i) {
+    void idle(int ms) {  // service the client for ms milliseconds of wall time (the host's timers run on the wall clock too)
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        do {
             service(0);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        } while (std::chrono::steady_clock::now() < until);
     }
 };
 
 // Polls the core for up to ms, until want events have arrived; the client is serviced meanwhile.
 std::vector<HostEvent> collect(HostCore& core, TestClient& c, size_t want, int ms) {
     std::vector<HostEvent> out;
-    for (int t = 0; t < ms && out.size() < want; ++t) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (out.size() < want && std::chrono::steady_clock::now() < until) {
         c.service(0);
         HostEvent ev[16];
         const size_t n = core.poll(ev, 16);
@@ -441,7 +443,14 @@ void host_core_tests() {
         while (b.got.empty() && !b.disconnected && std::chrono::steady_clock::now() < until) b.idle(1);
         b.idle(100);
     }
-    expect(!b.disconnected && b.got.size() == 1, "the current-generation Bye is delivered");
+    {
+        ByeMsg got_bye{};
+        const bool one = b.got.size() == 1;
+        std::printf("  Bye wait: %zu received, disconnected %d\n", b.got.size(), b.disconnected ? 1 : 0);
+        expect(!b.disconnected && one && b.got[0].channel == kChannelReliable &&
+                   decode(b.got[0].bytes.data(), b.got[0].bytes.size(), got_bye) == Status::Ok && got_bye.reason == 9,
+               "the current-generation Bye is delivered, with its content (reason 9)");
+    }
 
     // Control events survive a flood of States while the game does not drain the queue.
     b.send(buf, enc(h, buf), kChannelReliable);
@@ -974,29 +983,89 @@ void bot_loopback_tests() {
                    code(30, 5, nan, 0, "127.0.0.1:7777") == 1 && code(30, 5, 0, inf, "127.0.0.1:7777") == 1,
                "the bot rejects non-finite numbers and a port with trailing characters");
     }
-    {  // a host that never answers: the bot gives up after about 4 s with code 3, before and after the connect
+    {  // hosts that go quiet: no listener (code 3 at 4 s), a connected host without a Welcome (code 3 at 15 s), a Welcome then
+       // silence (code 4 at 4 s), and the real core, whose own 5 s timer kicks a client that never gets welcomed (code 4)
         using Clk = std::chrono::steady_clock;
-        auto timed = [](const std::string& host, int* code) {
+        struct Run {
+            int code = -1;
+            double secs = 0;
+            bool welcomed = false;
+        };
+        auto timed = [](const std::string& host) {
             bot::BotConfig c;
             c.host = host;
-            c.duration = 5.0;
+            c.duration = 20.0;
+            Run r;
             const auto t0 = Clk::now();
-            *code = bot::run_bot(c).code;
-            return std::chrono::duration<double>(Clk::now() - t0).count();
+            r.code = bot::run_bot(c).code;
+            r.secs = std::chrono::duration<double>(Clk::now() - t0).count();
+            return r;
         };
-        int code_none = -1, code_mute = -1;
-        const double s_none = timed("127.0.0.1:9", &code_none);  // nothing listens there
-        HostCore core;  // accepts the connection, but no game thread ever sends the Welcome
-        core.start("127.0.0.1", 0, [](const char*) {});
-        for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        double s_mute = 0;
-        if (core.state() == HostCore::State::Running) s_mute = timed("127.0.0.1:" + std::to_string(core.port()), &code_mute);
-        core.stop(false);
-        std::printf("  mute host: no listener -> code %d after %.1f s; no Welcome -> code %d after %.1f s\n", code_none,
-                    s_none, code_mute, s_mute);
-        expect(code_none == 3 && s_none > 3.5 && s_none < 9.0, "no answer to connect: exit code 3 after about 4 s");
-        expect(code_mute == 3 && s_mute > 3.5 && s_mute < 9.0, "no Welcome: exit code 3 after about 4 s");
+        // A bare ENet server that never answers a Ping, and sends the Welcome to the first Hello only if asked to.
+        auto raw_host = [&](bool send_welcome) {
+            Run r;
+            if (enet_initialize() != 0) return r;
+            ENetAddress sa{};
+            enet_address_set_host(&sa, "127.0.0.1");
+            sa.port = 0;
+            ENetHost* srv = enet_host_create(&sa, 2, kChannelCount, 0, 0);
+            if (srv) {
+                std::atomic<bool> done{false};
+                Run res;
+                const std::string host = "127.0.0.1:" + std::to_string(srv->address.port);
+                std::thread th([&] {
+                    res = timed(host);
+                    done = true;
+                });
+                while (!done) {
+                    ENetEvent ev;
+                    while (enet_host_service(srv, &ev, 1) > 0) {
+                        if (ev.type != ENET_EVENT_TYPE_RECEIVE) continue;
+                        MsgType t{};
+                        if (send_welcome && !res.welcomed && peek_type(ev.packet->data, ev.packet->dataLength, t) == Status::Ok &&
+                            t == MsgType::Hello) {
+                            WelcomeMsg w{};
+                            w.client_id = 1;
+                            w.host_game_time = 1000.0;
+                            uint8_t wb[64];
+                            ENetPacket* p = enet_packet_create(wb, encode(w, wb, sizeof(wb)), ENET_PACKET_FLAG_RELIABLE);
+                            if (p && enet_peer_send(ev.peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
+                            enet_host_flush(srv);
+                            r.welcomed = true;
+                        }
+                        enet_packet_destroy(ev.packet);
+                    }
+                }
+                th.join();
+                r.code = res.code;
+                r.secs = res.secs;
+                enet_host_destroy(srv);
+            }
+            enet_deinitialize();
+            return r;
+        };
+        const Run none = timed("127.0.0.1:9");  // nothing listens there
+        const Run no_welcome = raw_host(false);
+        const Run silent = raw_host(true);
+        Run kicked;
+        {
+            HostCore core;  // accepts the connection, but no game thread ever sends the Welcome
+            core.start("127.0.0.1", 0, [](const char*) {});
+            for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (core.state() == HostCore::State::Running) kicked = timed("127.0.0.1:" + std::to_string(core.port()));
+            core.stop(false);
+        }
+        std::printf("  quiet hosts: no listener %d/%.1f s; no Welcome %d/%.1f s; silent after Welcome %d/%.1f s; kicked by the core "
+                    "%d/%.1f s\n",
+                    none.code, none.secs, no_welcome.code, no_welcome.secs, silent.code, silent.secs, kicked.code, kicked.secs);
+        expect(none.code == 3 && none.secs > 3.5 && none.secs < 9.0, "no answer to connect: exit code 3 after about 4 s");
+        expect(no_welcome.code == 3 && no_welcome.secs > 14.0 && no_welcome.secs < 22.0,
+               "connected but no Welcome: exit code 3 after about 15 s");
+        expect(silent.welcomed && silent.code == 4 && silent.secs > 3.5 && silent.secs < 9.0,
+               "host silent after the Welcome: exit code 4 after about 4 s");
+        expect(kicked.code == 4 && kicked.secs > 3.5 && kicked.secs < 9.0,
+               "the core drops a client that is never welcomed: the bot exits 4");
     }
     {
         const BotSession r = run_clean_session(bot::Script::Climb, 20.0, 1.0, 0.0, 0.0, 0.0);

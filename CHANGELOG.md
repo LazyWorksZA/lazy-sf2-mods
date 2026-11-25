@@ -7,7 +7,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Developer tools (off unless enabled)
 
-- **`lazysf2-bot` gives up on a silent host.** After 4 s with nothing from the host it prints one line and exits: code 3 when the connect or the Welcome gets no answer, code 4 when the host goes silent or closes the connection later. Code 2 now means only a bad address or a refused connection.
+- **`lazysf2-bot` gives up on a silent host.** After 4 s with nothing from the host it prints one line and exits: code 3 when the connection is not established within 4 s or the Welcome has not come 15 s after connecting (the host may be loading), code 4 when the host goes silent or closes the connection later. Code 2 now means only a bad address or a refused connection.
 - The loopback tests no longer fail on a slow or busy machine.
 
 ## 1.0.0 (2026-11-25)

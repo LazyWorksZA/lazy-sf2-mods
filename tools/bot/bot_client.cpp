@@ -21,8 +21,10 @@ double wall_now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - origin).count();
 }
 
-/// Seconds without anything from the host before the bot gives up (exit code 3 before the Welcome, 4 after).
+/// Seconds without anything from the host before the bot gives up: no ENet connection (exit code 3), or silence after the Welcome (4).
 constexpr double kSilenceLimit = 4.0;
+/// Seconds a connected host may take to send the Welcome (its game thread may be busy loading) before exit code 3.
+constexpr double kWelcomeWait = 15.0;
 
 struct Runner {
     const BotConfig& cfg;
@@ -31,7 +33,6 @@ struct Runner {
     ENetPeer* peer = nullptr;
     bool connected = false, disconnected = false, welcomed = false;
     WelcomeMsg welcome{};
-    double welcome_wall = 0;
     double last_rx = 0;  // wall time of the last packet from the host
     ClockSync clock;
     Flight flight;
@@ -77,7 +78,6 @@ struct Runner {
                     if (decode(ev.packet->data, ev.packet->dataLength, w) == Status::Ok) {
                         welcome = w;
                         welcomed = true;
-                        welcome_wall = rx;
                         res.client_id = w.client_id;
                         // The connect RTT: ENet's smoothed value for the peer (ms), as half a trip.
                         clock.on_welcome(rx, w.host_game_time, 0.0005 * static_cast<double>(peer->roundTripTime));
@@ -183,7 +183,7 @@ BotResult run_bot(const BotConfig& cfg) {
     enet_host_flush(r.host);
 
     // Welcome.
-    for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < kSilenceLimit && !r.cancelled();)
+    for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < kWelcomeWait && !r.cancelled();)
         r.service(10);
     if (!r.welcomed) {
         r.say("bot: no Welcome from the host (%s)", r.disconnected ? "it closed the connection" : "timed out");
@@ -208,6 +208,7 @@ BotResult run_bot(const BotConfig& cfg) {
     };
 
     for (;;) {
+        r.service(0);  // count what already arrived before judging silence
         const double wall = wall_now();
         if (r.disconnected) {
             r.say("bot: the host closed the connection");
@@ -229,12 +230,7 @@ BotResult run_bot(const BotConfig& cfg) {
             res.code = 4;
             break;
         }
-        // The host never answers: no Pong within 4 s of the Welcome, or its clock held for more than 4 s on end.
-        if (!flying && !r.clock.have_pong() && wall - r.welcome_wall > 4.0) {
-            r.say("bot: host not answering: no Pong 4 s after the Welcome");
-            res.code = 4;
-            break;
-        }
+        // The host answers Pings but its clock held for more than 4 s on end.
         if (flying) {
             if (!r.clock.on_hold(wall)) {
                 hold_since = 0;
