@@ -1823,6 +1823,32 @@ void tacview_tests() {
         expect(ev_line == "0,Event=Destroyed|2000a1f|\n", "acmi format: Destroyed event line");
     }
 
+    // An unchanged ground pose is not written again; a change is.
+    {
+        using lazysf2::hooks::AircraftSide;
+        TacviewCore core{TacviewCoreConfig{}};
+        auto site = [](double t, double x) {
+            TacviewRec r = make_rec(1, false, AircraftSide::Enemy, "SA-2 Site", t, x, 200, 5, 0.0f, 1.0f, 0.0f);
+            r.obj_class = TacviewRec::kGroundStatic;
+            return r;
+        };
+        std::string o1, o2, o3, o4;
+        core.add(site(1.0, 100));
+        core.end_frame(1.0, o1, TacviewRec::kSeriesGroundStatic);
+        core.add(site(2.0, 100));
+        core.end_frame(2.0, o2, TacviewRec::kSeriesGroundStatic);
+        core.add(site(3.0, 101));
+        core.end_frame(3.0, o3, TacviewRec::kSeriesGroundStatic);
+        core.add(site(4.0, 101));
+        core.end_frame(4.0, o4, TacviewRec::kSeriesGroundStatic);
+        expect(count_of(o1, "2000001,T=") == 1 && count_of(o2, "2000001,T=") == 0 && count_of(o3, "2000001,T=") == 1 &&
+                   count_of(o4, "2000001,T=") == 0 && core.live_objects() == 1 && core.stats().unchanged == 2,
+               "tacview world: an unchanged static is written once, a change is written again, and it stays alive");
+        std::string o5;
+        core.end_frame(5.0, o5, TacviewRec::kSeriesGroundStatic);
+        expect(o5.find("-2000001") != std::string::npos, "tacview world: a skipped static is still removed when it is gone");
+    }
+
     // The world walker's identity rules, over synthetic slot snapshots.
     {
         using namespace lazysf2::hooks;
@@ -1897,7 +1923,9 @@ void tacview_tests() {
         // Same seq in different families are different objects; there is no rate limit in the core for these.
         std::string o2;
         core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.01, 0, 0, 100, 0, 0, 0));
-        core.add(rec(TacviewRec::kGroundStatic, 1, AircraftSide::Enemy, "SA-2 Site", 10.01));
+        TacviewRec moved = rec(TacviewRec::kGroundStatic, 1, AircraftSide::Enemy, "SA-2 Site", 10.01);
+        moved.pos[0] += 1;  // an unchanged pose would not be written again
+        core.add(moved);
         core.end_frame(10.01, o2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesGroundStatic);
         expect(o2.find("2000001,T=") != std::string::npos && o2.find("10001") == std::string::npos &&
                    o2.find("-2000002") == std::string::npos && o2.find("-3000001") == std::string::npos,

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "acmi/acmi_format.h"
 
@@ -83,6 +84,16 @@ void TacviewCore::add(const TacviewRec& r) {
         return;
     }
     s->last_t = r.t;
+    if (family == TacviewRec::Family::Ground) {
+        if (!is_new && s->has_last && std::memcmp(s->last_pos, r.pos, sizeof(r.pos)) == 0 &&
+            std::memcmp(s->last_ang, r.ang, sizeof(r.ang)) == 0) {
+            ++stats_.unchanged;
+            return;
+        }
+        std::memcpy(s->last_pos, r.pos, sizeof(r.pos));
+        std::memcpy(s->last_ang, r.ang, sizeof(r.ang));
+        s->has_last = true;
+    }
 
     const Mapping m{lon_scale_, lat_scale_};
     append_transform(pending_, s->id, r.pos, r.ang, m);

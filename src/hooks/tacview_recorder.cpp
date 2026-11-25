@@ -45,6 +45,8 @@ bool g_skip_valid = false;   // a start failed or the writer failed during this 
 uint32_t g_skip_epoch = 0;
 double g_last_snapshot = 0;
 std::unique_ptr<acmi::TacviewRec[]> g_walk_buf;  // the world walker's records, copied into the ring as one frame
+uint64_t g_dead_sent[64];  // aircraft seqs whose Destroyed marker was sent this recording
+size_t g_dead_n = 0;
 bool g_walk_on = false;                          // the walker started with this recording
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
@@ -105,7 +107,12 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.parent_seq = 0;
         r.destroyed = 0;
         if (!read_active(list[i].obj)) {
-            // Finished (destroyed): left out of the frame, so the core removes it; the marker adds the Destroyed event.
+            // Finished (destroyed): left out of the frame, so the core removes it; the marker adds the Destroyed event,
+            // once per aircraft (a full list just repeats it, which the core ignores).
+            bool sent = false;
+            for (size_t k = 0; k < g_dead_n && !sent; ++k) sent = g_dead_sent[k] == list[i].seq;
+            if (sent) continue;
+            if (g_dead_n < sizeof(g_dead_sent) / sizeof(g_dead_sent[0])) g_dead_sent[g_dead_n++] = list[i].seq;
             r.kind = acmi::TacviewRec::kObject;
             r.destroyed = 1;
             r.is_player = list[i].is_player ? 1 : 0;
@@ -230,6 +237,7 @@ StartResult start_recording(uint32_t epoch) {
     g_last_snapshot = -1e300;
     g_weapons_live = false;
     weapon_track_new_flight();
+    g_dead_n = 0;
     if (!g_walk_buf) g_walk_buf.reset(new (std::nothrow) acmi::TacviewRec[kWorldWalkMaxRecords]);
     g_walk_on = g_walk_buf && world_walk_start();
     if (!g_walk_buf) LOG("tacview: out of memory for the world walker; only aircraft and weapons are recorded");
@@ -241,7 +249,11 @@ void write_world_frame(double t) {
     if (!g_walk_on) return;
     uint8_t mask = 0;
     const size_t n = world_walk_run(t, g_walk_buf.get(), kWorldWalkMaxRecords, &mask);
-    if (!mask || !g_writer->begin_frame(n)) return;  // a dropped frame is counted by the writer
+    if (!mask) return;
+    if (!g_writer->begin_frame(n)) {  // the writer counts the dropped frame
+        world_walk_frame_dropped(g_walk_buf.get(), n);
+        return;
+    }
     for (size_t i = 0; i < n; ++i) g_writer->slot(i) = g_walk_buf[i];
     g_writer->commit_frame(n, t, mask);
 }

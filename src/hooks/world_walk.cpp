@@ -85,6 +85,11 @@ struct Walk {
     double last[kDueCount] = {};
     Stats stats;
     bool logged_first = false, logged_unknown = false, logged_cap = false;
+    struct Pending {
+        uint64_t seq;
+        uint8_t cls;
+    } pending[kMaxMarkers];  // Destroyed markers of a frame that was dropped: sent with the next one
+    size_t n_pending = 0;
 };
 Walk g;  // game thread only
 
@@ -279,6 +284,19 @@ void fill_common(TacviewRec& r, uint8_t cls, uint64_t seq, double t) {
     r.t = t;
 }
 
+// Grows a slot array to n entries before a walk. On failure the walker is off for the rest of the recording.
+bool grow(std::vector<SlotMem>& v, size_t n) {
+    if (n <= v.size()) return true;
+    try {
+        v.resize(n);
+        return true;
+    } catch (const std::bad_alloc&) {
+        g.on = false;
+        LOG("world: out of memory growing the slot state; ground objects, flares, chaff and tracers stop here");
+        return false;
+    }
+}
+
 // Ground objects, vehicles and ships. Returns the series walked (0 if the group could not be read).
 uint8_t walk_ground(uintptr_t grp, uint8_t due_series, double t, TacviewRec* out, size_t cap, size_t& n) {
     GroupView v;
@@ -286,7 +304,7 @@ uint8_t walk_ground(uintptr_t grp, uint8_t due_series, double t, TacviewRec* out
         ++g.stats.bad_walks;
         return 0;
     }
-    if (v.count > g.ground.size()) g.ground.resize(v.count);  // before the loop: the loop never allocates
+    if (!grow(g.ground, v.count)) return 0;  // before the loop: the loop never allocates
     const uint32_t gcount = static_cast<uint32_t>(g.ground.size());
     uint32_t live[3] = {};
     size_t present = 0, markers = 0;
@@ -345,7 +363,7 @@ uint8_t walk_counter_measures(uintptr_t grp, double t, TacviewRec* out, size_t c
         ++g.stats.bad_walks;
         return 0;
     }
-    if (v.count > g.cm.size()) g.cm.resize(v.count);
+    if (!grow(g.cm, v.count)) return 0;
     const uint32_t gcount = static_cast<uint32_t>(g.cm.size());
     uint32_t live[2] = {};
     size_t present = 0;
@@ -392,7 +410,7 @@ uint8_t walk_bullets(uintptr_t grp, const Groups& gr, double t, TacviewRec* out,
         ++g.stats.bad_walks;
         return 0;
     }
-    if (v.count > g.bullet.size()) g.bullet.resize(v.count);
+    if (!grow(g.bullet, v.count)) return 0;
     const uint32_t gcount = static_cast<uint32_t>(g.bullet.size());
     size_t present = 0;
     for (uint32_t i = 0; i < v.count && i < gcount; ++i) {
@@ -433,6 +451,7 @@ bool world_walk_start() {
     g.stats = Stats{};
     g.logged_first = g.logged_unknown = g.logged_cap = false;
     g.next_ground = g.next_cm = g.next_bullet = 1;
+    g.n_pending = 0;
     for (double& l : g.last) l = -1e300;
     uint32_t f = 0, e = 0, nt = 0;
     aircraft_side_masks(&f, &e, &nt);
@@ -485,6 +504,15 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
         mask |= walk_counter_measures(gr.cm, t, out, cap, n);
     if ((due & TacviewRec::kSeriesBullet) && gr.bullet && g.mods.bullet)
         mask |= walk_bullets(gr.bullet, gr, t, out, cap, n);
+    if ((mask & (TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile)) && g.n_pending) {
+        size_t sent = 0;
+        for (; sent < g.n_pending && n < cap; ++sent) {
+            fill_common(out[n], g.pending[sent].cls, g.pending[sent].seq, t);
+            out[n++].destroyed = 1;
+        }
+        g.n_pending -= sent;  // a rare overflow of cap stays queued
+        for (size_t k = 0; k < g.n_pending; ++k) g.pending[k] = g.pending[sent + k];
+    }
     for (int k = 0; k < kDueCount; ++k)
         if (mask & kDueSeries[k]) g.last[k] = t;
     *series_mask = mask;
@@ -506,6 +534,14 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
             kMaxGround, kMaxCm, kMaxBullets);
     }
     return n;
+}
+
+void world_walk_frame_dropped(const TacviewRec* recs, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (!recs[i].destroyed) continue;
+        if (g.n_pending < kMaxMarkers) g.pending[g.n_pending++] = {recs[i].seq, recs[i].obj_class};
+        else ++g.stats.markers_dropped;
+    }
 }
 
 void world_walk_stop() {
