@@ -142,7 +142,7 @@ void TacviewWriter::close(bool wait_and_detach, const char* why) {
 }
 
 void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t structures,
-                                uint64_t structures_skipped) {
+                                uint64_t structures_skipped, uint64_t structures_destroyed) {
     if (summary_logged_.exchange(true)) return;
     char line[640];
     const std::string shown = narrow(display_ ? display_(path()) : path());
@@ -150,8 +150,9 @@ void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char*
                                 why ? why : "closed", shown.c_str(), static_cast<unsigned long long>(transforms),
                                 static_cast<unsigned long long>(bytes), dropped_.load(std::memory_order_relaxed));
     if (n > 0 && static_cast<size_t>(n) < sizeof(line) && (structures || structures_skipped))
-        std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), ", %llu structures (%llu skipped next to live ground objects)",
-                      static_cast<unsigned long long>(structures), static_cast<unsigned long long>(structures_skipped));
+        std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), ", %llu structures (%llu skipped next to live ground objects, %llu destroyed)",
+                      static_cast<unsigned long long>(structures), static_cast<unsigned long long>(structures_skipped),
+                      static_cast<unsigned long long>(structures_destroyed));
     log_(line);
 }
 
@@ -325,7 +326,7 @@ void TacviewWriter::run() {
     CloseHandle(f);
     file_ = nullptr;
     log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed), core.stats().structures,
-                core.stats().structures_skipped);
+                core.stats().structures_skipped, core.stats().structures_destroyed);
     // Hand the closed file to the background compressor: this thread, and so the next recording, never waits for it.
     if (!failed && !no_zip_.load(std::memory_order_acquire)) zip_queue_submit(path, log_, display_);
     finished_.store(true, std::memory_order_release);

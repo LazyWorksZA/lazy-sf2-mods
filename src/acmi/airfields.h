@@ -85,6 +85,12 @@ struct AreaPick {
 /// <summary>Sets out[i] to 1 for each picked area (0 otherwise). Returns the number picked.</summary>
 size_t pick_areas(const TargetArea* areas, size_t n, const AreaPick& pick, uint8_t* out);
 
+/// <summary>
+/// The first of pts[0..n) within tol metres of (x, y), searching from hint on and then from 0 (lists that run in the
+/// same order match in one step each). n when there is none.
+/// </summary>
+size_t find_near(const double (*pts)[2], size_t n, double x, double y, double tol, size_t hint);
+
 /// <summary>The length of the longest prefix of s, at most max bytes, that does not cut a UTF-8 character.</summary>
 size_t utf8_prefix(const std::string& s, size_t max);
 

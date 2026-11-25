@@ -238,6 +238,19 @@ size_t pick_areas(const TargetArea* areas, size_t n, const AreaPick& pick, uint8
     return picked;
 }
 
+size_t find_near(const double (*pts)[2], size_t n, double x, double y, double tol, size_t hint) {
+    const double t2 = tol * tol;
+    if (hint > n) hint = n;
+    for (size_t pass = 0; pass < 2; ++pass) {
+        const size_t from = pass == 0 ? hint : 0, to = pass == 0 ? n : hint;
+        for (size_t i = from; i < to; ++i) {
+            const double dx = pts[i][0] - x, dy = pts[i][1] - y;
+            if (dx * dx + dy * dy <= t2) return i;
+        }
+    }
+    return n;
+}
+
 size_t utf8_prefix(const std::string& s, size_t max) {
     if (s.size() <= max) return s.size();
     size_t n = max;

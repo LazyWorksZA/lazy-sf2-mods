@@ -197,8 +197,27 @@ void TacviewCore::add(const TacviewRec& r) {
 }
 
 void TacviewCore::add_structure(const TacviewRec& r) {
-    if (r.destroyed) return;
     const auto known = static_index_.find(r.seq);
+    if (r.destroyed) {
+        // Destroyed (a marker): the event, an explosion where it stood, and its removal in this frame. Unknown: ignored.
+        if (known == static_index_.end()) return;
+        const size_t i = known->second;
+        const Static st = statics_[i];
+        if (r.destroyed == TacviewRec::kDestroyed) {
+            append_event_destroyed(events_, st.id);
+            ++stats_.destroyed_events;
+        }
+        add_explosion(st.pos, kExplosionRadiusGround, r.t);
+        dead_statics_.push_back(st.id);
+        static_index_.erase(known);
+        if (i + 1 != statics_.size()) {
+            statics_[i] = statics_.back();
+            static_index_[statics_[i].seq] = i;
+        }
+        statics_.pop_back();
+        ++stats_.structures_destroyed;
+        return;
+    }
     if (known != static_index_.end()) {
         statics_[known->second].seen = frame_no_;  // already written: Tacview keeps it
         return;
@@ -218,7 +237,7 @@ void TacviewCore::add_structure(const TacviewRec& r) {
     }
     const uint32_t id = kStructureIdBase + static_cast<uint32_t>(r.seq);
     static_index_.emplace(r.seq, statics_.size());
-    statics_.push_back({r.seq, id, frame_no_});
+    statics_.push_back({r.seq, id, frame_no_, {r.pos[0], r.pos[1], r.pos[2]}});
     append_transform(pending_, id, r.pos, r.ang, Mapping{lon_scale_, lat_scale_});
     char name[kRecNameChars + 1];
     std::copy(r.name, r.name + kRecNameChars, name);
@@ -254,6 +273,11 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
             ++i;
         }
     }
+    for (const uint32_t id : dead_statics_) {
+        append_removal(removals, id);
+        ++stats_.removals;
+    }
+    dead_statics_.clear();
     if ((series_mask & TacviewRec::kSeriesStructure) && !statics_.empty()) {
         size_t kept = 0;
         for (const Static& st : statics_) {

@@ -3428,6 +3428,43 @@ void structure_tests() {
                "structures: 15 m is still the game's object, just over it is not; a marker or a repeat writes nothing");
     }
 
+    // A destroyed structure: the event, an explosion, its removal; only once.
+    {
+        TacviewCore c3{cfg};
+        std::string o;
+        c3.add(structure(4, "Fuel Tank", 2000, 3000, 0.0f, false));
+        c3.add(structure(5, "Bridge", 2500, 3000, 0.0f, true));
+        c3.end_frame(1.0, o, 0);
+        std::string od;
+        TacviewRec boom = structure(4, "", 0, 0, 0.0f, false);
+        boom.destroyed = TacviewRec::kDestroyed;
+        boom.t = 2.0;
+        c3.add(boom);
+        TacviewRec bridge_boom = structure(5, "", 0, 0, 0.0f, false);
+        bridge_boom.obj_class = TacviewRec::kStructure;  // the marker's class need not say bridge: one family
+        bridge_boom.destroyed = TacviewRec::kDestroyed;
+        c3.add(bridge_boom);
+        c3.end_frame(2.0, od, 0);
+        const size_t ev = od.find("0,Event=Destroyed|7000004|"), rm = od.find("-7000004\n");
+        expect(ev != std::string::npos && rm != std::string::npos && ev < rm && od.find("Type=Misc+Explosion") != std::string::npos &&
+                   od.find("0,Event=Destroyed|7000005|") != std::string::npos && od.find("-7000005\n") != std::string::npos,
+               "structures: a destroyed one gets its Destroyed event, an explosion and its removal");
+        std::string oe;
+        c3.add(boom);
+        c3.end_frame(3.0, oe, 0);
+        std::string of;
+        c3.end_frame(9.0, of);
+        expect(oe.find("7000004") == std::string::npos && of.find("7000004") == std::string::npos && of.find("7000005") == std::string::npos &&
+                   c3.stats().structures_destroyed == 2 && c3.live_objects() == 0,
+               "structures: destroyed once; the final frame does not remove it again");
+    }
+    {
+        const double pts[4][2] = {{0, 0}, {10, 0}, {20, 0}, {10, 0.5}};
+        expect(find_near(pts, 4, 10.4, 0, 2.0, 0) == 1 && find_near(pts, 4, 10.4, 0.4, 2.0, 2) == 3 &&
+                   find_near(pts, 4, 0.5, 0, 2.0, 3) == 0 && find_near(pts, 4, 50, 0, 2.0, 0) == 4 && find_near(pts, 0, 0, 0, 2.0, 0) == 0,
+               "find_near: from the hint, then from the start; n when none");
+    }
+
     TacviewWriter w(64);
     expect(!w.can_take(1), "tacview writer: can_take is false while nothing is open");
 }

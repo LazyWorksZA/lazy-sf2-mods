@@ -26,7 +26,8 @@
 // A structure (0x7000000+seq) is a placed building or bridge from the theatre's inis: Ground+Static+Building or
 // Ground+Static+Bridge, written once and never updated; the recorder lists them over several frames that name no series,
 // so only the final frame removes them. A structure within kStructureDedupeMetres of a live ground object (a
-// GroundObject the core already has a position for) is skipped: the game made that one a real object.
+// GroundObject the core already has a position for) is skipped: the game made that one a real object. A destroyed
+// marker for a written structure writes its Destroyed event and an explosion, and removes it.
 // A transform line writes only the T components whose text changed since the last line of that object (ACMI 2.2 lets a
 // component stay empty); every '|' is kept, and an object's first line is complete.
 // A frame says which series it lists completely (end_frame's series_mask), so a 1 Hz series is not removed in between.
@@ -132,6 +133,7 @@ struct TacviewCoreStats {
     uint64_t bad_samples = 0;   // objects skipped for a non-finite value
     uint64_t structures = 0;          // structures written
     uint64_t structures_skipped = 0;  // structures not written: a live ground object stands there
+    uint64_t structures_destroyed = 0;
 };
 
 class TacviewCore {
@@ -185,8 +187,10 @@ private:
         uint64_t seq;
         uint32_t id;
         uint64_t seen;
+        double pos[3];  // where an explosion goes
     };
-    std::vector<Static> statics_;  // structures: kept out of objs_, so their thousands never slow the per-object lookup
+    std::vector<Static> statics_;
+    std::vector<uint32_t> dead_statics_;  // destroyed in the current frame: removed at its end  // structures: kept out of objs_, so their thousands never slow the per-object lookup
     std::unordered_map<uint64_t, size_t> static_index_;  // seq to index in statics_
     void add_structure(const TacviewRec& r);
     std::string pending_;  // transform lines of the current frame

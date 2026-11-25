@@ -22,7 +22,12 @@ constexpr size_t kSlotGet = 0x08, kSlotRelease = 0x0c;
 constexpr DWORD kSmTimestamp = 0x51d220e5, kSmImageSize = 0xc1000;
 constexpr DWORD kRvaMsn = 0xa67c0, kRvaMsnVtable = 0x8b924;
 constexpr size_t kOffTargets = 0x2e30, kOffAreaCount = 0x690, kOffAreaArray = 0x694, kAreaBytes = 0x118;
-constexpr size_t kOffAreaActive = 0x02, kOffAreaPos = 0x98;
+constexpr size_t kOffAreaActive = 0x02, kOffAreaPos = 0x98, kOffAreaPlacedCount = 0xec, kOffAreaPlaced = 0xf8;
+// A placed-object record (0x80 bytes): damage 0..100 (100 destroyed), offset from the area (already turned), the plain
+// model it is drawn with, and the live object made instead. See lazy-sf2-recon: recon-notes §20.6.
+constexpr size_t kOffPlacedDamage = 0x04, kOffPlacedOffset = 0x2c, kOffPlacedModel = 0x5c, kOffPlacedObject = 0x64;
+constexpr int16_t kDamageDestroyed = 100;
+constexpr int kMaxPlaced = 4096;
 constexpr int kMaxAreas = 8192;
 constexpr double kMaxCoord = 1e7;
 
@@ -59,7 +64,7 @@ void release_msn(void* sys, void** obj) {
 }
 
 // 0 ok, 2 unexpected memory. SEH only.
-int read_areas(HMODULE sm, const BYTE* msn, double (*out)[2], size_t cap, size_t* n) {
+int read_areas(HMODULE sm, const BYTE* msn, GameArea* out, size_t cap, size_t* n) {
     __try {
         if (*reinterpret_cast<void* const*>(msn) != at_rva(sm, kRvaMsnVtable)) return 2;
         const BYTE* owner = msn + kOffTargets;
@@ -80,8 +85,15 @@ int read_areas(HMODULE sm, const BYTE* msn, double (*out)[2], size_t cap, size_t
                 std::fabs(pos[1]) > kMaxCoord)
                 return 2;
             if (active && k < cap) {
-                out[k][0] = pos[0];
-                out[k][1] = pos[1];
+                int placed_n = 0;
+                const void* const* placed = nullptr;
+                std::memcpy(&placed_n, rec + kOffAreaPlacedCount, sizeof(placed_n));
+                std::memcpy(&placed, rec + kOffAreaPlaced, sizeof(placed));
+                if (placed_n < 0 || placed_n > kMaxPlaced || (placed_n > 0 && !placed)) return 2;
+                out[k].x = pos[0];
+                out[k].y = pos[1];
+                out[k].placed = placed;
+                out[k].n_placed = placed_n;
                 ++k;
             }
         }
@@ -94,7 +106,7 @@ int read_areas(HMODULE sm, const BYTE* msn, double (*out)[2], size_t cap, size_t
 
 }  // namespace
 
-MissionAreas mission_active_areas(double (*out)[2], size_t cap, size_t* n) {
+MissionAreas mission_active_areas(GameArea* out, size_t cap, size_t* n) {
     *n = 0;
     static bool exe_checked = false, exe_ok = false;
     HMODULE exe = GetModuleHandleW(nullptr);
@@ -133,6 +145,46 @@ MissionAreas mission_active_areas(double (*out)[2], size_t cap, size_t* n) {
     }
     release_msn(sys, &msn);
     return result;
+}
+
+bool mission_placed(const GameArea& a, int i, PlacedView* out) {
+    if (i < 0 || i >= a.n_placed) return false;
+    __try {
+        const BYTE* rec = static_cast<const BYTE*>(a.placed[i]);
+        if (!rec) return false;
+        float off[2];
+        const void* model = nullptr;
+        const void* object = nullptr;
+        std::memcpy(off, rec + kOffPlacedOffset, sizeof(off));
+        std::memcpy(&model, rec + kOffPlacedModel, sizeof(model));
+        std::memcpy(&object, rec + kOffPlacedObject, sizeof(object));
+        // The game adds the offset to the area position in float (SingleMission +0x3a2c0).
+        out->x = static_cast<double>(off[0] + static_cast<float>(a.x));
+        out->y = static_cast<double>(off[1] + static_cast<float>(a.y));
+        out->model = model != nullptr;
+        out->object = object != nullptr;
+        out->record = rec;
+        return std::isfinite(out->x) && std::isfinite(out->y);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+size_t mission_poll_destroyed(const void* const* records, size_t n, uint8_t* dead, uint32_t* out, size_t cap) {
+    size_t k = 0;
+    for (size_t i = 0; i < n && k < cap; ++i) {
+        if (dead[i]) continue;
+        int16_t damage = 0;
+        __try {
+            std::memcpy(&damage, static_cast<const BYTE*>(records[i]) + kOffPlacedDamage, sizeof(damage));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            damage = 0;
+        }
+        if (damage < kDamageDestroyed) continue;
+        dead[i] = 1;
+        out[k++] = static_cast<uint32_t>(i);
+    }
+    return k;
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

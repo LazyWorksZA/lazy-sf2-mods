@@ -47,6 +47,12 @@ constexpr size_t kStructureHeadroom = kWorldWalkMaxRecords + 256;
 // within their radius plus this of the player's first position, and those with a live ground object inside them.
 constexpr double kFallbackRangeMetres = 30000.0;
 constexpr size_t kMaxMissionAreas = 4096;  // the game's set, and the theatre's areas we can pick from
+constexpr size_t kMaxPlacedPerArea = 4096;
+// A mark and the game's placed object are the same when this close (the game sums in float).
+constexpr double kPlacedMatchMetres = 2.0;
+// Placed structures the game drew are checked for destruction this often (game seconds), at most this many per frame.
+constexpr double kDestroyedPollSeconds = 1.0;
+constexpr size_t kMaxDestroyedPerFrame = 256;
 
 static_assert(static_cast<uint8_t>(WeaponClass::Missile) == acmi::TacviewRec::kMissile &&
                   static_cast<uint8_t>(WeaponClass::Bomb) == acmi::TacviewRec::kBomb &&
@@ -72,14 +78,14 @@ std::string g_theater;       // the theatre id of this recording; empty when the
 bool g_aero_pending = false;  // this recording's aerodromes are not written yet
 bool g_struct_pending = false;  // this recording's structures are not all written yet
 std::shared_ptr<const StructureList> g_struct_list;  // held while the chunks go out (the map keeps it too)
-bool g_struct_picked = false;    // g_area_on is filled for g_struct_list
-size_t g_struct_area = 0;        // the next area to write, and the next mark in it
-size_t g_struct_mark = 0;
+bool g_struct_picked = false;    // g_mark_write is filled for g_struct_list
+size_t g_struct_mark = 0;        // the next mark to look at
 size_t g_struct_written = 0;
 bool g_ground_walked = false;    // a world frame that lists the ground objects is in the ring
 double g_struct_wait_from = 0;   // game time of this recording's first step; NaN before it
 // Fixed buffers, so the game thread never allocates for them.
-double g_active_xy[kMaxMissionAreas][2];  // the game's populated areas, read at the start
+GameArea g_game_areas[kMaxMissionAreas];  // the single mission's populated areas, read at the start
+double g_active_xy[kMaxMissionAreas][2];
 size_t g_active_n = 0;
 MissionAreas g_active_src = MissionAreas::NotSingle;
 double g_ground_xy[kWorldWalkMaxRecords][2];  // the first ground walk's GroundObject positions (for the fallback)
@@ -87,6 +93,16 @@ size_t g_ground_n = 0;
 bool g_player_known = false;
 double g_player_xy[2] = {};
 uint8_t g_area_on[kMaxMissionAreas];
+uint8_t g_mark_write[kMaxStructures];  // per mark of the theatre: write it
+PlacedView g_placed[kMaxPlacedPerArea];
+double g_placed_xy[kMaxPlacedPerArea][2];
+// The written structures the game drew as plain models: their records, polled for destruction.
+const void* g_watch_rec[kMaxStructures];
+uint32_t g_watch_seq[kMaxStructures];
+uint8_t g_watch_dead[kMaxStructures];
+size_t g_watch_n = 0;
+uint32_t g_watch_hits[kMaxDestroyedPerFrame];
+double g_last_poll = 0;
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -303,12 +319,19 @@ StartResult start_recording(uint32_t epoch) {
     g_struct_pending = !g_theater.empty();
     g_struct_list.reset();
     g_struct_picked = false;
-    g_struct_area = g_struct_mark = g_struct_written = 0;
+    g_struct_mark = g_struct_written = 0;
+    g_watch_n = 0;
+    g_last_poll = -1e300;
     g_ground_walked = false;
     g_ground_n = 0;
     g_player_known = false;
     g_struct_wait_from = std::nan("");
-    g_active_src = g_struct_pending ? mission_active_areas(g_active_xy, kMaxMissionAreas, &g_active_n) : MissionAreas::NotSingle;
+    g_active_n = 0;
+    g_active_src = g_struct_pending ? mission_active_areas(g_game_areas, kMaxMissionAreas, &g_active_n) : MissionAreas::NotSingle;
+    for (size_t i = 0; i < g_active_n; ++i) {
+        g_active_xy[i][0] = g_game_areas[i].x;
+        g_active_xy[i][1] = g_game_areas[i].y;
+    }
     g_table_empty.store(false, std::memory_order_relaxed);
     g_recording = true;
     g_epoch = epoch;
@@ -388,8 +411,10 @@ void write_world_frame(double t) {
     }
 }
 
-// Picks the areas to record, once per recording, and logs which rule did it. Game thread.
-void pick_structure_areas(const StructureList& list) {
+// Decides, once per recording, which marks to write, and logs how. In a single mission each mark of a populated area is
+// matched to the game's placed object by position: written only when the game drew it as a plain model (not when it
+// made a live object, or skipped it for its year), and then watched for destruction. Game thread.
+void pick_structures(const StructureList& list) {
     const size_t n = std::min(list.areas.size(), kMaxMissionAreas);
     acmi::AreaPick pick;
     pick.use_active = g_active_src == MissionAreas::Read;
@@ -402,12 +427,63 @@ void pick_structure_areas(const StructureList& list) {
     pick.ground = g_ground_xy;
     pick.n_ground = g_ground_n;
     const size_t picked = acmi::pick_areas(list.areas.data(), n, pick, g_area_on);
+    std::memset(g_mark_write, 0, sizeof(g_mark_write));
+    size_t drawn = 0, live = 0, not_drawn = 0, unmatched = 0;
+    for (size_t a = 0; a < n; ++a) {
+        if (!g_area_on[a]) continue;
+        const size_t first = list.first[a], end = std::min<size_t>(list.first[a + 1], kMaxStructures);
+        const GameArea* g = nullptr;
+        if (pick.use_active)
+            for (size_t k = 0; k < g_active_n && !g; ++k)
+                if (std::fabs(g_game_areas[k].x - list.areas[a].x) <= acmi::kAreaMatchMetres &&
+                    std::fabs(g_game_areas[k].y - list.areas[a].y) <= acmi::kAreaMatchMetres)
+                    g = &g_game_areas[k];
+        size_t np = 0;
+        if (g)
+            for (int i = 0; i < g->n_placed && np < kMaxPlacedPerArea; ++i)
+                if (mission_placed(*g, i, &g_placed[np])) {
+                    g_placed_xy[np][0] = g_placed[np].x;
+                    g_placed_xy[np][1] = g_placed[np].y;
+                    ++np;
+                }
+        size_t hint = 0;
+        for (size_t m = first; m < end; ++m) {
+            if (!g) {
+                g_mark_write[m] = 1;
+                continue;
+            }
+            const size_t i = acmi::find_near(g_placed_xy, np, list.marks[m].x, list.marks[m].y, kPlacedMatchMetres, hint);
+            if (i >= np) {
+                g_mark_write[m] = 1;  // not found in the game's list: written, but not watched
+                ++unmatched;
+                continue;
+            }
+            hint = i + 1;
+            if (g_placed[i].object) {
+                ++live;
+            } else if (!g_placed[i].model) {
+                ++not_drawn;
+            } else {
+                g_mark_write[m] = 1;
+                ++drawn;
+                if (g_watch_n < kMaxStructures) {
+                    g_watch_rec[g_watch_n] = g_placed[i].record;
+                    g_watch_seq[g_watch_n] = static_cast<uint32_t>(m + 1);
+                    g_watch_dead[g_watch_n] = 0;
+                    ++g_watch_n;
+                }
+            }
+        }
+    }
     g_struct_picked = true;
     if (pick.use_active)
-        LOG("tacview: structures from the %zu target areas the single mission populated (%zu matched)", g_active_n, picked);
+        LOG("tacview: structures from the %zu target areas the single mission populated (%zu matched): %zu drawn by the "
+            "game, %zu left out as live objects, %zu not drawn this flight, %zu not found in the mission",
+            g_active_n, picked, drawn, live, not_drawn, unmatched);
     else
-        LOG("tacview: structures from %zu target areas near the player's start or holding live ground objects (%s)", picked,
-            g_active_src == MissionAreas::NotSingle ? "not a single mission" : "the mission's own set is unavailable");
+        LOG("tacview: structures from %zu target areas near the player's start or holding live ground objects (%s); "
+            "their destruction is not tracked",
+            picked, g_active_src == MissionAreas::NotSingle ? "not a single mission" : "the mission's own set is unavailable");
 }
 
 // The theatre's placed structures, one chunk per step, after the first ground walk. The chunks name no series, so
@@ -423,67 +499,68 @@ void write_structures(double t) {
         }
     }
     const StructureList& list = *g_struct_list;
-    if (!g_struct_picked) pick_structure_areas(list);
-    const size_t areas = std::min(list.areas.size(), kMaxMissionAreas);
-    // The next chunk: up to kStructuresPerFrame marks of the picked areas, from the cursor on.
-    size_t n = 0, area = g_struct_area, mark = g_struct_mark;
-    while (n < kStructuresPerFrame && area < areas && g_struct_written + n < kMaxStructures) {
-        const size_t end = list.first[area + 1];
-        if (!g_area_on[area] || mark >= end) {
-            ++area;
-            mark = area < areas ? list.first[area] : 0;
-            continue;
-        }
-        const size_t take = std::min({kStructuresPerFrame - n, end - mark, kMaxStructures - g_struct_written - n});
-        n += take;
-        mark += take;
-    }
-    const bool done = area >= areas || g_struct_written + n >= kMaxStructures;
+    if (!g_struct_picked) pick_structures(list);
+    const size_t marks = std::min(list.marks.size(), kMaxStructures);
+    size_t n = 0, mark = g_struct_mark;
+    for (; mark < marks && n < kStructuresPerFrame; ++mark) n += g_mark_write[mark];
     if (n > 0) {
         if (!g_writer->can_take(n + kStructureHeadroom) || !g_writer->begin_frame(n)) return;  // not urgent: next step
         size_t used = 0;
-        area = g_struct_area;
-        mark = g_struct_mark;
-        while (used < n) {
-            const size_t end = list.first[area + 1];
-            if (!g_area_on[area] || mark >= end) {
-                ++area;
-                mark = area < areas ? list.first[area] : 0;
-                continue;
-            }
-            const StructureMark& m = list.marks[mark];
-            acmi::TacviewRec& r = g_writer->slot(used);
+        for (size_t m = g_struct_mark; used < n; ++m) {
+            if (!g_mark_write[m]) continue;
+            const StructureMark& sm = list.marks[m];
+            acmi::TacviewRec& r = g_writer->slot(used++);
             r.kind = acmi::TacviewRec::kObject;
-            r.obj_class = m.bridge ? acmi::TacviewRec::kBridge : acmi::TacviewRec::kStructure;
+            r.obj_class = sm.bridge ? acmi::TacviewRec::kBridge : acmi::TacviewRec::kStructure;
             r.side = 0;
             r.is_player = 0;
             r.parent_class = acmi::TacviewRec::kAircraft;
             r.destroyed = 0;
-            r.seq = mark + 1;  // the mark's index: unique and stable within the theatre
+            r.seq = m + 1;  // the mark's index: unique and stable within the theatre
             r.parent_seq = 0;
             r.t = t;
-            r.pos[0] = m.x;
-            r.pos[1] = m.y;
-            r.pos[2] = m.z;
+            r.pos[0] = sm.x;
+            r.pos[1] = sm.y;
+            r.pos[2] = sm.z;
             r.ang[0] = 0;
-            r.ang[1] = static_cast<float>(m.heading);
+            r.ang[1] = static_cast<float>(sm.heading);
             r.ang[2] = 0;
-            const size_t k = acmi::utf8_prefix(m.name, acmi::kRecNameChars);
-            std::memcpy(r.name, m.name.data(), k);
+            const size_t k = acmi::utf8_prefix(sm.name, acmi::kRecNameChars);
+            std::memcpy(r.name, sm.name.data(), k);
             r.name[k] = '\0';
             r.type[0] = '\0';
-            ++used;
-            ++mark;
         }
         g_writer->commit_frame(n, t, 0);
         g_struct_written += n;
-        g_struct_area = area;
-        g_struct_mark = mark;
     }
-    if (!done) return;
-    LOG("tacview: %zu structures queued%s", g_struct_written, g_struct_written >= kMaxStructures ? " (the cap)" : "");
+    g_struct_mark = mark;
+    if (mark < marks) return;
+    LOG("tacview: %zu structures queued%s", g_struct_written, list.marks.size() > kMaxStructures ? " (the cap)" : "");
     g_struct_pending = false;
     g_struct_list.reset();
+}
+
+// The drawn structures the game has destroyed since the last poll: a Destroyed marker each, in a frame of their own.
+// Game thread; only after every chunk is out (a marker for a structure not yet written would be ignored).
+void poll_destroyed_structures(double t) {
+    if (g_struct_pending || g_watch_n == 0) return;
+    if (t >= g_last_poll && t - g_last_poll < kDestroyedPollSeconds - 1e-9) return;
+    g_last_poll = t;
+    const size_t n = mission_poll_destroyed(g_watch_rec, g_watch_n, g_watch_dead, g_watch_hits, kMaxDestroyedPerFrame);
+    if (n == 0) return;
+    if (!g_writer->begin_frame(n)) {  // counted as dropped; tried again at the next poll
+        for (size_t i = 0; i < n; ++i) g_watch_dead[g_watch_hits[i]] = 0;
+        return;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        acmi::TacviewRec& r = g_writer->slot(i);
+        r.kind = acmi::TacviewRec::kObject;
+        r.obj_class = acmi::TacviewRec::kStructure;
+        r.destroyed = acmi::TacviewRec::kDestroyed;
+        r.seq = g_watch_seq[g_watch_hits[i]];
+        r.t = t;
+    }
+    g_writer->commit_frame(n, t, 0);
 }
 
 // A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
@@ -532,6 +609,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         }
     }
     if (g_struct_pending) write_structures(t);
+    poll_destroyed_structures(t);
 }
 
 }  // namespace
