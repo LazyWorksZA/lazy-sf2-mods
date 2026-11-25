@@ -12,13 +12,13 @@ struct Monitor {
     bool primary = false;
 };
 
-// All active monitors, sorted by number.
+/// <summary>All active monitors, sorted by number.</summary>
 std::vector<Monitor> list();
 
-// Rect of monitor `number`; false if there is no such monitor (e.g. unplugged).
+/// <summary>Rect of monitor `number`; false if there is no such monitor (e.g. unplugged).</summary>
 bool rect_of(int number, RECT* out);
 
-// Number of the monitor containing most of `hwnd`, or 0.
+/// <summary>Number of the monitor containing most of `hwnd`, or 0.</summary>
 int number_of_window(HWND hwnd);
 
 }  // namespace lazysf2::monitors
