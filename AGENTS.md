@@ -15,8 +15,8 @@ This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a
    - Notes describe behaviour and give RVAs. Paraphrase instead of pasting decompiled code (EULA 3(d)).
 2. **Never patch the game on disk.** No byte patches to the exe or DLLs, and no edits to game ini or cat files that you leave behind.
    - The mod may only add its own files to the game folder, and must list them in `lazysf2.manifest.txt` (see `scripts/install.ps1`). Running `scripts/uninstall.ps1` must return the folder to stock.
-   - Temporary experiments on a game file must be restored from `G:\SF2-backup`, then hash-checked.
-3. **Test against the original install. Don't run a copy of the game.** EULA 3(b) allows copies only as backups. The backups in `G:\SF2-backup\` exist only to restore files.
+   - Temporary experiments on a game file must be restored from `F:\SF2-backup` (a second copy is in `G:\SF2-backup`), then hash-checked.
+3. **Test against the original install. Don't run a copy of the game.** EULA 3(b) allows copies only as backups. The backups in `F:\SF2-backup\` and `G:\SF2-backup\` exist only to restore files.
 4. **Stay compatible with DXVK, but don't vendor it.** Don't assume we own `d3d9.dll`, `dxgi.dll` or the `d3d10*.dll` files. Hook the COM objects the game actually gets, rather than replacing system DLLs.
    - DXVK isn't part of this project: never commit it, ship it, or install it with the mod. We only make sure the mod works when a player has installed it.
    - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `lazy-sf2-recon`, `recon-notes.md` §15).
