@@ -46,6 +46,14 @@ void TacviewCore::add(const TacviewRec& r) {
             break;
         }
     }
+    if (r.destroyed) {
+        if (s && !s->destroyed) {
+            s->destroyed = true;
+            append_event_destroyed(events_, s->id);
+            ++stats_.destroyed_events;
+        }
+        return;  // not seen in this frame: end_frame removes it
+    }
     if (!std::isfinite(r.t) || !finite3(r.pos) || !finite3(r.ang)) {
         ++stats_.bad_samples;
         if (s) s->seen = frame_no_;  // still present: no remove and re-add for one bad sample
@@ -55,7 +63,7 @@ void TacviewCore::add(const TacviewRec& r) {
     if (is_new) {
         const uint32_t id = weapon ? kWeaponIdBase + static_cast<uint32_t>(r.seq)
                                    : (r.is_player ? kPlayerId : kOtherIdBase + static_cast<uint32_t>(r.seq));
-        objs_.push_back({r.seq, r.obj_class, r.side, id, -1e300, 0});
+        objs_.push_back({r.seq, r.obj_class, r.side, false, id, -1e300, 0});
         s = &objs_.back();
     }
     s->seen = frame_no_;  // present in this frame, even if its transform is skipped below
@@ -140,7 +148,7 @@ void TacviewCore::end_frame(double t, std::string& out) {
         }
     }
     ++frame_no_;
-    if (removals.empty() && pending_.empty()) return;
+    if (removals.empty() && pending_.empty() && events_.empty()) return;
     if (!std::isfinite(t)) t = last_t_;
     if (!have_t0_) {
         have_t0_ = true;
@@ -154,8 +162,10 @@ void TacviewCore::end_frame(double t, std::string& out) {
         append_frame(out, ms);
         last_ms_ = ms;
     }
+    out += events_;
     out += removals;
     out += pending_;
+    events_.clear();
     pending_.clear();
 }
 

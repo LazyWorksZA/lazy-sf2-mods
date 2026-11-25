@@ -9,6 +9,8 @@
 //   - keeps frame times monotonic (relative to the first frame) and never writes an empty frame.
 // The player (rec.is_player) has id 1 and Pilot=Player; any other aircraft has id 0x10000 + seq; a weapon has id
 // 0x1000000 + seq (its own sequence numbers, so the two series can never collide).
+// A record with destroyed set is a marker: if that object is known, the core writes "0,Event=Destroyed|id|" before its
+// removal (it is not counted as seen, so the removal follows in the same frame); an unknown object is ignored.
 // A weapon (obj_class other than kAircraft) is written as Weapon+Missile, Weapon+Bomb or Weapon+Rocket, with
 // Parent=<id> when parent_seq names an aircraft, and the parent's coalition and colour when the record has no side.
 // Each class has its own rate limit: aircraft 10 Hz, weapons 20 Hz (weapons move fast).
@@ -37,6 +39,7 @@ struct TacviewRec {
     uint8_t side = 0;        // hooks::AircraftSide
     uint8_t is_player = 0;
     uint8_t obj_class = kAircraft;  // kAircraft, kMissile, kBomb or kRocket
+    uint8_t destroyed = 0;  // a marker, not a sample: the object (seq, class) went inactive; only seq and class are used
     uint64_t seq = 0;         // the tracker's sequence number: unique and never reused within its class
     uint64_t parent_seq = 0;  // weapons: the shooting aircraft's seq, or 0 for none
     double t = 0;      // game time, seconds
@@ -59,6 +62,7 @@ struct TacviewCoreConfig {
 struct TacviewCoreStats {
     uint64_t transforms = 0;
     uint64_t removals = 0;
+    uint64_t destroyed_events = 0;
     uint64_t objects = 0;       // distinct objects described
     uint64_t rate_limited = 0;  // transforms skipped by the rate limit
     uint64_t bad_samples = 0;   // objects skipped for a non-finite value
@@ -91,6 +95,7 @@ private:
         uint64_t seq;
         uint8_t obj_class;
         uint8_t side;
+        bool destroyed;  // its Destroyed event is already written
         uint32_t id;
         double last_t;
         uint64_t seen;  // number of the last frame it was in
@@ -100,6 +105,7 @@ private:
     double min_dt_ = 0, min_dt_weapon_ = 0;
     std::vector<State> objs_;
     std::string pending_;  // transform lines of the current frame
+    std::string events_;   // Destroyed events of the current frame: written before the removals
     uint64_t frame_no_ = 1;
     bool have_t0_ = false;
     double t0_ = 0;

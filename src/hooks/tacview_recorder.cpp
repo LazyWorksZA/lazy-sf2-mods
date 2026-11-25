@@ -24,6 +24,8 @@ namespace {
 constexpr size_t kOffPos = 0x38, kOffAngles = 0x100;  // aircraft object: double[3] position, float[3] angles
 // Weapon object (MissileObject): position double[3] at +0x20; angles float[3] (pitch, heading, roll) at +0xe8.
 constexpr size_t kOffWeaponPos = 0x20, kOffWeaponAngles = 0xe8;
+// Every object: int, 0 once it has finished; its memory stays valid. See lazy-sf2-recon: recon-notes §20.1.3.
+constexpr size_t kOffActive = 0x04;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
 
@@ -60,6 +62,15 @@ bool read_pose(const void* obj, size_t off_pos, size_t off_ang, double pos[3], f
     }
 }
 
+// An object's active flag. True when unreadable, so that the pose read decides. No C++ objects (SEH).
+bool read_active(const void* obj) {
+    __try {
+        return *reinterpret_cast<const volatile int*>(static_cast<const char*>(obj) + kOffActive) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
 struct SnapCtx {
     double t = 0;
     bool wrote = false;
@@ -88,6 +99,17 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = acmi::TacviewRec::kAircraft;
         r.parent_seq = 0;
+        r.destroyed = 0;
+        if (!read_active(list[i].obj)) {
+            // Finished (destroyed): left out of the frame, so the core removes it; the marker adds the Destroyed event.
+            r.kind = acmi::TacviewRec::kObject;
+            r.destroyed = 1;
+            r.is_player = list[i].is_player ? 1 : 0;
+            r.seq = list[i].seq;
+            r.t = c.t;
+            ++used;
+            continue;
+        }
         if (!read_pose(list[i].obj, kOffPos, kOffAngles, r.pos, r.ang)) {
             // Keep the object in the frame with a non-finite pose: the core counts it as seen (no remove and re-add)
             // and skips the transform.
@@ -109,9 +131,13 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.type[t] = '\0';
         ++used;
     }
+    size_t live_weapons = 0;
     for (size_t i = 0; i < nw; ++i) {
+        if (!read_active(wl[i].obj)) continue;  // detonated or burnt out: no event, the core removes it
+        ++live_weapons;
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = wl[i].weapon_class;
+        r.destroyed = 0;
         r.kind = acmi::TacviewRec::kObject;
         r.is_player = 0;
         r.type[0] = '\0';  // weapons have no type field (ring slots are reused)
@@ -131,7 +157,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.name[k] = '\0';
         ++used;
     }
-    g_weapons_live = nw != 0;
+    g_weapons_live = live_weapons != 0;
     g_writer->commit_frame(used, c.t);
     c.wrote = true;
 }

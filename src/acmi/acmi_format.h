@@ -35,6 +35,8 @@ void append_header(std::string& out, const char* reference_time, double ref_lon,
 void append_frame(std::string& out, long long ms);
 /// <summary>"-id\n"</summary>
 void append_removal(std::string& out, uint32_t id);
+/// <summary>"0,Event=Destroyed|id|\n": a global event naming one object (hex id).</summary>
+void append_event_destroyed(std::string& out, uint32_t id);
 /// <summary>
 /// "id,T=Lon|Lat|Alt|Roll|Pitch|Yaw|U|V|Heading" without the newline (the caller may append properties first).
 /// pos is (east, north, up) in metres, ang is (pitch, heading, roll) in radians as the game keeps them:

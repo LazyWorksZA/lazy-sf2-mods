@@ -70,6 +70,12 @@ void append_removal(std::string& out, uint32_t id) {
     out += b;
 }
 
+void append_event_destroyed(std::string& out, uint32_t id) {
+    char b[48];
+    std::snprintf(b, sizeof(b), "0,Event=Destroyed|%x|\n", id);
+    out += b;
+}
+
 void append_transform(std::string& out, uint32_t id, const double pos[3], const float ang[3], const Mapping& m) {
     char idbuf[16];
     std::snprintf(idbuf, sizeof(idbuf), "%x", id);

@@ -1774,6 +1774,54 @@ void tacview_tests() {
         expect(o4.empty(), "tacview: a second empty frame writes nothing");
     }
 
+    // A finished object: it leaves the frame (removal), and a destroyed marker adds the Destroyed event before it.
+    {
+        auto marker = [](uint64_t seq, uint8_t cls, double t) {
+            TacviewRec r = make_rec(seq, false, AircraftSide::Unknown, "", t, 0, 0, 0, 0, 0, 0);
+            r.obj_class = cls;
+            r.destroyed = 1;
+            return r;
+        };
+        auto weapon = [](uint64_t seq, double t) {
+            TacviewRec r = make_rec(seq, false, AircraftSide::Friendly, "AIM-9B", t, 0, 0, 500, 0, 0, 0);
+            r.obj_class = TacviewRec::kMissile;
+            return r;
+        };
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string o1, o2, o3, o4;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 0, 0, 100, 0, 0, 0));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "E", 1.0, 0, 0, 100, 0, 0, 0));
+        core.add(weapon(1, 1.0));
+        core.end_frame(1.0, o1);
+        // Aircraft 2 and the weapon are no longer listed (inactive); only aircraft 2 gets a marker.
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.1, 1, 0, 100, 0, 0, 0));
+        core.add(marker(2, TacviewRec::kAircraft, 1.1));
+        core.end_frame(1.1, o2);
+        const size_t ev = o2.find("0,Event=Destroyed|10002|\n");
+        const size_t rm = o2.find("-10002\n");
+        expect(ev != std::string::npos && rm != std::string::npos && ev < rm,
+               "tacview destroyed: the event is written before the removal");
+        expect(count_of(o2, "-1000001\n") == 1 && count_of(o2, "Event=") == 1,
+               "tacview destroyed: an unlisted weapon is removed with no event");
+        expect(core.live_objects() == 1, "tacview destroyed: only the player is left");
+        // The marker again (the aircraft stays inactive for the rest of the flight), and one for an unknown object.
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.2, 2, 0, 100, 0, 0, 0));
+        core.add(marker(2, TacviewRec::kAircraft, 1.2));
+        core.add(marker(77, TacviewRec::kAircraft, 1.2));
+        core.end_frame(1.2, o3);
+        expect(o3.find("Event=") == std::string::npos && o3.find("-1") == std::string::npos,
+               "tacview destroyed: a repeated or unknown marker writes nothing");
+        // A marker never keeps the object alive: the player's marker removes id 1 too.
+        core.add(marker(1, TacviewRec::kAircraft, 1.3));
+        core.end_frame(1.3, o4);
+        expect(o4.find("0,Event=Destroyed|1|\n") != std::string::npos && o4.find("-1\n") != std::string::npos &&
+                   core.live_objects() == 0 && core.stats().destroyed_events == 2,
+               "tacview destroyed: the player's id is 1, and the event count is kept");
+        std::string ev_line;
+        append_event_destroyed(ev_line, 0x2000a1f);
+        expect(ev_line == "0,Event=Destroyed|2000a1f|\n", "acmi format: Destroyed event line");
+    }
+
     // Weapon type classification and the ring slot size.
     {
         using lazysf2::hooks::WeaponClass;
