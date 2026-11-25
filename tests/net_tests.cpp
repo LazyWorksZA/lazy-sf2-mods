@@ -1571,10 +1571,10 @@ void terrain_tests() {
     std::string h1, h2;
     TacviewCore{cfg}.header(h1, "2026-11-24T20:15:00Z");
     expect(h1 == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,Theater=LazySF2.DESERT\n",
+                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=LazySF2,Theater=LazySF2.DESERT\n",
            "header: Theater= after the title");
     TacviewCore{TacviewCoreConfig{}}.header(h2, "2026-11-24T20:15:00Z");
-    expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2\n") != std::string::npos,
+    expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2,DataSource=") != std::string::npos,
            "header: no Theater= by default");
 }
 
@@ -1589,7 +1589,7 @@ void tacview_tests() {
         std::string out;
         core.header(out, "2026-11-24T20:15:00Z");
         expect(out == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                      "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2\n",
+                      "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2,DataSource=Strike Fighters 2,DataRecorder=LazySF2\n",
                "tacview: header");
         core.add(make_rec(1, true, AircraftSide::Friendly, "F-4E,lead", 100.0, 1000, 2000, 3000, 0.1f, -1.5707964f, 0.2f));
         core.add(make_rec(2, false, AircraftSide::Enemy, "MiG-21", 100.0, 5, 6, 7, 0, 0, 0));

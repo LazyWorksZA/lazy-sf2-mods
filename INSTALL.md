@@ -37,9 +37,11 @@ No game files and no registry keys are changed. Removing these files returns the
 
 ## Tacview terrain
 
-With **Tacview Recording** on, the first flight you record in each theatre also writes that theatre's heightmap (elevation only, no texture) to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre, so Tacview should show the Strike Fighters terrain under the aircraft. The theatres are not to real scale, so each one sits as its own square over open ocean and not over its real place on the map.
+With **Tacview Recording** on, the first flight you record in each theatre also writes that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\` and a ground texture (made from the theatre's own ground tiles, with the runways painted in) to `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2\`. Every recording also marks the theatre's airfields by name. The theatres are not to real scale, so each one sits as its own square over open ocean and not over its real place on the map.
 
-If you don't see it, check that Tacview's terrain or custom elevation options are on. This is unverified: it hasn't been tried in Tacview yet. These files are outside the game folder, so uninstalling the mod leaves them. You can delete the `LazySF2` folder yourself.
+In Tacview, set the terrain layer set to **Auto** (or **Real World**). Recordings say they come from Strike Fighters 2, and Auto then shows the Real World layers, where this terrain lives. If Tacview is set to another simulator's layers, such as BMS, the texture is hidden. Tacview reads new terrain files only when it starts, so restart it after your first flight in a new theatre.
+
+These files are outside the game folder, so uninstalling the mod leaves them. You can delete the two `LazySF2` folders yourself.
 
 ## How to tell it's working
 
