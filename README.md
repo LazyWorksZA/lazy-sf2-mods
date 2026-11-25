@@ -89,7 +89,7 @@ Smaller items:
 - Ramp starts, using the airfields' parking spots.
 - Esc in flight pauses first instead of ending the flight.
 - Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
-- Tacview: move old recordings to a theatre's current position; non-ASCII aerodrome names.
+- Tacview: non-ASCII aerodrome names show as "?".
 
 **Later**
 
