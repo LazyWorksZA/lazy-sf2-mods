@@ -1,12 +1,5 @@
-// Display mode at the DXGI layer. In Borderless mode the game's exclusive-fullscreen calls (SetFullscreenState,
-// ResizeTarget and friends; see lazy-sf2-recon: recon-notes section 4.3) become no-ops so the swap chain stays windowed
-// inside the monitor-sized popup. In Fullscreen mode everything passes through unchanged.
-//
-// The mode can change while the game runs: dxgi_apply_display_mode() moves the existing swap chain into or out
-// of exclusive mode and must run on the game window's thread.
-//
-// We hook the functions behind the COM vtables of whatever dxgi.dll the game loads, so this works the same
-// with the system DXGI and with DXVK.
+// Display mode at the DXGI layer: in Borderless the game's exclusive-fullscreen calls become no-ops. Hooks the COM
+// vtables of whatever dxgi.dll is loaded (system or DXVK). See lazy-sf2-recon: recon-notes §4.3.
 #include <windows.h>
 
 #include <d3d10.h>
@@ -181,10 +174,8 @@ HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT
     return hr;
 }
 
-// IUnknown::Release is vtable slot 2. When the game's final Release returns 0 the object is gone, so we drop
-// our pointer. No locks and no allocation: Release can run on any thread, even under the loader lock at exit.
-// After the original returns 0 `self` is only compared, never used. The swap chain and the factory may share one
-// Release function (DXVK can) and MinHook allows one hook per address, so each detour checks both pointers.
+// Release is vtable slot 2: drop our pointer when the game's last reference goes. No locks or allocation (any thread,
+// maybe the loader lock); `self` is only compared. The swap chain and factory may share one Release (DXVK).
 constexpr int kReleaseSlot = 2;
 using Release_t = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
 Release_t o_SwapRelease = nullptr;

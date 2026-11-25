@@ -15,10 +15,8 @@ namespace {
 using LoadLibraryExW_t = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 LoadLibraryExW_t o_LoadLibraryExW = nullptr;
 
-// May run under the loader lock (DLLs loading other DLLs during start-up), so handlers must not
-// call into the shell, COM or anything else that can block. In particular they must not call
-// config::display_mode(); hooks that depend on it check it when they are called instead. The aircraft tracker only
-// peeks at the Tacview Recording setting (config::tacview_recording_peek), which never loads anything.
+// May run under the loader lock: handlers must not call the shell, COM or anything that can block, and must not
+// read settings (config::display_mode()); the aircraft tracker only peeks at the Tacview setting.
 void notify() {
     dxgi_on_modules_loaded();  // behaves as stock unless the display mode is Borderless
     input_on_modules_loaded();  // keyboard Windows key always; mouse only in Cursor mode

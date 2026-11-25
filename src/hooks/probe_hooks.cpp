@@ -1,10 +1,5 @@
-// Object probe (developer tool, multiplayer go/no-go experiment). Inert unless the environment
-// variable LAZYSF2_PROBE_DIR names a folder.
-//
-// It builds on the aircraft tracker (aircraft_track.cpp, which owns the AircraftObject.dll hooks, the table and
-// the player rule). On Ctrl+Shift+D it dumps each object's memory and one level of the heap blocks it points to into that
-// folder, so position and velocity fields can be found offline. Nothing is written to the game
-// folder, and nothing is hooked or logged when the variable is not set.
+// Object probe (developer tool): inert unless LAZYSF2_PROBE_DIR names a folder. Ctrl+Shift+D dumps live aircraft
+// object memory there; also starts the other developer features. Nothing is written to the game folder.
 #include <windows.h>
 
 #include <atomic>

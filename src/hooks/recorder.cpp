@@ -1,11 +1,5 @@
-// Recorder (developer tool, part of the probe). Inert unless the probe is on.
-//
-// Ctrl+Shift+R starts and stops a recording of the player's aircraft: every player step (the sim "after Update"
-// callback) appends one RecSample to a preallocated buffer. A recording ends on the hotkey, after 180 s of game
-// time, or when the buffer is full (180 x 120 samples). It only reads the aircraft.
-//
-// Threads: the hotkey thread only sets g_toggle_request; everything else runs on the game thread, so there are
-// no locks. File format of rec_NNN.bin: see hooks.h (RecSample).
+// Recorder (developer tool, part of the probe): Ctrl+Shift+R records the player's aircraft each player step for up
+// to 180 s. Game thread only; the hotkey thread just sets a request. File format: see hooks.h (RecSample).
 #include <windows.h>
 
 #include <atomic>

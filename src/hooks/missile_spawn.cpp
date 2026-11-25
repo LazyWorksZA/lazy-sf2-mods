@@ -1,14 +1,5 @@
-// Missile spawn test (developer tool, part of the object probe; see probe_hooks.cpp). Inert unless
-// the probe is on: the MissileObject constructor hook is only installed then, and the hotkey
-// (Ctrl+Shift+M) lives in the probe's hotkey thread, which only exists then.
-//
-// The constructor hook learns which weapon data ids the game uses. On the hotkey, the next
-// Present (the game's main thread) asks the game's object manager to create one missile of the
-// most recently seen id, 200 m ahead of the player, and then follows it for up to 20 s, to see
-// whether it flies on its own. Nothing here destroys the missile.
-//
-// Calls into the game are __thiscall; the function pointers use the repo's __fastcall(self, edx,
-// ...) pattern. The callee cleans the stack arguments, as __fastcall does for the ones on the stack.
+// Missile spawn test (developer tool, part of the probe): creates one missile ahead of the player on the next
+// Present and follows it for 20 s. Game calls are __thiscall, called through the repo's __fastcall pattern.
 #include <windows.h>
 
 #include <atomic>
@@ -31,7 +22,7 @@ enum State { kIdle = 0, kRequested = 1, kFollowing = 2 };
 
 constexpr DWORD kAircraftTimestamp = 0x51d220bd, kAircraftImageSize = 0xc2000;
 constexpr DWORD kMissileTimestamp = 0x51d220d1, kMissileImageSize = 0x46000;
-constexpr DWORD kMissileCtorRva = 0x4fb0;  // void* __thiscall ctor(this, const uint32_t* desc)  (ret 4)
+constexpr DWORD kMissileCtorRva = 0x4fb0;  // MissileObject ctor
 constexpr DWORD kObjServiceRva = 0xb7b88;  // AircraftObject.dll global: the OBJ interface pointer
 constexpr DWORD kClassIdRva = 0xa7700;     // AircraftObject.dll global: MissileObject class id (int)
 constexpr DWORD kGroupIdRva = 0xa7704;     // AircraftObject.dll global: MissileGroup group id (int)

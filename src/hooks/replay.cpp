@@ -1,14 +1,5 @@
-// Replay with network-style smoothing (developer tool, part of the probe). Inert unless the probe is on.
-//
-// Ctrl+Shift+T replays the latest recording (recorder.cpp) onto the AI aircraft nearest to the player as if
-// it arrived over a network: one sample per feed period (60, 10, 5 or 2 Hz; Ctrl+Shift+Y cycles) counts as
-// received, and the receiver shows the state at render time t - delay (Hermite interpolation, dead reckoning
-// past the newest sample, decaying correction offset). The target is flagged REMOTEOBJECT, so we are the only
-// writer. Math is in replay_math.h. Metrics compare what we wrote with the recording once per game second.
-//
-// Threads: the hotkey thread only sets g_toggle_request and g_rate_idx (atomics). Everything else runs on
-// the game thread in the sim "after Update" callback. Nothing is logged under the probe's lock, and nothing
-// is allocated per step.
+// Replay with network-style smoothing (developer tool, part of the probe): replays the latest recording onto the
+// nearest AI aircraft as if received over a network. Math is in replay_math.h; game thread only (atomics from hotkeys).
 #include <windows.h>
 
 #include <atomic>

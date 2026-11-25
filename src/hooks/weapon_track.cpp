@@ -1,17 +1,5 @@
-// Weapon tracker: follows missiles, bombs and rockets in flight (MissileObject.dll) for the Tacview recorder.
-// Same enable rule, install decisions and reload handling as the aircraft tracker (aircraft_track.cpp).
-//
-// Hooked (fixed RVAs, July 2013 build only):
-//  - the release call (+0x50e0), a method of the object's second interface (this = object + 0x14). A weapon is
-//    tracked when it returns with a null "attached to" argument, so pylon stores never enter the table.
-//  - the scalar deleting destructor (+0xa7f0). The entry is removed before the original runs, so the recorder's
-//    sampler (which holds the table lock shared) never sees an object being freed.
-// MissileObject's constructor (+0x4fb0) is NOT hooked here: missile_spawn.cpp owns it (MinHook allows one hook
-// per address). A weapon created without a release call (the probe's spawn test) is not tracked.
-//
-// Read per weapon at release: data type name and type, and the shooter (matched against the aircraft table by
-// address; an unknown pointer gives no parent). Read by the recorder at sample time with SEH guards: flags,
-// position, angles.
+// Weapon tracker: follows missiles, bombs and rockets in flight for the Tacview recorder. Same enable rule and
+// reload handling as aircraft_track.cpp. Fixed RVAs, July 2013 build only.
 #include <windows.h>
 
 #include <atomic>
@@ -30,8 +18,8 @@ namespace lazysf2::hooks {
 namespace {
 
 constexpr DWORD kMissileTimestamp = 0x51d220d1, kMissileImageSize = 0x46000;
-constexpr DWORD kReleaseRva = 0x50e0;  // void __thiscall release(this = object + 0x14, int* attached_to)  (ret 4)
-constexpr DWORD kDtorRva = 0xa7f0;     // void* __thiscall scalar_deleting_dtor(this, byte flags)  (ret 4)
+constexpr DWORD kReleaseRva = 0x50e0;  // MissileObject release call
+constexpr DWORD kDtorRva = 0xa7f0;     // MissileObject scalar deleting dtor
 // Flag-mask globals (FRIENDLY, ENEMY; no NEUTRAL in this module).
 constexpr DWORD kFriendlyMaskRva = 0x40588;
 constexpr DWORD kEnemyMaskRva = 0x4058c;
@@ -102,6 +90,7 @@ bool safe_read_u32(const void* p, uint32_t* out) {
     }
 }
 
+// Track only releases with no attached station, so pylon stores never enter the table.
 void __fastcall h_Release(void* self, void* edx, int* attached) {
     o_Release(self, edx, attached);
     if (attached) return;  // attached to a station: carried, not in flight
@@ -146,8 +135,8 @@ void __fastcall h_Release(void* self, void* edx, int* attached) {
     }
 }
 
+// Remove the entry before the original runs, so the sampler (shared lock) never sees an object being freed.
 void* __fastcall h_Dtor(void* self, void* edx, uint32_t flags) {
-    // Remove first (see the file comment).
     size_t live = 0;
     bool removed = false;
     AcquireSRWLockExclusive(&g_lock);
@@ -198,6 +187,7 @@ bool hooks_carry_patch(HMODULE m) {
     return *static_cast<const BYTE*>(at_rva(m, kReleaseRva)) == 0xE9;  // MinHook writes a JMP rel32
 }
 
+// MissileObject's ctor is hooked by missile_spawn.cpp, not here (one hook per address).
 bool install_for(HMODULE m) {
     remove_weapon_hooks(m);  // stale entries of an earlier load at this base
     clear_table();

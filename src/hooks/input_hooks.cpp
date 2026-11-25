@@ -1,14 +1,5 @@
-// DirectInput hooks: the Windows key in Borderless, and the "Mouse Pointer" setting.
-//
-// Keyboard: in Borderless the game's DISCL_NOWINKEY cooperative flag is dropped so the Start menu works.
-// Mouse ("Match the Windows cursor", the default): the mouse device is made non-exclusive, the game's own
-// X/Y delta records are dropped, and before each per-frame read the game's pointer is set to the Windows
-// cursor scaled to the game's cursor space. The Windows cursor is hidden over the game window.
-// See lazy-sf2-recon: recon-notes (DirectInput).
-//
-// Both settings are decided when the hooks are called, so Options can change them while the game runs;
-// input_apply_settings() re-applies the devices' cooperative levels. The read hook is at a fixed RVA, so
-// it is only installed on the exact DirectInput.dll build we analysed; without it the mouse stays stock.
+// DirectInput hooks: Windows key in Borderless, and the "Mouse Pointer" (Cursor) setting. Settings are read when
+// the hooks run, so Options can change them live. See lazy-sf2-recon: recon-notes §10.
 #include <windows.h>
 
 #define DIRECTINPUT_VERSION 0x0800
@@ -29,7 +20,7 @@ namespace {
 // Core\DirectInput.dll, July 2013 build.
 constexpr DWORD kDirectInputTimestamp = 0x51d21fcc;
 constexpr DWORD kDirectInputImageSize = 0x30000;
-constexpr DWORD kMouseReadRva = 0x51b0;  // __fastcall int read(MouseState* this)
+constexpr DWORD kMouseReadRva = 0x51b0;  // per-frame mouse read
 // MouseState layout (int-sized fields): [0] device, [4..7] range left/top/right/bottom (inclusive, a virtual
 // space, not screen pixels), [8] x, [9] y, [10] wheel.
 constexpr int kStateDevice = 0;

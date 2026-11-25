@@ -1,15 +1,6 @@
-// Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer (Controls), Tacview
-// Recording (Other). See lazy-sf2-recon: option-trace.md.
-//
-// 1. Menu data: when the exe's file service reads OptionsScreen.ini, we splice items into the text before the
-//    game parses it. Nothing of the game's data is shipped or written. Labels use literal text as the string
-//    ID, so no string-table changes are needed.
-// 2. Screen logic: the sub-menu classes in OptionsScreen.dll are hooked (Init/Refresh/Changed/Exit) to fill,
-//    select, read and save our lists.
-// 3. Values are saved through the game's own Options.ini helper, read by config::*, and applied live
-//    (dxgi_apply_display_mode on the window thread).
-//
-// All hooks are at fixed RVAs and only installed on the July 2013 builds.
+// Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer (Controls), Tacview Recording
+// (Other). Splices menu text as the file service reads it; hooks the OptionsScreen sub-menu classes at fixed RVAs.
+// See lazy-sf2-recon: option-trace.md.
 #include <windows.h>
 
 #include <atomic>
@@ -29,30 +20,30 @@
 namespace lazysf2::hooks {
 namespace {
 
-// Build stamps and RVAs. See lazy-sf2-recon: option-trace.md.
+// Build stamps and RVAs.
 constexpr DWORD kExeTimestamp = 0x51d22110, kExeImageSize = 0x62000;
-constexpr DWORD kFileOpenRva = 0x94e0;   // int  __thiscall Open(svc, const wchar_t* name, int mode)
-constexpr DWORD kFileCloseRva = 0x9590;  // void __thiscall Close(svc, int handle)
-constexpr DWORD kFileReadRva = 0x8270;   // int  __thiscall Read(svc, int handle, char* buf, unsigned bytes)
+constexpr DWORD kFileOpenRva = 0x94e0;   // file service Open
+constexpr DWORD kFileCloseRva = 0x9590;  // file service Close
+constexpr DWORD kFileReadRva = 0x8270;   // file service Read
 
 constexpr DWORD kOptsTimestamp = 0x51d220d6, kOptsImageSize = 0x2c000;
-constexpr DWORD kGfxInitRva = 0x58f0;     // void __thiscall Init(this, int*, int*)   (ret 8)
-constexpr DWORD kGfxRefreshRva = 0x5dd0;  // void __thiscall Refresh(this)
-constexpr DWORD kGfxChangedRva = 0x4e20;  // void __thiscall Changed(this)
-constexpr DWORD kGfxExitRva = 0x5da0;     // void __thiscall Exit(this)  (saves, then tears down)
+constexpr DWORD kGfxInitRva = 0x58f0;     // Graphics page Init
+constexpr DWORD kGfxRefreshRva = 0x5dd0;  // Graphics page Refresh
+constexpr DWORD kGfxChangedRva = 0x4e20;  // Graphics page Changed
+constexpr DWORD kGfxExitRva = 0x5da0;     // Graphics page Exit
 // Controls sub-menu class (vtable +0x1e9a0).
-constexpr DWORD kCtlInitRva = 0x3500;     // void __thiscall Init(this, int*, int*)   (ret 8)
-constexpr DWORD kCtlExitRva = 0x1f40;     // void __thiscall Exit(this)  (saves [ControlOptions])
-constexpr DWORD kCtlRefreshRva = 0x1fa0;  // void __thiscall Refresh(this)
-constexpr DWORD kCtlChangedRva = 0x2010;  // void __thiscall Changed(this)
+constexpr DWORD kCtlInitRva = 0x3500;     // Controls page Init
+constexpr DWORD kCtlExitRva = 0x1f40;     // Controls page Exit
+constexpr DWORD kCtlRefreshRva = 0x1fa0;  // Controls page Refresh
+constexpr DWORD kCtlChangedRva = 0x2010;  // Controls page Changed
 // Other sub-menu class (vtable +0x1e9e8): Init is a short wrapper; the other three are JMP stubs to the shared
 // base, which stays unhooked (every page uses it).
-constexpr DWORD kOthInitRva = 0x5f20;     // void __thiscall Init(this, int*, int*)   (ret 8)
-constexpr DWORD kOthExitRva = 0x5f30;     // void __thiscall Exit(this)
-constexpr DWORD kOthRefreshRva = 0x5ee0;  // void __thiscall Refresh(this)
-constexpr DWORD kOthChangedRva = 0x5ef0;  // void __thiscall Changed(this)
-constexpr DWORD kIniReadIntRva = 0xa790;  // int  __thiscall ReadInt(ini, section, key, default)
-constexpr DWORD kIniWriteIntRva = 0xa0e0; // void __thiscall WriteInt(ini, section, key, value)
+constexpr DWORD kOthInitRva = 0x5f20;     // Other page Init
+constexpr DWORD kOthExitRva = 0x5f30;     // Other page Exit
+constexpr DWORD kOthRefreshRva = 0x5ee0;  // Other page Refresh
+constexpr DWORD kOthChangedRva = 0x5ef0;  // Other page Changed
+constexpr DWORD kIniReadIntRva = 0xa790;  // Options.ini ReadInt
+constexpr DWORD kIniWriteIntRva = 0xa0e0; // Options.ini WriteInt
 constexpr DWORD kIniGlobalRva = 0x26a90;  // Options.ini object used by the screen
 
 // Menu and control interfaces (vtable byte offsets / 4).

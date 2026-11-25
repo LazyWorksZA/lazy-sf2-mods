@@ -1,14 +1,5 @@
-// Host mode (developer tool, part of the probe): remote clients drive AI aircraft in the running game as their
-// avatars. Inert unless LAZYSF2_HOST is set and the probe is on.
-//
-// Threading: the network thread (host_core.cpp) owns ENet. Everything here runs on the game thread inside the
-// sim "after Update" callback and talks to the network thread only through HostCore's two queues. Nothing here
-// calls ENet, and nothing logs under the probe's lock.
-//
-// Per client (slot 0..3; client_id on the wire is slot + 1): Hello claims the nearest live AI aircraft and
-// answers Welcome; State packets are smoothed as in replay.cpp; Bye, 5 s of silence, the avatar being
-// destroyed or a player change gives the aircraft back to the AI. Puppet and replay refuse to start while a
-// client holds an avatar (host_has_clients()), and the host refuses clients while one of them runs.
+// Host mode (developer tool, part of the probe): remote clients drive AI aircraft as avatars. Inert unless
+// LAZYSF2_HOST is set and the probe is on. Runs on the game thread; the network thread (host_core.cpp) owns ENet.
 #include <windows.h>
 
 #include <atomic>

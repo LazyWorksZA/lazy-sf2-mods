@@ -1,21 +1,5 @@
-// Tacview recorder (player-facing): with Options > Other > Tacview Recording On, writes each flight to
-// Saved Games\ThirdWire\<exe>\Tacview\SF2 <date time>.acmi.
-//
-// Inert while Off: the tracker installs its hooks only when the setting (or the probe) asks, so no callback,
-// thread, memory or file exists. The ring (8192 slots of 168 B) is allocated at the first recording.
-//
-// One file per flight. A recording starts at the first player step while the setting is On, and stops when the
-// player is lost (sim_player_epoch changes), the writer fails or reaches its size cap, the setting goes Off, the
-// aircraft table empties (tacview_recorder_table_empty() sets a flag; closed at the next step or Options menu
-// moment), or the process exits. Before a "player lost" or "table empty" stop one empty frame is written, so
-// the file gets its removal lines. A new start waits (retrying each player step) while the previous writer is
-// still draining, so the game thread never blocks on it.
-//
-// Game thread cost: at most 10 times per game second (20 while a weapon is in flight), on a player step, one pass
-// over the live aircraft under probe_with_aircraft's shared lock and, nested in it, the live weapons: a pose read
-// (SEH-guarded) and a name copy per object into the ring. No allocation, I/O or logging. Formatting, the rate
-// limit, removals and the file are the writer thread's (acmi/tacview_writer.h, acmi/tacview_core.h). The shell
-// call that finds Saved Games runs once, on the game thread, at the first start; never from the module watch.
+// Tacview recorder (player-facing): with Options > Other > Tacview Recording On, writes one .acmi per flight.
+// Inert while Off (no hooks, thread, memory or file). Game thread only copies into a ring: no allocation, I/O or logging.
 #include <windows.h>
 
 #include <atomic>
@@ -206,6 +190,7 @@ StartResult start_recording(uint32_t epoch) {
     return StartResult::Started;
 }
 
+// A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
 void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
     if (g_recording) {
         if (sim_player_epoch() != g_epoch) {
