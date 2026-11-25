@@ -1,6 +1,6 @@
 # Install and uninstall
 
-LazySF2 is a mod for Strike Fighters 2 (July 2013 patch). The project is not affiliated with ThirdWire, and you need your own copy of the game.
+The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project is not affiliated with ThirdWire, and you need your own copy of the game.
 
 ## Players: the installer
 
@@ -9,7 +9,7 @@ LazySF2 is a mod for Strike Fighters 2 (July 2013 patch). The project is not aff
 2. The installer finds Strike Fighters 2 through the game's own registry entry and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
 3. That's all. There's no app, window or shortcut. Start the game as usual; the settings are in the game (below).
 
-**Uninstall** LazySF2 from Windows' *Installed apps*. That removes exactly the files the mod added to the game folder.
+**Uninstall** the Lazy SF2 Patch from Windows' *Installed apps*. That removes exactly the files the mod added to the game folder.
 
 ## Settings, in the game
 
@@ -40,7 +40,7 @@ No game files and no registry keys are changed. Removing these files returns the
 
 With **Tacview Recording** on, the first flight you record in each theatre also writes that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\` and a ground texture (made from the theatre's own ground tiles, with the runways painted in) to `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2\`. Every recording also marks the theatre's airfields by name. A theatre whose ini gives a real-world position, such as GermanyCE, is placed there. The others are not to real scale, so each one sits as its own square over open ocean. Each airfield also gets a sharp patch of ground around its runways.
 
-The mod also writes a Tacview add-on to `%APPDATA%\Tacview\AddOns\LazySF2\main.lua`. In Tacview 1.9.5 or newer, enable **LazySF2** in the Add-ons menu. It shows only the ground of the theatre you recorded, and it hides the other LazySF2 grounds and all of them for other recordings. Without the add-on, every LazySF2 theatre that has a real-world position is always visible at that place.
+The mod also writes a Tacview add-on to `%APPDATA%\Tacview\AddOns\LazySF2\main.lua`. In Tacview 1.9.5 or newer, enable **Lazy SF2 Patch** in the Add-ons menu. It shows only the ground of the theatre you recorded, and it hides the other LazySF2 grounds and all of them for other recordings. Without the add-on, every LazySF2 theatre that has a real-world position is always visible at that place.
 
 In Tacview, set the terrain layer set to **Auto** (or **Real World**). Recordings say they come from Strike Fighters 2, and Auto then shows the Real World layers, where this terrain lives. If Tacview is set to another simulator's layers, such as BMS, the texture is hidden. Leave Tacview's Advanced Options "Auto Terrain Switch" as it is: our recordings do not write `MapId`, so it does not touch our terrain. Tacview reads new terrain files and add-ons only when it starts, so restart it after your first flight in a new theatre.
 

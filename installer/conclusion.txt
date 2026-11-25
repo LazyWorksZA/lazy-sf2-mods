@@ -1,4 +1,4 @@
-LazySF2 is installed into your Strike Fighters 2 folder.
+The Lazy SF2 Patch is installed into your Strike Fighters 2 folder.
 
 To play, start Strike Fighters 2 as usual, from its Start menu or desktop shortcut.
 
@@ -6,4 +6,4 @@ The new settings are in the game:
 - Options > Graphics: Display Mode, Screen
 - Options > Controls: Mouse Pointer
 
-To remove LazySF2, uninstall it from Windows' Installed apps.
+To remove the Lazy SF2 Patch, uninstall it from Windows' Installed apps.
