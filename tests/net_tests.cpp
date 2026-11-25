@@ -397,9 +397,6 @@ void host_core_tests() {
         c.send(buf, enc(pi, buf), kChannelReliable);  // PeerInfo only travels host to client
         PeerLeftMsg pl{};
         c.send(buf, enc(pl, buf), kChannelReliable);  // PeerLeft likewise
-        enc(h, buf);
-        buf[2] = 1;
-        c.send(buf, 52, kChannelReliable);  // a v1 Hello (52 bytes, version 1)
     }
     c.send(buf, enc(h, buf), kChannelReliable);    // a second Hello
     PingMsg nanping{};
@@ -417,8 +414,8 @@ void host_core_tests() {
     const uint32_t format = after.dropped_format - before.dropped_format;
     const uint32_t state = after.dropped_state - before.dropped_state;
     std::printf("  dropped: %u out of range, %u malformed, %u wrong phase\n", range, format, state);
-    expect(range == 6 && format == 11 && state == 1 && queue_empty(core),
-           "6 out of range, 11 malformed, 1 repeated Hello, and nothing else queued");
+    expect(range == 6 && format == 10 && state == 1 && queue_empty(core),
+           "6 out of range, 10 malformed, 1 repeated Hello, and nothing else queued");
 
     // Bye: the game thread frees the slot and asks for the disconnect.
     ByeMsg bye{};
@@ -437,6 +434,30 @@ void host_core_tests() {
     expect(c.disconnected && ev.size() == 1 && ev[0].kind == HostEvent::Disconnect && ev[0].slot == 0,
            "disconnect: the client sees it, and the game thread gets a Disconnect event");
 
+    {  // a v1 Hello: refused with a Bye (wrong version) and a disconnect, nothing queued for the game thread
+        TestClient v;
+        v.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+        v.peer = enet_host_connect(v.host, &addr, kChannelCount, 0);
+        HelloMsg v1{};
+        enc(v1, buf);
+        buf[2] = 1;
+        for (int i = 0; i < 2000 && !v.connected; ++i) v.idle(1);
+        v.send(buf, 52, kChannelReliable);
+        for (int i = 0; i < 2000 && !v.disconnected; ++i) v.idle(1);
+        bool bye6 = false;
+        for (const auto& g : v.got) {
+            ByeMsg bm;
+            if (decode(g.bytes.data(), g.bytes.size(), bm) == Status::Ok && bm.reason == kByeWrongVersion) bye6 = true;
+        }
+        expect(v.disconnected && bye6, "a v1 Hello is refused with Bye 6 and a disconnect");
+        HostEvent drain[16];
+        for (int i = 0; i < 50; ++i) {
+            core.poll(drain, 16);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        enet_host_destroy(v.host);
+        v.host = nullptr;
+    }
     // A command for a connection that is gone must not reach the client that took its slot.
     TestClient b;
     b.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);

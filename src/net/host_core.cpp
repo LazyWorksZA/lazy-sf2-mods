@@ -220,6 +220,7 @@ void HostCore::run() {
     ENetPeer* peers[kMaxClients] = {};
     bool hello_seen[kMaxClients] = {};
     bool bye_seen[kMaxClients] = {};
+    bool version_refused[kMaxClients] = {};
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
     uint32_t gens[kMaxClients] = {};
@@ -233,6 +234,7 @@ void HostCore::run() {
         slot_state_[slot].store(0, std::memory_order_release);  // commands for this connection are void from now on
         hello_seen[slot] = false;
         bye_seen[slot] = false;
+        version_refused[slot] = false;
         rtt_[slot].store(0, std::memory_order_relaxed);
     };
     auto drop = [&](std::atomic<uint32_t>& counter) { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -241,7 +243,26 @@ void HostCore::run() {
         n_received_.fetch_add(1, std::memory_order_relaxed);
         if (len > kMaxPacket) return drop(n_format_);
         MsgType type{};
-        if (peek_type(data, len, type) != Status::Ok) return drop(n_format_);
+        const Status ps = peek_type(data, len, type);
+        if (ps == Status::BadVersion && channel == kChannelReliable && !version_refused[slot] && peers[slot]) {
+            // A peer of another protocol version (a v1 build): say why once, send a Bye it can read if it is
+            // v2-framed, and end the connection. Nothing from it reaches the game thread.
+            version_refused[slot] = true;
+            say("net: client %u speaks another protocol version (this host is v%u); refused", static_cast<unsigned>(slot + 1),
+                static_cast<unsigned>(kVersion));
+            ByeMsg bye{};
+            bye.client_id = 0;
+            bye.reason = kByeWrongVersion;
+            uint8_t out[sizeof(ByeMsg)];
+            const size_t n = encode(bye, out, sizeof(out));
+            if (n) {
+                if (ENetPacket* p = enet_packet_create(out, n, ENET_PACKET_FLAG_RELIABLE)) {
+                    if (enet_peer_send(peers[slot], kChannelReliable, p) != 0) enet_packet_destroy(p);
+                }
+            }
+            enet_peer_disconnect_later(peers[slot], 0);
+        }
+        if (ps != Status::Ok) return drop(n_format_);
         const uint16_t id = static_cast<uint16_t>(slot + 1);
         switch (type) {
             case MsgType::Hello: {

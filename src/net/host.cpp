@@ -381,7 +381,7 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     std::memcpy(w.spawn_pos, c.spawn, sizeof(w.spawn_pos));
     w.spawn_heading = c.heading;
     w.host_game_time = now;
-    uint8_t buf[64];
+    uint8_t buf[net::kMaxMessage];
     const size_t n = net::encode(w, buf, sizeof(buf));
     const bool welcomed = n && g_core->send(static_cast<uint8_t>(slot), gen, buf, n, net::kChannelReliable, true);
     if (!welcomed) {
