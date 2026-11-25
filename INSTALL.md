@@ -18,10 +18,11 @@ LazySF2 is a mod for Strike Fighters 2 (July 2013 patch). The project is not aff
 | Options → Graphics (below Aspect Ratio) | **Display Mode** | **Fullscreen**: stock exclusive fullscreen. **Borderless**: a window covering the screen, so Alt-Tab is instant and other monitors stay usable. | Fullscreen |
 | Options → Graphics | **Screen** | "Screen N (W×H)", numbered as in Windows' Settings → Display. Choosing another screen also sets the game resolution to its native size, which applies at the next start. | the stock choice (primary) |
 | Options → Controls (below Keyboard Map) | **Mouse Pointer** | **Match Windows cursor**: the game's pointer sits exactly on the Windows cursor, at Windows' speed and acceleration. **Stock game pointer**: the game builds its own pointer from raw mouse movement, as without the mod. | Match Windows cursor |
+| Options → Gameplay (bottom row) | **Tacview Recording** | **On**: every flight is recorded to a Tacview file in `Saved Games\ThirdWire\StrikeFighters2\Tacview`. **Off**: no recording. | Off |
 
 Changes take effect when you leave the Options screen, like the game's own settings.
 
-All three are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini`: `DisplayMode` and `DisplayMonitor` under `[GraphicsOptions]`, and `MouseMode` under `[ControlOptions]`. Without the mod they do nothing.
+All four are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini`: `DisplayMode` and `DisplayMonitor` under `[GraphicsOptions]`, `MouseMode` under `[ControlOptions]`, and `TacviewRecording` under `[OtherOptions]`. Without the mod they do nothing.
 
 **Why the mouse option exists:** the stock game doesn't use the Windows pointer. It draws its own, moved by raw mouse movement with its own speed and no Windows acceleration. So it never quite matches where Windows' pointer is and feels off, and over remote-control tools (RustDesk, Parsec, ...) it wanders by itself.
 
@@ -43,7 +44,7 @@ If you don't see it, check that Tacview's terrain or custom elevation options ar
 
 ## How to tell it's working
 
-- Options → Graphics shows **Display Mode** and **Screen**, and Options → Controls shows **Mouse Pointer**.
+- Options → Graphics shows **Display Mode** and **Screen**, Options → Controls shows **Mouse Pointer**, and Options → Gameplay shows **Tacview Recording**.
 - In **Borderless**, the game covers the screen without a mode switch, Alt-Tab is instant, and the game stays visible behind other windows.
 - `lazysf2.log` in the game folder contains lines like `DisplayMode=1 -> Borderless` and `MouseMode=1 -> match the Windows cursor`.
 

@@ -18,7 +18,7 @@
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
-#include "hooks/options_other_splice.h"
+#include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
@@ -2235,51 +2235,45 @@ void tacview_tests() {
     }
 }
 
-// The Other page splice, on a miniature of the stock OptionsScreen.ini shape.
-void other_page_splice_tests() {
-    std::printf("other_page_splice\n");
-    std::wstring ini = L"[OptionsScreen]\r\nMenuItem006=NetworkOptionsButton\r\nMenuItem007=OtherOptionsButton\r\n\r\n";
-    const wchar_t* names[] = {L"GameplayOptionsButton", L"GraphicsOptionsButton", L"SoundOptionsButton",
-                              L"ControlOptionsButton", L"OtherOptionsButton"};
-    for (int i = 0; i < 4; ++i) {
-        ini += std::wstring(L"[") + names[i] +
-               L"]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=\r\nTextPosition=597,120\r\n\r\n";
-    }
-    ini +=
-        L"[OtherOptionsButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=\r\nTextStringID=\r\nTextPosition=\r\n"
-        L"InfoTextStringID=\r\nStickySelection=TRUE\r\nActive=FALSE\r\n\r\n"
+// The Gameplay row splice, on a miniature of the stock OptionsScreen.ini shape.
+void gameplay_row_splice_tests() {
+    std::printf("gameplay_row_splice\n");
+    const std::wstring ini =
+        L"[OptionsScreen]\r\nMenuItem009=GameplayOptionsSubMenu\r\nMenuItem014=OtherOptionsSubMenu\r\n\r\n"
+        L"[OtherOptionsButton]\r\nMenuItemType=TEXTBUTTON\r\nTextPosition=\r\nActive=FALSE\r\n\r\n"
+        L"[GameplayOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nMenuItem001=MissionStartList\r\n"
+        L"MenuItem016=GameplayTitleText\r\nMenuItem032=FuelUsageText\r\n"
+        L"Position=550,180\r\nWidth=450\r\nHeight=460\r\nHasBackground=FALSE\r\nActive=FALSE\r\n\r\n"
+        L"[MissionStartList]\r\nMenuItemType=LIST\r\nPosition=200,0\r\n\r\n"
         L"[OtherOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nMenuItem001=OtherTitleText\r\nMenuItem002=SectionVITitleText\r\n"
-        L"Position=565,130\r\nWidth=362\r\nHeight=480\r\nHasBackground=FALSE\r\nActive=FALSE\r\n\r\n"
-        L"[OtherTitleText]\r\nMenuItemType=INACTIVE\r\n";
+        L"Position=565,130\r\nWidth=362\r\nHeight=480\r\n";
     std::wstring t = ini;
-    const int id = lazysf2::hooks::splice_other_page(t);
-    expect(id == 3, "row takes the next free MenuItem ID");
+    const int id = lazysf2::hooks::splice_gameplay_row(t);
+    expect(id == 33, "row takes the next free Gameplay MenuItem ID");
     auto has = [&](const wchar_t* needle) { return t.find(needle) != std::wstring::npos; };
-    expect(has(L"MenuItem003=TacviewRecordingList\r\nMenuItem004=TacviewRecordingText\r\n"),
-           "row items listed, ids unique");
-    expect(has(L"MenuItem002=SectionVITitleText\r\nMenuItem003="), "items appended after the existing ones");
-    expect(has(L"Position=550,180\r\nWidth=450\r\nHeight=460\r\n"), "page sized like the visible pages");
-    expect(has(L"[TacviewRecordingList]") && has(L"Position=200,0") && has(L"TextPosition=0,3") &&
-               has(L"InfoTextStringID=TXT_LAZY_TACVIEW_INFO") && has(L"TextStringID=TXT_LAZY_TACVIEW_RECORDING"),
-           "list and text sections present");
-    const size_t ob = t.find(L"[OtherOptionsButton]");
-    const std::wstring button = t.substr(ob, t.find(L"\n[", ob) - ob);
-    expect(button.find(L"Active=FALSE") == std::wstring::npos, "Other tab activated");
-    expect(button.find(L"TextStringID=TXT_LAZY_OTHER_OPTIONS\r") != std::wstring::npos &&
-               button.find(L"InfoTextStringID=TXT_LAZY_OTHER_OPTIONS_INFO") != std::wstring::npos,
-           "Other tab text keys");
-    expect(button.find(L"DestinationMenu=\r") != std::wstring::npos, "DestinationMenu stays empty, like the stock tabs");
-    bool spaced = true;
-    for (int i = 0; i < 5; ++i) {
-        const std::wstring want = L"TextPosition=" + std::to_wstring(lazysf2::hooks::kTabX[i]) + L"," +
-                                 std::to_wstring(lazysf2::hooks::kTabY[i]) + L"\r\n";
-        const size_t b = t.find(std::wstring(L"[") + names[i] + L"]");
-        spaced &= b != std::wstring::npos && t.substr(b, t.find(L"\n[", b) - b).find(want) != std::wstring::npos;
-    }
-    expect(spaced, "five tabs placed at the named positions");
-    expect(lazysf2::hooks::splice_other_page(t) == 0, "second splice is refused");
+    expect(has(L"MenuItem032=FuelUsageText\r\nMenuItem033=TacviewRecordingList\r\nMenuItem034=TacviewRecordingText\r\n"
+               L"Position=550,180\r\n"),
+           "row items appended after the last Gameplay item, ids unique");
+    expect(has(L"[TacviewRecordingList]\r\nMenuItemType=LIST\r\nPosition=200,400\r\nWidth=240\r\nHeight=22\r\n"
+               L"ListFieldSetting=MediumListField\r\n") &&
+               has(L"InfoTextStringID=TXT_LAZY_TACVIEW_INFO\r\n"),
+           "list at 200,400, styled like the top rows");
+    expect(has(L"[TacviewRecordingText]\r\nMenuItemType=TEXT\r\nTextSetting=MediumTextLeft\r\n"
+               L"TextStringID=TXT_LAZY_TACVIEW_RECORDING\r\nTextPosition=0,403\r\n"),
+           "text at 0,403");
+    expect(has(L"[OtherOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nMenuItem001=OtherTitleText\r\nMenuItem002="
+               L"SectionVITitleText\r\nPosition=565,130\r\n") &&
+               has(L"[OtherOptionsButton]\r\nMenuItemType=TEXTBUTTON\r\nTextPosition=\r\nActive=FALSE\r\n") &&
+               has(L"Position=550,180\r\nWidth=450\r\nHeight=460\r\n"),
+           "Other tab, Other page and Gameplay geometry stay stock");
+    const std::wstring once = t;
+    expect(lazysf2::hooks::splice_gameplay_row(t) == 0 && t == once, "second splice is refused, text unchanged");
     std::wstring bad = L"[OptionsScreen]\r\n";
-    expect(lazysf2::hooks::splice_other_page(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
+    expect(lazysf2::hooks::splice_gameplay_row(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
+    std::wstring empty_page = L"[GameplayOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nPosition=550,180\r\n";
+    const std::wstring empty_copy = empty_page;
+    expect(lazysf2::hooks::splice_gameplay_row(empty_page) == 0 && empty_page == empty_copy,
+           "page without MenuItem lines left unchanged");
 }
 
 int main() {
@@ -2304,7 +2298,7 @@ int main() {
     tracker_logic_tests();
     tacview_tests();
     terrain_tests();
-    other_page_splice_tests();
+    gameplay_row_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;
