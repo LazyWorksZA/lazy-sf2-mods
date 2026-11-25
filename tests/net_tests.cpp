@@ -1,6 +1,7 @@
 // Console tests for the network protocol and an ENet loopback. Not shipped, no game needed.
 #include <enet/enet.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <chrono>
@@ -15,9 +16,12 @@
 
 #include "acmi/acmi_convert.h"
 #include "acmi/acmi_format.h"
+#include "acmi/airfields.h"
+#include "acmi/ini.h"
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
+#include "acmi/terrain_texture.h"
 #include "hooks/options_other_splice.h"
 #include "hooks/weapon_class.h"
 #include "hooks/world_walk_logic.h"
@@ -2282,6 +2286,355 @@ void other_page_splice_tests() {
     expect(lazysf2::hooks::splice_other_page(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
 }
 
+namespace {
+using lazysf2::acmi::Image;
+
+// Synthetic images: a 2x2 picture with red top-left, green top-right, blue bottom-left, white bottom-right.
+std::vector<uint8_t> make_tga(int type, int bpp, bool top_origin, bool rle) {
+    const uint8_t px[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};  // as viewed, row by row
+    std::vector<uint8_t> f = {0, 0, static_cast<uint8_t>(type), 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0,
+                              static_cast<uint8_t>(bpp), static_cast<uint8_t>(top_origin ? 0x20 : 0)};
+    const int order_top[4] = {0, 1, 2, 3}, order_bottom[4] = {2, 3, 0, 1};
+    const int* order = top_origin ? order_top : order_bottom;
+    auto put = [&](int i) {
+        f.push_back(px[i][2]);
+        f.push_back(px[i][1]);
+        f.push_back(px[i][0]);
+        if (bpp == 32) f.push_back(200);
+    };
+    if (!rle) {
+        for (int i = 0; i < 4; ++i) put(order[i]);
+    } else {
+        f.push_back(0x80 | 0);  // a run of 1
+        put(order[0]);
+        f.push_back(0x02);  // 3 raw pixels
+        for (int i = 1; i < 4; ++i) put(order[i]);
+    }
+    return f;
+}
+
+std::vector<uint8_t> make_bmp(int bpp, bool bottom_up, int w = 3, int h = 2) {
+    // Pixel (x, y) as viewed has the value 10*y + x in the red channel (or index), green 7, blue 9.
+    const int stride = ((w * bpp + 31) / 32) * 4;
+    const int pal = bpp == 8 ? 256 * 4 : 0;
+    const uint32_t off = 14 + 40 + pal;
+    std::vector<uint8_t> f(off + static_cast<size_t>(stride) * h, 0xee);  // padding bytes are junk
+    std::fill(f.begin(), f.begin() + off, uint8_t{0});
+    auto w16 = [&](size_t p, uint16_t v) { f[p] = v & 0xff; f[p + 1] = v >> 8; };
+    auto w32 = [&](size_t p, uint32_t v) { for (int i = 0; i < 4; ++i) f[p + i] = static_cast<uint8_t>(v >> (8 * i)); };
+    f[0] = 'B';
+    f[1] = 'M';
+    w32(2, static_cast<uint32_t>(f.size()));
+    w32(10, off);
+    w32(14, 40);
+    w32(18, static_cast<uint32_t>(w));
+    w32(22, static_cast<uint32_t>(bottom_up ? h : -h));
+    w16(26, 1);
+    w16(28, static_cast<uint16_t>(bpp));
+    for (int i = 0; i < pal / 4; ++i) {  // palette entry i: B=9, G=7, R=i
+        f[54 + i * 4] = 9;
+        f[54 + i * 4 + 1] = 7;
+        f[54 + i * 4 + 2] = static_cast<uint8_t>(i);
+        f[54 + i * 4 + 3] = 0;
+    }
+    for (int y = 0; y < h; ++y) {
+        const int row = bottom_up ? h - 1 - y : y;
+        uint8_t* p = &f[off + static_cast<size_t>(stride) * row];
+        for (int x = 0; x < w; ++x) {
+            const uint8_t v = static_cast<uint8_t>(10 * y + x);
+            if (bpp == 8) {
+                p[x] = v;
+            } else {
+                const int b = bpp / 8;
+                p[x * b] = 9;
+                p[x * b + 1] = 7;
+                p[x * b + 2] = v;
+                if (b == 4) p[x * b + 3] = 0;
+            }
+        }
+    }
+    return f;
+}
+
+Image solid(int w, int h, uint8_t r, uint8_t g, uint8_t b) {
+    Image im;
+    im.w = w;
+    im.h = h;
+    for (int i = 0; i < w * h; ++i) {
+        im.px.push_back(r);
+        im.px.push_back(g);
+        im.px.push_back(b);
+        im.px.push_back(255);
+    }
+    return im;
+}
+
+std::vector<uint8_t> utf16le(const std::wstring& s, bool bom = true) {
+    std::vector<uint8_t> v;
+    if (bom) {
+        v.push_back(0xff);
+        v.push_back(0xfe);
+    }
+    for (wchar_t c : s) {
+        v.push_back(static_cast<uint8_t>(c & 0xff));
+        v.push_back(static_cast<uint8_t>(c >> 8));
+    }
+    return v;
+}
+
+std::vector<uint8_t> ansi(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
+
+void texture_tests() {
+    using namespace lazysf2::acmi;
+    std::printf("tacview texture\n");
+    const auto pix = [](const Image& im, int x, int y, int c) { return im.px[(static_cast<size_t>(y) * im.w + x) * 4 + c]; };
+
+    // TGA: both origins, uncompressed and RLE, 24 and 32 bpp. The picture as viewed is always the same.
+    bool tga_ok = true;
+    for (int bpp : {24, 32}) {
+        for (bool top : {false, true}) {
+            for (bool rle : {false, true}) {
+                const auto f = make_tga(rle ? 10 : 2, bpp, top, rle);
+                Image im;
+                tga_ok &= decode_image(f.data(), f.size(), im) && im.w == 2 && im.h == 2 && pix(im, 0, 0, 0) == 255 &&
+                          pix(im, 0, 0, 1) == 0 && pix(im, 1, 0, 1) == 255 && pix(im, 0, 1, 2) == 255 &&
+                          pix(im, 1, 1, 0) == 255 && pix(im, 1, 1, 2) == 255 && pix(im, 0, 0, 3) == (bpp == 32 ? 200 : 255);
+            }
+        }
+    }
+    expect(tga_ok, "tga: uncompressed and RLE, 24 and 32 bpp, both origins decode top-down");
+    {
+        auto f = make_tga(2, 24, false, false);
+        f[17] |= 0x10;  // right to left
+        Image im;
+        expect(decode_image(f.data(), f.size(), im) && pix(im, 1, 0, 0) == 255 && pix(im, 0, 0, 1) == 255,
+               "tga: right-to-left origin bit");
+    }
+    {
+        auto f = make_tga(2, 24, false, false);
+        Image im;
+        f.pop_back();
+        expect(!decode_image(f.data(), f.size(), im), "tga: truncated pixel data rejected");
+        auto r = make_tga(10, 24, true, true);
+        r.resize(r.size() - 3);
+        expect(!decode_image(r.data(), r.size(), im), "tga: truncated RLE rejected");
+        auto big = make_tga(2, 24, true, false);
+        big[12] = 0x01;
+        big[13] = 0x20;  // width 8193
+        expect(!decode_image(big.data(), big.size(), im), "tga: too wide rejected");
+        auto z = make_tga(2, 24, true, false);
+        z[12] = z[13] = 0;
+        expect(!decode_image(z.data(), z.size(), im), "tga: zero width rejected");
+        auto t = make_tga(3, 24, true, false);
+        expect(!decode_image(t.data(), t.size(), im), "tga: unsupported type rejected");
+        auto rl = make_tga(10, 24, true, true);
+        rl[18] = 0x7f;  // a raw packet of 128 pixels in a 4-pixel image
+        expect(!decode_image(rl.data(), rl.size(), im), "tga: RLE packet past the image rejected");
+        expect(!decode_image(nullptr, 0, im) && !decode_image(f.data(), 5, im), "tga: empty and tiny input rejected");
+    }
+
+    // BMP: palettised, 24 and 32 bpp, both orientations; width 3 gives row padding.
+    bool bmp_ok = true;
+    for (int bpp : {8, 24, 32}) {
+        for (bool up : {true, false}) {
+            const auto f = make_bmp(bpp, up);
+            Image im;
+            bmp_ok &= decode_image(f.data(), f.size(), im) && im.w == 3 && im.h == 2 && pix(im, 0, 0, 0) == 0 &&
+                      pix(im, 2, 0, 0) == 2 && pix(im, 0, 1, 0) == 10 && pix(im, 2, 1, 0) == 12 && pix(im, 1, 1, 1) == 7 &&
+                      pix(im, 1, 1, 2) == 9 && pix(im, 1, 1, 3) == 255;
+        }
+    }
+    expect(bmp_ok, "bmp: 8, 24 and 32 bpp, bottom-up and top-down, row padding");
+    {
+        auto f = make_bmp(24, true);
+        Image im;
+        f.resize(f.size() - 1);
+        expect(!decode_image(f.data(), f.size(), im), "bmp: truncated pixel data rejected");
+        auto c = make_bmp(24, true);
+        c[30] = 1;  // RLE-compressed
+        expect(!decode_image(c.data(), c.size(), im), "bmp: compressed rejected");
+        auto b4 = make_bmp(24, true);
+        b4[28] = 4;
+        expect(!decode_image(b4.data(), b4.size(), im), "bmp: 4 bpp rejected");
+        auto o = make_bmp(24, true);
+        o[10] = o[11] = o[12] = 0xff;  // pixel offset far outside
+        expect(!decode_image(o.data(), o.size(), im), "bmp: pixel offset outside the file rejected");
+        auto hu = make_bmp(24, true);
+        hu[20] = 0xff;
+        hu[21] = 0x7f;  // width ~2 billion
+        expect(!decode_image(hu.data(), hu.size(), im), "bmp: huge width rejected");
+    }
+
+    // rotate_cw on [a b; c d]
+    {
+        Image im = solid(2, 2, 0, 0, 0);
+        const uint8_t v[4] = {1, 2, 3, 4};  // a b c d
+        for (int i = 0; i < 4; ++i) im.px[i * 4] = v[i];
+        Image r1, r2, r3, r0, r4;
+        rotate_cw(im, 1, r1);
+        rotate_cw(im, 2, r2);
+        rotate_cw(im, 3, r3);
+        rotate_cw(im, 0, r0);
+        rotate_cw(im, 4, r4);
+        auto at = [&](const Image& i, int x, int y) { return pix(i, x, y, 0); };
+        expect(at(r1, 0, 0) == 3 && at(r1, 1, 0) == 1 && at(r1, 0, 1) == 4 && at(r1, 1, 1) == 2, "rotate_cw: one turn is [c a; d b]");
+        expect(at(r2, 0, 0) == 4 && at(r2, 1, 1) == 1, "rotate_cw: two turns");
+        expect(at(r3, 0, 0) == 2 && at(r3, 1, 0) == 4 && at(r3, 0, 1) == 1 && at(r3, 1, 1) == 3, "rotate_cw: three turns is [b d; a c]");
+        expect(at(r0, 0, 0) == 1 && at(r4, 1, 1) == 4, "rotate_cw: zero and four turns leave it");
+        Image wide = solid(3, 1, 0, 0, 0), rw;
+        rotate_cw(wide, 1, rw);
+        expect(rw.w == 1 && rw.h == 3, "rotate_cw: a non-square image swaps its sides");
+    }
+
+    // box_downsample
+    {
+        Image im = solid(4, 4, 0, 0, 0), out;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) im.px[(y * 4 + x) * 4] = static_cast<uint8_t>(x < 2 ? (y < 2 ? 10 : 20) : (y < 2 ? 30 : 40));
+        box_downsample(im, 2, out);
+        expect(out.w == 2 && out.h == 2 && pix(out, 0, 0, 0) == 10 && pix(out, 1, 0, 0) == 30 && pix(out, 0, 1, 0) == 20 &&
+                   pix(out, 1, 1, 0) == 40,
+               "box_downsample: 4x4 to 2x2");
+        box_downsample(im, 1, out);
+        expect(pix(out, 0, 0, 0) == 25, "box_downsample: the mean");
+        box_downsample(im, 8, out);
+        expect(out.w == 8 && pix(out, 0, 0, 0) == 10 && pix(out, 7, 7, 0) == 40, "box_downsample: a small source repeats pixels");
+        Image none;
+        box_downsample(none, 4, out);
+        expect(out.w == 0 && out.px.empty(), "box_downsample: empty in, empty out");
+    }
+
+    // compose: 2x2 tiles of 2x2 pixels. Row 0 of the game's order is south.
+    {
+        std::vector<Image> tiles(3);
+        tiles[1] = solid(2, 2, 100, 0, 0);
+        tiles[2] = solid(2, 2, 0, 0, 0);
+        tiles[2].px[0] = 200;  // top-left pixel red-ish: tile "2" has a marker at its top-left
+        const std::vector<RGB> colours = {{9, 9, 9}, {1, 1, 1}, {2, 2, 2}, {3, 3, 3}};
+        const uint16_t index[4] = {1, 2, 0, 3};  // (0,0)=1 (1,0)=2 (0,1)=0 (1,1)=3 in (tx, ty)
+        const uint8_t rot[4] = {0, 1, 0, 0};     // tile (1,0) turned once
+        RGBImage out;
+        compose(2, 2, 2, index, rot, tiles, colours, out);
+        const auto g = [&](int x, int y, int c) { return out.px[(static_cast<size_t>(y) * out.w + x) * 3 + c]; };
+        expect(out.w == 4 && out.h == 4, "compose: size");
+        expect(g(0, 2, 0) == 100 && g(1, 3, 0) == 100, "compose: tile (0,0) is at the bottom-left");
+        expect(g(0, 0, 0) == 9 && g(3, 0, 0) == 3, "compose: tile (0,1) top-left and (1,1) top-right; no image uses its colour");
+        // tile (1,0): bottom-right block (columns 2-3, rows 2-3), turned once clockwise: the top-left marker moves to the top-right.
+        expect(g(3, 2, 0) == 200 && g(2, 2, 0) == 0 && g(2, 3, 0) == 0 && g(3, 3, 0) == 0, "compose: rotation r turns the tile clockwise");
+        const uint16_t bad[4] = {50, 50, 50, 50};
+        compose(2, 2, 2, bad, rot, tiles, colours, out);
+        expect(g(0, 0, 0) == 128, "compose: an index out of range gives grey");
+        compose(0, 2, 2, index, rot, tiles, colours, out);
+        expect(out.px.empty(), "compose: no tiles, no image");
+    }
+
+    // paint_runway: 100 m pixels, a 100 x 100 image covering 10 km square.
+    {
+        RGBImage img;
+        img.w = img.h = 100;
+        img.px.assign(100 * 100 * 3, 200);
+        // Centre (5000, 5000): row 50, column 50. Heading 90: along east-west.
+        paint_runway(img, 100.0, 5000, 5000, kPi / 2, 1000, 90);
+        const auto painted = [&](int x, int y) { return img.px[(static_cast<size_t>(y) * 100 + x) * 3] == 64; };
+        int count = 0;
+        for (size_t i = 0; i < img.px.size(); i += 3) count += img.px[i] == 64;
+        expect(painted(50, 49) && painted(50, 50), "paint_runway: the centre is painted");
+        expect(painted(46, 49) && painted(53, 49) && !painted(40, 49) && !painted(60, 49), "paint_runway: heading 90 is a horizontal stripe");
+        expect(!painted(50, 45) && !painted(50, 55), "paint_runway: not vertical");
+        expect(count >= 20 && count <= 24, "paint_runway: a 90 m runway is painted 2 pixels wide at 100 m per pixel");
+        RGBImage v;
+        v.w = v.h = 100;
+        v.px.assign(100 * 100 * 3, 200);
+        paint_runway(v, 100.0, 5000, 5000, 0.0, 1000, 90);  // heading 0: north-south
+        expect(v.px[(46 * 100 + 49) * 3] == 64 && v.px[(54 * 100 + 49) * 3] == 64 && v.px[(50 * 100 + 40) * 3] == 200,
+               "paint_runway: heading 0 is a vertical stripe");
+        RGBImage n;
+        n.w = n.h = 100;
+        n.px.assign(100 * 100 * 3, 200);
+        paint_runway(n, 100.0, 5000, 9500, 0.0, 2000, 90);  // runs off the north edge: row 0 is north
+        expect(n.px[(0 * 100 + 49) * 3] == 64 && n.px[(99 * 100 + 49) * 3] == 200, "paint_runway: row 0 is north, clipped at the edge");
+        paint_runway(n, 100.0, 1e9, 1e9, 0.0, 10, 10);
+        paint_runway(n, 100.0, std::nan(""), 0, 0.0, 10, 10);
+        expect(true, "paint_runway: far away and non-finite input do nothing");
+    }
+
+    // ini
+    {
+        const auto u16 = utf16le(L"[TargetArea001]\r\nName=Ramstein Airbase\r\nPosition=1000.5,2000\r\n; comment\r\n[Other]\r\nKey = Value  ; note\r\n");
+        const Ini a = parse_ini(u16.data(), u16.size());
+        const auto s1 = a.get("targetarea001", "NAME"), s2 = a.get("OTHER", "key");
+        expect(s1 && *s1 == "Ramstein Airbase" && s2 && *s2 == "Value", "ini: UTF-16LE with a BOM, case-insensitive, trimmed, comments cut");
+        const auto an = ansi(std::string("[A]\r\nName=Zweibr") + "ü" + "cken\r\n");
+        const Ini b = parse_ini(an.data(), an.size());
+        const auto s3 = b.get("a", "name");
+        expect(s3 && *s3 == "Zweibr\xc3\xbc" "cken", "ini: ANSI text read as Latin-1 into UTF-8");
+        const auto eu = utf16le(std::wstring(L"[A]\r\nName=Zweibr") + wchar_t(0xfc) + L"cken\r\n");
+        const Ini c = parse_ini(eu.data(), eu.size());
+        expect(c.get("A", "Name") && *c.get("A", "Name") == "Zweibr\xc3\xbc" "cken", "ini: UTF-16 non-ASCII becomes UTF-8");
+        expect(a.get("nope", "x") == nullptr && a.get("other", "x") == nullptr, "ini: missing section or key is null");
+        double v[2];
+        expect(parse_numbers("-1066.00, 2392.5", v, 2) && v[0] == -1066.0 && v[1] == 2392.5 && !parse_numbers("1", v, 2) &&
+                   !parse_numbers("x,2", v, 2),
+               "ini: number lists");
+    }
+
+    // airfields
+    {
+        const auto targets = utf16le(
+            L"[TargetArea001]\r\nName=Ramstein Airbase\r\nPosition=100000,200000\r\nAirfieldDataFile=af_one.ini\r\n"
+            L"Target[001].Type=Runway1\r\nTarget[001].Offset=0,0\r\nTarget[001].Heading=90\r\n"
+            L"Target[002].Type=Tower1\r\nTarget[002].Heading=45\r\n\r\n"
+            L"[TargetArea002]\r\nName=USS Somebody\r\nPosition=5,5\r\nAirfieldDataFile=carrier.ini\r\nCarrierStation=1\r\n\r\n"
+            L"[TargetArea003]\r\nName=Far Away\r\nPosition=5,5\r\nAirfieldDataFile=off.ini\r\nOffMapAirBase=TRUE\r\n\r\n"
+            L"[TargetArea004]\r\nName=Town\r\nPosition=5,5\r\n\r\n"
+            L"[TargetArea005]\r\nName=Missing File\r\nPosition=300,400\r\nAirfieldDataFile=gone.ini\r\n"
+            L"Target[001].Type=Runway2\r\nTarget[001].Heading=30\r\n");
+        const Ini t = parse_ini(targets.data(), targets.size());
+        int loads = 0;
+        const AirfieldLoader loader = [&](const std::string& name) -> std::vector<uint8_t> {
+            ++loads;
+            if (name != "af_one.ini") return {};
+            return ansi("[Runway001]\r\nHeading=0\r\nOffset=0,1000\r\nLength=2500\r\nWidth=90\r\n"
+                        "[Runway002]\r\nHeading=-30\r\nOffset=100,0\r\nLength=1200\r\nWidth=60\r\n");
+        };
+        const auto af = airfields_from(t, loader);
+        expect(af.size() == 2 && af[0].name == "Ramstein Airbase" && af[1].name == "Missing File", "airfields: carriers, off-map bases and non-airfields skipped");
+        expect(loads == 2, "airfields: only airfields' inis are loaded");
+        const double deg = kPi / 180;
+        const Airfield& a = af[0];
+        expect(a.x == 100000 && a.y == 200000 && a.runways.size() == 2, "airfields: position and two runways");
+        // A = 90 degrees, offset (0, 1000): centre = position + (1000, 0).
+        expect(std::fabs(a.runways[0].x - 101000) < 1e-6 && std::fabs(a.runways[0].y - 200000) < 1e-6, "airfields: the runway offset is turned by the area heading");
+        expect(std::fabs(a.runways[0].heading - 90 * deg) < 1e-9 && a.runways[0].length == 2500 && a.runways[0].width == 90, "airfields: heading is area plus ini, size as given");
+        // Offset (100, 0) at A = 90: (x cosA + y sinA, -x sinA + y cosA) = (0, -100).
+        expect(std::fabs(a.runways[1].x - 100000) < 1e-6 && std::fabs(a.runways[1].y - 199900) < 1e-6 &&
+                   std::fabs(a.runways[1].heading - 60 * deg) < 1e-9,
+               "airfields: the second runway");
+        expect(std::fabs(a.heading - 90 * deg) < 1e-9, "airfields: the airfield heading is the first runway's");
+        expect(af[1].runways.empty() && std::fabs(af[1].heading - 30 * deg) < 1e-9 && af[1].x == 300, "airfields: an unreadable ini keeps the airfield, with the area heading");
+        const Ini none = parse_ini(nullptr, 0);
+        expect(airfields_from(none, loader).empty(), "airfields: an empty ini has none");
+    }
+
+    // texture xml
+    {
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5);
+        const auto m = make_mapping(-4.5);
+        const std::string east = num(-25.0 + 1000000.0 * m.lon_scale, 9), north = num(-4.5 + 1000000.0 * m.lat_scale, 9);
+        auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
+        auto corner = [&](const char* tag, const std::string& lon, const std::string& lat) {
+            return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat + "</Latitude>");
+        };
+        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" ID=\"LazySF2.T\">") &&
+                   has("<File>LazySF2.T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
+               "texture xml: structure");
+        expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&
+                   corner("TopLeft", "-25", north),
+               "texture xml: corners are the outer edges of the extent");
+    }
+}
+}  // namespace
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -2304,6 +2657,7 @@ int main() {
     tracker_logic_tests();
     tacview_tests();
     terrain_tests();
+    texture_tests();
     other_page_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

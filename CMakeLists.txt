@@ -34,6 +34,9 @@ add_library(lazysf2 SHARED
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
+    src/acmi/terrain_texture.cpp
+    src/acmi/airfields.cpp
+    src/acmi/ini.cpp
     src/hooks/probe_hooks.cpp
     src/hooks/puppet_hooks.cpp
     src/hooks/missile_spawn.cpp
@@ -72,6 +75,9 @@ add_executable(lazysf2-net-tests
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
+    src/acmi/terrain_texture.cpp
+    src/acmi/airfields.cpp
+    src/acmi/ini.cpp
     src/hooks/options_other_splice.cpp
 )
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
