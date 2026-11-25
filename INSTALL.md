@@ -45,7 +45,7 @@ In Tacview, set the terrain layer set to **Auto** (or **Real World**). Recording
 
 These files are outside the game folder, so uninstalling the mod leaves them. You can delete the three `LazySF2` folders (in `Data\Terrain\Custom`, `Data\Terrain\Textures` and `AddOns`) yourself.
 
-Theatres with a real-world position moved, so recordings of GermanyCE, IsraelME and VietnamSEA made before this version no longer line up with the terrain. The flat mapping also stretches east-west by a few percent away from the theatre's middle latitude.
+Theatres with a real-world position moved, so recordings of GermanyCE, IsraelME and VietnamSEA made before this version no longer line up with the terrain. The flat mapping also stretches east-west by up to about 10% at the theatre's north and south edges.
 
 ## How to tell it's working
 
