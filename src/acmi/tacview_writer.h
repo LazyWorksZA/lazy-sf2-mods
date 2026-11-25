@@ -66,8 +66,11 @@ public:
     /// </summary>
     bool begin_frame(size_t n);
     TacviewRec& slot(size_t i) { return ring_[(head_.load(std::memory_order_relaxed) + static_cast<uint32_t>(i)) & (cap_ - 1)]; }
-    /// <summary>Publishes the frame: the first `used` reserved slots (used &lt;= n) and an end marker at game time t.</summary>
-    void commit_frame(size_t used, double t);
+    /// <summary>
+    /// Publishes the frame: the first `used` reserved slots (used &lt;= n) and an end marker at game time t. series_mask
+    /// names the series the frame lists completely (see TacviewCore::end_frame).
+    /// </summary>
+    void commit_frame(size_t used, double t, uint8_t series_mask = TacviewRec::kSeriesAll);
 
     /// <summary>
     /// Asks the thread to finish: it drains the ring, flushes and closes the file, then logs the summary (with why, a

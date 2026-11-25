@@ -37,11 +37,12 @@ void TacviewCore::seed_time(double t0, long long last_ms) {
 
 void TacviewCore::add(const TacviewRec& r) {
     if (r.kind != TacviewRec::kObject) return;
-    // An aircraft and a weapon can have the same seq (each has its own counter): the class is part of the identity.
-    const bool weapon = r.obj_class != TacviewRec::kAircraft;
+    // Each family has its own seq counter: the family is part of the identity.
+    const auto family = TacviewRec::family_of(r.obj_class);
+    const bool weapon = family == TacviewRec::Family::Weapon;
     State* s = nullptr;
     for (State& o : objs_) {
-        if (o.seq == r.seq && (o.obj_class != TacviewRec::kAircraft) == weapon) {
+        if (o.seq == r.seq && TacviewRec::family_of(o.obj_class) == family) {
             s = &o;
             break;
         }
@@ -61,13 +62,22 @@ void TacviewCore::add(const TacviewRec& r) {
     }
     const bool is_new = s == nullptr;
     if (is_new) {
-        const uint32_t id = weapon ? kWeaponIdBase + static_cast<uint32_t>(r.seq)
-                                   : (r.is_player ? kPlayerId : kOtherIdBase + static_cast<uint32_t>(r.seq));
-        objs_.push_back({r.seq, r.obj_class, r.side, false, id, -1e300, 0});
+        const uint32_t n = static_cast<uint32_t>(r.seq);
+        uint32_t id = 0;
+        switch (family) {
+            case TacviewRec::Family::Aircraft: id = r.is_player ? kPlayerId : kOtherIdBase + n; break;
+            case TacviewRec::Family::Weapon: id = kWeaponIdBase + n; break;
+            case TacviewRec::Family::Ground: id = kGroundIdBase + n; break;
+            case TacviewRec::Family::CounterMeasure: id = kCounterMeasureIdBase + n; break;
+        }
+        objs_.push_back({r.seq, r.obj_class, r.side, TacviewRec::series_of(r.obj_class), false, id, -1e300, 0});
         s = &objs_.back();
     }
     s->seen = frame_no_;  // present in this frame, even if its transform is skipped below
-    if (!is_new && r.t - s->last_t < (weapon ? min_dt_weapon_ : min_dt_) - 1e-9) {
+    const double min_dt = family == TacviewRec::Family::Aircraft ? min_dt_
+                          : weapon                              ? min_dt_weapon_
+                                                                : 0.0;  // the walker's own due times
+    if (!is_new && r.t - s->last_t < min_dt - 1e-9) {
         ++stats_.rate_limited;
         return;
     }
@@ -103,6 +113,14 @@ void TacviewCore::add(const TacviewRec& r) {
                 std::snprintf(parent_id, sizeof(parent_id), "%x", pid);
                 p.parent = parent_id;
             }
+        } else if (family == TacviewRec::Family::Ground) {
+            p.type = r.obj_class == TacviewRec::kGroundStatic    ? "Ground+Static+Building"
+                     : r.obj_class == TacviewRec::kGroundVehicle ? "Ground+Vehicle"
+                                                                  : "Sea+Watercraft";
+        } else if (family == TacviewRec::Family::CounterMeasure) {
+            p.name = nullptr;
+            side = hooks::AircraftSide::Unknown;  // decoys have no coalition
+            p.type = r.obj_class == TacviewRec::kFlare ? "Misc+Decoy+Flare" : "Misc+Decoy+Chaff";
         } else {
             if (type[0]) {  // type known: the model key is the Name, the callsign is the Pilot (the player too)
                 p.name = type;
@@ -134,11 +152,11 @@ void TacviewCore::add(const TacviewRec& r) {
     ++stats_.transforms;
 }
 
-void TacviewCore::end_frame(double t, std::string& out) {
+void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
     // Removals first: objects of earlier frames that were not added in this one.
     std::string removals;
     for (size_t i = 0; i < objs_.size();) {
-        if (objs_[i].seen != frame_no_) {
+        if (objs_[i].seen != frame_no_ && (objs_[i].series & series_mask)) {
             append_removal(removals, objs_[i].id);
             ++stats_.removals;
             objs_[i] = objs_.back();

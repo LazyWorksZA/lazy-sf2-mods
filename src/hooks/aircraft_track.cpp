@@ -377,6 +377,15 @@ unsigned long long aircraft_seq_for_object(const void* obj) {
     return seq;
 }
 
+bool aircraft_side_masks(uint32_t* friendly, uint32_t* enemy, uint32_t* neutral) {
+    if (!g_base.load(std::memory_order_acquire)) return false;
+    const SideMasks m = read_side_masks();
+    *friendly = m.friendly;
+    *enemy = m.enemy;
+    *neutral = m.neutral;
+    return true;
+}
+
 void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx) {
     LiveAircraft list[kMaxTracked];  // a copy of the table, so the callback never sees Entry
     const SideMasks masks = read_side_masks();

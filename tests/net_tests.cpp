@@ -20,6 +20,7 @@
 #include "acmi/tacview_writer.h"
 #include "hooks/options_other_splice.h"
 #include "hooks/weapon_class.h"
+#include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "bot_client.h"
 #include "bot_core.h"
@@ -1820,6 +1821,107 @@ void tacview_tests() {
         std::string ev_line;
         append_event_destroyed(ev_line, 0x2000a1f);
         expect(ev_line == "0,Event=Destroyed|2000a1f|\n", "acmi format: Destroyed event line");
+    }
+
+    // The world walker's identity rules, over synthetic slot snapshots.
+    {
+        using namespace lazysf2::hooks;
+        uint64_t next = 1;
+        SlotMem m;
+        GroundStep s = ground_step(m, 0x1000, true, -1, next);
+        expect(s.present && s.is_new && m.seq == 1 && next == 2, "ground identity: a first sighting gets seq 1");
+        s = ground_step(m, 0x1000, true, -1, next);
+        expect(s.present && !s.is_new && m.seq == 1 && next == 2, "ground identity: the same pointer keeps its seq");
+        s = ground_step(m, 0x2000, true, -1, next);
+        expect(s.present && s.is_new && m.seq == 2, "ground identity: a new pointer in the slot gets a new seq");
+        s = ground_step(m, 0x2000, false, 5, next);
+        expect(!s.present && s.destroyed && s.dead_seq == 2 && !m.live,
+               "ground identity: live to inactive at damage 5 writes the destroyed event");
+        s = ground_step(m, 0x2000, false, 5, next);
+        expect(!s.present && !s.destroyed, "ground identity: the event is written once");
+        s = ground_step(m, 0x2000, true, -1, next);
+        expect(s.present && s.is_new && m.seq == 3, "ground identity: inactive to live again gets a new seq");
+        s = ground_step(m, 0x2000, false, 3, next);
+        expect(!s.present && !s.destroyed, "ground identity: inactive at a lower damage level is only a removal");
+        s = ground_step(m, 0x2000, true, -1, next);
+        s = ground_step(m, 0x3000, false, 5, next);
+        expect(!s.destroyed && !m.live, "ground identity: a replaced object gives no event");
+
+        uint64_t cm_next = 1;
+        SlotMem c;
+        CounterMeasureStep cs = counter_measure_step(c, true, 3.5f, cm_next);
+        expect(cs.present && cs.is_new && c.seq == 1, "counter-measure: first sighting");
+        cs = counter_measure_step(c, true, 3.1f, cm_next);
+        expect(cs.present && !cs.is_new && c.seq == 1, "counter-measure: life going down keeps the seq");
+        cs = counter_measure_step(c, true, 3.8f, cm_next);
+        expect(cs.present && cs.is_new && c.seq == 2, "counter-measure: life going up is a new instance in the same object");
+        cs = counter_measure_step(c, false, 0.0f, cm_next);
+        expect(!cs.present && !c.live, "counter-measure: inactive is not present");
+        cs = counter_measure_step(c, true, 0.5f, cm_next);
+        expect(cs.present && cs.is_new && c.seq == 3, "counter-measure: live again after a gap is new, even with less life");
+    }
+
+    // New classes in the core: ids, types, no rate limit, and series that are only removed in their own frames.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        auto rec = [](uint8_t cls, uint64_t seq, AircraftSide side, const char* name, double t) {
+            TacviewRec r = make_rec(seq, false, side, name, t, 100, 200, 5, 0.1f, 1.0f, 0.0f);
+            r.obj_class = cls;
+            return r;
+        };
+        core.add(rec(TacviewRec::kGroundStatic, 1, AircraftSide::Enemy, "SA-2 Site", 10.0));
+        core.add(rec(TacviewRec::kGroundVehicle, 2, AircraftSide::Friendly, "M113,APC", 10.0));
+        core.add(rec(TacviewRec::kShip, 3, AircraftSide::Neutral, "Frigate", 10.0));
+        core.add(rec(TacviewRec::kFlare, 1, AircraftSide::Friendly, "", 10.0));
+        core.add(rec(TacviewRec::kChaff, 2, AircraftSide::Unknown, "", 10.0));
+        core.end_frame(10.0, out, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile |
+                                      TacviewRec::kSeriesCounterMeasure);
+        const auto ls = lines_of(out);
+        expect(ls.size() == 6, "tacview world: five objects");
+        expect(ls[1].rfind("2000001,T=", 0) == 0 &&
+                   ls[1].find(",Name=SA-2 Site,Type=Ground+Static+Building,Coalition=Enemies,Color=Red") != std::string::npos &&
+                   ls[1].find("Pilot") == std::string::npos,
+               "tacview world: building id 0x2000000+seq, type name, coalition");
+        expect(ls[2].rfind("2000002,T=", 0) == 0 &&
+                   ls[2].find(",Name=M113" + std::string(1, 92) + ",APC,Type=Ground+Vehicle,Coalition=Allies") != std::string::npos,
+               "tacview world: vehicle type and escaped name");
+        expect(ls[3].find(",Name=Frigate,Type=Sea+Watercraft,Coalition=Neutrals") != std::string::npos &&
+                   ls[3].rfind("2000003,T=", 0) == 0,
+               "tacview world: ship type");
+        expect(ls[4].rfind("3000001,T=", 0) == 0 && ls[4].find("Type=Misc+Decoy+Flare") != std::string::npos &&
+                   ls[4].find("Name=") == std::string::npos && ls[4].find("Coalition") == std::string::npos,
+               "tacview world: flare id 0x3000000+seq, no name, no coalition");
+        expect(ls[5].rfind("3000002,T=", 0) == 0 && ls[5].find("Type=Misc+Decoy+Chaff") != std::string::npos,
+               "tacview world: chaff type");
+        // Same seq in different families are different objects; there is no rate limit in the core for these.
+        std::string o2;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.01, 0, 0, 100, 0, 0, 0));
+        core.add(rec(TacviewRec::kGroundStatic, 1, AircraftSide::Enemy, "SA-2 Site", 10.01));
+        core.end_frame(10.01, o2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesGroundStatic);
+        expect(o2.find("2000001,T=") != std::string::npos && o2.find("10001") == std::string::npos &&
+                   o2.find("-2000002") == std::string::npos && o2.find("-3000001") == std::string::npos,
+               "tacview world: the same seq in two families; unlisted series are not removed");
+        // An aircraft frame (aircraft and weapons only) does not remove the ground objects.
+        std::string o3;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.1, 0, 0, 100, 0, 0, 0));
+        core.end_frame(10.1, o3, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+        expect(o3.find("-") == std::string::npos && core.live_objects() == 6, "tacview world: an aircraft frame keeps the rest");
+        // A ground frame that lacks the ship removes it.
+        std::string o4;
+        core.add(rec(TacviewRec::kGroundVehicle, 2, AircraftSide::Friendly, "M113,APC", 11.0));
+        core.end_frame(11.0, o4, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile);
+        expect(count_of(o4, "-2000003" + std::string(1, 10)) == 1 && count_of(o4, "-2000001" + std::string(1, 10)) == 1 &&
+                   o4.find("-3000001") == std::string::npos,
+               "tacview world: objects missing from a frame of their series are removed");
+        // A destroyed building: event, then removal.
+        std::string o5;
+        TacviewRec d = rec(TacviewRec::kGroundVehicle, 2, AircraftSide::Unknown, "", 12.0);
+        d.destroyed = 1;
+        core.add(d);
+        core.end_frame(12.0, o5, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile);
+        expect(o5.find("0,Event=Destroyed|2000002|") != std::string::npos && o5.find("-2000002") != std::string::npos,
+               "tacview world: a destroyed vehicle gets the event and the removal");
     }
 
     // Weapon type classification and the ring slot size.

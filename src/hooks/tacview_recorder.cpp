@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 
@@ -15,6 +16,7 @@
 #include "hooks/hooks.h"
 #include "hooks/terrain_export.h"
 #include "hooks/weapon_class.h"
+#include "hooks/world_walk.h"
 #include "log.h"
 
 namespace lazysf2::hooks {
@@ -42,6 +44,8 @@ uint32_t g_epoch = 0;        // sim_player_epoch() at the start
 bool g_skip_valid = false;   // a start failed or the writer failed during this player's flight: do not retry it
 uint32_t g_skip_epoch = 0;
 double g_last_snapshot = 0;
+std::unique_ptr<acmi::TacviewRec[]> g_walk_buf;  // the world walker's records, copied into the ring as one frame
+bool g_walk_on = false;                          // the walker started with this recording
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -158,7 +162,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         ++used;
     }
     g_weapons_live = live_weapons != 0;
-    g_writer->commit_frame(used, c.t);
+    g_writer->commit_frame(used, c.t, acmi::TacviewRec::kSeriesAircraft | acmi::TacviewRec::kSeriesWeapon);
     c.wrote = true;
 }
 
@@ -175,6 +179,8 @@ void snapshot_cb(const LiveAircraft* list, size_t n, void* vctx) {
 void stop_recording(const char* why, bool final_frame = false) {
     if (!g_recording) return;
     g_recording = false;
+    if (g_walk_on) world_walk_stop();
+    g_walk_on = false;
     if (final_frame && g_writer->accepting() && g_writer->begin_frame(0)) g_writer->commit_frame(0, sim_game_time());
     g_writer->close(false, why);  // the thread logs the summary
 }
@@ -223,7 +229,20 @@ StartResult start_recording(uint32_t epoch) {
     g_last_snapshot = -1e300;
     g_weapons_live = false;
     weapon_track_new_flight();
+    if (!g_walk_buf) g_walk_buf.reset(new (std::nothrow) acmi::TacviewRec[kWorldWalkMaxRecords]);
+    g_walk_on = g_walk_buf && world_walk_start();
+    if (!g_walk_buf) LOG("tacview: out of memory for the world walker; only aircraft and weapons are recorded");
     return StartResult::Started;
+}
+
+// The world walker's objects, as a frame of their own at the same game time. Game thread.
+void write_world_frame(double t) {
+    if (!g_walk_on) return;
+    uint8_t mask = 0;
+    const size_t n = world_walk_run(t, g_walk_buf.get(), kWorldWalkMaxRecords, &mask);
+    if (!mask || !g_writer->begin_frame(n)) return;  // a dropped frame is counted by the writer
+    for (size_t i = 0; i < n; ++i) g_writer->slot(i) = g_walk_buf[i];
+    g_writer->commit_frame(n, t, mask);
 }
 
 // A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
@@ -254,11 +273,13 @@ void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
     }
     const double t = sim_game_time();
     const double interval = g_weapons_live ? kSnapshotIntervalWeapons : kSnapshotInterval;
-    if (t >= g_last_snapshot && t - g_last_snapshot < interval - 1e-9) return;
-    g_last_snapshot = t;
-    SnapCtx c;
-    c.t = t;
-    probe_with_aircraft(snapshot_cb, &c);
+    if (!(t >= g_last_snapshot && t - g_last_snapshot < interval - 1e-9)) {
+        g_last_snapshot = t;
+        SnapCtx c;
+        c.t = t;
+        probe_with_aircraft(snapshot_cb, &c);
+    }
+    write_world_frame(t);
 }
 
 }  // namespace
