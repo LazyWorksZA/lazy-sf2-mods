@@ -1,9 +1,11 @@
 # Changelog
 
 All notable changes to LazySF2, the runtime mods for Strike Fighters 2 (July 2013).
-Newest first. There is no tagged release yet; the installer is at 0.1.0.
+Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Releases page.
 
 ## Unreleased
+
+## 1.0.0 (2026-11-25)
 
 ### Player features
 
