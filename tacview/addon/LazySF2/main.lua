@@ -92,7 +92,7 @@ local function OnUpdate(dt, absoluteTime)
 	lastTheatre = theatre
 	reapply = true
 	ApplyAll(theatre)
-	Tacview.Log.Info("LazySF2: terrain " .. (theatre or "no LazySF2 terrain"))
+	Tacview.Log.Info("terrain " .. (theatre or "none (not a LazySF2 recording)"))
 end
 
 Tacview.UI.Menus.AddOption(nil, "LazySF2 theatre switch", IsSwitchEnabled(), OnToggle)
