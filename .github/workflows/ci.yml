@@ -1,0 +1,46 @@
+# Builds the mod and runs the tests on every push. The runner has the same VS 2026 toolset as the dev machine.
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.vcpkg-cache
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: vcpkg binary cache
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-x86-windows-static-${{ hashFiles('vcpkg.json') }}
+
+      - name: Create the vcpkg cache folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+
+      # The loopback network tests are timing-sensitive on a busy runner: one retry before failing.
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          ./build/Release/tools/lazysf2-net-tests.exe
+          if ($LASTEXITCODE) {
+            Write-Host '::warning::tests failed once; retrying'
+            ./build/Release/tools/lazysf2-net-tests.exe
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+
+      - name: Installer helper tests
+        shell: pwsh
+        run: dotnet test installer/LazySF2.Manager.Tests

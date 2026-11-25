@@ -1,6 +1,6 @@
 # SF2 Borderless Fullscreen — Claude Code Brief
 
-Nov 24, 2026 · @Jozias van der Westhuizen
+Nov 24, 2026
 
 ## Goal and scope
 

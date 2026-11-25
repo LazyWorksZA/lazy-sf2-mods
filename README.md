@@ -4,11 +4,12 @@ These are quality-of-life mods for **Strike Fighters 2**, the merged install wit
 
 - **Display Mode and Screen** in the game's own **Options → Graphics**: Borderless or stock exclusive Fullscreen, on the monitor of your choice.
 - **Mouse Pointer** in **Options → Controls**. The game normally builds its own pointer from raw mouse movement, so it never quite lines up with Windows' pointer and feels off (and wanders over remote desktop). "Match Windows cursor", the default, puts the game's pointer exactly on Windows' pointer.
+- **Tacview Recording** in **Options → Gameplay** (default Off). Every flight, single-player included, is recorded to a Tacview `.acmi` file: aircraft, weapons, ground units, ships, flares, chaff, tracers and explosions. Each theatre's terrain, ground texture and airfields are exported for Tacview too, and a small Tacview add-on shows the right theatre for each recording. See [`INSTALL.md`](INSTALL.md).
 - **Fixes:** Alt-Tab back into Fullscreen works again (a stock bug), display scaling other than 100% no longer breaks the picture, the Windows key works in Borderless, and lock/unlock recovers.
 - **Installer:** a normal MSI wizard (license and third-party notices included) that copies one DLL into the game folder. No app, window or shortcut is left behind. Uninstall it from *Installed apps*.
 - **Later: multiplayer.** The long-term goal is to bring multiplayer back. See `docs/SF2 Network Layer — Claude Code Brief.md`.
 
-> **Status:** the borderless brief's phases 1–5 are done. Auto-update and a public release are still to come.
+> **Status:** the borderless brief is done, and Tacview recording is in. Multiplayer is in progress (developer-only so far).
 
 This project is not affiliated with or endorsed by Third Wire Productions. It contains no ThirdWire code or game data, and you need your own copy of the game.
 
@@ -26,9 +27,17 @@ The reverse-engineering notes are kept in a separate private repository.
 
 ## Quick start
 
-**Players:** run `LazySF2-win.msi`. See [`INSTALL.md`](INSTALL.md).
+**Players:** download `LazySF2-win.msi` from the [Releases](../../releases) page and run it. See [`INSTALL.md`](INSTALL.md).
 
-**Developers:** you need Windows, Visual Studio 2026 or 2022 with **Desktop development with C++** (x86 toolset), and for the installer the .NET 10 SDK plus `vpk`.
+Every release file is built by GitHub Actions from the tagged commit, never on a developer's machine. To confirm that a download came from this repository's code:
+
+```powershell
+gh attestation verify LazySF2-win.msi --repo LazyWorksZA/lazy-sf2-mods
+```
+
+The release notes also list each file's SHA-256.
+
+**Developers:** you need Windows, Visual Studio 2026 with **Desktop development with C++** (x86 toolset), and for the installer the .NET 10 SDK plus `vpk`.
 
 ```powershell
 .\build.ps1                                       # x86 build: build\Release\winmm.dll
@@ -45,7 +54,9 @@ The reverse-engineering notes are kept in a separate private repository.
 | `installer/` | The headless LazySF2 helper (C#, Velopack install/uninstall hooks), installer texts, and `build-installer.ps1` |
 | `scripts/` | Install and uninstall for development, using a file manifest |
 | `tools/` | The winmm proxy generator, the `.cat` unpacker, Ghidra scripts, Process Monitor helpers, and the unattended test driver |
+| `tacview/` | The LazySF2 Tacview add-on (Lua), built into the DLL |
 | `docs/` | The briefs and the [host stream format](docs/stream-format.md) |
+| `.github/` | CI (build and tests on every push) and the release workflow |
 
 ## Roadmap (borderless brief)
 
@@ -55,7 +66,7 @@ The reverse-engineering notes are kept in a separate private repository.
 4. ~~Display Mode option in the Options menu~~ (applied live)
 5. ~~Hardening~~: Alt-Tab, device lost, DPI, Windows key, multi-monitor (Screen option), DXVK check, Velopack installer
 
-Next: auto-update and a public release, then the network brief.
+Next: the network brief (multiplayer), then auto-update.
 
 ## Contributing
 
@@ -63,4 +74,4 @@ Contributors, human or AI, should read [`AGENTS.md`](AGENTS.md) first. It lists 
 
 ## License
 
-[MIT](LICENSE), for this project's own code and documentation only. Third-party components we distribute (MinHook, Velopack) are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+[MIT](LICENSE), for this project's own code and documentation only. Third-party components we distribute (MinHook, ENet, Velopack) are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
