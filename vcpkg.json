@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "dependencies": [
     "minhook",
-    "enet"
+    "enet",
+    "miniz"
   ],
   "builtin-baseline": "7f2ca8f8f9a2b6ae02ea4b4b7e0ef27490568afa"
 }

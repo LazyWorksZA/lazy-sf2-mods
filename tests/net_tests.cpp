@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <memory>
 #include <chrono>
 #include <cmath>
@@ -19,6 +20,7 @@
 #include "acmi/airfields.h"
 #include "tacview_addon_lua.h"
 #include "acmi/ini.h"
+#include "acmi/acmi_zip.h"
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
@@ -28,6 +30,8 @@
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "bot_client.h"
+#include <miniz.h>
+
 #include "bot_core.h"
 #include "net/host_core.h"
 #include "net/protocol.h"
@@ -1520,6 +1524,32 @@ void tv_log(const char* l) {
     tv_logged += '\n';
 }
 
+// The one entry of a .zip.acmi, read through miniz; empty (and entry_name empty) when it is not a one-entry zip.
+std::string read_zip_entry(const std::wstring& p, std::string& entry_name) {
+    std::string r;
+    entry_name.clear();
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, p.c_str(), L"rb") != 0 || !f) return r;
+    mz_zip_archive z{};
+    if (mz_zip_reader_init_cfile(&z, f, 0, 0)) {
+        mz_zip_archive_file_stat st{};
+        if (mz_zip_reader_get_num_files(&z) == 1 && mz_zip_reader_file_stat(&z, 0, &st)) {
+            size_t n = 0;
+            void* heap = mz_zip_reader_extract_to_heap(&z, 0, &n, 0);
+            if (heap) {
+                r.assign(static_cast<const char*>(heap), n);
+                mz_free(heap);
+                entry_name = st.m_filename;
+            }
+        }
+        mz_zip_reader_end(&z);
+    }
+    std::fclose(f);
+    return r;
+}
+
+bool exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
 std::string read_whole(const std::wstring& p) {
     std::string s;
     FILE* f = nullptr;
@@ -1703,7 +1733,7 @@ void tacview_tests() {
         b.add(make_rec(1, true, AircraftSide::Friendly, "P", last_t - 1.0, 0, 0, 0, 0, 0, 0));  // earlier than the last frame
         b.end_frame(last_t - 1.0, o3);
         expect(o3.rfind("1,T=", 0) == 0, "tacview: a seeded core clamps an earlier frame to the last one (no # line)");
-        b.add(make_rec(1, true, AircraftSide::Friendly, "P", last_t + 0.5, 0, 0, 0, 0, 0, 0));
+        b.add(make_rec(1, true, AircraftSide::Friendly, "P", last_t + 0.5, 1, 0, 0, 0, 0, 0));  // moved: a delta line
         b.end_frame(last_t + 0.5, o4);
         expect(o4.rfind("#", 0) == 0 && std::atof(o4.c_str() + 1) > static_cast<double>(core.last_ms()) / 1000.0 + 0.49 &&
                    o4.find("FileType") == std::string::npos,
@@ -1755,7 +1785,7 @@ void tacview_tests() {
         std::string o3;
         for (int i = 0; i <= 200; ++i) {
             const double t = 50.0 + i / 100.0;
-            c3.add(make_rec(1, true, AircraftSide::Friendly, "P", t, 0, 0, 100, 0, 0, 0));
+            c3.add(make_rec(1, true, AircraftSide::Friendly, "P", t, i, 0, 100, 0, 0, 0));
             if (i < 200) c3.add(weapon(1, TacviewRec::kMissile, 1, AircraftSide::Unknown, "AIM-9B", t, i));
             c3.end_frame(t, o3);
         }
@@ -1767,6 +1797,85 @@ void tacview_tests() {
         expect(c3.live_objects() == 1, "tacview weapons: only the aircraft is left");
         // Weapon seq 1 and aircraft seq 1 are different objects with different ids.
         expect(count_of(o3, "\n10001,T=") == 0, "tacview weapons: no id collision with aircraft");
+    }
+
+    // Delta encoding: only the changed T components are written, every '|' is kept, a re-created id is complete, and
+    // a decoder that reapplies the deltas reproduces the full values.
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string o1, o2, o3;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.0, 1000, 2000, 3000, 0.1f, 1.0f, 0.2f));
+        core.end_frame(10.0, o1);
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.2, 2000, 2000, 3000, 0.1f, 1.0f, 0.2f));
+        core.end_frame(10.2, o2);
+        expect(o2 == "#0.200\n1,T=0.017966223||||||2000||\n", "tacview delta: a longitude-only change writes lon and U, nine fields");
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.4, 2000, 2000, 3000, 0.1f, 1.0f, 0.2f));
+        core.end_frame(10.4, o3);
+        expect(o3.empty() && core.stats().unchanged == 1, "tacview delta: an unchanged sample writes no line");
+
+        std::string o4, o5;
+        core.end_frame(10.6, o4);  // the player is gone
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 10.8, 2000, 2000, 3000, 0.1f, 1.0f, 0.2f));
+        core.end_frame(10.8, o5);
+        const auto l5 = lines_of(o5);
+        expect(o4.find("-1\n") != std::string::npos && l5.size() == 2 && l5[1].rfind("1,T=0.017966223|0.017966223|3000|", 0) == 0 &&
+                   l5[1].find("||") == std::string::npos && l5[1].find(",Name=") != std::string::npos,
+               "tacview delta: a re-created id is written in full, with its properties");
+
+        // Round trip over several objects, with a removal and a re-creation.
+        TacviewCore rc{TacviewCoreConfig{}};
+        std::map<uint32_t, std::vector<std::string>> state;
+        bool round_ok = true;
+        int checked = 0;
+        for (int i = 0; i < 60; ++i) {
+            const double t = 100.0 + i * 0.2;
+            std::vector<std::pair<uint32_t, TacviewRec>> in;
+            in.push_back({1, make_rec(1, true, AircraftSide::Friendly, "P", t, i * 37.5, 500 + i % 7, 3000 + i, 0.01f * i, 0.05f * i, 0)});
+            if (i % 3) in.push_back({0x10002, make_rec(2, false, AircraftSide::Enemy, "E", t, 90000, -i * 11.25, 1200, 0, 1.5f, (i / 5) * 0.1f)});
+            if (i < 20 || i >= 40) in.push_back({0x10003, make_rec(3, false, AircraftSide::Neutral, "N", t, 5, 6, 7, 0, 0, 0)});
+            for (auto& e : in) rc.add(e.second);
+            std::string out;
+            rc.end_frame(t, out);
+            for (const std::string& l : lines_of(out)) {
+                if (!l.empty() && l[0] == '-') {
+                    state.erase(static_cast<uint32_t>(std::strtoul(l.c_str() + 1, nullptr, 16)));
+                    continue;
+                }
+                const size_t tp = l.find(",T=");
+                if (tp == std::string::npos) continue;
+                const uint32_t id = static_cast<uint32_t>(std::strtoul(l.c_str(), nullptr, 16));
+                const size_t end = l.find(',', tp + 3);
+                const std::string body = l.substr(tp + 3, end == std::string::npos ? std::string::npos : end - tp - 3);
+                std::vector<std::string> f;
+                size_t a = 0;
+                for (;;) {
+                    const size_t b = body.find('|', a);
+                    f.push_back(body.substr(a, b == std::string::npos ? std::string::npos : b - a));
+                    if (b == std::string::npos) break;
+                    a = b + 1;
+                }
+                if (f.size() != 9) {
+                    round_ok = false;
+                    continue;
+                }
+                auto& st = state[id];
+                if (st.empty()) st.assign(9, "");
+                for (int k = 0; k < 9; ++k)
+                    if (!f[k].empty()) st[k] = f[k];
+            }
+            for (auto& e : in) {
+                TransformText full;
+                format_transform(full, e.second.pos, e.second.ang, Mapping{1.0 / 111320.0, 1.0 / 111320.0});
+                auto it = state.find(e.first);
+                if (it == state.end()) {
+                    round_ok = false;
+                    continue;
+                }
+                for (int k = 0; k < 9; ++k) round_ok = round_ok && it->second[k] == full.f[k];
+                ++checked;
+            }
+        }
+        expect(round_ok && checked > 100, "tacview delta: a decoder reapplying the deltas reproduces the full values");
     }
 
     // NaN sample of an existing object; end_frame after an empty frame.
@@ -2170,7 +2279,9 @@ void tacview_tests() {
         expect(!w.begin_frame(100) && w.dropped_frames() == dropped_before + 1,
                "tacview writer: a frame that cannot fit is dropped and counted");
         w.close_and_join("test");
-        const std::string c1 = read_whole(dir + L"\\SF2 2026-11-24 10-11-12.acmi");
+        expect(zip_queue_wait_idle(10000), "tacview writer: the compressor finishes");
+        std::string entry1;
+        const std::string c1 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-12.zip.acmi", entry1);
         {
             char* dump = nullptr;
             size_t dump_len = 0;
@@ -2182,7 +2293,10 @@ void tacview_tests() {
             std::free(dump);
         }
         expect(c1.rfind("FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z", 0) == 0,
-               "tacview writer: the file is named SF2 <date time>.acmi and starts with the header");
+               "tacview writer: the file is named SF2 <date time>.zip.acmi and starts with the header");
+        expect(entry1 == "SF2 2026-11-24 10-11-12.acmi" && !exists(dir + L"\\SF2 2026-11-24 10-11-12.acmi"),
+               "tacview writer: one entry named <name>.acmi, and the plain file is gone");
+        expect(tv_logged.find("tacview: packed the recording as ") != std::string::npos, "tacview writer: the compressor logs the packed file");
         expect(count_of(c1, "\n1,T=") == 30 && count_of(c1, "\n10002,T=") == 20 && count_of(c1, "\n-10002\n") == 1,
                "tacview writer: all frames and the removal reach the file");
         expect(tv_logged.find("tacview: recording to ") != std::string::npos &&
@@ -2194,7 +2308,8 @@ void tacview_tests() {
         TacviewWriter w2(64);
         expect(w2.open(dir, st, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview writer: second open");
         w2.close_and_join("test");
-        expect(GetFileAttributesW((dir + L"\\SF2 2026-11-24 10-11-12 (2).acmi").c_str()) != INVALID_FILE_ATTRIBUTES,
+        zip_queue_wait_idle(10000);
+        expect(exists(dir + L"\\SF2 2026-11-24 10-11-12 (2).zip.acmi"),
                "tacview writer: a name clash appends (2)");
 
         // Size cap: stops, keeps a whole-line prefix, accepting() turns false.
@@ -2215,7 +2330,9 @@ void tacview_tests() {
         for (int i = 0; i < 100 && w3.accepting(); ++i) Sleep(10);
         expect(!w3.accepting(), "tacview writer: the size cap stops the recording");
         w3.close_and_join("cap test");
-        const std::string c3 = read_whole(dir + L"\\SF2 2026-11-24 10-11-40.acmi");
+        zip_queue_wait_idle(10000);
+        std::string entry3;
+        const std::string c3 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-40.zip.acmi", entry3);
         expect(!c3.empty() && c3.size() <= 600 && c3.back() == '\n' && count_of(tv_logged, "byte cap") == 1,
                "tacview writer: capped file is a whole-line prefix, logged once");
 
@@ -2228,6 +2345,126 @@ void tacview_tests() {
         expect(!w4.accepting() && count_of(tv_logged, "not recording") == 1,
                "tacview writer: folder failure logged once, recording off");
         w4.close_and_join("test");
+
+        // close(true) (shutdown) never zips: the plain file stays. A stale temp file is deleted at the next start.
+        {
+            tv_logged.clear();
+            SYSTEMTIME st5 = st;
+            st5.wSecond = 50;
+            const std::wstring stale = dir + L"\\old.zip.acmi.tmp";
+            FILE* sf = nullptr;
+            _wfopen_s(&sf, stale.c_str(), L"wb");
+            if (sf) std::fclose(sf);
+            TacviewWriter w5(64);
+            expect(w5.open(dir, st5, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr), "tacview shutdown: opens");
+            while (w5.begin_frame(1) == false) Sleep(5);
+            w5.slot(0) = make_rec(1, true, AircraftSide::Friendly, "P", 0.0, 1, 0, 100, 0, 0, 0);
+            w5.commit_frame(1, 0.0);
+            for (int i = 0; i < 200 && tv_logged.find("recording to") == std::string::npos; ++i) Sleep(10);
+            expect(tv_logged.find("deleted 1 unfinished") != std::string::npos && !exists(stale),
+                   "tacview zip: a stale .zip.acmi.tmp is deleted when a recording starts");
+            w5.close(true, "shutdown test");
+            for (int i = 0; i < 200 && !w5.idle(); ++i) Sleep(10);
+            zip_queue_wait_idle(5000);
+            expect(w5.idle() && exists(dir + L"\\SF2 2026-11-24 10-11-50.acmi") &&
+                       !exists(dir + L"\\SF2 2026-11-24 10-11-50.zip.acmi"),
+                   "tacview zip: close(true) skips the zip and keeps the plain file");
+        }
+
+        // Two recordings closing back to back: the writer is free at once, the compressor queue packs both.
+        {
+            tv_logged.clear();
+            TacviewWriter w6(64);
+            bool all_ok = true;
+            for (unsigned k = 0; k < 2; ++k) {
+                SYSTEMTIME s6 = st;
+                s6.wSecond = static_cast<WORD>(20 + k);
+                all_ok = all_ok && w6.open(dir, s6, "2026-11-24T20:15:00Z", cfg, tv_log, nullptr);
+                for (int i = 0; i < 50; ++i) {
+                    while (!w6.begin_frame(1)) Sleep(1);
+                    w6.slot(0) = make_rec(1, true, AircraftSide::Friendly, "P", i * 0.1, i, 0, 100, 0, 0, 0);
+                    w6.commit_frame(1, i * 0.1);
+                }
+                w6.close(false, "back to back");
+                for (int i = 0; i < 500 && !w6.idle(); ++i) Sleep(2);
+                all_ok = all_ok && w6.idle();
+            }
+            expect(all_ok, "tacview zip: the writer is idle again without waiting for the compressor");
+            expect(zip_queue_wait_idle(10000), "tacview zip: the queue drains");
+            std::string e1, e2;
+            const std::string z1 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-20.zip.acmi", e1);
+            const std::string z2 = read_zip_entry(dir + L"\\SF2 2026-11-24 10-11-21.zip.acmi", e2);
+            expect(!z1.empty() && !z2.empty() && e1 == "SF2 2026-11-24 10-11-20.acmi" && e2 == "SF2 2026-11-24 10-11-21.acmi" &&
+                       !exists(dir + L"\\SF2 2026-11-24 10-11-20.acmi") && !exists(dir + L"\\SF2 2026-11-24 10-11-21.acmi") &&
+                       count_of(tv_logged, "packed the recording as") == 2,
+                   "tacview zip: two back-to-back recordings are both packed and logged");
+        }
+
+        // A zip that fails midway (the read stops after 1000 bytes): the plain file stays and the temp file is removed.
+        {
+            const std::wstring plain = dir + L"\\zt4.acmi";
+            std::string big(300000, 'x');
+            FILE* pf = nullptr;
+            _wfopen_s(&pf, plain.c_str(), L"wb");
+            if (pf) {
+                std::fwrite(big.data(), 1, big.size(), pf);
+                std::fclose(pf);
+            }
+            zip_test_fail_after(1000);
+            std::wstring zp;
+            uint64_t zb = 0;
+            std::string err;
+            const bool ok = compress_acmi(plain, zp, zb, err);
+            zip_test_fail_after(0);
+            expect(!ok && !err.empty() && exists(plain) && !exists(dir + L"\\zt4.zip.acmi") && !exists(dir + L"\\zt4.zip.acmi.tmp"),
+                   "tacview zip: a mid-stream failure keeps the plain file and removes the temp file");
+        }
+
+        // The zip step on its own: streamed (a file larger than the read chunk), exact bytes, plain file gone.
+        {
+            std::string big;
+            for (int i = 0; i < 120000; ++i) big += "#" + std::to_string(i) + "\n1,T=" + std::to_string(i * 7 % 1000) + "||\n";
+            const std::wstring plain = dir + L"\\zt1.acmi";
+            FILE* pf = nullptr;
+            _wfopen_s(&pf, plain.c_str(), L"wb");
+            if (pf) {
+                std::fwrite(big.data(), 1, big.size(), pf);
+                std::fclose(pf);
+            }
+            std::wstring zp;
+            uint64_t zb = 0;
+            std::string err;
+            const bool ok = compress_acmi(plain, zp, zb, err);
+            std::string en;
+            const std::string back = ok ? read_zip_entry(zp, en) : std::string();
+            expect(ok && zp == dir + L"\\zt1.zip.acmi" && en == "zt1.acmi" && back == big && !exists(plain) && zb > 0 && zb < big.size(),
+                   "tacview zip: one entry named like the plain file, exact bytes, smaller, plain file deleted");
+
+            // Failure: the temp name is taken by a folder. The plain file stays, an error is reported.
+            const std::wstring plain2 = dir + L"\\zt2.acmi";
+            _wfopen_s(&pf, plain2.c_str(), L"wb");
+            if (pf) {
+                std::fwrite("abc\n", 1, 4, pf);
+                std::fclose(pf);
+            }
+            CreateDirectoryW((dir + L"\\zt2.zip.acmi.tmp").c_str(), nullptr);
+            std::wstring zp2;
+            expect(!compress_acmi(plain2, zp2, zb, err) && !err.empty() && exists(plain2) && !exists(dir + L"\\zt2.zip.acmi"),
+                   "tacview zip: an unwritable target keeps the plain file and reports why");
+            RemoveDirectoryW((dir + L"\\zt2.zip.acmi.tmp").c_str());
+
+            // An existing zip with the target's name is never overwritten.
+            const std::wstring plain3 = dir + L"\\zt3.acmi";
+            _wfopen_s(&pf, plain3.c_str(), L"wb");
+            if (pf) {
+                std::fwrite("abc\n", 1, 4, pf);
+                std::fclose(pf);
+            }
+            _wfopen_s(&pf, (dir + L"\\zt3.zip.acmi").c_str(), L"wb");
+            if (pf) std::fclose(pf);
+            expect(!compress_acmi(plain3, zp2, zb, err) && exists(plain3) && !exists(dir + L"\\zt3.zip.acmi.tmp"),
+                   "tacview zip: an existing target keeps the plain file, no temp file left");
+        }
 
         // Clean up.
         WIN32_FIND_DATAW fd;

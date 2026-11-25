@@ -1,5 +1,7 @@
 #include "acmi/tacview_writer.h"
 
+#include "acmi/acmi_zip.h"
+
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -75,6 +77,7 @@ bool TacviewWriter::open(const std::wstring& dir, const SYSTEMTIME& t, const cha
     last_ms_.store(-1);
     next_explosion_.store(1);
     stop_.store(false);
+    no_zip_.store(false);
     finished_.store(false);
     failed_.store(false);
     summary_logged_.store(false);
@@ -113,6 +116,7 @@ void TacviewWriter::commit_frame(size_t used, double t, uint8_t series_mask) {
 void TacviewWriter::close(bool wait_and_detach, const char* why) {
     if (!thread_.joinable()) return;
     if (why) why_.store(why, std::memory_order_relaxed);
+    if (wait_and_detach) no_zip_.store(true, std::memory_order_release);
     open_.store(false, std::memory_order_release);
     stop_.store(true, std::memory_order_release);
     if (!wait_and_detach) return;
@@ -179,13 +183,21 @@ void TacviewWriter::flush_orphaned(const char* why) {
 void TacviewWriter::run() {
     char line[512];
     // 1. The folder and the file.
-    if (!CreateDirectoryW(dir_.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+    const bool dir_made = CreateDirectoryW(dir_.c_str(), nullptr) != 0;
+    if (!dir_made && GetLastError() != ERROR_ALREADY_EXISTS) {
         std::snprintf(line, sizeof(line), "tacview: could not create the folder %s (error %lu); not recording",
                       narrow(display_ ? display_(dir_) : dir_).c_str(), GetLastError());
         log_(line);
         failed_.store(true, std::memory_order_release);
         finished_.store(true, std::memory_order_release);
         return;
+    }
+    if (!dir_made) {
+        const unsigned stale = delete_stale_zip_temps(dir_);  // from a zip cut short by a process exit
+        if (stale) {
+            std::snprintf(line, sizeof(line), "tacview: deleted %u unfinished .zip.acmi.tmp file(s) from an earlier session", stale);
+            log_(line);
+        }
     }
     HANDLE f = INVALID_HANDLE_VALUE;
     std::wstring path;
@@ -201,6 +213,8 @@ void TacviewWriter::run() {
             finished_.store(true, std::memory_order_release);
             return;
         }
+        // The finished recording is "<name>.zip.acmi": a leftover one counts as a clash too.
+        if (GetFileAttributesW((path.substr(0, path.size() - 5) + L".zip.acmi").c_str()) != INVALID_FILE_ATTRIBUTES) continue;
         f = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
                         nullptr);
         if (f != INVALID_HANDLE_VALUE) break;
@@ -298,6 +312,8 @@ void TacviewWriter::run() {
     CloseHandle(f);
     file_ = nullptr;
     log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed));
+    // Hand the closed file to the background compressor: this thread, and so the next recording, never waits for it.
+    if (!failed && !no_zip_.load(std::memory_order_acquire)) zip_queue_submit(path, log_, display_);
     finished_.store(true, std::memory_order_release);
 }
 

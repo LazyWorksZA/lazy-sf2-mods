@@ -23,6 +23,8 @@
 // Ground+Static+Building, Ground+Vehicle or Sea+Watercraft with the type name as Name; flares and chaff are Misc+Decoy+...
 // An aerodrome (0x6000000+seq) is a static Ground+Static+Aerodrome with its name and heading, written once: the recorder
 // lists it in one frame of its own, and only the final frame (every series) removes it.
+// A transform line writes only the T components whose text changed since the last line of that object (ACMI 2.2 lets a
+// component stay empty); every '|' is kept, and an object's first line is complete.
 // A frame says which series it lists completely (end_frame's series_mask), so a 1 Hz series is not removed in between.
 #pragma once
 
@@ -32,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "acmi/acmi_format.h"
 #include "hooks/aircraft_side.h"
 
 namespace lazysf2::acmi {
@@ -114,7 +117,7 @@ struct TacviewCoreStats {
     uint64_t removals = 0;
     uint64_t destroyed_events = 0;
     uint64_t explosions = 0;
-    uint64_t unchanged = 0;     // ground transforms skipped because the pose had not changed
+    uint64_t unchanged = 0;     // transforms skipped because no formatted component had changed
     uint64_t objects = 0;       // distinct objects described
     uint64_t rate_limited = 0;  // transforms skipped by the rate limit
     uint64_t bad_samples = 0;   // objects skipped for a non-finite value
@@ -158,9 +161,10 @@ private:
         uint32_t id;
         double last_t;
         uint64_t seen;  // number of the last frame it was in
-        double last_pos[3];  // the pose last written (ground objects: an unchanged pose is not written again)
+        double last_pos[3];  // the pose last sampled (where an explosion goes)
         float last_ang[3];
         bool has_last;
+        TransformText text;  // the last written text of each T component (delta encoding)
     };
     TacviewCoreConfig cfg_;
     double lon_scale_ = 0, lat_scale_ = 0;
