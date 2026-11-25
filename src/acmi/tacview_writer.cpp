@@ -93,18 +93,20 @@ bool TacviewWriter::open(const std::wstring& dir, const SYSTEMTIME& t, const cha
     return true;
 }
 
+bool TacviewWriter::ring_fits(uint32_t head, uint32_t tail, uint32_t cap, size_t n) {
+    return n + 1 <= cap && head - tail <= cap - (n + 1);
+}
+
 bool TacviewWriter::can_take(size_t n) const {
     if (!open_.load(std::memory_order_acquire) || failed_.load(std::memory_order_relaxed)) return false;
-    const uint32_t h = head_.load(std::memory_order_relaxed);
-    const uint32_t t = tail_.load(std::memory_order_acquire);
-    return n + 1 <= cap_ && h - t <= cap_ - (n + 1);
+    return ring_fits(head_.load(std::memory_order_relaxed), tail_.load(std::memory_order_acquire), cap_, n);
 }
 
 bool TacviewWriter::begin_frame(size_t n) {
     if (!open_.load(std::memory_order_acquire) || failed_.load(std::memory_order_relaxed)) return false;
     const uint32_t h = head_.load(std::memory_order_relaxed);
     const uint32_t t = tail_.load(std::memory_order_acquire);
-    if (n + 1 > cap_ || h - t > cap_ - (n + 1)) {
+    if (!ring_fits(h, t, cap_, n)) {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }

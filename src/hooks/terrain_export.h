@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "acmi/acmi_format.h"
+#include "acmi/airfields.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -80,7 +81,14 @@ struct StructureMark {
     bool bridge = false;
 };
 
+/// <summary>A theatre's structures by target area: marks[first[i] .. first[i + 1]) are area i's.</summary>
+struct StructureList {
+    std::vector<acmi::TargetArea> areas;
+    std::vector<uint32_t> first;  // areas.size() + 1 entries
+    std::vector<StructureMark> marks;
+};
+
 /// <summary>The structures of theatre id, published like the airfields (see terrain_aerodromes). Any thread.</summary>
-StaticList terrain_structures(const std::string& id, std::shared_ptr<const std::vector<StructureMark>>& out);
+StaticList terrain_structures(const std::string& id, std::shared_ptr<const StructureList>& out);
 
 }  // namespace LazyWorks::SF2Patch::hooks

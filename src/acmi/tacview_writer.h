@@ -73,6 +73,8 @@ public:
     bool begin_frame(size_t n);
     /// <summary>Producer thread only. True when begin_frame(n) would succeed now; nothing is counted.</summary>
     bool can_take(size_t n) const;
+    /// <summary>The ring arithmetic of begin_frame and can_take: n records plus the end marker fit (free-running indexes).</summary>
+    static bool ring_fits(uint32_t head, uint32_t tail, uint32_t cap, size_t n);
     TacviewRec& slot(size_t i) { return ring_[(head_.load(std::memory_order_relaxed) + static_cast<uint32_t>(i)) & (cap_ - 1)]; }
     /// <summary>
     /// Publishes the frame: the first `used` reserved slots (used &lt;= n) and an end marker at game time t. series_mask

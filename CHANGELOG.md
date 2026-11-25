@@ -7,7 +7,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Player features
 
-- **Tacview structures.** Recordings now show the theatre's placed buildings and bridges (hangars, bunkers, factories, town buildings) as static objects on the ground, written once per recording; those the game already shows as live objects (guns, SAM sites, radars, mission targets) are not doubled.
+- **Tacview structures.** Recordings now show the placed buildings and bridges (hangars, bunkers, factories, town buildings) of the target areas the mission populates, as static objects on the ground, written once per recording; those the game already shows as live objects (guns, SAM sites, radars, mission targets) are not doubled.
 
 ### Developer tools (off unless enabled)
 

@@ -182,27 +182,34 @@ std::atomic<bool> g_job_ok{false};  // the last job's result, stored before g_bu
 std::mutex g_aero_lock;  // guards g_aero and g_struct
 // By theatre id: present once the export thread has read them (or it was decided that none will come).
 template <typename T>
-using ListMap = std::map<std::string, std::shared_ptr<const std::vector<T>>>;
-ListMap<AerodromeMark> g_aero;
-ListMap<StructureMark> g_struct;
+using ListMap = std::map<std::string, std::shared_ptr<const T>>;
+ListMap<std::vector<AerodromeMark>> g_aero;
+ListMap<StructureList> g_struct;
+
+bool list_empty(const std::vector<AerodromeMark>& l) { return l.empty(); }
+bool list_empty(const StructureList& l) { return l.marks.empty(); }
 
 // An empty list marks "none"; it never replaces a good non-empty one (a failed retry must not lose it).
 template <typename T>
-void publish_list(ListMap<T>& map, const std::string& id, std::vector<T>&& list) {
-    const bool empty = list.empty();
-    auto shared = std::make_shared<const std::vector<T>>(std::move(list));  // allocated outside the lock
-    std::lock_guard<std::mutex> g(g_aero_lock);
-    const auto it = map.find(id);
-    if (it != map.end() && empty && !it->second->empty()) return;
-    map[id] = std::move(shared);
+void publish_list(ListMap<T>& map, const std::string& id, T&& list) {
+    const bool empty = list_empty(list);
+    auto shared = std::make_shared<const T>(std::move(list));  // allocated outside the lock
+    std::shared_ptr<const T> old;  // freed after the lock is released
+    {
+        std::lock_guard<std::mutex> g(g_aero_lock);
+        auto& slot = map[id];
+        if (slot && empty && !list_empty(*slot)) return;
+        old = std::move(slot);
+        slot = std::move(shared);
+    }
 }
 
 template <typename T>
-StaticList lookup_list(const ListMap<T>& map, const std::string& id, std::shared_ptr<const std::vector<T>>& out) {
+StaticList lookup_list(const ListMap<T>& map, const std::string& id, std::shared_ptr<const T>& out) {
     std::lock_guard<std::mutex> g(g_aero_lock);
     const auto it = map.find(id);
-    if (it == map.end()) return StaticList::Pending;
-    if (it->second->empty()) return StaticList::None;
+    if (it == map.end() || !it->second) return StaticList::Pending;
+    if (list_empty(*it->second)) return StaticList::None;
     out = it->second;
     return StaticList::Ready;
 }
@@ -210,8 +217,8 @@ StaticList lookup_list(const ListMap<T>& map, const std::string& id, std::shared
 // No job will run for this theatre now: the recorder stops waiting. The next flight tries again.
 void mark_no_aerodromes(const std::string& id) {
     try {
-        publish_list(g_aero, id, {});
-        publish_list(g_struct, id, {});
+        publish_list(g_aero, id, std::vector<AerodromeMark>{});
+        publish_list(g_struct, id, StructureList{});
     } catch (...) {
     }
 }
@@ -395,50 +402,60 @@ std::string narrow_utf8(const std::wstring& w) {
 }
 
 /// <summary>Export thread: the theatre's airfields from its targets ini.</summary>
-std::vector<acmi::Airfield> read_airfields(const Job& job, const acmi::Ini& targets) {
+std::vector<acmi::Airfield> read_airfields(const Job& job, const acmi::Ini& targets, const acmi::Ini& types) {
     const TextureCapture& t = *job.texture;
     const acmi::AirfieldLoader loader = [&](const std::string& name) {
         std::vector<uint8_t> file;
         if (!read_game_file(t.folder + L"\\" + widen_utf8(name), file)) file.clear();
         return file;
     };
-    return acmi::airfields_from(targets, loader);
+    return acmi::airfields_from(targets, loader, &types);
 }
 
-/// <summary>
-/// Export thread: the theatre's placed structures, on the heightmap and inside it, published for the recorder. Without
-/// the types ini every placed object is kept, named by its type id. Logs the count once per theatre and session.
-/// </summary>
-void publish_structures(const Job& job, const acmi::Ini& targets) {
+/// <summary>Export thread: the theatre's types ini (named by its theatre ini); empty (logged) when it cannot be read.</summary>
+acmi::Ini read_types(const Job& job) {
     const TextureCapture& t = *job.texture;
     std::vector<uint8_t> bytes;
     acmi::Ini theatre;
     if (read_game_file(t.folder + L"\\" + t.theatre_ini, bytes)) theatre = acmi::parse_ini(bytes.data(), bytes.size());
     const std::string types_name = acmi::types_file_name(theatre, narrow_utf8(t.targets_ini));
-    acmi::Ini types;
     if (!types_name.empty() && read_game_file(t.folder + L"\\" + widen_utf8(types_name), bytes))
-        types = acmi::parse_ini(bytes.data(), bytes.size());
-    else
-        LOG("tacview terrain: %s: could not read the types ini; structures are named by type id, live types included",
-            job.id.c_str());
-    bytes = {};
-    const std::vector<acmi::Structure> placed = acmi::structures_from(targets, types);
+        return acmi::parse_ini(bytes.data(), bytes.size());
+    LOG("tacview terrain: %s: could not read the types ini; structures are named by type id, live types included",
+        job.id.c_str());
+    return {};
+}
+
+/// <summary>
+/// Export thread: the theatre's placed structures by target area, on the heightmap and inside it, published for the
+/// recorder. Logs the count once per theatre and session.
+/// </summary>
+void publish_structures(const Job& job, const acmi::Ini& targets, const acmi::Ini& types) {
+    acmi::PlacedStructures placed = acmi::structures_from(targets, types);
     const double max_x = (job.w - 1) * job.spacing, max_y = (job.h - 1) * job.spacing;
-    std::vector<StructureMark> list;
-    list.reserve(placed.size());
-    for (const acmi::Structure& s : placed) {
-        if (!(s.x >= 0 && s.y >= 0 && s.x <= max_x && s.y <= max_y)) continue;  // off the map
-        StructureMark m;
-        m.name = s.name;
-        m.x = s.x;
-        m.y = s.y;
-        m.z = acmi::height_at(job.samples.get(), job.w, job.h, job.spacing, s.x, s.y);
-        m.heading = s.heading;
-        m.bridge = s.bridge;
-        list.push_back(std::move(m));
+    StructureList list;
+    list.areas = std::move(placed.areas);
+    list.first.assign(list.areas.size() + 1, 0);
+    list.marks.reserve(placed.items.size());
+    size_t next = 0;  // placed.items is grouped by area in area order
+    for (size_t a = 0; a < list.areas.size(); ++a) {
+        list.first[a] = static_cast<uint32_t>(list.marks.size());
+        for (; next < placed.items.size() && placed.items[next].area == a; ++next) {
+            const acmi::Structure& s = placed.items[next];
+            if (!(s.x >= 0 && s.y >= 0 && s.x <= max_x && s.y <= max_y)) continue;  // off the map
+            StructureMark m;
+            m.name = s.name;
+            m.x = s.x;
+            m.y = s.y;
+            m.z = acmi::height_at(job.samples.get(), job.w, job.h, job.spacing, s.x, s.y);
+            m.heading = s.heading;
+            m.bridge = s.bridge;
+            list.marks.push_back(std::move(m));
+        }
     }
-    LOG("tacview terrain: %s: %zu structures (%zu more off the map)", job.id.c_str(), list.size(),
-        placed.size() - list.size());
+    list.first[list.areas.size()] = static_cast<uint32_t>(list.marks.size());
+    LOG("tacview terrain: %s: %zu structures in %zu target areas (%zu more off the map)", job.id.c_str(),
+        list.marks.size(), list.areas.size(), placed.items.size() - list.marks.size());
     publish_list(g_struct, job.id, std::move(list));
 }
 
@@ -797,9 +814,10 @@ bool export_files(Job& job) {
         acmi::Ini targets;
         std::vector<acmi::Airfield> airfields;
         if (read_targets(job, targets)) {
-            airfields = read_airfields(job, targets);
+            const acmi::Ini types = read_types(job);
+            airfields = read_airfields(job, targets, types);
             publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
-            publish_structures(job, targets);
+            publish_structures(job, targets, types);
         }
         export_texture(job, airfields, root + L"\\Textures\\LazySF2Patch");
     } catch (...) {  // the heightmap is done: only the texture and the airfields are lost
@@ -937,7 +955,7 @@ StaticList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::
     return lookup_list(g_aero, id, out);
 }
 
-StaticList terrain_structures(const std::string& id, std::shared_ptr<const std::vector<StructureMark>>& out) {
+StaticList terrain_structures(const std::string& id, std::shared_ptr<const StructureList>& out) {
     return lookup_list(g_struct, id, out);
 }
 
