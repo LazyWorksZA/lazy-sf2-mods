@@ -249,8 +249,15 @@ StartResult start_recording(uint32_t epoch) {
     }
     // The theatre's ini point is the centre of its square; without one the square sits over open ocean. A capture
     // failure only means no Theater=. The export gets the same placement.
-    const acmi::Placement place = acmi::place_theatre(terrain.has_geo, terrain.geo_lon, terrain.geo_lat,
-                                                      (terrain.w - 1) * terrain.spacing, (terrain.h - 1) * terrain.spacing);
+    const acmi::Placement place =
+        acmi::place_theatre(terrain.has_geo, terrain.geo_lon, terrain.geo_lat, (terrain.w - 1) * terrain.spacing,
+                            (terrain.h - 1) * terrain.spacing);
+    if (terrain.has_geo)
+        LOG("tacview: theatre placed at its ini point (%.5f, %.5f); south-west corner (%.5f, %.5f)", terrain.geo_lon,
+            terrain.geo_lat, place.ref_lon, place.ref_lat);
+    else
+        LOG("tacview: theatre has no usable ini position; using the open-ocean frame (%.1f, %.1f)", place.ref_lon,
+            place.ref_lat);
     cfg.ref_lon = place.ref_lon;
     cfg.ref_lat = place.ref_lat;
     cfg.scale_lat = place.scale_lat;

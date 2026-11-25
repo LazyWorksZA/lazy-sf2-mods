@@ -33,7 +33,8 @@ namespace {
 constexpr DWORD kStamp = 0x51d21fa0, kImageSize = 0x46000;
 constexpr DWORD kRvaTerObject = 0x3f650, kRvaTerVtable = 0x3543c;
 constexpr size_t kOffKind = 0x08, kOffWidth = 0x78, kOffHeight = 0x7a, kOffSpacing = 0x80, kOffSamples = 0xa4,
-                 kOffLon = 0x10, kOffLat = 0x18, kOffLoaded = 0x918, kOffManager = 0x04, kOffCurrent = 0x14, kOffBaseName = 0x00, kOffFullName = 0x04;
+                 kOffLon = 0x10, kOffLat = 0x18, kOffLoaded = 0x918, kOffManager = 0x04, kOffCurrent = 0x14,
+                 kOffBaseName = 0x00, kOffFullName = 0x04;
 // The tile field (TFD), the texture list and the file names. See lazy-sf2-recon: recon-notes §21.1 and §21.4.
 constexpr size_t kOffTfdWidth = 0xf0, kOffTfdHeight = 0xf2, kOffTfdRecords = 0x10c, kTfdRecordBytes = 12;
 constexpr size_t kOffTexCount = 0x728, kOffTexArray = 0x72c, kTexEntryBytes = 0x71e0, kOffTexColor = 0x12fc,
@@ -83,12 +84,6 @@ T field(const BYTE* base, size_t off) {
 
 // Reads the live theatre; every access is guarded, so a stale pointer cannot crash the game. No C++ objects here (SEH).
 // Result: 0 ok, 1 no theatre loaded, 2 unexpected memory.
-/// <summary>True when the theatre's ini gave a real position: finite, in range, and not the game's own default (-96.8, 30.2).</summary>
-bool geo_is_set(double lon, double lat) {
-    if (!std::isfinite(lon) || !std::isfinite(lat) || lon < -180.0 || lon > 180.0 || lat < -85.0 || lat > 85.0) return false;
-    return !(std::fabs(lon - -96.8) < 1e-6 && std::fabs(lat - 30.2) < 1e-6);
-}
-
 int read_raw(HMODULE m, Raw* r) {
     __try {
         const BYTE* obj = static_cast<const BYTE*>(at_rva(m, kRvaTerObject));
@@ -329,8 +324,8 @@ bool export_heightmap(const Job& job, const std::wstring& dir) {
     const bool have_raw = exists_with_size(stem + L".raw", raw_bytes);
     // The xml is small: always rewritten, so a changed reference point never leaves stale corners.
     const std::string xml =
-        acmi::terrain_xml(job.id, job.id + ".raw", job.w, job.h, job.spacing, job.place.ref_lon,
-                                         job.place.ref_lat, job.place.scale_lat);
+        acmi::terrain_xml(job.id, job.id + ".raw", job.w, job.h, job.spacing,
+                          job.place.ref_lon, job.place.ref_lat, job.place.scale_lat);
     bool ok = true;
     if (!have_raw) {
         // One row at a time, north row first: no second full-size buffer.
@@ -510,7 +505,8 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
             written + present, written, present, failed);
     // The xml is small: always rewritten, so a changed reference point never leaves stale corners.
     const std::string xml = acmi::texture_xml(job.id, job.id + ".jpg", t.tiles_w * n, t.tiles_h * n, extent_x, extent_y,
-                                              job.place.ref_lon, job.place.ref_lat, job.place.scale_lat, patches);
+                                              job.place.ref_lon, job.place.ref_lat, job.place.scale_lat,
+                                              patches);
     if (!write_atomic(stem + L".xml", [&](HANDLE f) { return write_all(f, xml.data(), xml.size()); }))
         LOG("tacview terrain: %s: could not write the texture xml (error %lu)", job.id.c_str(), GetLastError());
 }
@@ -590,7 +586,7 @@ static bool capture_impl(TerrainInfo& out) {
     out.w = raw.w;
     out.h = raw.h;
     out.spacing = raw.spacing;
-    out.has_geo = geo_is_set(raw.lon, raw.lat);
+    out.has_geo = acmi::geo_is_set(raw.lon, raw.lat);
     out.geo_lon = raw.lon;
     out.geo_lat = raw.lat;
     out.samples.reset();

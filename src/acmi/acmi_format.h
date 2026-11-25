@@ -30,8 +30,15 @@ constexpr double kDefaultRefLon = -25.0;
 constexpr double kDefaultRefLat = -4.5;
 
 /// <summary>
+/// True when a theatre's ini gave a real position: finite, longitude within +-180, latitude within +-85, and not the
+/// game's own default (-96.8, 30.2) within 1e-6.
+/// </summary>
+bool geo_is_set(double lon, double lat);
+
+/// <summary>
 /// With geo, (lon, lat) is the centre of the extent_x_m by extent_y_m square and the corner is placed from it; without,
-/// the default frame.
+/// the default frame. The corner is clamped to +-180 / +-89 so the header and the XMLs always agree. The inputs must be
+/// finite.
 /// </summary>
 Placement place_theatre(bool has_geo, double lon, double lat, double extent_x_m, double extent_y_m);
 

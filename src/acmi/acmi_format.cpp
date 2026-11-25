@@ -1,5 +1,6 @@
 #include "acmi/acmi_format.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -9,10 +10,16 @@ Mapping make_mapping(double ref_lat_deg) {
     return {1.0 / (kMetresPerDegree * std::cos(ref_lat_deg / kRadToDeg)), 1.0 / kMetresPerDegree};
 }
 
+bool geo_is_set(double lon, double lat) {
+    if (!std::isfinite(lon) || !std::isfinite(lat) || lon < -180.0 || lon > 180.0 || lat < -85.0 || lat > 85.0) return false;
+    return !(std::fabs(lon - -96.8) < 1e-6 && std::fabs(lat - 30.2) < 1e-6);
+}
+
 Placement place_theatre(bool has_geo, double lon, double lat, double extent_x_m, double extent_y_m) {
     if (!has_geo) return {kDefaultRefLon, kDefaultRefLat, kDefaultRefLat};
     const Mapping m = make_mapping(lat);
-    return {lon - extent_x_m / 2 * m.lon_scale, lat - extent_y_m / 2 * m.lat_scale, lat};
+    return {std::clamp(lon - extent_x_m / 2 * m.lon_scale, -180.0, 180.0),
+            std::clamp(lat - extent_y_m / 2 * m.lat_scale, -89.0, 89.0), lat};
 }
 
 std::string num(double v, int decimals) {

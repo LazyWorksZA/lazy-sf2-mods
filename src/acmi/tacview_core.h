@@ -27,7 +27,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string>

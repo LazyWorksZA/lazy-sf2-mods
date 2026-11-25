@@ -2789,12 +2789,29 @@ void placement_tests() {
     const Placement p = place_theatre(true, 10.817, 51.111, 1000000.0, 1000000.0);
     const Mapping m = make_mapping(51.111);
     expect(p.scale_lat == 51.111, "placement: scale latitude is the ini latitude");
-    expect(std::fabs(m.lon_scale - 1.0 / (kMetresPerDegree * std::cos(51.111 * kPi / 180.0))) < 1e-15,
+    expect(std::fabs(m.lon_scale - 1.0 / 69895.4) < 3e-9,  // 111320 * cos(51.111 deg) = 69895.4 m
            "placement: lon_scale uses cos(51.111)");
     expect(std::fabs(p.ref_lon + 500000.0 * m.lon_scale - 10.817) < 1e-6 &&
                std::fabs(p.ref_lat + 500000.0 * m.lat_scale - 51.111) < 1e-6,
            "placement: the square's centre maps back to the geo point");
     expect(p.ref_lon < 10.817 && p.ref_lat < 51.111, "placement: the corner is south-west of the centre");
+
+    expect(geo_is_set(10.817, 51.111), "geo: a real point is set");
+    expect(!geo_is_set(-96.8, 30.2) && !geo_is_set(-96.8 + 1e-7, 30.2 - 1e-7), "geo: the game default pair is not set");
+    expect(geo_is_set(-96.8 + 1e-3, 30.2), "geo: near the default but not within 1e-6 is set");
+    const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    expect(!geo_is_set(nan, 10) && !geo_is_set(10, nan) && !geo_is_set(inf, 10) && !geo_is_set(10, -inf),
+           "geo: NaN and infinity are not set");
+    expect(!geo_is_set(181, 10) && !geo_is_set(10, 86) && !geo_is_set(10, -86), "geo: out of range is not set");
+    const Placement edge = place_theatre(true, 179.9, 85.0, 1000000.0, 1000000.0);
+    expect(edge.ref_lon >= -180.0 && edge.ref_lon <= 180.0 && edge.ref_lat >= -89.0, "placement: the corner is clamped");
+
+    const std::string txml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
+                                         p.scale_lat);
+    expect(txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * m.lon_scale, 9) + "</Longitude>") != std::string::npos &&
+               txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * make_mapping(p.ref_lat).lon_scale, 9) + "</Longitude>") ==
+                   std::string::npos,
+           "placement: texture_xml uses the scale latitude, not the corner latitude");
 
     const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
     expect(xml.find(num(p.ref_lon + 1000.0 * m.lon_scale, 9)) != std::string::npos,
