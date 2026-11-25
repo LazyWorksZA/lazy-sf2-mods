@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "net/clock_sync.h"
 #include "net/protocol.h"
 
 namespace LazyWorks::SF2Patch::bot {
@@ -138,98 +139,6 @@ private:
     double t0_ = 0, t_ = 0;
 };
 
-// The bot's copy of the host's game clock. All times are seconds; wall is any steady clock.
-//
-//  - Seeded by the Welcome (host time, minus half the connect RTT). Pongs received before the Welcome are ignored.
-//  - Each Pong gives a sample offset = host_game_time - (send + receive) / 2, with its RTT. The offset in use is that
-//    of the lowest-RTT sample among the last 16 Pongs (windowed, so a lucky early sample cannot stick forever).
-//  - The host's game time freezes while it is paused or in a menu. A Pong whose host time did not advance while wall
-//    time did (kFreezeWall) puts the clock on hold: now() stays at the last host time and callers send no States. The
-//    first advance after that clears the window (every sample is stale by the length of the pause) and resumes. A
-//    Pong whose offset differs from the one in use by more than kJump (plus half its RTT) does the same, which covers
-//    short pauses and a host that restarted its clock. No Pong for kStale also puts callers on hold.
-class ClockSync {
-public:
-    static constexpr int kWindow = 16;
-    static constexpr double kFreezeWall = 0.1;  // wall seconds with no host advance that mean "frozen"
-    static constexpr double kFreezeAdvance = 0.001;
-    static constexpr double kJump = 0.2;
-    static constexpr double kStale = 3.0;
-    static constexpr double kMaxRtt = 2.0;
-
-    bool welcomed() const { return welcomed_; }
-    bool have_pong() const { return pongs_ > 0; }
-    bool frozen() const { return frozen_; }
-    double offset() const { return offset_; }
-    double best_rtt() const { return best_rtt_; }
-    int pongs() const { return pongs_; }
-    int resets() const { return resets_; }
-
-    void on_welcome(double wall_rx, double host_time, double half_rtt) {
-        welcomed_ = true;
-        offset_ = host_time - (wall_rx - half_rtt);
-        ref_wall_ = wall_rx;
-        ref_host_ = host_time;
-        last_pong_wall_ = wall_rx;
-        held_ = host_time;
-        frozen_ = false;
-        n_ = 0;
-        pongs_ = 0;
-        best_rtt_ = half_rtt * 2.0;
-    }
-
-    /// <summary>Returns false if the Pong was ignored.</summary>
-    bool on_pong(double wall_send, double wall_rx, double host_time) {
-        if (!welcomed_) return false;
-        const double rtt = wall_rx - wall_send;
-        if (!(rtt >= 0.0) || rtt > kMaxRtt || !(host_time == host_time)) return false;
-        last_pong_wall_ = wall_rx;
-        const double off = host_time - 0.5 * (wall_send + wall_rx);
-        const double wall_elapsed = wall_rx - ref_wall_;
-        const double advance = host_time - ref_host_;
-        if (advance < kFreezeAdvance && wall_elapsed >= kFreezeWall && advance > -kJump) {
-            frozen_ = true;  // host time did not move while ours did: hold
-            held_ = host_time;
-            ref_wall_ = wall_rx;
-            ref_host_ = host_time;
-            return true;
-        }
-        ref_wall_ = wall_rx;
-        ref_host_ = host_time;
-        bool reset = frozen_;
-        if (!reset && pongs_ > 0 && std::fabs(off - offset_) > kJump + 0.5 * rtt) reset = true;
-        if (reset) {
-            n_ = 0;
-            ++resets_;
-        }
-        frozen_ = false;
-        ++pongs_;
-        rtt_[head_] = rtt;
-        off_[head_] = off;
-        head_ = (head_ + 1) % kWindow;
-        if (n_ < kWindow) ++n_;
-        int best = 0;
-        for (int i = 1; i < n_; ++i)
-            if (rtt_[(head_ + kWindow - 1 - i) % kWindow] < rtt_[(head_ + kWindow - 1 - best) % kWindow]) best = i;
-        const int idx = (head_ + kWindow - 1 - best) % kWindow;
-        offset_ = off_[idx];
-        best_rtt_ = rtt_[idx];
-        return true;
-    }
-
-    /// <summary>
-    /// True while States must not be sent: the host's clock is frozen, or nothing has come for kStale: no Pong since
-    /// the last one, or, if none ever arrived, none since the Welcome (the Welcome's clock goes stale, too).
-    /// </summary>
-    bool on_hold(double wall) const { return frozen_ || (welcomed_ && wall - last_pong_wall_ > kStale); }
-    /// <summary>The host's game time as of wall. Held at the last known host time while frozen.</summary>
-    double now(double wall) const { return frozen_ ? held_ : wall + offset_; }
-
-private:
-    bool welcomed_ = false, frozen_ = false;
-    double offset_ = 0, held_ = 0, ref_wall_ = 0, ref_host_ = 0, last_pong_wall_ = 0, best_rtt_ = 0;
-    double rtt_[kWindow] = {}, off_[kWindow] = {};
-    int n_ = 0, head_ = 0, pongs_ = 0, resets_ = 0;
-};
+using net::ClockSync;  // the shared clock estimate lives in net/clock_sync.h
 
 }  // namespace LazyWorks::SF2Patch::bot

@@ -35,6 +35,7 @@
 #include <miniz.h>
 
 #include "bot_core.h"
+#include "net/clock_sync.h"
 #include "net/host_core.h"
 #include "net/protocol.h"
 #include "net/stream_format.h"
@@ -755,9 +756,9 @@ void bot_clock_tests() {
         for (int i = 0; i < 10; ++i) pong(0.040, 0.015);
         expect(std::fabs(c.best_rtt() - 0.004) < 1e-9 && std::fabs(c.offset() - (90.0 + 0.001)) < 1e-6,
                "the offset comes from the lowest-RTT sample in the window");
-        for (int i = 0; i < 16; ++i) pong(0.040, 0.015);
+        for (int i = 0; i < 32; ++i) pong(0.040, 0.015);
         expect(std::fabs(c.best_rtt() - 0.040) < 1e-9 && std::fabs(c.offset() - (90.0 + 0.015)) < 1e-6,
-               "the lucky sample leaves the window after 16 Pongs, it does not stick");
+               "the lucky sample leaves the window after 32 Pongs, it does not stick");
     }
     {  // freeze and resume
         bot::ClockSync c;
@@ -804,6 +805,159 @@ void bot_clock_tests() {
         bot::ClockSync c;
         c.on_welcome(10.0, 100.0, 0.0);
         expect(!c.on_hold(12.0) && c.on_hold(13.5), "no Pong since the Welcome for 3 s puts the sender on hold");
+    }
+}
+
+// A synthetic network between a client and a host whose game clock runs at `rate` of wall time (and can freeze).
+// Pings leave every 0.25 s; delays are one-way constants plus uniform jitter from a fixed-seed generator.
+struct ClockNet {
+    double rate = 1.0, base = 500.0;
+    double up = 0.15, down = 0.15, jitter = 0.010;
+    double freeze_at = 1e9, freeze_len = 0.0;
+    uint32_t seed = 12345;
+    double rnd() {  // uniform in (-1, 1)
+        seed = seed * 1664525u + 1013904223u;
+        return (static_cast<double>(seed >> 8) / 8388608.0) - 1.0;
+    }
+    double host(double w) const {
+        if (w <= freeze_at) return base + rate * w;
+        if (w < freeze_at + freeze_len) return base + rate * freeze_at;
+        return base + rate * (w - freeze_len);
+    }
+    struct Flight {
+        double send, rx, host;
+    };
+    Flight ping(double send) {
+        const double u = up + jitter * rnd(), d = down + jitter * rnd();
+        return {send, send + u + d, host(send + u)};
+    }
+};
+
+// Runs the client over the model from wall 10 (the Welcome) to `end` in 10 ms steps, delivering Pongs as they arrive,
+// and calls on_step(wall) each step.
+template <class F>
+void run_clock(ClockNet& n, ClockSync& c, double end, F on_step) {
+    c.on_welcome(10.0, n.host(10.0 - n.down), 0.5 * (n.up + n.down));
+    std::vector<ClockNet::Flight> pending;
+    double next_ping = 10.0;
+    for (int i = 0; 10.0 + i * 0.01 <= end; ++i) {
+        const double w = 10.0 + i * 0.01;
+        if (w >= next_ping - 1e-9) {
+            pending.push_back(n.ping(next_ping));
+            next_ping += 0.25;
+        }
+        for (size_t k = 0; k < pending.size();) {
+            if (pending[k].rx <= w) {
+                c.on_pong(pending[k].send, pending[k].rx, pending[k].host);
+                pending.erase(pending.begin() + static_cast<std::ptrdiff_t>(k));
+            } else {
+                ++k;
+            }
+        }
+        on_step(w);
+    }
+}
+
+void clock_sync_tests() {
+    std::printf("shared clock (synthetic network)\n");
+    {  // symmetric 150 ms one way, +-10 ms jitter
+        ClockNet n;
+        ClockSync c;
+        double worst = 0;
+        run_clock(n, c, 14.0, [&](double w) {
+            if (w >= 10.0 + 4.0) worst = (std::max)(worst, std::fabs(c.now(w) - n.host(w)));
+        });
+        std::printf("    symmetric: worst offset error after 4 s %.2f ms\n", worst * 1e3);
+        expect(worst < 0.005, "symmetric 150 ms +-10 ms: the offset error is under 5 ms after 4 s");
+    }
+    {  // asymmetric 150 ms up, 0 down: half the asymmetry is the limit
+        ClockNet n;
+        n.up = 0.15;
+        n.down = 0.0;
+        ClockSync c;
+        double lo = 1e9, hi = -1e9;
+        run_clock(n, c, 14.0, [&](double w) {
+            if (w >= 10.0 + 4.0) {
+                const double e = c.now(w) - n.host(w);
+                lo = (std::min)(lo, e);
+                hi = (std::max)(hi, e);
+            }
+        });
+        std::printf("    asymmetric 150/0: error %.1f..%.1f ms\n", lo * 1e3, hi * 1e3);
+        expect(lo > 0.070 && hi < 0.080, "asymmetric 150/0 ms: the error is 75 ms +-5 ms (the limit of the method)");
+    }
+    for (double rate : {0.99, 1.01}) {  // a host clock that runs slow or fast
+        ClockNet n;
+        n.rate = rate;
+        n.jitter = 0.005;  // per direction: with +-10 ms the jitter alone leaves 5-9 ms of error over 40 model seeds
+        ClockSync c;
+        double worst = 0;
+        run_clock(n, c, 22.0, [&](double w) {
+            if (w >= 10.0 + 4.0) worst = (std::max)(worst, std::fabs(c.now(w) - n.host(w)));
+        });
+        std::printf("    host clock at %.2f of wall: worst error over 8 s %.2f ms, skew %.4f\n", rate, worst * 1e3,
+                    c.skew());
+        expect(worst < 0.005, "with 1 % skew the prediction error stays under 5 ms over 8 s");
+        expect(std::fabs(c.skew() - (rate - 1.0)) < 0.002, "the fitted skew matches the host's rate");
+    }
+    {  // the skew is clamped to +-2 %
+        ClockNet n;
+        n.rate = 1.05;
+        ClockSync c;
+        run_clock(n, c, 18.0, [&](double) {});
+        expect(std::fabs(c.skew()) <= ClockSync::kMaxSkew + 1e-12, "the skew is clamped to +-2 %");
+    }
+    {  // HostClock: monotonic, and a 50 ms correction closes in about 1 s of wall time without a step
+        ClockSync c;
+        HostClock h;
+        c.on_welcome(10.0, 100.0, 0.0);  // now(w) = w + 90
+        double wall = 10.0, prev = h.read(wall, c), max_step = 0, closed_at = -1, sent = -1;
+        bool backwards = false;
+        for (int i = 1; i <= 400; ++i) {
+            wall = 10.0 + i * 0.01;
+            if (i == 100) {  // a Pong that moves the estimate by +50 ms (no reset: under kJump)
+                c.on_pong(wall - 0.002, wall, wall - 0.001 + 90.0 + 0.05);
+                sent = wall;
+            }
+            const double v = h.read(wall, c);
+            if (v < prev) backwards = true;
+            max_step = (std::max)(max_step, v - prev - 0.01);
+            prev = v;
+            if (sent > 0 && closed_at < 0 && std::fabs(v - c.now(wall)) < 1e-4) closed_at = wall - sent;
+        }
+        std::printf("    slew: 50 ms closed in %.2f s, largest step beyond the elapsed time %.2f ms\n", closed_at,
+                    max_step * 1e3);
+        expect(!backwards, "HostClock never goes backwards");
+        expect(closed_at > 0.9 && closed_at < 1.1, "a 50 ms correction closes in about 1 s of wall time");
+        expect(max_step < 0.01 * 0.05 + 1e-9, "the slew adds at most 5 % of the elapsed time per read (no step)");
+    }
+    {  // a 1 s freeze holds, and the resume resets
+        ClockNet n;
+        n.freeze_at = 16.0;
+        n.freeze_len = 1.0;
+        ClockSync c;
+        HostClock h;
+        double prev = 0, held_value = 0, worst_after = 0;
+        bool backwards = false, held_seen = false, held_const = true, resumed = false, hold_flags = true;
+        run_clock(n, c, 24.0, [&](double w) {
+            const double v = h.read(w, c);
+            if (c.frozen()) {
+                if (!held_seen) held_value = v;
+                else if (v != held_value) held_const = false;
+                held_seen = true;
+                if (!(h.held() && c.on_hold(w))) hold_flags = false;
+            } else if (held_seen) {
+                resumed = true;
+                if (w > 19.0) worst_after = (std::max)(worst_after, std::fabs(v - n.host(w)));
+            }
+            if (!held_seen && prev != 0 && v < prev) backwards = true;
+            prev = v;
+        });
+        std::printf("    freeze: resets %d, worst error from 2 s after the resume %.2f ms\n", c.resets(),
+                    worst_after * 1e3);
+        expect(held_seen && held_const && hold_flags && !backwards, "a freeze holds the clock still, and the sender on hold");
+        expect(resumed && c.resets() == 1 && !h.held(), "the resume resets the window, once");
+        expect(worst_after < 0.010, "after the resume the clock matches the host again");
     }
 }
 
@@ -969,6 +1123,7 @@ void check_session(const BotSession& r, double rate, double lo_seconds, double h
 void bot_loopback_tests() {
     bot_flight_tests();
     bot_clock_tests();
+    clock_sync_tests();
     {  // warm-up: the first session after a build pays for cold caches and thread start-up; it is not measured
         const BotSession w = run_bot_session(bot::Script::Straight, 20.0, 0.3, 0, 0, 0);
         std::printf("  warm-up session: %zu States\n", w.states.size());
