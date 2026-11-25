@@ -234,7 +234,7 @@ int __fastcall h_MouseRead(int* state) {
         const ULONGLONG now = GetTickCount64();
         if (now - last_clip_check.load() >= 250) {
             last_clip_check = now;
-            cursor_clip_update("mouse read");
+            cursor_clip_poll("mouse read");
         }
         if (cursor_mode()) {
             static int last_range[4] = {};

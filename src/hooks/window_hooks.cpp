@@ -43,22 +43,23 @@ UINT g_apply_msg = 0;
 WNDPROC g_game_wndproc = nullptr;
 
 std::atomic<bool> g_app_active{false};  // from WM_ACTIVATEAPP; GetForegroundWindow lags behind that message
-SRWLOCK g_clip_lock = SRWLOCK_INIT;
-bool g_clip_set = false;  // guarded by g_clip_lock: we hold the system clip, and it is g_clip_rect
+SRWLOCK g_clip_lock = SRWLOCK_INIT;     // guards g_clip_rect and the decision; no syscalls or logging under it
+std::atomic<bool> g_clip_set{false};    // we hold the system clip (it is g_clip_rect)
 RECT g_clip_rect{};
 
 bool same_rect(const RECT& a, const RECT& b) { return memcmp(&a, &b, sizeof(RECT)) == 0; }
 
-// Releases the clip only if it is still ours; another app's clip is left alone.
-void release_clip_locked(const char* why) {
-    if (!g_clip_set) return;
-    g_clip_set = false;
-    RECT cur{};
-    if (GetClipCursor(&cur) && same_rect(cur, g_clip_rect)) {
+bool foreground_is_ours() {
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    return fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
+}
+
+// Whenever we hold a clip and must let go, release it unconditionally (a clip the system altered is still ours).
+void release_clip(const char* why) {
+    if (g_clip_set.exchange(false)) {
         ClipCursor(nullptr);
         LOG("cursor: clip off (%s)", why);
-    } else {
-        LOG("cursor: clip no longer ours, left alone (%s)", why);
     }
 }
 
@@ -77,11 +78,13 @@ LRESULT CALLBACK game_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         cursor_clip_update("display mode applied");
         return 0;
     }
-    if (msg == WM_ACTIVATEAPP) g_app_active = wp != 0;
+    if (msg == WM_ACTIVATEAPP) {
+        g_app_active = wp != 0;
+        if (!wp) cursor_clip_update("deactivating");  // before the game's own focus-loss handling runs
+    }
     if (msg == WM_DESTROY) {
-        AcquireSRWLockExclusive(&g_clip_lock);
-        release_clip_locked("window destroyed");
-        ReleaseSRWLockExclusive(&g_clip_lock);
+        g_app_active = false;
+        release_clip("window destroyed");
     }
     if (msg == WM_DISPLAYCHANGE) {
         LOG("window: WM_DISPLAYCHANGE %ux%u @ %u bpp", LOWORD(lp), HIWORD(lp), static_cast<unsigned>(wp));
@@ -144,6 +147,7 @@ HWND WINAPI h_CreateWindowExW(DWORD ex_style, LPCWSTR cls, LPCWSTR title, DWORD 
         g_apply_msg = RegisterWindowMessageW(L"lazysf2.ApplyDisplayMode");
         g_game_wndproc = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&game_subclass_proc)));
+        g_app_active = foreground_is_ours();
         LOG("window: game hwnd=%p%s, subclassed: %s", static_cast<void*>(hwnd),
             borderless ? " (WS_EX_TOPMOST removed)" : "", g_game_wndproc ? "ok" : "FAILED");
     }
@@ -206,35 +210,51 @@ bool hook_api(LPCWSTR module, LPCSTR proc, LPVOID detour, LPVOID* original) {
 
 HWND game_window() { return g_game_hwnd.load(); }
 
-void cursor_clip_update(const char* why) {
+namespace {
+void clip_update(const char* why, bool poll) {
     HWND hwnd = g_game_hwnd.load();
     if (!hwnd) return;
     RECT rc{};
-    POINT tl{}, br{};
     bool have_rect = false;
     if (GetClientRect(hwnd, &rc) && rc.right > rc.left && rc.bottom > rc.top) {
-        br = {rc.right, rc.bottom};
+        POINT tl{0, 0}, br{rc.right, rc.bottom};
         have_rect = ClientToScreen(hwnd, &tl) && ClientToScreen(hwnd, &br);
         rc = {tl.x, tl.y, br.x, br.y};
     }
-    const ClipInputs in{!config::borderless(), mouse_cursor_mode_active(), g_app_active.load(), IsIconic(hwnd) != FALSE,
+    // Messages trust WM_ACTIVATEAPP (the foreground window lags it); the poll also needs a foreground window of ours.
+    const bool foreground = g_app_active.load() && (!poll || foreground_is_ours());
+    const ClipInputs in{!config::borderless(), mouse_cursor_mode_active(), foreground, IsIconic(hwnd) != FALSE,
                         have_rect};
-    AcquireSRWLockExclusive(&g_clip_lock);
-    if (want_clip(in)) {
-        RECT cur{};
-        if (!g_clip_set || !same_rect(rc, g_clip_rect) || !GetClipCursor(&cur) || !same_rect(cur, rc)) {
-            const bool changed = !g_clip_set || !same_rect(rc, g_clip_rect);
-            if (ClipCursor(&rc)) {
-                g_clip_set = true;
-                g_clip_rect = rc;
-                if (changed)
-                    LOG("cursor: clip on (%s) (%ld,%ld)-(%ld,%ld)", why, rc.left, rc.top, rc.right, rc.bottom);
-            }
-        }
-    } else {
-        release_clip_locked(why);
+    if (!want_clip(in)) {
+        release_clip(why);
+        return;
     }
+    RECT cur{};
+    const bool system_differs = g_clip_set.load() && (!GetClipCursor(&cur) || !same_rect(cur, rc));
+    AcquireSRWLockExclusive(&g_clip_lock);
+    const bool was_set = g_clip_set.load();
+    const bool moved = !was_set || !same_rect(rc, g_clip_rect);
+    if (moved) g_clip_rect = rc;
     ReleaseSRWLockExclusive(&g_clip_lock);
+    if (!moved && !system_differs) return;
+
+    static std::atomic<bool> failed_logged{false};
+    if (ClipCursor(&rc)) {
+        g_clip_set = true;
+        failed_logged = false;
+        if (moved) LOG("cursor: clip on (%s) (%ld,%ld)-(%ld,%ld)", why, rc.left, rc.top, rc.right, rc.bottom);
+        else LOG("cursor: clip re-applied (%s)", why);
+    } else {
+        g_clip_set = false;
+        if (!failed_logged.exchange(true)) LOG("cursor: ClipCursor failed (%s), error %lu", why, GetLastError());
+    }
+}
+}  // namespace
+
+void cursor_clip_update(const char* why) { clip_update(why, false); }
+void cursor_clip_poll(const char* why) { clip_update(why, true); }
+void cursor_clip_release_at_exit() {
+    if (g_clip_set.exchange(false)) ClipCursor(nullptr);
 }
 
 bool window_chosen_screen(RECT* r) { return chosen_monitor_rect(r); }

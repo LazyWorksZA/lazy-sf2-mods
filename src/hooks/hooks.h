@@ -28,6 +28,10 @@ bool dxgi_is_exclusive();
 /// active app) and releases it otherwise, only ever releasing a clip this mod set. Any thread; logs on change.
 /// </summary>
 void cursor_clip_update(const char* why);
+/// <summary>As cursor_clip_update, for periodic calls: also requires the foreground window to belong to this process.</summary>
+void cursor_clip_poll(const char* why);
+/// <summary>DLL detach: lets go of a clip we hold. Lock-free, safe at process exit.</summary>
+void cursor_clip_release_at_exit();
 /// <summary>True while "Match Windows cursor" is active (chosen in Options and the mouse read hook is in place).</summary>
 bool mouse_cursor_mode_active();
 
