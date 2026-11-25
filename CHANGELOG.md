@@ -33,6 +33,7 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
   - DPI scaling is handled.
   - The full-length Display Mode hint text shows.
   - Tacview recordings no longer keep detonated weapons and destroyed aircraft frozen in place until the flight ends.
+  - A Tacview recording now closes as soon as its flight ends, instead of staying open (and locked) until the next flight starts.
 - **Installer:** an MSI wizard (Velopack) with a small headless helper, using the same file-manifest rules as the dev scripts. Uninstalling returns the game folder to stock.
 - **Compatibility:** checked to work with DXVK, which is never bundled.
 
