@@ -70,6 +70,12 @@ void append_removal(std::string& out, uint32_t id) {
     out += b;
 }
 
+void append_event_destroyed(std::string& out, uint32_t id) {
+    char b[48];
+    std::snprintf(b, sizeof(b), "0,Event=Destroyed|%x|\n", id);
+    out += b;
+}
+
 void append_transform(std::string& out, uint32_t id, const double pos[3], const float ang[3], const Mapping& m) {
     char idbuf[16];
     std::snprintf(idbuf, sizeof(idbuf), "%x", id);
@@ -78,6 +84,13 @@ void append_transform(std::string& out, uint32_t id, const double pos[3], const 
     out += ",T=" + num(pos[0] * m.lon_scale, 9) + "|" + num(pos[1] * m.lat_scale, 9) + "|" + num(pos[2], 2) + "|" +
            num(static_cast<double>(ang[2]) * kRadToDeg, 2) + "|" + num(static_cast<double>(ang[0]) * kRadToDeg, 2) +
            "|" + num(heading, 2) + "|" + num(pos[0], 2) + "|" + num(pos[1], 2) + "|" + num(heading, 2);
+}
+
+void append_position(std::string& out, uint32_t id, const double pos[3], const Mapping& m) {
+    char idbuf[16];
+    std::snprintf(idbuf, sizeof(idbuf), "%x", id);
+    out += idbuf;
+    out += ",T=" + num(pos[0] * m.lon_scale, 9) + "|" + num(pos[1] * m.lat_scale, 9) + "|" + num(pos[2], 2);
 }
 
 void append_props(std::string& out, const ObjectProps& p) {

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 
@@ -15,6 +16,7 @@
 #include "hooks/hooks.h"
 #include "hooks/terrain_export.h"
 #include "hooks/weapon_class.h"
+#include "hooks/world_walk.h"
 #include "log.h"
 
 namespace lazysf2::hooks {
@@ -24,6 +26,8 @@ namespace {
 constexpr size_t kOffPos = 0x38, kOffAngles = 0x100;  // aircraft object: double[3] position, float[3] angles
 // Weapon object (MissileObject): position double[3] at +0x20; angles float[3] (pitch, heading, roll) at +0xe8.
 constexpr size_t kOffWeaponPos = 0x20, kOffWeaponAngles = 0xe8;
+// Every object: int, 0 once it has finished; its memory stays valid. See lazy-sf2-recon: recon-notes §20.1.3.
+constexpr size_t kOffActive = 0x04;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
 
@@ -40,6 +44,12 @@ uint32_t g_epoch = 0;        // sim_player_epoch() at the start
 bool g_skip_valid = false;   // a start failed or the writer failed during this player's flight: do not retry it
 uint32_t g_skip_epoch = 0;
 double g_last_snapshot = 0;
+std::unique_ptr<acmi::TacviewRec[]> g_walk_buf;  // the world walker's records, copied into the ring as one frame
+uint64_t g_dead_sent[64];  // aircraft seqs whose Destroyed marker was sent this recording
+size_t g_dead_n = 0;
+uint64_t g_wdead_sent[256];  // the same for weapons (a repeat is harmless: the core ignores it)
+size_t g_wdead_n = 0;
+bool g_walk_on = false;                          // the walker started with this recording
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -57,6 +67,15 @@ bool read_pose(const void* obj, size_t off_pos, size_t off_ang, double pos[3], f
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
+    }
+}
+
+// An object's active flag. True when unreadable, so that the pose read decides. No C++ objects (SEH).
+bool read_active(const void* obj) {
+    __try {
+        return *reinterpret_cast<const volatile int*>(static_cast<const char*>(obj) + kOffActive) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
     }
 }
 
@@ -88,6 +107,22 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = acmi::TacviewRec::kAircraft;
         r.parent_seq = 0;
+        r.destroyed = 0;
+        if (!read_active(list[i].obj)) {
+            // Finished (destroyed): left out of the frame, so the core removes it; the marker adds the Destroyed event,
+            // once per aircraft (a full list just repeats it, which the core ignores).
+            bool sent = false;
+            for (size_t k = 0; k < g_dead_n && !sent; ++k) sent = g_dead_sent[k] == list[i].seq;
+            if (sent) continue;
+            if (g_dead_n < sizeof(g_dead_sent) / sizeof(g_dead_sent[0])) g_dead_sent[g_dead_n++] = list[i].seq;
+            r.kind = acmi::TacviewRec::kObject;
+            r.destroyed = acmi::TacviewRec::kDestroyed;
+            r.is_player = list[i].is_player ? 1 : 0;
+            r.seq = list[i].seq;
+            r.t = c.t;
+            ++used;
+            continue;
+        }
         if (!read_pose(list[i].obj, kOffPos, kOffAngles, r.pos, r.ang)) {
             // Keep the object in the frame with a non-finite pose: the core counts it as seen (no remove and re-add)
             // and skips the transform.
@@ -109,9 +144,28 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.type[t] = '\0';
         ++used;
     }
+    size_t live_weapons = 0;
     for (size_t i = 0; i < nw; ++i) {
+        if (!read_active(wl[i].obj)) {
+            // Detonated or burnt out: the core removes it and writes an explosion (no Destroyed event), once.
+            bool sent = false;
+            for (size_t k = 0; k < g_wdead_n && !sent; ++k) sent = g_wdead_sent[k] == wl[i].seq;
+            if (sent) continue;
+            if (g_wdead_n < sizeof(g_wdead_sent) / sizeof(g_wdead_sent[0])) g_wdead_sent[g_wdead_n++] = wl[i].seq;
+            acmi::TacviewRec& m = g_writer->slot(used);
+            m.kind = acmi::TacviewRec::kObject;
+            m.obj_class = wl[i].weapon_class;
+            m.destroyed = acmi::TacviewRec::kDetonated;
+            m.seq = wl[i].seq;
+            m.t = c.t;
+            ++used;
+            continue;
+        }
+        ++live_weapons;
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = wl[i].weapon_class;
+        r.destroyed = 0;
+        r.parent_class = acmi::TacviewRec::kAircraft;  // ring slots are reused
         r.kind = acmi::TacviewRec::kObject;
         r.is_player = 0;
         r.type[0] = '\0';  // weapons have no type field (ring slots are reused)
@@ -131,8 +185,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.name[k] = '\0';
         ++used;
     }
-    g_weapons_live = nw != 0;
-    g_writer->commit_frame(used, c.t);
+    g_weapons_live = live_weapons != 0;
+    g_writer->commit_frame(used, c.t, acmi::TacviewRec::kSeriesAircraft | acmi::TacviewRec::kSeriesWeapon);
     c.wrote = true;
 }
 
@@ -149,6 +203,8 @@ void snapshot_cb(const LiveAircraft* list, size_t n, void* vctx) {
 void stop_recording(const char* why, bool final_frame = false) {
     if (!g_recording) return;
     g_recording = false;
+    if (g_walk_on) world_walk_stop();
+    g_walk_on = false;
     if (final_frame && g_writer->accepting() && g_writer->begin_frame(0)) g_writer->commit_frame(0, sim_game_time());
     g_writer->close(false, why);  // the thread logs the summary
 }
@@ -197,7 +253,26 @@ StartResult start_recording(uint32_t epoch) {
     g_last_snapshot = -1e300;
     g_weapons_live = false;
     weapon_track_new_flight();
+    g_dead_n = 0;
+    g_wdead_n = 0;
+    if (!g_walk_buf) g_walk_buf.reset(new (std::nothrow) acmi::TacviewRec[kWorldWalkMaxRecords]);
+    g_walk_on = g_walk_buf && world_walk_start();
+    if (!g_walk_buf) LOG("tacview: out of memory for the world walker; only aircraft and weapons are recorded");
     return StartResult::Started;
+}
+
+// The world walker's objects, as a frame of their own at the same game time. Game thread.
+void write_world_frame(double t) {
+    if (!g_walk_on) return;
+    uint8_t mask = 0;
+    const size_t n = world_walk_run(t, g_walk_buf.get(), kWorldWalkMaxRecords, &mask);
+    if (!mask) return;
+    if (!g_writer->begin_frame(n)) {  // the writer counts the dropped frame
+        world_walk_frame_dropped(g_walk_buf.get(), n);
+        return;
+    }
+    for (size_t i = 0; i < n; ++i) g_writer->slot(i) = g_walk_buf[i];
+    g_writer->commit_frame(n, t, mask);
 }
 
 // A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
@@ -228,11 +303,13 @@ void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
     }
     const double t = sim_game_time();
     const double interval = g_weapons_live ? kSnapshotIntervalWeapons : kSnapshotInterval;
-    if (t >= g_last_snapshot && t - g_last_snapshot < interval - 1e-9) return;
-    g_last_snapshot = t;
-    SnapCtx c;
-    c.t = t;
-    probe_with_aircraft(snapshot_cb, &c);
+    if (!(t >= g_last_snapshot && t - g_last_snapshot < interval - 1e-9)) {
+        g_last_snapshot = t;
+        SnapCtx c;
+        c.t = t;
+        probe_with_aircraft(snapshot_cb, &c);
+    }
+    write_world_frame(t);
 }
 
 }  // namespace

@@ -100,10 +100,11 @@ bool TacviewWriter::begin_frame(size_t n) {
     return true;
 }
 
-void TacviewWriter::commit_frame(size_t used, double t) {
+void TacviewWriter::commit_frame(size_t used, double t, uint8_t series_mask) {
     const uint32_t h = head_.load(std::memory_order_relaxed);
     ring_[(h + static_cast<uint32_t>(used)) & (cap_ - 1)].kind = TacviewRec::kEndFrame;
     ring_[(h + static_cast<uint32_t>(used)) & (cap_ - 1)].t = t;
+    ring_[(h + static_cast<uint32_t>(used)) & (cap_ - 1)].series_mask = series_mask;
     for (size_t i = 0; i < used; ++i) ring_[(h + static_cast<uint32_t>(i)) & (cap_ - 1)].kind = TacviewRec::kObject;
     head_.store(h + static_cast<uint32_t>(used) + 1, std::memory_order_release);
 }
@@ -153,7 +154,7 @@ void TacviewWriter::flush_orphaned(const char* why) {
             const TacviewRec& r = ring_[tail & (cap_ - 1)];
             if (r.kind == TacviewRec::kEndFrame) {
                 const size_t before = buf.size();
-                core.end_frame(r.t, buf);
+                core.end_frame(r.t, buf, r.series_mask);
                 if (total + buf.size() > max_bytes_) {
                     buf.resize(before);
                     break;
@@ -262,7 +263,7 @@ void TacviewWriter::run() {
             if (!failed && !capped) {
                 if (r.kind == TacviewRec::kEndFrame) {
                     const size_t before = buf.size();
-                    core.end_frame(r.t, buf);
+                    core.end_frame(r.t, buf, r.series_mask);
                     if (on_disk + buf.size() > max_bytes_) {
                         buf.resize(before);
                         capped = true;

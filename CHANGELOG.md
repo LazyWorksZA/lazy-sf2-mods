@@ -9,10 +9,15 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
 
 - **Tacview Recording** (Options › Other, default Off). With it on, every flight, single-player included, is recorded to `Saved Games\ThirdWire\StrikeFighters2\Tacview\SF2 <date>.acmi`. A recording holds:
   - aircraft at 10 Hz, with type names so Tacview shows 3D models;
-  - missiles, bombs and rockets at 20 Hz, each linked to the aircraft that fired it.
+  - missiles, bombs and rockets at 20 Hz, each linked to the aircraft that fired it;
+  - ground objects (buildings, sites, AAA and SAM) at 1 Hz, and ground vehicles and ships at 5 Hz, with their type names;
+  - flares and chaff at 10 Hz;
+  - tracer rounds at 20 Hz, up to 128 at a time, linked to the shooter;
+  - a Destroyed event when an aircraft or a ground object, vehicle or ship is destroyed;
+  - explosions for detonations and kills.
   
   The file is flushed to disk every 200 ms or 32 KB and capped at 512 MB.
-- **Tacview terrain.** With Tacview Recording on, the first flight in each theatre also exports that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre (`Theater=`), so Tacview shows the SF2 terrain under the flight. The theatre is placed as its own map on an equatorial patch of open Atlantic, with game distances kept to within about 0.3%. Elevation only for now; a ground texture comes later. Not yet checked in-game.
+- **Tacview terrain.** With Tacview Recording on, the first flight in each theatre also exports that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre (`Theater=`), so Tacview shows the SF2 terrain under the flight. The theatre is placed as its own map on an equatorial patch of open Atlantic, with game distances kept to within about 0.3%. Elevation only for now; a ground texture comes later.
 - **Options › Other page.** A new fifth tab under Gameplay holds the mod's own settings. The four stock tabs move up to make room.
 - **Mouse Pointer** (Options › Controls). In Cursor mode the game's pointer follows the Windows cursor, which fixes pointer drift with remote-control tools such as RustDesk.
 - **Screen** (Options › Graphics) picks the monitor the game runs on.
@@ -27,6 +32,7 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
   - A lost graphics device is handled.
   - DPI scaling is handled.
   - The full-length Display Mode hint text shows.
+  - Tacview recordings no longer keep detonated weapons and destroyed aircraft frozen in place until the flight ends.
 - **Installer:** an MSI wizard (Velopack) with a small headless helper, using the same file-manifest rules as the dev scripts. Uninstalling returns the game folder to stock.
 - **Compatibility:** checked to work with DXVK, which is never bundled.
 

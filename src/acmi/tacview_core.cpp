@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "acmi/acmi_format.h"
 
@@ -37,14 +38,37 @@ void TacviewCore::seed_time(double t0, long long last_ms) {
 
 void TacviewCore::add(const TacviewRec& r) {
     if (r.kind != TacviewRec::kObject) return;
-    // An aircraft and a weapon can have the same seq (each has its own counter): the class is part of the identity.
-    const bool weapon = r.obj_class != TacviewRec::kAircraft;
+    // Each family has its own seq counter: the family is part of the identity.
+    const auto family = TacviewRec::family_of(r.obj_class);
+    const bool weapon = family == TacviewRec::Family::Weapon;
     State* s = nullptr;
     for (State& o : objs_) {
-        if (o.seq == r.seq && (o.obj_class != TacviewRec::kAircraft) == weapon) {
+        if (o.seq == r.seq && TacviewRec::family_of(o.obj_class) == family) {
             s = &o;
             break;
         }
+    }
+    if (r.destroyed) {
+        if (s && !s->destroyed) {
+            s->destroyed = true;
+            if (r.destroyed == TacviewRec::kDestroyed) {
+                append_event_destroyed(events_, s->id);
+                ++stats_.destroyed_events;
+            }
+            if (s->has_last) {
+                double radius = kExplosionRadiusMissile;
+                switch (s->obj_class) {
+                    case TacviewRec::kAircraft: radius = kExplosionRadiusAircraft; break;
+                    case TacviewRec::kBomb: radius = kExplosionRadiusBomb; break;
+                    case TacviewRec::kRocket: radius = kExplosionRadiusRocket; break;
+                    default:
+                        if (TacviewRec::family_of(s->obj_class) == TacviewRec::Family::Ground) radius = kExplosionRadiusGround;
+                        break;
+                }
+                add_explosion(s->last_pos, radius, r.t);
+            }
+        }
+        return;  // not seen in this frame: end_frame removes it
     }
     if (!std::isfinite(r.t) || !finite3(r.pos) || !finite3(r.ang)) {
         ++stats_.bad_samples;
@@ -53,17 +77,35 @@ void TacviewCore::add(const TacviewRec& r) {
     }
     const bool is_new = s == nullptr;
     if (is_new) {
-        const uint32_t id = weapon ? kWeaponIdBase + static_cast<uint32_t>(r.seq)
-                                   : (r.is_player ? kPlayerId : kOtherIdBase + static_cast<uint32_t>(r.seq));
-        objs_.push_back({r.seq, r.obj_class, r.side, id, -1e300, 0});
+        const uint32_t n = static_cast<uint32_t>(r.seq);
+        uint32_t id = 0;
+        switch (family) {
+            case TacviewRec::Family::Aircraft: id = r.is_player ? kPlayerId : kOtherIdBase + n; break;
+            case TacviewRec::Family::Weapon: id = kWeaponIdBase + n; break;
+            case TacviewRec::Family::Ground: id = kGroundIdBase + n; break;
+            case TacviewRec::Family::CounterMeasure: id = kCounterMeasureIdBase + n; break;
+            case TacviewRec::Family::Bullet: id = kBulletIdBase + n; break;
+        }
+        objs_.push_back({r.seq, r.obj_class, r.side, TacviewRec::series_of(r.obj_class), false, id, -1e300, 0});
         s = &objs_.back();
     }
     s->seen = frame_no_;  // present in this frame, even if its transform is skipped below
-    if (!is_new && r.t - s->last_t < (weapon ? min_dt_weapon_ : min_dt_) - 1e-9) {
+    const double min_dt = family == TacviewRec::Family::Aircraft ? min_dt_
+                          : weapon                              ? min_dt_weapon_
+                                                                : 0.0;  // the walker's own due times
+    if (!is_new && r.t - s->last_t < min_dt - 1e-9) {
         ++stats_.rate_limited;
         return;
     }
     s->last_t = r.t;
+    if (family == TacviewRec::Family::Ground && !is_new && s->has_last &&
+        std::memcmp(s->last_pos, r.pos, sizeof(r.pos)) == 0 && std::memcmp(s->last_ang, r.ang, sizeof(r.ang)) == 0) {
+        ++stats_.unchanged;
+        return;
+    }
+    std::memcpy(s->last_pos, r.pos, sizeof(r.pos));  // the last written pose: where an explosion goes
+    std::memcpy(s->last_ang, r.ang, sizeof(r.ang));
+    s->has_last = true;
 
     const Mapping m{lon_scale_, lat_scale_};
     append_transform(pending_, s->id, r.pos, r.ang, m);
@@ -79,14 +121,21 @@ void TacviewCore::add(const TacviewRec& r) {
         p.name = name;
         char parent_id[16] = {};
         auto side = static_cast<hooks::AircraftSide>(r.side);
-        if (weapon) {
-            p.type = r.obj_class == TacviewRec::kBomb     ? "Weapon+Bomb"
-                     : r.obj_class == TacviewRec::kRocket ? "Weapon+Rocket"
-                                                           : "Weapon+Missile";
+        if (weapon || family == TacviewRec::Family::Bullet) {
+            if (weapon) {
+                p.type = r.obj_class == TacviewRec::kBomb     ? "Weapon+Bomb"
+                         : r.obj_class == TacviewRec::kRocket ? "Weapon+Rocket"
+                                                               : "Weapon+Missile";
+            } else {
+                p.name = nullptr;
+                p.type = "Projectile+Bullet";
+            }
             if (r.parent_seq != 0) {
-                uint32_t pid = kOtherIdBase + static_cast<uint32_t>(r.parent_seq);  // an aircraft we have not seen
+                const auto pfam = TacviewRec::family_of(r.parent_class);
+                uint32_t pid = (pfam == TacviewRec::Family::Ground ? kGroundIdBase : kOtherIdBase) +
+                               static_cast<uint32_t>(r.parent_seq);  // a shooter we have not seen
                 for (const State& o : objs_) {
-                    if (o.seq == r.parent_seq && o.obj_class == TacviewRec::kAircraft) {
+                    if (o.seq == r.parent_seq && TacviewRec::family_of(o.obj_class) == pfam) {
                         pid = o.id;
                         if (side == hooks::AircraftSide::Unknown) side = static_cast<hooks::AircraftSide>(o.side);
                         break;
@@ -95,6 +144,14 @@ void TacviewCore::add(const TacviewRec& r) {
                 std::snprintf(parent_id, sizeof(parent_id), "%x", pid);
                 p.parent = parent_id;
             }
+        } else if (family == TacviewRec::Family::Ground) {
+            p.type = r.obj_class == TacviewRec::kGroundStatic    ? "Ground+Static+Building"
+                     : r.obj_class == TacviewRec::kGroundVehicle ? "Ground+Vehicle"
+                                                                  : "Sea+Watercraft";
+        } else if (family == TacviewRec::Family::CounterMeasure) {
+            p.name = nullptr;
+            side = hooks::AircraftSide::Unknown;  // decoys have no coalition
+            p.type = r.obj_class == TacviewRec::kFlare ? "Misc+Decoy+Flare" : "Misc+Decoy+Chaff";
         } else {
             if (type[0]) {  // type known: the model key is the Name, the callsign is the Pilot (the player too)
                 p.name = type;
@@ -126,11 +183,19 @@ void TacviewCore::add(const TacviewRec& r) {
     ++stats_.transforms;
 }
 
-void TacviewCore::end_frame(double t, std::string& out) {
+void TacviewCore::add_explosion(const double pos[3], double radius, double t) {
+    const uint32_t id = kExplosionIdBase + next_explosion_++;
+    append_position(pending_, id, pos, Mapping{lon_scale_, lat_scale_});
+    pending_ += ",Type=Misc+Explosion,Radius=" + num(radius, 1) + "\n";
+    explosions_.push_back({id, t + kExplosionLifeSeconds, frame_no_});
+    ++stats_.explosions;
+}
+
+void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
     // Removals first: objects of earlier frames that were not added in this one.
     std::string removals;
     for (size_t i = 0; i < objs_.size();) {
-        if (objs_[i].seen != frame_no_) {
+        if (objs_[i].seen != frame_no_ && (objs_[i].series & series_mask)) {
             append_removal(removals, objs_[i].id);
             ++stats_.removals;
             objs_[i] = objs_.back();
@@ -140,7 +205,17 @@ void TacviewCore::end_frame(double t, std::string& out) {
         }
     }
     ++frame_no_;
-    if (removals.empty() && pending_.empty()) return;
+    // Explosions that are due, or all older ones when the frame lists every series (the last frame).
+    for (size_t i = 0; i < explosions_.size();) {
+        const bool last = series_mask == TacviewRec::kSeriesAll && explosions_[i].frame < frame_no_ - 1;
+        if (last || explosions_[i].remove_at <= t) {
+            append_removal(removals, explosions_[i].id);
+            explosions_.erase(explosions_.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+    if (removals.empty() && pending_.empty() && events_.empty()) return;
     if (!std::isfinite(t)) t = last_t_;
     if (!have_t0_) {
         have_t0_ = true;
@@ -154,8 +229,10 @@ void TacviewCore::end_frame(double t, std::string& out) {
         append_frame(out, ms);
         last_ms_ = ms;
     }
+    out += events_;
     out += removals;
     out += pending_;
+    events_.clear();
     pending_.clear();
 }
 

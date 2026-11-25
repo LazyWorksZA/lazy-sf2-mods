@@ -103,6 +103,8 @@ struct LiveAircraft {
 /// table lock shared; the caller must not hold the weapon table's lock.
 /// </summary>
 unsigned long long aircraft_seq_for_object(const void* obj);
+/// <summary>The FRIENDLY, ENEMY and NEUTRAL flag masks of the hooked AircraftObject.dll (0 for one that cannot be read); false when tracking is off.</summary>
+bool aircraft_side_masks(uint32_t* friendly, uint32_t* enemy, uint32_t* neutral);
 /// <summary>
 /// Runs callback while holding the aircraft table lock shared, so no listed object is destroyed until it
 /// returns. The callback must not log or do file I/O. The table is empty unless tracking is active.
