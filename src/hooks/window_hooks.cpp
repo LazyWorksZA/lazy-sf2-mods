@@ -239,13 +239,29 @@ void clip_update(const char* why, bool poll) {
     if (!moved && !system_differs) return;
 
     static std::atomic<bool> failed_logged{false};
+    static std::atomic<ULONGLONG> reapply_logged_at{0};
+    static std::atomic<unsigned> reapply_count{0};
     if (ClipCursor(&rc)) {
         g_clip_set = true;
         failed_logged = false;
-        if (moved) LOG("cursor: clip on (%s) (%ld,%ld)-(%ld,%ld)", why, rc.left, rc.top, rc.right, rc.bottom);
-        else LOG("cursor: clip re-applied (%s)", why);
+        if (moved) {
+            LOG("cursor: clip on (%s) (%ld,%ld)-(%ld,%ld)", why, rc.left, rc.top, rc.right, rc.bottom);
+        } else {
+            // The system resets the clip now and then; log the first one, then at most one line per 10 s.
+            const unsigned n = ++reapply_count;
+            const ULONGLONG now = GetTickCount64();
+            if (n == 1 || now - reapply_logged_at.load() >= 10000) {
+                reapply_logged_at = now;
+                reapply_count = 0;
+                LOG("cursor: clip re-applied (%s), %u time(s)", why, n);
+            }
+        }
+        // Focus may have gone while we were applying; never leave a clip on an inactive game.
+        if (!g_app_active.load() || (poll && !foreground_is_ours())) release_clip("focus changed while applying");
     } else {
+        // A failed call may leave an earlier clip in place: let go of it and stop tracking it.
         g_clip_set = false;
+        ClipCursor(nullptr);
         if (!failed_logged.exchange(true)) LOG("cursor: ClipCursor failed (%s), error %lu", why, GetLastError());
     }
 }
