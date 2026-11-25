@@ -82,6 +82,7 @@ The test project is only for development: it is not published or shipped.
 
 - **GitHub flow, without pull requests.** Do each piece of work on its own branch off `master`, and commit there. **Never commit to `master` directly.** Merge into `master` and push it **only when the user explicitly says so**. Don't open pull requests.
 - Delete branches after they are merged.
+- Each branch adds its user-visible changes to `CHANGELOG.md` under **Unreleased**, in the same branch.
 - End commit messages with the `Co-Authored-By` lines given in your session instructions, if any.
 - Testing needs the live game. Get the user to drive it, ask specific questions, and read `lazysf2.log` yourself.
 - The user often works over RustDesk. Judge mouse behaviour at the machine, or with Cursor mode on.
