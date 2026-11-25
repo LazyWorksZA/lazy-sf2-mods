@@ -83,11 +83,19 @@ The release notes also list each file's SHA-256.
 3. Per-mission start position, with end-of-runway starts.
 4. Clickable cockpits (feasibility first).
 
-Smaller items: automatic pilot lean when looking far to the side or behind (the view now only turns in place); Esc in flight pauses first instead of ending the flight; Tacview: move old recordings to a theatre's current position, non-ASCII aerodrome names.
+Smaller items:
+
+- Automatic pilot lean when looking far to the side or behind (the view now only turns in place).
+- Ramp starts, using the airfields' parking spots.
+- Esc in flight pauses first instead of ending the flight.
+- Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
+- Tacview: move old recordings to a theatre's current position; non-ASCII aerodrome names.
 
 **Later**
 
 - Auto-update, and Authenticode signing of the installer.
+- Keep the game simulating in the background in exclusive Fullscreen during a network session (Phase 4 covers Borderless).
+- A headless dedicated server (needs its own licensed install; revisit after Phase 6).
 
 ## Contributing
 
