@@ -83,7 +83,7 @@ void tacview_recorder_menu_moment();
 /// </summary>
 void tacview_recorder_table_empty();
 /// <summary>DllMain detach: closes the file. At process exit it also writes what the dead writer left in its ring.</summary>
-void tacview_recorder_shutdown();
+void tacview_recorder_shutdown(bool process_exit);
 /// <summary>Sim step hooks (sim_hooks.cpp); the tracker calls these after its own build check.</summary>
 bool sim_install(HMODULE aircraft_dll);
 void sim_remove(HMODULE aircraft_dll);

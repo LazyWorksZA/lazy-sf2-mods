@@ -414,9 +414,10 @@ void tacview_recorder_menu_moment() {
     if (!g_writer->accepting()) stop_recording("writer stopped");
 }
 
-void tacview_recorder_shutdown() {
+void tacview_recorder_shutdown(bool process_exit) {
     terrain_export_shutdown();
-    acmi::zip_queue_shutdown();
+    // At process exit the compressor thread is already gone, possibly holding its lock: leave the plain file.
+    if (!process_exit) acmi::zip_queue_shutdown();
     if (!g_writer) return;
     g_recording = false;
     g_writer->close(true, "process exit");
