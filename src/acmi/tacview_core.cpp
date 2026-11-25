@@ -25,7 +25,7 @@ TacviewCore::TacviewCore(const TacviewCoreConfig& cfg) : cfg_(cfg) {
 }
 
 void TacviewCore::header(std::string& out, const char* reference_time) const {
-    append_header(out, reference_time, cfg_.ref_lon, cfg_.ref_lat, "Strike Fighters 2");
+    append_header(out, reference_time, cfg_.ref_lon, cfg_.ref_lat, cfg_.title.c_str(), cfg_.theater.c_str());
 }
 
 void TacviewCore::seed_time(double t0, long long last_ms) {

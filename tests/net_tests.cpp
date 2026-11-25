@@ -16,6 +16,7 @@
 #include "acmi/acmi_convert.h"
 #include "acmi/acmi_format.h"
 #include "acmi/tacview_core.h"
+#include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
 #include "hooks/options_other_splice.h"
 #include "hooks/weapon_class.h"
@@ -1524,6 +1525,54 @@ std::string read_whole(const std::wstring& p) {
     return s;
 }
 
+void terrain_tests() {
+    using namespace lazysf2::acmi;
+    std::printf("tacview terrain\n");
+    expect(terrain_id(L"DESERT") == "LazySF2.DESERT", "terrain id: plain name");
+    expect(terrain_id(std::wstring(L"Angola v1/") + wchar_t(0xe9) + L",x") == "LazySF2.Angola_v1___x", "terrain id: other characters become _");
+    expect(terrain_id(L"A-b_9") == "LazySF2.A-b_9", "terrain id: dash and underscore kept");
+    expect(terrain_id(L"").empty(), "terrain id: empty in, empty out");
+    expect(terrain_id(std::wstring(100, L'X')).size() == 48, "terrain id: capped at 48 chars");
+
+    const uint16_t g[6] = {1, 2, 3, 0x0104, 5, 0xabcd};  // 3x2, south row first
+    std::vector<uint8_t> raw;
+    terrain_raw_north_first(g, 3, 2, raw);
+    const uint8_t want[12] = {0x04, 0x01, 5, 0, 0xcd, 0xab, 1, 0, 2, 0, 3, 0};
+    expect(raw.size() == 12 && std::memcmp(raw.data(), want, 12) == 0, "terrain raw: north row first, little-endian");
+
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2000, 2000, 500.0, -25.0, -4.5);
+    const auto m = make_mapping(-4.5);
+    const std::string east = num(-25.0 + 1999 * 500.0 * m.lon_scale, 9);
+    const std::string north = num(-4.5 + 1999 * 500.0 * m.lat_scale, 9);
+    auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
+    auto corner = [&](const char* tag, const std::string& lon, const std::string& lat) {
+        return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat +
+                   "</Latitude>");
+    };
+    expect(has("<CustomHeightmap Layer=\"Real World\" ID=\"LazySF2.T\">") && has("<File>LazySF2.T.raw</File>") &&
+               has("<Width>2000</Width>") && has("<Height>2000</Height>") && has("<BigEndian>0</BigEndian>") &&
+               has("<AltitudeFactor>1</AltitudeFactor>") && has("<Projection>Quad</Projection>"),
+           "terrain xml: structure");
+    expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&
+               corner("TopLeft", "-25", north),
+           "terrain xml: corners");
+    expect(std::atof(east.c_str()) > -16.0 && std::atof(east.c_str()) < -15.9 && std::atof(north.c_str()) > 4.4 &&
+               std::atof(north.c_str()) < 4.5,
+           "terrain xml: 1000 km square sits over the Atlantic");
+
+    TacviewCoreConfig cfg;
+    cfg.theater = "LazySF2.DESERT";
+    cfg.title = "Strike Fighters 2 - Desert";
+    std::string h1, h2;
+    TacviewCore{cfg}.header(h1, "2026-11-24T20:15:00Z");
+    expect(h1 == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
+                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,Theater=LazySF2.DESERT\n",
+           "header: Theater= after the title");
+    TacviewCore{TacviewCoreConfig{}}.header(h2, "2026-11-24T20:15:00Z");
+    expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2\n") != std::string::npos,
+           "header: no Theater= by default");
+}
+
 void tacview_tests() {
     using namespace lazysf2::acmi;
     using lazysf2::hooks::AircraftSide;
@@ -1919,6 +1968,7 @@ int main() {
     acmi_tests();
     tracker_logic_tests();
     tacview_tests();
+    terrain_tests();
     other_page_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

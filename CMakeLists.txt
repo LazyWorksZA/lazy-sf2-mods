@@ -30,6 +30,7 @@ add_library(lazysf2 SHARED
     src/hooks/tacview_recorder.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
+    src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
     src/hooks/probe_hooks.cpp
     src/hooks/puppet_hooks.cpp
@@ -67,6 +68,7 @@ add_executable(lazysf2-net-tests
     tools/acmi/acmi_convert.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
+    src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
     src/hooks/options_other_splice.cpp
 )
