@@ -17,10 +17,10 @@ constexpr float kStartYaw = 60.0f * kDeg;   // head yaw where the effect starts
 constexpr float kFullYaw = 150.0f * kDeg;   // head yaw where it is at full strength
 constexpr float kMaxTwist = 15.0f * kDeg;   // extra view yaw at full strength (also how far past the seat limit)
 constexpr float kYawCap = 180.0f * kDeg;    // the twisted view never turns past this
-constexpr float kLeanSide = 0.06f;          // metres toward the side the pilot looks, at full strength
-constexpr float kLeanUp = 0.03f;            // metres up, at full strength
-constexpr float kCapSide = 0.10f;           // the lean plus the tracker's own head movement stays within these
-constexpr float kCapUp = 0.06f;
+constexpr float kLeanSide = 0.03f;          // metres toward the side the pilot looks, at full strength
+constexpr float kLeanUp = 0.015f;           // metres up, at full strength
+constexpr float kCapSide = 0.06f;           // our lean plus the game's tracker head offset stays within these
+constexpr float kCapUp = 0.03f;
 constexpr float kFilterSeconds = 0.12f;     // low-pass time constant
 constexpr float kSnapAfterSeconds = 0.5f;   // a longer gap (view not updated) jumps straight to the target
 
@@ -112,23 +112,39 @@ inline float camera_yaw(TwistState& s, float head, float dt, float min_yaw, floa
 constexpr float restore_yaw(float current, float written, float head) { return current == written ? head : current; }
 
 /// <summary>
-/// Lean offset in body axes for a weight. native_bound is the largest head movement the tracker itself may add
-/// (0 without one); the sum stays within kCapSide sideways and kCapUp up.
+/// Lean offset in body axes for a weight. native is the game's own tracker head offset this frame, in body axes (zero
+/// without a tracker). The lean only ever shrinks so that the sum stays within kCapSide sideways and kCapUp up; the
+/// native offset itself is left alone.
 /// </summary>
-inline Vec3 lean_body(float weight, float native_bound) {
-    if (!(std::fabs(weight) <= 1.0f)) return {0, 0, 0};
-    const float b = native_bound > 0.0f ? native_bound : 0.0f;
-    const float side_cap = kCapSide - b > 0.0f ? kCapSide - b : 0.0f;
-    const float up_cap = kCapUp - b > 0.0f ? kCapUp - b : 0.0f;
-    const float side = clampf(weight * kLeanSide, -side_cap, side_cap);
-    const float up = clampf(std::fabs(weight) * kLeanUp, 0.0f, up_cap);
-    return {side, 0.0, up};
+inline Vec3 lean_body(float weight, const Vec3& native) {
+    if (!(std::fabs(weight) <= 1.0f) || !(std::fabs(native.x) < 1e3) || !(std::fabs(native.z) < 1e3)) return {0, 0, 0};
+    const float want_side = weight * kLeanSide;
+    const float side_room = static_cast<float>(want_side >= 0 ? kCapSide - native.x : kCapSide + native.x);
+    const float side_mag = clampf(std::fabs(want_side), 0.0f, side_room > 0.0f ? side_room : 0.0f);
+    const float up_room = static_cast<float>(kCapUp - native.z);
+    const float up = clampf(std::fabs(weight) * kLeanUp, 0.0f, up_room > 0.0f ? up_room : 0.0f);
+    return {want_side >= 0 ? side_mag : -side_mag, 0.0, up};
 }
 
 /// <summary>Rotates a body-axes vector into world axes with the aircraft orientation (rows = body axes).</summary>
 inline Vec3 body_to_world(const float m[9], const Vec3& b) {
     return {b.x * m[0] + b.y * m[3] + b.z * m[6], b.x * m[1] + b.y * m[4] + b.z * m[7],
             b.x * m[2] + b.y * m[5] + b.z * m[8]};
+}
+
+/// <summary>Rotates a world vector into body axes (the transpose of body_to_world).</summary>
+inline Vec3 world_to_body(const float m[9], const Vec3& w) {
+    return {w.x * m[0] + w.y * m[1] + w.z * m[2], w.x * m[3] + w.y * m[4] + w.z * m[5],
+            w.x * m[6] + w.y * m[7] + w.z * m[8]};
+}
+
+/// <summary>
+/// The game's tracker head offset in camera axes (x side, z up), as +0x2ec0 computes it: tracker axes 0 and 1
+/// (+-16383) scaled by the seat's movement limits (lo/hi as the seat returns them, both positive).
+/// </summary>
+constexpr Vec3 native_camera_offset(int axis_x, int axis_z, const float lo[3], const float hi[3]) {
+    const float kx = -static_cast<float>(axis_x) / 16383.0f, kz = static_cast<float>(axis_z) / 16383.0f;
+    return {kx * (kx < 0 ? lo[0] : hi[0]), 0.0, kz * (kz < 0 ? lo[2] : hi[2])};
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks::pilot_twist

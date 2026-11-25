@@ -3283,7 +3283,7 @@ void pilot_twist_tests() {
     c = pt::continuous_yaw(c, 175.0f * d);
     expect(close_to(c, 175.0f * d, 1e-4) && pt::target_weight(c) == 1.0f, "side: and back again");
     expect(close_to(pt::continuous_yaw(400.0f * d, 10.0f * d), 10.0f * d, 1e-5), "side: re-anchored inside the start angle");
-    expect(pt::lean_body(pt::target_weight(pt::continuous_yaw(170.0f * d, -170.0f * d)), 0.0f).x > 0,
+    expect(pt::lean_body(pt::target_weight(pt::continuous_yaw(170.0f * d, -170.0f * d)), {0, 0, 0}).x > 0,
            "side: the lean does not flip across 180");
     expect(pt::target_weight(std::numeric_limits<float>::quiet_NaN()) == 0.0f, "twist: NaN yaw has no effect");
 
@@ -3344,18 +3344,39 @@ void pilot_twist_tests() {
         expect(close_to(first, 120.0f * d + pt::target_weight(120.0f * d) * pt::kMaxTwist, 1e-4), "twist: a fresh state starts at its target");
     }
 
-    // Lean: toward the look side and up, in body axes, capped together with the tracker's own movement.
-    const pt::Vec3 full = pt::lean_body(1.0f, 0.0f);
+    // Lean: toward the look side and up, in body axes; our lean shrinks so that it plus the game's tracker offset
+    // stays within the caps.
+    expect(close_to(pt::kLeanSide, 0.03, 1e-6) && close_to(pt::kLeanUp, 0.015, 1e-6), "lean: 3 cm sideways, 1.5 cm up");
+    const pt::Vec3 zero{0, 0, 0};
+    const pt::Vec3 full = pt::lean_body(1.0f, zero);
     expect(close_to(full.x, pt::kLeanSide, 1e-6) && full.y == 0.0 && close_to(full.z, pt::kLeanUp, 1e-6), "lean: full right and up");
-    const pt::Vec3 left = pt::lean_body(-0.5f, 0.0f);
+    const pt::Vec3 left = pt::lean_body(-0.5f, zero);
     expect(close_to(left.x, -0.5 * pt::kLeanSide, 1e-6) && close_to(left.z, 0.5 * pt::kLeanUp, 1e-6), "lean: left is negative x, still up");
-    const pt::Vec3 none = pt::lean_body(0.0f, 0.0f);
+    const pt::Vec3 none = pt::lean_body(0.0f, zero);
     expect(none.x == 0.0 && none.z == 0.0, "lean: none at zero weight");
-    const pt::Vec3 tracked = pt::lean_body(1.0f, 0.05f);
-    expect(close_to(tracked.x, pt::kCapSide - 0.05, 1e-6) && close_to(tracked.z, pt::kCapUp - 0.05, 1e-6), "lean: the sum with the tracker is capped");
-    const pt::Vec3 big = pt::lean_body(1.0f, 0.2f);
-    expect(big.x == 0.0 && big.z == 0.0, "lean: no room left when the tracker already moves that far");
-    expect(close_to(pt::lean_body(1.0f, 0.03f).x, pt::kLeanSide, 1e-6), "lean: the stock 3 cm tracker range leaves the lean whole");
+    const pt::Vec3 tracked = pt::lean_body(1.0f, {0.05, 0.0, 0.02});
+    expect(close_to(tracked.x + 0.05, pt::kCapSide, 1e-6) && close_to(tracked.z + 0.02, pt::kCapUp, 1e-6),
+           "lean: the sum with the tracker offset is capped");
+    const pt::Vec3 big = pt::lean_body(1.0f, {0.08, 0.0, 0.04});
+    expect(big.x == 0.0 && big.z == 0.0, "lean: no room left when the tracker offset is already past the cap");
+    const pt::Vec3 opposite = pt::lean_body(1.0f, {-0.03, 0.0, -0.03});
+    expect(close_to(opposite.x, pt::kLeanSide, 1e-6) && close_to(opposite.z, pt::kLeanUp, 1e-6),
+           "lean: a tracker offset the other way leaves the lean whole");
+    const pt::Vec3 left_tracked = pt::lean_body(-1.0f, {-0.05, 0.0, 0.0});
+    expect(close_to(left_tracked.x - 0.05, -pt::kCapSide, 1e-6), "lean: the cap holds to the left too");
+    expect(close_to(pt::lean_body(1.0f, {0.03, 0.0, 0.015}).x, pt::kLeanSide, 1e-6),
+           "lean: the stock 3 cm tracker range at full leaves room for the whole lean");
+    {
+        const float mlo[3] = {0.03f, 0.0f, 0.03f}, mhi[3] = {0.03f, 0.0f, 0.03f};  // stock seat limits as the seat returns them
+        const pt::Vec3 n = pt::native_camera_offset(-16383, 16383, mlo, mhi);
+        expect(close_to(n.x, 0.03, 1e-6) && n.y == 0.0 && close_to(n.z, 0.03, 1e-6), "native: full tracker x and z give the seat limits");
+        expect(pt::native_camera_offset(0, 0, mlo, mhi).x == 0.0, "native: a centred tracker adds nothing");
+        const float m[9] = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+        const pt::Vec3 wv = pt::body_to_world(m, {0.01, 0.02, 0.03});
+        const pt::Vec3 back = pt::world_to_body(m, wv);
+        expect(close_to(back.x, 0.01, 1e-7) && close_to(back.y, 0.02, 1e-7) && close_to(back.z, 0.03, 1e-7),
+               "native: world_to_body undoes body_to_world");
+    }
 
     // Body to world: rows are the body axes in world coordinates.
     const float ident[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
