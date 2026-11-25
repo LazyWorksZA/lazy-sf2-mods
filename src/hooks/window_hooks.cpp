@@ -15,7 +15,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 constexpr wchar_t kGameWindowClass[] = L"twWindowClass";
@@ -303,4 +303,4 @@ bool install_window_hooks() {
     return ok;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

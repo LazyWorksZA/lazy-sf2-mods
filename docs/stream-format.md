@@ -42,7 +42,7 @@ A reader stops at a `length` outside 9 to 105 (`BadLength`): nothing after it ca
 
 ### Kinds
 
-The payloads of kinds 1 to 4 are the protocol messages **byte for byte as on the wire** (`src/net/protocol.h`, with their own magic, version and type). Decode them with `lazysf2::net::decode`.
+The payloads of kinds 1 to 4 are the protocol messages **byte for byte as on the wire** (`src/net/protocol.h`, with their own magic, version and type). Decode them with `LazyWorks::SF2Patch::net::decode`.
 
 | Kind | Name | Payload | When |
 |---|---|---|---|

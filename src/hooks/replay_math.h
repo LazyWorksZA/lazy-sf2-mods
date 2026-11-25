@@ -8,7 +8,7 @@
 #include <cmath>
 #include <cstddef>
 
-namespace lazysf2::hooks::replay_math {
+namespace LazyWorks::SF2Patch::hooks::replay_math {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kBlendSeconds = 0.2;   // a correction offset decays to zero over this much game time
@@ -196,4 +196,4 @@ constexpr bool check_sample_at() {
 }
 static_assert(check_sample_at());
 
-}  // namespace lazysf2::hooks::replay_math
+}  // namespace LazyWorks::SF2Patch::hooks::replay_math

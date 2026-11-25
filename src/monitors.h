@@ -4,7 +4,7 @@
 
 #include <vector>
 
-namespace lazysf2::monitors {
+namespace LazyWorks::SF2Patch::monitors {
 
 struct Monitor {
     int number = 0;  // n in \\.\DISPLAYn
@@ -21,4 +21,4 @@ bool rect_of(int number, RECT* out);
 /// <summary>Number of the monitor containing most of `hwnd`, or 0.</summary>
 int number_of_window(HWND hwnd);
 
-}  // namespace lazysf2::monitors
+}  // namespace LazyWorks::SF2Patch::monitors

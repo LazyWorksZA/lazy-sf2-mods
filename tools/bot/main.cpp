@@ -41,7 +41,7 @@ void log_line(const char* line) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    lazysf2::bot::BotConfig cfg;
+    LazyWorks::SF2Patch::bot::BotConfig cfg;
     cfg.log = log_line;
     const char* log_path = nullptr;
     for (int i = 1; i < argc; ++i) {
@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
         } else if (a == "--aircraft" && (v = val())) {
             cfg.aircraft = v;
         } else if (a == "--script" && (v = val())) {
-            ok = lazysf2::bot::parse_script(v, &cfg.script);
+            ok = LazyWorks::SF2Patch::bot::parse_script(v, &cfg.script);
         } else if (a == "--rate" && (v = val())) {
             ok = to_double(v, &cfg.rate);
         } else if (a == "--duration" && (v = val())) {
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
         std::printf("cannot open the log file %s\n", log_path);
         return 1;
     }
-    const lazysf2::bot::BotResult res = lazysf2::bot::run_bot(cfg);
+    const LazyWorks::SF2Patch::bot::BotResult res = LazyWorks::SF2Patch::bot::run_bot(cfg);
     if (g_logfile) std::fclose(g_logfile);
     return res.code;
 }

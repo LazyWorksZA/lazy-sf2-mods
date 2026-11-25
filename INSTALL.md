@@ -4,7 +4,7 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 
 ## Players: the installer
 
-1. Run **`LazySF2-win.msi`**. It's a normal installer wizard: a welcome page, the license (ours plus the [third-party notices](THIRD_PARTY_NOTICES.md)), an administrator prompt, and a finish page.
+1. Run **`Lazy-SF2-Patch-<version>.msi`** from the Releases page. It's a normal installer wizard: a welcome page, the license (ours plus the [third-party notices](THIRD_PARTY_NOTICES.md)), an administrator prompt, and a finish page.
    - If the .NET 10 runtime is missing, the installer adds it.
 2. The installer finds Strike Fighters 2 through the game's own registry entry and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
 3. That's all. There's no app, window or shortcut. Start the game as usual; the settings are in the game (below).
@@ -38,13 +38,13 @@ No game files and no registry keys are changed. Removing these files returns the
 
 ## Tacview terrain
 
-With **Tacview Recording** on, the first flight you record in each theatre also writes that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\` and a ground texture (made from the theatre's own ground tiles, with the runways painted in) to `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2\`. Every recording also marks the theatre's airfields by name. A theatre whose ini gives a real-world position, such as GermanyCE, is placed there. The others are not to real scale, so each one sits as its own square over open ocean. Each airfield also gets a sharp patch of ground around its runways.
+With **Tacview Recording** on, the first flight you record in each theatre also writes that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2Patch\` and a ground texture (made from the theatre's own ground tiles, with the runways painted in) to `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2Patch\`. Every recording also marks the theatre's airfields by name. A theatre whose ini gives a real-world position, such as GermanyCE, is placed there. The others are not to real scale, so each one sits as its own square over open ocean. Each airfield also gets a sharp patch of ground around its runways.
 
-The mod also writes a Tacview add-on to `%APPDATA%\Tacview\AddOns\LazySF2\main.lua`. In Tacview 1.9.5 or newer, enable **Lazy SF2 Patch** in the Add-ons menu. It shows only the ground of the theatre you recorded, and it hides the other LazySF2 grounds and all of them for other recordings. Without the add-on, every LazySF2 theatre that has a real-world position is always visible at that place.
+The mod also writes a Tacview add-on to `%APPDATA%\Tacview\AddOns\LazySF2Patch\main.lua`. In Tacview 1.9.5 or newer, enable **Lazy SF2 Patch** in the Add-ons menu. It shows only the ground of the theatre you recorded, and it hides the other Lazy SF2 Patch grounds and all of them for other recordings. Without the add-on, every Lazy SF2 Patch theatre that has a real-world position is always visible at that place.
 
 In Tacview, set the terrain layer set to **Auto** (or **Real World**). Recordings say they come from Strike Fighters 2, and Auto then shows the Real World layers, where this terrain lives. If Tacview is set to another simulator's layers, such as BMS, the texture is hidden. Leave Tacview's Advanced Options "Auto Terrain Switch" as it is: our recordings do not write `MapId`, so it does not touch our terrain. Tacview reads new terrain files and add-ons only when it starts, so restart it after your first flight in a new theatre.
 
-These files are outside the game folder, so uninstalling the mod leaves them. You can delete the three `LazySF2` folders (in `Data\Terrain\Custom`, `Data\Terrain\Textures` and `AddOns`) yourself.
+These files are outside the game folder, so uninstalling the mod leaves them. You can delete the three `LazySF2Patch` folders (in `Data\Terrain\Custom`, `Data\Terrain\Textures` and `AddOns`) yourself.
 
 Theatres with a real-world position moved, so recordings of GermanyCE, IsraelME and VietnamSEA made before this version no longer line up with the terrain. The flat mapping also stretches east-west by up to about 10% at the theatre's north and south edges.
 

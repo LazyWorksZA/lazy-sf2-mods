@@ -26,7 +26,7 @@ bool parse_num(const char* s, double& v) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    using namespace lazysf2;
+    using namespace LazyWorks::SF2Patch;
     acmi::Options opt;
     std::vector<const char*> pos;
     for (int i = 1; i < argc; ++i) {

@@ -43,4 +43,4 @@ jobs:
 
       - name: Installer helper tests
         shell: pwsh
-        run: dotnet test installer/LazySF2.Manager.Tests
+        run: dotnet test installer/LazyWorks.SF2Patch.Manager.Tests

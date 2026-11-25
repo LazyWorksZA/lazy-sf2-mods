@@ -17,7 +17,7 @@
 #include "net/stream_format.h"
 #include "net/stream_record.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -734,4 +734,4 @@ void host_shutdown() {
 
 bool host_has_clients() { return g_has_clients.load(std::memory_order_relaxed); }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

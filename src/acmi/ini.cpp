@@ -2,7 +2,7 @@
 
 #include <cstdlib>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 std::string to_lower_ascii(std::string_view s) {
     std::string r(s);
@@ -132,4 +132,4 @@ bool parse_numbers(const std::string& value, double* out, size_t count) {
     return true;
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

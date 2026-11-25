@@ -9,7 +9,7 @@
 
 #include "net/protocol.h"
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 /// <summary>Limits for numbers that arrive from the network. Anything else is dropped.</summary>
 inline constexpr double kMaxPosition = 1.0e7;   // metres, per axis
@@ -140,4 +140,4 @@ constexpr bool check_delay() {
 }
 static_assert(check_delay());
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

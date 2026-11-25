@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Developer tools (off unless enabled)
+
+- **Probe hotkeys for the Phase 4 recon.** Ctrl+Shift+J moves the player's own jet 1 km ahead and turns it 90 degrees right; Ctrl+Shift+K moves it 1 km ahead only. Either then logs the jet's state once a second for 5 s. The probe also logs once per flight whether the player's aircraft steps before or after the other aircraft in a frame.
+
 ## 1.0.0 (2026-11-25)
 
 First public release.
@@ -29,7 +33,7 @@ First public release.
 
   Recordings are compact: each line holds only the values that changed, and the finished file is zipped (one measured 19.6 MB recording came to about 1.4 MB). While a flight runs the file is a plain `.acmi`; if the game exits before packing finishes, it stays a plain `.acmi` that Tacview opens just the same. A recording is capped at 512 MB.
 - **Tacview terrain.** The first recorded flight in each theatre exports that theatre for Tacview: its heightmap, a ground texture built from the theatre's own tiles, and a sharp patch of real ground tiles around each airfield's runways. A theatre whose ini gives a geographic position is placed there (GermanyCE sits over central Germany); the others sit on open Atlantic. The files go to `%APPDATA%\Tacview\Data\Terrain\` and are made once per theatre; delete them to have them made again.
-- **Tacview add-on.** The patch writes a small add-on to `%APPDATA%\Tacview\AddOns\LazySF2\`. Enable "Lazy SF2 Patch" in Tacview's Add-ons menu (Tacview 1.9.5 or newer) and it shows only the ground of the recording's theatre, hiding the others. Its "Lazy SF2 Patch: theatre switch" option turns this off.
+- **Tacview add-on.** The patch writes a small add-on to `%APPDATA%\Tacview\AddOns\LazySF2Patch\`. Enable "Lazy SF2 Patch" in Tacview's Add-ons menu (Tacview 1.9.5 or newer) and it shows only the ground of the recording's theatre, hiding the others. Its "Lazy SF2 Patch: theatre switch" option turns this off.
 
 ### Install
 

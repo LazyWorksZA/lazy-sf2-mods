@@ -1,6 +1,6 @@
 #pragma once
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>What decides whether the system cursor is confined to the game window.</summary>
 struct ClipInputs {
@@ -16,4 +16,4 @@ constexpr bool want_clip(const ClipInputs& in) {
     return in.fullscreen && in.cursor_mode && in.foreground && !in.iconic && in.have_rect;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

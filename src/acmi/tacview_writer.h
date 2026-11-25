@@ -32,7 +32,7 @@
 
 #include "acmi/tacview_core.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr uint64_t kTacviewMaxFileBytes = 512ull * 1024 * 1024;
 
@@ -127,4 +127,4 @@ private:
     std::atomic<bool> created_{false};  // the file exists
 };
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

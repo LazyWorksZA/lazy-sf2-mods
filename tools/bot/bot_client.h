@@ -8,7 +8,7 @@
 
 #include "bot_core.h"
 
-namespace lazysf2::bot {
+namespace LazyWorks::SF2Patch::bot {
 
 struct BotConfig {
     std::string host = "127.0.0.1:7777";  // numeric address or name, and port
@@ -40,4 +40,4 @@ struct BotResult {
 
 BotResult run_bot(const BotConfig& cfg);
 
-}  // namespace lazysf2::bot
+}  // namespace LazyWorks::SF2Patch::bot

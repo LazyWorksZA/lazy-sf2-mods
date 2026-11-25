@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cwchar>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 // [begin, end) of a section's body (after its header line, up to the next section's line start).
@@ -76,4 +76,4 @@ int splice_gameplay_row(std::wstring& text) {
     return id;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

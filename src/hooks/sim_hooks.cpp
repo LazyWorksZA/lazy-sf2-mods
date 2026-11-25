@@ -10,7 +10,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -204,4 +204,4 @@ void sim_remove(HMODULE aircraft_dll) {
     (void)s;  // MH_ERROR_NOT_CREATED is expected
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

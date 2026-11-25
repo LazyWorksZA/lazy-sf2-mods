@@ -8,7 +8,7 @@
 
 #include "net/stream_format.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 struct Options {
     double ref_lat = 0;    // degrees; the origin of the local flat mapping
@@ -32,4 +32,4 @@ struct Info {
 /// </summary>
 bool convert_stream(const uint8_t* data, size_t size, const Options& opt, std::string& out, Info& info);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

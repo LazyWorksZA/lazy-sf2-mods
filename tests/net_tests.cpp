@@ -40,7 +40,7 @@
 #include "net/stream_format.h"
 #include "net/stream_record.h"
 
-using namespace lazysf2::net;
+using namespace LazyWorks::SF2Patch::net;
 
 namespace {
 
@@ -623,7 +623,7 @@ void host_core_tests() {
 
 }  // namespace
 
-namespace bot = lazysf2::bot;
+namespace bot = LazyWorks::SF2Patch::bot;
 
 void bot_flight_tests() {
     std::printf("bot flight scripts\n");
@@ -1424,10 +1424,10 @@ void acmi_tests() {
         std::free(dump);
     }
 
-    lazysf2::acmi::Options opt;
+    LazyWorks::SF2Patch::acmi::Options opt;
     std::string out;
-    lazysf2::acmi::Info info;
-    expect(lazysf2::acmi::convert_stream(f.data(), full, opt, out, info), "converts");
+    LazyWorks::SF2Patch::acmi::Info info;
+    expect(LazyWorks::SF2Patch::acmi::convert_stream(f.data(), full, opt, out, info), "converts");
     expect(info.end == StreamStatus::End, "reads to the end");
     expect(out.rfind("FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=", 0) == 0, "header and global object");
     expect(out.find("ReferenceLongitude=0,ReferenceLatitude=0") != std::string::npos, "reference point");
@@ -1471,28 +1471,28 @@ void acmi_tests() {
     expect(rm != std::string::npos && out.find("\n102,", rm) == std::string::npos, "client removed on leave, nothing after");
     expect(out.find("\n#1.000\n-102\n") != std::string::npos, "removal is at the leave time");
 
-    lazysf2::acmi::Options all;
+    LazyWorks::SF2Patch::acmi::Options all;
     all.max_rate = 0;
     std::string out_all;
-    lazysf2::acmi::convert_stream(f.data(), full, all, out_all, info);
+    LazyWorks::SF2Patch::acmi::convert_stream(f.data(), full, all, out_all, info);
     int c = 0;
     for (size_t p = out_all.find("\n1,T="); p != std::string::npos; p = out_all.find("\n1,T=", p + 1)) ++c;
     expect(c == 100, "--max-rate 0 keeps every sample");
 
     // Reference point: lat/lon are offsets from it, and x is scaled by cos(lat).
-    lazysf2::acmi::Options ro;
+    LazyWorks::SF2Patch::acmi::Options ro;
     ro.ref_lat = 60;
     ro.ref_lon = 10;
     std::string out_ref;
-    lazysf2::acmi::convert_stream(f.data(), full, ro, out_ref, info);
+    LazyWorks::SF2Patch::acmi::convert_stream(f.data(), full, ro, out_ref, info);
     expect(out_ref.find("ReferenceLongitude=10,ReferenceLatitude=60") != std::string::npos &&
                out_ref.find("\n1,T=0.017966223|0.017966223|") != std::string::npos,
            "reference point and cos(lat) scaling");
 
     // Truncated tail: cut in the middle of a record. What was read is converted, the status says Truncated.
     std::string out_t;
-    lazysf2::acmi::Info it;
-    expect(lazysf2::acmi::convert_stream(f.data(), full - 20, opt, out_t, it) && it.end == StreamStatus::Truncated &&
+    LazyWorks::SF2Patch::acmi::Info it;
+    expect(LazyWorks::SF2Patch::acmi::convert_stream(f.data(), full - 20, opt, out_t, it) && it.end == StreamStatus::Truncated &&
                out_t.find("\n1,T=") != std::string::npos,
            "truncated tail: converted, reported");
     // A corrupt length stops reading, the earlier records stay.
@@ -1501,8 +1501,8 @@ void acmi_tests() {
         const size_t fourth = starts[3];  // from the real record sizes: the 4th record
         g[fourth + 3] = 0xff;  // top byte of its length
         std::string o2;
-        lazysf2::acmi::Info i2;
-        expect(lazysf2::acmi::convert_stream(g.data(), g.size(), opt, o2, i2) && i2.end == StreamStatus::BadLength &&
+        LazyWorks::SF2Patch::acmi::Info i2;
+        expect(LazyWorks::SF2Patch::acmi::convert_stream(g.data(), g.size(), opt, o2, i2) && i2.end == StreamStatus::BadLength &&
                    o2.find("\n1,T=") != std::string::npos,
                "corrupt length: stops, keeps the earlier records");
     }
@@ -1523,10 +1523,10 @@ void acmi_tests() {
         }
         put(StreamKind::ClientJoined, 10.5, &jp, sizeof(jp));  // again, no ClientLeft in between
         std::string o4;
-        lazysf2::acmi::Info i4;
-        lazysf2::acmi::Options all2;
+        LazyWorks::SF2Patch::acmi::Info i4;
+        LazyWorks::SF2Patch::acmi::Options all2;
         all2.max_rate = 0;
-        expect(lazysf2::acmi::convert_stream(g.data(), m, all2, o4, i4), "rejoin stream converts");
+        expect(LazyWorks::SF2Patch::acmi::convert_stream(g.data(), m, all2, o4, i4), "rejoin stream converts");
         expect(o4.find("\n#0.500\n-102\n") != std::string::npos, "a rejoin removes the object that is still shown");
         int zero_heading = 0, bad360 = 0, neg0 = 0;
         for (size_t p = o4.find("\n102,T="); p != std::string::npos; p = o4.find("\n102,T=", p + 1)) {
@@ -1538,16 +1538,16 @@ void acmi_tests() {
         expect(bad360 == 0 && neg0 == 0 && zero_heading >= 2, "a heading of -0 or one that rounds to 360 is written as 0");
     }
     std::string o3;
-    lazysf2::acmi::Info i3;
-    expect(!lazysf2::acmi::convert_stream(f.data(), 20, opt, o3, i3) && o3.empty(), "short header: rejected");
+    LazyWorks::SF2Patch::acmi::Info i3;
+    expect(!LazyWorks::SF2Patch::acmi::convert_stream(f.data(), 20, opt, o3, i3) && o3.empty(), "short header: rejected");
     std::vector<uint8_t> bad(f.begin(), f.begin() + 60);
     bad[0] = 'X';
-    expect(!lazysf2::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
+    expect(!LazyWorks::SF2Patch::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
 }
 
 void cursor_clip_tests() {
-    using lazysf2::hooks::ClipInputs;
-    using lazysf2::hooks::want_clip;
+    using LazyWorks::SF2Patch::hooks::ClipInputs;
+    using LazyWorks::SF2Patch::hooks::want_clip;
     std::printf("cursor clip\n");
     const ClipInputs on{true, true, true, false, true};
     expect(want_clip(on), "clip: fullscreen + match cursor + foreground -> clip");
@@ -1566,9 +1566,9 @@ void cursor_clip_tests() {
 }
 
 void tracker_logic_tests() {
-    using lazysf2::hooks::AircraftSide;
-    using lazysf2::hooks::classify_side;
-    using lazysf2::hooks::tracking_wanted;
+    using LazyWorks::SF2Patch::hooks::AircraftSide;
+    using LazyWorks::SF2Patch::hooks::classify_side;
+    using LazyWorks::SF2Patch::hooks::tracking_wanted;
     std::printf("tracker logic\n");
     // The enable rule: hooks only if the probe is on or Tacview Recording is on.
     expect(!tracking_wanted(false, false), "enable rule: neither client -> nothing hooked");
@@ -1585,9 +1585,9 @@ void tracker_logic_tests() {
     expect(classify_side(en, 0, en, ne) == AircraftSide::Enemy, "side: a zero mask never matches, others still do");
 
     // The decision when a new AircraftObject.dll image appears.
-    using lazysf2::hooks::LoadInput;
-    using lazysf2::hooks::LoadKind;
-    using lazysf2::hooks::decide_on_image;
+    using LazyWorks::SF2Patch::hooks::LoadInput;
+    using LazyWorks::SF2Patch::hooks::LoadKind;
+    using LazyWorks::SF2Patch::hooks::decide_on_image;
     auto dec = [](bool hooked, bool build, bool wanted, bool old) {
         return decide_on_image(LoadInput{hooked, build, wanted, old});
     };
@@ -1605,8 +1605,8 @@ void tracker_logic_tests() {
     expect(dec(false, true, true, true).kind == LoadKind::Install && dec(false, true, true, true).drop_old,
            "image: wanted, reload (hooked image replaced or unpatched) -> drop old, install");
     // The decision when an Options page is left.
-    using lazysf2::hooks::OptionsExitAction;
-    using lazysf2::hooks::decide_on_options_exit;
+    using LazyWorks::SF2Patch::hooks::OptionsExitAction;
+    using LazyWorks::SF2Patch::hooks::decide_on_options_exit;
     expect(decide_on_options_exit(true, false, true) == OptionsExitAction::Install, "options exit: wanted, DLL loaded, not hooked -> install");
     expect(decide_on_options_exit(false, false, true) == OptionsExitAction::Nothing, "options exit: wanted but no DLL yet -> nothing (the load installs)");
     expect(decide_on_options_exit(true, true, true) == OptionsExitAction::Nothing, "options exit: wanted and hooked -> nothing");
@@ -1615,10 +1615,10 @@ void tracker_logic_tests() {
     expect(decide_on_options_exit(true, false, false) == OptionsExitAction::Nothing, "options exit: not wanted, not hooked -> nothing");
 }
 
-lazysf2::acmi::TacviewRec make_rec(uint64_t seq, bool player, lazysf2::hooks::AircraftSide side, const char* name,
+LazyWorks::SF2Patch::acmi::TacviewRec make_rec(uint64_t seq, bool player, LazyWorks::SF2Patch::hooks::AircraftSide side, const char* name,
                                    double t, double x, double y, double z, float pitch, float heading, float roll) {
-    lazysf2::acmi::TacviewRec r;
-    r.kind = lazysf2::acmi::TacviewRec::kObject;
+    LazyWorks::SF2Patch::acmi::TacviewRec r;
+    r.kind = LazyWorks::SF2Patch::acmi::TacviewRec::kObject;
     r.seq = seq;
     r.is_player = player ? 1 : 0;
     r.side = static_cast<uint8_t>(side);
@@ -1695,11 +1695,11 @@ std::string read_whole(const std::wstring& p) {
 }
 
 void terrain_tests() {
-    using namespace lazysf2::acmi;
+    using namespace LazyWorks::SF2Patch::acmi;
     std::printf("tacview terrain\n");
-    expect(terrain_id(L"DESERT") == "LazySF2.DESERT", "terrain id: plain name");
-    expect(terrain_id(std::wstring(L"Angola v1/") + wchar_t(0xe9) + L",x") == "LazySF2.Angola_v1___x", "terrain id: other characters become _");
-    expect(terrain_id(L"A-b_9") == "LazySF2.A-b_9", "terrain id: dash and underscore kept");
+    expect(terrain_id(L"DESERT") == "LazySF2Patch.DESERT", "terrain id: plain name");
+    expect(terrain_id(std::wstring(L"Angola v1/") + wchar_t(0xe9) + L",x") == "LazySF2Patch.Angola_v1___x", "terrain id: other characters become _");
+    expect(terrain_id(L"A-b_9") == "LazySF2Patch.A-b_9", "terrain id: dash and underscore kept");
     expect(terrain_id(L"").empty(), "terrain id: empty in, empty out");
     expect(terrain_id(std::wstring(100, L'X')).size() == 48, "terrain id: capped at 48 chars");
 
@@ -1709,11 +1709,11 @@ void terrain_tests() {
     const uint8_t want[12] = {0x04, 0x01, 5, 0, 0xcd, 0xab, 1, 0, 2, 0, 3, 0};
     expect(raw.size() == 12 && std::memcmp(raw.data(), want, 12) == 0, "terrain raw: north row first, little-endian");
 
-    expect(terrain_file_stem("LazySF2.T") == "LazySF2-T" && terrain_file_stem("LazySF2.A_b-1") == "LazySF2-A_b-1" &&
+    expect(terrain_file_stem("LazySF2Patch.T") == "LazySF2Patch-T" && terrain_file_stem("LazySF2Patch.A_b-1") == "LazySF2Patch-A_b-1" &&
                terrain_file_stem("").empty(),
            "terrain file stem: dots become dashes");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
+    const std::string xml = terrain_xml("LazySF2Patch.T", "LazySF2Patch-T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
     const auto m = make_mapping(-4.5);
     const std::string east = num(-25.0 + 1999 * 500.0 * m.lon_scale, 9);
     const std::string north = num(-4.5 + 1999 * 500.0 * m.lat_scale, 9);
@@ -1722,7 +1722,7 @@ void terrain_tests() {
         return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat +
                    "</Latitude>");
     };
-    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2.T\">") && has("<File>LazySF2-T.raw</File>") &&
+    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2Patch.T\">") && has("<File>LazySF2Patch-T.raw</File>") &&
                has("<Width>2000</Width>") && has("<Height>2000</Height>") && has("<BigEndian>0</BigEndian>") &&
                has("<AltitudeFactor>1</AltitudeFactor>") && has("<Projection>Quad</Projection>"),
            "terrain xml: structure");
@@ -1734,13 +1734,13 @@ void terrain_tests() {
            "terrain xml: 1000 km square sits over the Atlantic");
 
     TacviewCoreConfig cfg;
-    cfg.theater = "LazySF2.DESERT";
+    cfg.theater = "LazySF2Patch.DESERT";
     cfg.title = "Strike Fighters 2 - Desert";
     std::string h1, h2;
     TacviewCore{cfg}.header(h1, "2026-11-24T20:15:00Z");
     expect(h1 == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=Lazy SF2 Patch,Theater=LazySF2.DESERT,LazySF2Theater=LazySF2.DESERT\n",
-           "header: Theater= and LazySF2Theater= after the title");
+                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=Lazy SF2 Patch,Theater=LazySF2Patch.DESERT,LazySF2PatchTheater=LazySF2Patch.DESERT\n",
+           "header: Theater= and LazySF2PatchTheater= after the title");
     TacviewCore{TacviewCoreConfig{}}.header(h2, "2026-11-24T20:15:00Z");
     expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2,DataSource=") != std::string::npos,
            "header: no Theater= by default");
@@ -1748,15 +1748,15 @@ void terrain_tests() {
 
 void addon_embed_test() {
     const std::string lua = kTacviewAddonLua;
-    expect(!lua.empty() && lua.rfind("-- LazySF2 terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
-    expect(lua.find("LazySF2Theater") != std::string::npos && lua.find("SetTitle(\"Lazy SF2 Patch\")") != std::string::npos,
-           "tacview add-on: embedded text reads LazySF2Theater and sets the add-on title");
+    expect(!lua.empty() && lua.rfind("-- Lazy SF2 Patch terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
+    expect(lua.find("LazySF2PatchTheater") != std::string::npos && lua.find("SetTitle(\"Lazy SF2 Patch\")") != std::string::npos,
+           "tacview add-on: embedded text reads LazySF2PatchTheater and sets the add-on title");
 }
 
 void tacview_tests() {
     addon_embed_test();
-    using namespace lazysf2::acmi;
-    using lazysf2::hooks::AircraftSide;
+    using namespace LazyWorks::SF2Patch::acmi;
+    using LazyWorks::SF2Patch::hooks::AircraftSide;
     std::printf("tacview recorder\n");
 
     // Header, ids, properties, sides, angles.
@@ -2084,7 +2084,7 @@ void tacview_tests() {
 
     // An unchanged ground pose is not written again; a change is.
     {
-        using lazysf2::hooks::AircraftSide;
+        using LazyWorks::SF2Patch::hooks::AircraftSide;
         TacviewCore core{TacviewCoreConfig{}};
         auto site = [](double t, double x) {
             TacviewRec r = make_rec(1, false, AircraftSide::Enemy, "SA-2 Site", t, x, 200, 5, 0.0f, 1.0f, 0.0f);
@@ -2110,7 +2110,7 @@ void tacview_tests() {
 
     // Explosions: for a detonated weapon, a destroyed aircraft and a destroyed ground object; not for a plain removal.
     {
-        using lazysf2::hooks::AircraftSide;
+        using LazyWorks::SF2Patch::hooks::AircraftSide;
         TacviewCore core{TacviewCoreConfig{}};
         auto obj = [](uint8_t cls, uint64_t seq, double t, double x) {
             TacviewRec r = make_rec(seq, false, AircraftSide::Friendly, "X", t, x, 50, 300, 0, 0, 0);
@@ -2189,7 +2189,7 @@ void tacview_tests() {
 
     // The world walker's identity rules, over synthetic slot snapshots.
     {
-        using namespace lazysf2::hooks;
+        using namespace LazyWorks::SF2Patch::hooks;
         uint64_t next = 1;
         SlotMem m;
         GroundStep s = ground_step(m, 0x1000, true, -1, next);
@@ -2292,7 +2292,7 @@ void tacview_tests() {
 
     // Tracer rounds: identity by prediction, angles from the velocity, the core's bullet type and parent.
     {
-        using namespace lazysf2::hooks;
+        using namespace LazyWorks::SF2Patch::hooks;
         uint64_t next = 1;
         SlotMem m;
         const float vel[3] = {800.0f, 0.0f, 0.0f};
@@ -2326,7 +2326,7 @@ void tacview_tests() {
                "bullet angles: heading east, diving 45 degrees");
     }
     {
-        using lazysf2::hooks::AircraftSide;
+        using LazyWorks::SF2Patch::hooks::AircraftSide;
         TacviewCore core{TacviewCoreConfig{}};
         std::string out;
         auto bullet = [](uint64_t seq, uint64_t parent, uint8_t parent_cls, double t) {
@@ -2370,8 +2370,8 @@ void tacview_tests() {
 
     // Weapon type classification and the ring slot size.
     {
-        using lazysf2::hooks::WeaponClass;
-        using lazysf2::hooks::classify_weapon_type;
+        using LazyWorks::SF2Patch::hooks::WeaponClass;
+        using LazyWorks::SF2Patch::hooks::classify_weapon_type;
         expect(classify_weapon_type(0) == WeaponClass::Bomb && classify_weapon_type(1) == WeaponClass::Missile &&
                    classify_weapon_type(7) == WeaponClass::Missile && classify_weapon_type(2) == WeaponClass::Rocket &&
                    classify_weapon_type(-5) == WeaponClass::Missile,
@@ -2635,7 +2635,7 @@ void gameplay_row_splice_tests() {
         L"[OtherOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nMenuItem001=OtherTitleText\r\nMenuItem002=SectionVITitleText\r\n"
         L"Position=565,130\r\nWidth=362\r\nHeight=480\r\n";
     std::wstring t = ini;
-    const int id = lazysf2::hooks::splice_gameplay_row(t);
+    const int id = LazyWorks::SF2Patch::hooks::splice_gameplay_row(t);
     expect(id == 33, "row takes the next free Gameplay MenuItem ID");
     auto has = [&](const wchar_t* needle) { return t.find(needle) != std::wstring::npos; };
     expect(has(L"MenuItem032=FuelUsageText\r\nMenuItem033=TacviewRecordingList\r\nMenuItem034=TacviewRecordingText\r\n"
@@ -2654,17 +2654,17 @@ void gameplay_row_splice_tests() {
                has(L"Position=550,180\r\nWidth=450\r\nHeight=460\r\n"),
            "Other tab, Other page and Gameplay geometry stay stock");
     const std::wstring once = t;
-    expect(lazysf2::hooks::splice_gameplay_row(t) == 0 && t == once, "second splice is refused, text unchanged");
+    expect(LazyWorks::SF2Patch::hooks::splice_gameplay_row(t) == 0 && t == once, "second splice is refused, text unchanged");
     std::wstring bad = L"[OptionsScreen]\r\n";
-    expect(lazysf2::hooks::splice_gameplay_row(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
+    expect(LazyWorks::SF2Patch::hooks::splice_gameplay_row(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
     std::wstring empty_page = L"[GameplayOptionsSubMenu]\r\nMenuItemType=SUBMENU\r\nPosition=550,180\r\n";
     const std::wstring empty_copy = empty_page;
-    expect(lazysf2::hooks::splice_gameplay_row(empty_page) == 0 && empty_page == empty_copy,
+    expect(LazyWorks::SF2Patch::hooks::splice_gameplay_row(empty_page) == 0 && empty_page == empty_copy,
            "page without MenuItem lines left unchanged");
 }
 
 namespace {
-using lazysf2::acmi::Image;
+using LazyWorks::SF2Patch::acmi::Image;
 
 // Synthetic images: a 2x2 picture with red top-left, green top-right, blue bottom-left, white bottom-right.
 std::vector<uint8_t> make_tga(int type, int bpp, bool top_origin, bool rle) {
@@ -2762,7 +2762,7 @@ std::vector<uint8_t> utf16le(const std::wstring& s, bool bom = true) {
 std::vector<uint8_t> ansi(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
 
 void texture_tests() {
-    using namespace lazysf2::acmi;
+    using namespace LazyWorks::SF2Patch::acmi;
     std::printf("tacview texture\n");
     const auto pix = [](const Image& im, int x, int y, int c) { return im.px[(static_cast<size_t>(y) * im.w + x) * 4 + c]; };
 
@@ -3002,15 +3002,15 @@ void texture_tests() {
 
     // texture xml
     {
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
+        const std::string xml = texture_xml("LazySF2Patch.T", "LazySF2Patch-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
         const auto m = make_mapping(-4.5);
         const std::string east = num(-25.0 + 1000000.0 * m.lon_scale, 9), north = num(-4.5 + 1000000.0 * m.lat_scale, 9);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
         auto corner = [&](const char* tag, const std::string& lon, const std::string& lat) {
             return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat + "</Latitude>");
         };
-        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2.T\">") &&
-                   has("<File>LazySF2-T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
+        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2Patch.T\">") &&
+                   has("<File>LazySF2Patch-T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
                "texture xml: structure");
         expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&
                    corner("TopLeft", "-25", north),
@@ -3158,14 +3158,14 @@ void texture_tests() {
             expect(unify_tile_size(capped, 32) == 32 && capped[0].w == 32, "unify_tile_size: a tile above the cap is brought down to it");
         }
 
-        const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2-T-AF001.jpg", 1000, 2000, 3000, 3000},
-                                               {"LazySF2.T.AF002", "LazySF2-T-AF002.jpg", 5000, 6000, 2000, 2000}};
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
+        const std::vector<PatchEntry> extra = {{"LazySF2Patch.T.AF001", "LazySF2Patch-T-AF001.jpg", 1000, 2000, 3000, 3000},
+                                               {"LazySF2Patch.T.AF002", "LazySF2Patch-T-AF002.jpg", 5000, 6000, 2000, 2000}};
+        const std::string xml = texture_xml("LazySF2Patch.T", "LazySF2Patch-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
         const auto m = make_mapping(-4.5);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
-        const size_t base = xml.find("Id=\"LazySF2.T\""), p1 = xml.find("Id=\"LazySF2.T.AF001\""), p2 = xml.find("Id=\"LazySF2.T.AF002\"");
+        const size_t base = xml.find("Id=\"LazySF2Patch.T\""), p1 = xml.find("Id=\"LazySF2Patch.T.AF001\""), p2 = xml.find("Id=\"LazySF2Patch.T.AF002\"");
         expect(base != std::string::npos && base < p1 && p1 < p2, "texture xml: base entry first, then the patches in order");
-        expect(has("<File>LazySF2-T-AF001.jpg</File>") && has("<File>LazySF2-T-AF002.jpg</File>"), "texture xml: patch files");
+        expect(has("<File>LazySF2Patch-T-AF001.jpg</File>") && has("<File>LazySF2Patch-T-AF002.jpg</File>"), "texture xml: patch files");
         const std::string bl_lon = num(-25.0 + 1000 * m.lon_scale, 9), bl_lat = num(-4.5 + 2000 * m.lat_scale, 9);
         const std::string tr_lon = num(-25.0 + 4000 * m.lon_scale, 9), tr_lat = num(-4.5 + 5000 * m.lat_scale, 9);
         const std::string first = xml.substr(p1, xml.find("</CustomTexture>", p1) - p1);
@@ -3180,8 +3180,8 @@ void texture_tests() {
 }  // namespace
 
 void aerodrome_core_tests() {
-    using namespace lazysf2::acmi;
-    using lazysf2::hooks::AircraftSide;
+    using namespace LazyWorks::SF2Patch::acmi;
+    using LazyWorks::SF2Patch::hooks::AircraftSide;
     std::printf("tacview aerodromes\n");
     TacviewCoreConfig cfg;
     cfg.ref_lat = -4.5;
@@ -3227,7 +3227,7 @@ void aerodrome_core_tests() {
 }
 
 void placement_tests() {
-    using namespace lazysf2::acmi;
+    using namespace LazyWorks::SF2Patch::acmi;
     const Placement none = place_theatre(false, 10.817, 51.111, 1000000.0, 1000000.0);
     expect(none.ref_lon == -25.0 && none.ref_lat == -4.5 && none.scale_lat == -4.5, "placement: no geo is the default frame");
 
@@ -3252,14 +3252,14 @@ void placement_tests() {
     const Placement edge = place_theatre(true, 179.9, 85.0, 1000000.0, 1000000.0);
     expect(edge.ref_lon >= -180.0 && edge.ref_lon <= 180.0 && edge.ref_lat >= -89.0, "placement: the corner is clamped");
 
-    const std::string txml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
+    const std::string txml = texture_xml("LazySF2Patch.T", "LazySF2Patch-T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
                                          p.scale_lat);
     expect(txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * m.lon_scale, 9) + "</Longitude>") != std::string::npos &&
                txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * make_mapping(p.ref_lat).lon_scale, 9) + "</Longitude>") ==
                    std::string::npos,
            "placement: texture_xml uses the scale latitude, not the corner latitude");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
+    const std::string xml = terrain_xml("LazySF2Patch.T", "LazySF2Patch-T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
     expect(xml.find(num(p.ref_lon + 1000.0 * m.lon_scale, 9)) != std::string::npos,
            "placement: terrain_xml uses the scale latitude");
 }

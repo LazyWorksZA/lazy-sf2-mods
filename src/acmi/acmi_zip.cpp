@@ -13,7 +13,7 @@
 #include <thread>
 #include <vector>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 namespace {
 
@@ -299,4 +299,4 @@ unsigned delete_stale_zip_temps(const std::wstring& dir) {
 
 void zip_test_fail_after(uint64_t bytes) { g_fail_after.store(bytes, std::memory_order_relaxed); }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

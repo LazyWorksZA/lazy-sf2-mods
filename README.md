@@ -27,12 +27,12 @@ The reverse-engineering notes are kept in a separate private repository.
 
 ## Quick start
 
-**Players:** download `LazySF2-win.msi` from the [Releases](../../releases) page and run it. See [`INSTALL.md`](INSTALL.md).
+**Players:** download `Lazy-SF2-Patch-<version>.msi` from the [Releases](../../releases) page and run it. See [`INSTALL.md`](INSTALL.md).
 
 Every release file is built by GitHub Actions from the tagged commit, never on a developer's machine. To confirm that a download came from this repository's code:
 
-```powershell
-gh attestation verify LazySF2-win.msi --repo LazyWorksZA/lazy-sf2-patch
+```
+gh attestation verify <downloaded file> --repo LazyWorksZA/lazy-sf2-patch
 ```
 
 The release notes also list each file's SHA-256.
@@ -63,7 +63,7 @@ The release notes also list each file's SHA-256.
 **Done (v1.0.0)**
 
 - Borderless brief: recon, borderless, the Display Mode and Screen options, mouse pointer, Alt-Tab, device lost, DPI, Windows key, DXVK check, MSI installer.
-- Tacview Recording: aircraft, weapons, ground objects, ships, countermeasures, tracers and explosions; each theatre's terrain, ground texture and airfields; the LazySF2 Tacview add-on.
+- Tacview Recording: aircraft, weapons, ground objects, ships, countermeasures, tracers and explosions; each theatre's terrain, ground texture and airfields; the Lazy SF2 Patch Tacview add-on.
 - Releases built on GitHub Actions with build provenance.
 
 **Now: multiplayer** (the [network brief](docs/SF2%20Network%20Layer%20%E2%80%94%20Claude%20Code%20Brief.md))

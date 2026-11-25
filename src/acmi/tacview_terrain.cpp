@@ -4,11 +4,11 @@
 
 #include "acmi/acmi_format.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 std::string terrain_id(std::wstring_view base_name) {
     if (base_name.empty()) return {};
-    std::string id = "LazySF2.";
+    std::string id = "LazySF2Patch.";
     for (const wchar_t c : base_name) {
         const bool ok = (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'_' ||
                         c == L'-';
@@ -67,4 +67,4 @@ std::string terrain_xml(const std::string& id, const std::string& raw_file, int 
     return x;
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cwchar>
 
-namespace lazysf2::monitors {
+namespace LazyWorks::SF2Patch::monitors {
 namespace {
 
 int display_number(const wchar_t* device) {
@@ -49,4 +49,4 @@ int number_of_window(HWND hwnd) {
     return (m && GetMonitorInfoW(m, &info)) ? display_number(info.szDevice) : 0;
 }
 
-}  // namespace lazysf2::monitors
+}  // namespace LazyWorks::SF2Patch::monitors

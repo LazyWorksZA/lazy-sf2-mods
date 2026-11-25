@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>What the walker remembers about one slot between walks.</summary>
 struct SlotMem {
@@ -128,4 +128,4 @@ inline void angles_from_velocity(const float vel[3], float ang[3]) {
     ang[2] = 0.0f;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

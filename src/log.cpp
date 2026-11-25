@@ -9,7 +9,7 @@
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
-namespace lazysf2::log {
+namespace LazyWorks::SF2Patch::log {
 namespace {
 
 CRITICAL_SECTION g_lock;
@@ -68,4 +68,4 @@ void write(const char* fmt, ...) {
     LeaveCriticalSection(&g_lock);
 }
 
-}  // namespace lazysf2::log
+}  // namespace LazyWorks::SF2Patch::log

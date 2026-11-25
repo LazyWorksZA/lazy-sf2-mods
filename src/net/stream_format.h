@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 inline constexpr char kStreamMagic[4] = {'L', 'Z', 'S', 'T'};
 inline constexpr uint16_t kStreamVersion = 1;
@@ -114,4 +114,4 @@ private:
 
 const char* stream_status_name(StreamStatus s);
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

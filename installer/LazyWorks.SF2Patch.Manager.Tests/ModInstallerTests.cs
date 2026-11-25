@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using Xunit;
 
-namespace LazySF2.Manager.Tests;
+namespace LazyWorks.SF2Patch.Manager.Tests;
 
 public sealed class ModInstallerTests : IDisposable
 {

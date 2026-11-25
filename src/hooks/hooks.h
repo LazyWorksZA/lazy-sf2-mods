@@ -8,7 +8,7 @@
 
 #include "hooks/aircraft_side.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>Strips WS_EX_TOPMOST from the game window at creation and keeps it non-topmost (Borderless).</summary>
 bool install_window_hooks();
@@ -199,7 +199,7 @@ uint64_t sim_step_count();
 /// The aircraft is valid only for the call. Keep it cheap.
 /// </summary>
 using SimStepCallback = void (*)(void* aircraft, float dt, bool is_player);
-/// <summary>Registers a step callback (4 slots; register once at install time). False if the set is full.</summary>
+/// <summary>Registers a step callback (8 slots; register once at install time). False if the set is full.</summary>
 bool sim_register_step_callback(SimStepCallback cb);
 /// <summary>While a developer run (recording, replay) is active, logs one clock line per second of game time.</summary>
 void sim_set_run_active(bool active);
@@ -240,6 +240,16 @@ void replay_cycle_rate();
 bool replay_active();
 
 /// <summary>
+/// Player jump (developer tool, player_jump.cpp): Ctrl+Shift+J moves the player 1 km ahead and turns it 90 degrees
+/// (position, angles, matrix, world velocity); Ctrl+Shift+K moves it only. Then logs its state for 5 s. The hotkey
+/// thread only sets the request; the player's next step acts on it.
+/// </summary>
+void player_jump_on_modules_loaded();
+void player_jump_request(bool full);
+/// <summary>Step order (developer tool, step_order.cpp): logs once per player whether it steps before the other aircraft in a frame.</summary>
+void step_order_on_modules_loaded();
+
+/// <summary>
 /// Host mode (developer tool; src/net/host.cpp): LAZYSF2_HOST=port or address:port (default 127.0.0.1) makes the
 /// mod listen for clients over UDP (ENet) and drive one AI aircraft per client as its avatar. Inert unless the
 /// probe is on. host_install() reads the variable once (DllMain, after install_probe_hooks());
@@ -252,4 +262,4 @@ void host_shutdown();
 /// <summary>True while any client holds an avatar. Puppet and replay refuse to start then, and the host refuses clients while one runs.</summary>
 bool host_has_clients();
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

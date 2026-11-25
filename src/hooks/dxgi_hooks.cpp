@@ -16,7 +16,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 // IDXGIFactory vtable slot
@@ -364,4 +364,4 @@ void dxgi_on_modules_loaded() {
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

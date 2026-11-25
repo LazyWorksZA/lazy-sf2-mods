@@ -37,7 +37,7 @@
 #include "acmi/acmi_format.h"
 #include "hooks/aircraft_side.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr uint32_t kPlayerId = 1;
 constexpr uint32_t kOtherIdBase = 0x10000;
@@ -188,4 +188,4 @@ private:
     TacviewCoreStats stats_;
 };
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

@@ -21,7 +21,7 @@
 
 #include "net/protocol.h"
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 inline constexpr int kMaxClients = 4;
 inline constexpr uint32_t kTimeoutMs = 5000;  // no packet from a peer for this long (wall clock) ends it
@@ -167,4 +167,4 @@ private:
     std::atomic<uint32_t> n_received_{0}, n_format_{0}, n_range_{0}, n_state_{0}, n_queue_{0}, n_control_{0}, n_quota_[kMaxClients] = {};
 };
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

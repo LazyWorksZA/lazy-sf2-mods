@@ -6,11 +6,11 @@
 #include <string_view>
 #include <vector>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr size_t kTerrainIdMaxChars = 48;
 
-/// <summary>"LazySF2." plus the base name with anything but ASCII letters, digits, '_' and '-' mapped to '_'; capped at 48 chars. Empty in, empty out.</summary>
+/// <summary>"LazySF2Patch." plus the base name with anything but ASCII letters, digits, '_' and '-' mapped to '_'; capped at 48 chars. Empty in, empty out.</summary>
 std::string terrain_id(std::wstring_view base_name);
 
 /// <summary>The id as a file stem: dots become dashes, because Tacview cannot load a texture whose name has more than one dot.</summary>
@@ -26,4 +26,4 @@ void terrain_raw_north_first(const uint16_t* south_first, int w, int h, std::vec
 std::string terrain_xml(const std::string& id, const std::string& raw_file, int w, int h, double spacing, double ref_lon,
                         double ref_lat, double scale_lat);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

@@ -11,7 +11,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 // 0 idle, 1 start requested, 2 running, 3 stop requested (hotkey).
 std::atomic<int> g_puppet_state{0};
@@ -343,4 +343,4 @@ void puppet_run_frame() {
     }
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

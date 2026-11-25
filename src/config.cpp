@@ -10,7 +10,7 @@
 
 #include "log.h"
 
-namespace lazysf2::config {
+namespace LazyWorks::SF2Patch::config {
 namespace {
 
 INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
@@ -109,4 +109,4 @@ void set_mouse_mode(MouseMode mode) {
     g_mouse = mode;
 }
 
-}  // namespace lazysf2::config
+}  // namespace LazyWorks::SF2Patch::config

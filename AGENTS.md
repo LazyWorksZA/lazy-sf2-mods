@@ -41,7 +41,7 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 .\build.ps1                    # enters the VS dev shell (x86) and runs the CMake preset; output build\Release\winmm.dll
 .\scripts\install.ps1 [-MouseMode Cursor|Stock]
 .\scripts\uninstall.ps1
-dotnet test installer\LazySF2.Manager.Tests   # xUnit tests for the installer helper
+dotnet test installer\LazyWorks.SF2Patch.Manager.Tests   # xUnit tests for the installer helper
 ```
 
 The test project is only for development: it is not published or shipped.
@@ -52,14 +52,14 @@ The test project is only for development: it is not published or shipped.
 - **Developer tools** (`lazysf2-bot`, `lazysf2-acmi`, `lazysf2-net-tests`) build into `build\Release\tools\`, not next to `winmm.dll`, so they never load the proxy as their own winmm. The installer copies only `build\Release\winmm.dll`.
 - **Runtime log:** `lazysf2.log` in the game folder. Use it to check that hooks were installed and what they did.
 - **`LAZYSF2_DISABLE=1`** runs the mod as a pure pass-through proxy.
-- **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the headless C# helper (`installer/LazySF2.Manager`, framework-dependent .NET 10, no WinForms), and runs `vpk pack --msi`.
-  - The player-facing artefact is `LazySF2-win.msi`: a wizard (welcome, license with third-party notices, finish), per machine, elevated, with no shortcuts. Velopack's `Setup.exe` is built as well.
+- **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the headless C# helper (`installer/LazyWorks.SF2Patch.Manager`, framework-dependent .NET 10, no WinForms), and runs `vpk pack --msi`.
+  - The player-facing artefact is `LazySF2Patch-win.msi`, published as `Lazy-SF2-Patch-<version>.msi` by the release workflow: a wizard (welcome, license with third-party notices, finish), per machine, elevated, with no shortcuts. Velopack's `Setup.exe` is built as well.
   - It needs the .NET 10 SDK and `vpk`, installed with `dotnet tool install -g vpk --version 1.2.161`. Keep that version in step with the `Velopack` package version in the csproj.
   - The output in `installer\Releases` and `installer\publish*` is ignored by git.
   - The helper's install, update and uninstall hooks use the same manifest rules as `scripts/install.ps1`. Hooks have 15–30 s and no UI. The MSI runs them elevated. The per-user `Setup.exe` falls back to a UAC prompt on the next normal start, and its uninstall falls back to an elevated `cmd /c del`.
   - Velopack's MSI doesn't start the helper after installing and has no "launch" checkbox. The finish page tells players how to start the game.
 - **Settings** live in the player's `Options.ini`, written by the game's own Options menu (rows the mod adds): `[GraphicsOptions] DisplayMode/DisplayMonitor`, `[ControlOptions] MouseMode` and `[OtherOptions] TacviewRecording` (the key keeps its old section, but the row is on the Gameplay page). They take effect when the player leaves the Options screen. The mod reads them once per process: if you edit `Options.ini` by hand during a session, the change applies after a restart, and only the Options UI applies live. There is no mod settings file.
-- **Tacview terrain:** with Tacview Recording on, the first recorded flight in each theatre per game session also writes that theatre's heightmap (`LazySF2-<THEATRE>.raw` and `.xml`) to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`, and a ground texture composed from the theatre's tiles (`LazySF2-<THEATRE>.jpg` and `.xml`, plus one sharp `LazySF2-<THEATRE>-AFnnn.jpg` patch per airfield, listed in that xml) to `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2\`. File names use dashes because Tacview cannot load a texture whose name has dots; the Tacview ids stay dotted (`LazySF2.<THEATRE>`, patches `LazySF2.<THEATRE>.AFnnn`), and the recording names the theatre in `Theater=` and `LazySF2Theater=` (no `MapId`). The mod also writes its Tacview add-on, embedded from `tacview/addon/LazySF2/main.lua`, to `%APPDATA%\Tacview\AddOns\LazySF2\main.lua`. The files are made once and kept, so delete them to have them made again. The mod reads the tile images and inis through the exe's own file manager (`src/hooks/game_files.cpp`), which also sees cat and DLC content. These files are outside the game folder and not in `lazysf2.manifest.txt`: uninstall leaves them.
+- **Tacview terrain:** with Tacview Recording on, the first recorded flight in each theatre per game session also writes that theatre's heightmap (`LazySF2Patch-<THEATRE>.raw` and `.xml`) to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2Patch\`, and a ground texture composed from the theatre's tiles (`LazySF2Patch-<THEATRE>.jpg` and `.xml`, plus one sharp `LazySF2Patch-<THEATRE>-AFnnn.jpg` patch per airfield, listed in that xml) to `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2Patch\`. File names use dashes because Tacview cannot load a texture whose name has dots; the Tacview ids stay dotted (`LazySF2Patch.<THEATRE>`, patches `LazySF2Patch.<THEATRE>.AFnnn`), and the recording names the theatre in `Theater=` and `LazySF2PatchTheater=` (no `MapId`). The mod also writes its Tacview add-on, embedded from `tacview/addon/LazySF2Patch/main.lua`, to `%APPDATA%\Tacview\AddOns\LazySF2Patch\main.lua`. The files are made once and kept, so delete them to have them made again. The mod reads the tile images and inis through the exe's own file manager (`src/hooks/game_files.cpp`), which also sees cat and DLC content. These files are outside the game folder and not in `lazysf2.manifest.txt`: uninstall leaves them.
 
 ## Reverse-engineering tools
 
@@ -77,7 +77,7 @@ The test project is only for development: it is not published or shipped.
 
 ## Code conventions
 
-- C++20, `/W4 /permissive-`, everything in namespace `lazysf2`. The build must have no warnings.
+- C++20, `/W4 /permissive-`, everything in namespace `LazyWorks::SF2Patch` (C# uses `LazyWorks.SF2Patch.*`). The build must have no warnings.
 - Each feature is its own `src/hooks/*.cpp`. Features that need modules loaded later register with the module watch (`module_watch.cpp`) instead of hooking `LoadLibrary` again.
 - Settings go in `src/config.*`. Defaults must give stock behaviour, unless the brief says a feature is always on.
 - Log every hook install and every behaviour change once, with `LOG(...)`. Don't log every frame.
