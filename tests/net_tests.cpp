@@ -3308,15 +3308,15 @@ void pilot_twist_tests() {
     expect(close_to(twisted_yaw(100.0f * d, 0.5f, lo, hi, true), 100.0f * d + 0.5f * pt::kMaxTwist, 1e-5),
            "twist: weight times the maximum");
     expect(close_to(pt::kMaxTwist, 20.0f * d, 1e-6), "twist: at most 20 degrees extra");
-    expect(close_to(twisted_yaw(152.0f * d, 1.0f, lo, hi, true), 167.0f * d, 1e-4), "twist: the seat MaxYaw plus 15 at most");
-    expect(close_to(twisted_yaw(-152.0f * d, -1.0f, lo, hi, true), -167.0f * d, 1e-4), "twist: the seat MinYaw minus 15 at most");
+    expect(close_to(twisted_yaw(152.0f * d, 1.0f, lo, hi, true), 172.0f * d, 1e-4), "twist: the seat MaxYaw plus 20 at most");
+    expect(close_to(twisted_yaw(-152.0f * d, -1.0f, lo, hi, true), -172.0f * d, 1e-4), "twist: the seat MinYaw minus 20 at most");
     expect(close_to(twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 140.0f * d, 1e-4),
            "twist: within the seat limit plus the twist");
     expect(close_to(twisted_yaw(110.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 120.0f * d, 1e-4),
            "twist: stops at the narrow seat limit plus the twist");
     expect(close_to(twisted_yaw(140.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 140.0f * d, 1e-4),
            "twist: never pulls back a yaw already past the widened limit");
-    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 155.0f * d, 1e-4), "twist: unlimited view, full twist");
+    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 160.0f * d, 1e-4), "twist: unlimited view, full twist");
     expect(close_to(twisted_yaw(175.0f * d, 1.0f, 0.0f, 0.0f, false), 180.0f * d, 1e-4), "twist: unlimited view, +-180 only");
     // No compounding: the game smooths its stored yaw (+0xdc) toward the head target every frame; the hook writes the
     // twisted yaw only around the camera build and restores it. The stored yaw must settle on the target and the
