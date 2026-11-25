@@ -32,8 +32,6 @@ constexpr size_t kNameChars = 63;
 std::wstring g_dir;  // empty = probe off; written once from DllMain, read-only afterwards
 std::atomic<bool> g_dev_started{false};  // developer features (recorder, replay, host, hotkeys) started (once)
 
-// --- Snapshot ----------------------------------------------------------------------------------
-
 bool write_file(const std::wstring& path, const void* data, size_t n, DWORD* error) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {

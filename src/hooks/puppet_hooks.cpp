@@ -66,8 +66,6 @@ bool g_thread_logged = false;
 
 void read_pos(const void* obj, Vec3d* p) { memcpy(p, static_cast<const char*>(obj) + kPosOffset, sizeof(*p)); }
 
-// --- Start (callback runs under the shared lock) --------------------------------------------------
-
 struct StartCtx {
     int result = 0;  // 0 ok, 1 fewer than 2 aircraft, 2 player too slow, 3 no player
     void* player = nullptr;
@@ -197,8 +195,6 @@ void start_run() {
     int expected = kStartRequested;
     g_puppet_state.compare_exchange_strong(expected, kRunning);
 }
-
-// --- One frame (callback runs under the shared lock) ----------------------------------------------
 
 struct FrameCtx {
     double t = 0;

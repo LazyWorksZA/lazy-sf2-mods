@@ -13,7 +13,7 @@ namespace lazysf2::hooks {
 
 inline void* vtable_slot(void* com_object, int slot) { return (*static_cast<void***>(com_object))[slot]; }
 
-// Creates and enables a hook; logs the outcome.
+/// <summary>Creates and enables a hook; logs the outcome.</summary>
 inline bool create_and_enable(void* target, void* detour, void** original, const char* what) {
     MH_STATUS s = MH_CreateHook(target, detour, original);
     if (s == MH_OK) s = MH_EnableHook(target);
@@ -21,7 +21,7 @@ inline bool create_and_enable(void* target, void* detour, void** original, const
     return s == MH_OK;
 }
 
-// Fixed-RVA hooks are only safe on the exact July 2013 build we analysed (AGENTS.md).
+/// <summary>Fixed-RVA hooks are only safe on the exact July 2013 build we analysed (AGENTS.md).</summary>
 inline bool is_expected_build(HMODULE m, DWORD timestamp, DWORD image_size, const char* name) {
     if (!m) return false;
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(m);
@@ -34,7 +34,7 @@ inline bool is_expected_build(HMODULE m, DWORD timestamp, DWORD image_size, cons
 
 inline void* at_rva(HMODULE m, DWORD rva) { return reinterpret_cast<BYTE*>(m) + rva; }
 
-// "Module.dll+0x1234" for a code address (e.g. a caller's return address), for diagnostics.
+/// <summary>"Module.dll+0x1234" for a code address (e.g. a caller's return address), for diagnostics.</summary>
 inline void describe_address(const void* addr, char* out, size_t n) {
     HMODULE m = nullptr;
     char name[MAX_PATH] = "?";

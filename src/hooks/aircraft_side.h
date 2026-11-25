@@ -4,8 +4,10 @@
 
 namespace lazysf2::hooks {
 
-// An aircraft's side, from the object's side flag bits (FRIENDLY, ENEMY, NEUTRAL): the object manager hands out
-// one flag bit for each, and they live in the object's flag word.
+/// <summary>
+/// An aircraft's side, from the object's side flag bits (FRIENDLY, ENEMY, NEUTRAL): the object manager hands out
+/// one flag bit for each, and they live in the object's flag word.
+/// </summary>
 enum class AircraftSide : uint8_t {
     Unknown = 0,  // none of the three bits is set, or the masks are not known yet
     Friendly,
@@ -13,7 +15,7 @@ enum class AircraftSide : uint8_t {
     Neutral,
 };
 
-// Classifies a flag word against the three masks. A mask of 0 (not filled in yet) never matches.
+/// <summary>Classifies a flag word against the three masks. A mask of 0 (not filled in yet) never matches.</summary>
 inline AircraftSide classify_side(uint32_t flags, uint32_t friendly, uint32_t enemy, uint32_t neutral) {
     if (friendly && (flags & friendly)) return AircraftSide::Friendly;
     if (enemy && (flags & enemy)) return AircraftSide::Enemy;
@@ -21,10 +23,10 @@ inline AircraftSide classify_side(uint32_t flags, uint32_t friendly, uint32_t en
     return AircraftSide::Unknown;
 }
 
-// The enable rule: the tracking hooks are installed only if a client needs them.
+/// <summary>The enable rule: the tracking hooks are installed only if a client needs them.</summary>
 inline bool tracking_wanted(bool probe_on, bool tacview_recording_on) { return probe_on || tacview_recording_on; }
 
-// What the tracker does when a (new) AircraftObject.dll image appears. No aircraft can exist yet then.
+/// <summary>What the tracker does when a (new) AircraftObject.dll image appears. No aircraft can exist yet then.</summary>
 struct LoadInput {
     bool hooked_patched;  // our hooks are on this very image and it still carries the patch
     bool build_ok;        // the image is the expected build
@@ -47,7 +49,7 @@ inline LoadDecision decide_on_image(const LoadInput& in) {
     return {in.wanted ? LoadKind::Install : LoadKind::Skip, in.had_old};
 }
 
-// What the tracker does when the Options screen is left (menus: no aircraft exist, so changing the hooks is safe).
+/// <summary>What the tracker does when the Options screen is left (menus: no aircraft exist, so changing the hooks is safe).</summary>
 enum class OptionsExitAction : uint8_t { Nothing, Install, Remove };
 inline OptionsExitAction decide_on_options_exit(bool dll_loaded, bool hooked, bool wanted) {
     if (wanted && !hooked && dll_loaded) return OptionsExitAction::Install;

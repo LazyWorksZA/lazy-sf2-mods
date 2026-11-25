@@ -1,25 +1,21 @@
-// Tacview recorder (player-facing): writes every flight's aircraft to Saved Games\ThirdWire\<exe>\Tacview\
-// SF2 <date time>.acmi when Options > Other > Tacview Recording is On.
+// Tacview recorder (player-facing): with Options > Other > Tacview Recording On, writes each flight to
+// Saved Games\ThirdWire\<exe>\Tacview\SF2 <date time>.acmi.
 //
-// Inert while Off: the aircraft tracker only installs its hooks when the setting (or the probe) asks for them, so
-// our sim step callback is never called, no thread exists, no memory is reserved and no file is made. The ring
-// (8192 slots of 168 B, about 1.3 MB) is allocated when the first recording starts.
+// Inert while Off: the tracker installs its hooks only when the setting (or the probe) asks, so no callback,
+// thread, memory or file exists. The ring (8192 slots of 168 B) is allocated at the first recording.
 //
-// One file per flight. A recording starts at the first step of the player's aircraft while the setting is On
-// (checked at that moment: tracking may be on for the probe alone), and stops when the player is lost (the sim's
-// player epoch changes), when the writer fails or reaches the size cap, or at process exit. When the aircraft table empties (the tracker's destructor hook calls tacview_recorder_table_empty(),
-// which only sets a flag), the recording is closed at the next step of any aircraft or at the next menu moment (an
-// Options page left, which also stops a recording whose setting is now Off), whichever comes first; a mission that ends with nothing stepping again is closed there. Before
-// a stop for "player lost" or "table empty" one last empty frame is written, so the file gets its removal lines.
-// The writer thread of a finished recording is only joined once it has finished: a new start waits (retrying at the
-// next player step) while the previous writer is still draining, so the game thread never blocks on it.
+// One file per flight. A recording starts at the first player step while the setting is On, and stops when the
+// player is lost (sim_player_epoch changes), the writer fails or reaches its size cap, the setting goes Off, the
+// aircraft table empties (tacview_recorder_table_empty() sets a flag; closed at the next step or Options menu
+// moment), or the process exits. Before a "player lost" or "table empty" stop one empty frame is written, so
+// the file gets its removal lines. A new start waits (retrying each player step) while the previous writer is
+// still draining, so the game thread never blocks on it.
 //
-// Game thread cost: at most 10 times per second of game time (20 while a weapon is in flight), on a player step, one
-// pass over the live aircraft under probe_with_aircraft's shared lock and, nested in it, over the live weapons under
-// probe_with_weapons': a pose read (SEH-guarded) and a name copy per object into the ring. No allocation, no I/O, no
-// logging. The core limits aircraft to 10 Hz and weapons to 20 Hz each. Everything else (formatting, the rate limit, removals, the file) is the writer
-// thread's (acmi/tacview_writer.h, acmi/tacview_core.h). The shell call that finds Saved Games runs once, on the
-// game thread, at the first start; it is never made from the module watch.
+// Game thread cost: at most 10 times per game second (20 while a weapon is in flight), on a player step, one pass
+// over the live aircraft under probe_with_aircraft's shared lock and, nested in it, the live weapons: a pose read
+// (SEH-guarded) and a name copy per object into the ring. No allocation, I/O or logging. Formatting, the rate
+// limit, removals and the file are the writer thread's (acmi/tacview_writer.h, acmi/tacview_core.h). The shell
+// call that finds Saved Games runs once, on the game thread, at the first start; never from the module watch.
 #include <windows.h>
 
 #include <atomic>
@@ -41,8 +37,7 @@ namespace lazysf2::hooks {
 namespace {
 
 constexpr size_t kOffPos = 0x38, kOffAngles = 0x100;  // aircraft object: double[3] position, float[3] angles
-// Weapon object (MissileObject): the body at +0x20 holds the position (double[3]); the angles (float[3], pitch,
-// heading, roll as for aircraft) are at body + 0xc8. The velocity (body + 0x18, float[3]) is not recorded.
+// Weapon object (MissileObject): position double[3] at +0x20; angles float[3] (pitch, heading, roll) at +0xe8.
 constexpr size_t kOffWeaponPos = 0x20, kOffWeaponAngles = 0xe8;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
@@ -96,9 +91,8 @@ void copy_name(char* dst, const wchar_t* src) {
     dst[k] = '\0';
 }
 
-// Under both tables' shared locks (the weapons' nested in the aircraft's): no allocation, no I/O, no logging.
-// Writes the whole frame: the aircraft first (a weapon's parent must be known to the core before the weapon), then
-// the weapons.
+// Under both tables' shared locks (the weapons' nested in the aircraft's): no allocation, I/O or logging.
+// Writes the whole frame, aircraft first (a weapon's parent must be known to the core before the weapon).
 void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
     auto& c = *static_cast<SnapCtx*>(vctx);
     const LiveAircraft* list = c.air;
@@ -167,7 +161,6 @@ void snapshot_cb(const LiveAircraft* list, size_t n, void* vctx) {
 }
 
 // One last frame with no objects, so the file gets a removal line for every object (the player's -1 included).
-// An empty frame is right in both cases: the table is empty, or it holds a new flight's aircraft.
 void stop_recording(const char* why, bool final_frame = false) {
     if (!g_recording) return;
     g_recording = false;

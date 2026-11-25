@@ -1,17 +1,13 @@
-// Options menu "Display Mode" list (borderless brief, Phase 4). See docs/option-trace.md.
+// Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer (Controls), Tacview
+// Recording (Other). See lazy-sf2-recon: option-trace.md.
 //
-// 1. Menu data. When the exe's file service reads OptionsScreen.ini (from the mod folder, the game
-//    folder or MenuData.cat), we splice two items into [GraphicsOptionsSubMenu] and append their
-//    sections before the game parses the text. Nothing of the game's data is shipped or written.
-//    The control ID of a sub-menu item is its MenuItemNNN number, so we take the next free ones.
-//    The new row sits directly below Aspect Ratio; the rows below it move down one row.
-//    Labels use literal text as the string ID: the text service returns the ID itself when it is
-//    not a known key, so no string-table changes are needed.
-// 2. Screen logic. The Graphics sub-menu class in OptionsScreen.dll has Init/Refresh/Changed/Exit
-//    methods; after the stock work we fill, select, read and save our list like the stock ones.
-// 3. The value is saved through the game's own Options.ini helper, read at start-up by
-//    config::display_mode(), and applied live when it changes (dxgi_apply_display_mode, on the
-//    window thread).
+// 1. Menu data: when the exe's file service reads OptionsScreen.ini, we splice items into the text before the
+//    game parses it. Nothing of the game's data is shipped or written. Labels use literal text as the string
+//    ID, so no string-table changes are needed.
+// 2. Screen logic: the sub-menu classes in OptionsScreen.dll are hooked (Init/Refresh/Changed/Exit) to fill,
+//    select, read and save our lists.
+// 3. Values are saved through the game's own Options.ini helper, read by config::*, and applied live
+//    (dxgi_apply_display_mode on the window thread).
 //
 // All hooks are at fixed RVAs and only installed on the July 2013 builds.
 #include <windows.h>
@@ -33,8 +29,7 @@
 namespace lazysf2::hooks {
 namespace {
 
-// --- Fingerprints and RVAs (docs/option-trace.md, recon-notes.md) -----------------------------
-
+// Build stamps and RVAs. See lazy-sf2-recon: option-trace.md.
 constexpr DWORD kExeTimestamp = 0x51d22110, kExeImageSize = 0x62000;
 constexpr DWORD kFileOpenRva = 0x94e0;   // int  __thiscall Open(svc, const wchar_t* name, int mode)
 constexpr DWORD kFileCloseRva = 0x9590;  // void __thiscall Close(svc, int handle)
@@ -45,13 +40,13 @@ constexpr DWORD kGfxInitRva = 0x58f0;     // void __thiscall Init(this, int*, in
 constexpr DWORD kGfxRefreshRva = 0x5dd0;  // void __thiscall Refresh(this)
 constexpr DWORD kGfxChangedRva = 0x4e20;  // void __thiscall Changed(this)
 constexpr DWORD kGfxExitRva = 0x5da0;     // void __thiscall Exit(this)  (saves, then tears down)
-// Controls sub-menu class (vtable +0x1e9a0), same method shapes as Graphics.
+// Controls sub-menu class (vtable +0x1e9a0).
 constexpr DWORD kCtlInitRva = 0x3500;     // void __thiscall Init(this, int*, int*)   (ret 8)
 constexpr DWORD kCtlExitRva = 0x1f40;     // void __thiscall Exit(this)  (saves [ControlOptions])
 constexpr DWORD kCtlRefreshRva = 0x1fa0;  // void __thiscall Refresh(this)
 constexpr DWORD kCtlChangedRva = 0x2010;  // void __thiscall Changed(this)
-// Other sub-menu class (vtable +0x1e9e8): Init is a short wrapper, the other three are 5-byte JMP stubs to
-// the shared base (which stays unhooked: every page uses it).
+// Other sub-menu class (vtable +0x1e9e8): Init is a short wrapper; the other three are JMP stubs to the shared
+// base, which stays unhooked (every page uses it).
 constexpr DWORD kOthInitRva = 0x5f20;     // void __thiscall Init(this, int*, int*)   (ret 8)
 constexpr DWORD kOthExitRva = 0x5f30;     // void __thiscall Exit(this)
 constexpr DWORD kOthRefreshRva = 0x5ee0;  // void __thiscall Refresh(this)
@@ -70,17 +65,13 @@ constexpr int kItemTypeList = 8;
 constexpr wchar_t kSection[] = L"GraphicsOptions";
 constexpr wchar_t kKey[] = L"DisplayMode";
 
-// Text service (Core\TextUSEnglish.dll, July 2013): both lookups take (file, key) and are
-// __thiscall on the text service object.
+// Text service (Core\TextUSEnglish.dll, July 2013).
 constexpr DWORD kTextTimestamp = 0x51d21fb5, kTextImageSize = 0x1e000;
 constexpr DWORD kGetTextRva = 0x1f50;   // const wchar_t* GetText(file, key)   (returns key if unknown)
 constexpr DWORD kCopyTextRva = 0x1ed0;  // int CopyText(file, key, wchar_t* buf, size_t n) (1 = found)
 constexpr wchar_t kHintKey[] = L"TXT_LAZY_DISPLAYMODE_INFO";
-// Match the stock hints: one "Set/Select ..." sentence, median 55 characters, 80 at most on the
-// Graphics page (longer text runs past the hint line and is cut off).
+// One line, at most 80 characters (the Graphics page cuts off longer hints).
 constexpr wchar_t kHintText[] = L"Select fullscreen, or a borderless window for instant Alt-Tab.";
-
-// --- State ------------------------------------------------------------------------------------
 
 std::atomic<int> g_list_id{0};       // control ID assigned to our list (0 = not injected)
 std::atomic<int> g_mouse_list_id{0}; // Controls page: Mouse Pointer list ID (0 = not injected)
@@ -88,8 +79,6 @@ std::atomic<int> g_tac_list_id{0};   // Other page: Tacview Recording list ID (0
 int g_selected = 0;                  // current selection on the Graphics page (UI thread)
 constexpr int kMaxTracked = 8;
 std::atomic<int> g_tracked[kMaxTracked] = {};  // open handles of OptionsScreen.ini (+1, 0 = free)
-
-// --- 1. Splice the menu data -----------------------------------------------------------------
 
 bool ends_with_options_screen_ini(const wchar_t* name) {
     if (!name) return false;
@@ -135,7 +124,6 @@ std::vector<std::wstring> item_names(const std::wstring& text, size_t body, size
 }
 
 // Moves every listed item whose Position/TextPosition y is at or below kInsertY down by kRowStep.
-// (Lowest stock row: y=345 -> 425, +22 high, inside the 460-high page.)
 void shift_rows(std::wstring& text, const std::vector<std::wstring>& names) {
     int moved = 0;
     for (const std::wstring& name : names) {
@@ -354,8 +342,6 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
     return static_cast<int>(need);
 }
 
-// --- 2. Graphics sub-menu logic --------------------------------------------------------------
-
 HMODULE g_opts = nullptr;
 using Method_t = void(__fastcall*)(void* self, void* edx);
 using Init_t = void(__fastcall*)(void* self, void* edx, int* a, int* b);
@@ -451,9 +437,8 @@ void __fastcall h_Changed(void* self, void* edx) {
     }
 }
 
-// The page's own resolution fields, saved by the stock Save (OptionsScreen.dll +0x5460) as
-// [GraphicsOptions] DisplayWidth/DisplayHeight. The exe reads them only at start-up (+0x3af0 from
-// init_system), so a resolution change, stock or ours, applies after a restart.
+// The page's resolution fields, saved by the stock Save as [GraphicsOptions] DisplayWidth/DisplayHeight. The exe
+// reads them only at start-up, so a resolution change applies after a restart.
 constexpr int kPageDisplayWidth = 0x10;
 constexpr int kPageDisplayHeight = 0x14;
 
@@ -493,9 +478,8 @@ void __fastcall h_Exit(void* self, void* edx) {
     aircraft_track_reevaluate();  // leaving an Options page: no aircraft exist; apply a changed Tacview setting
 }
 
-// --- 2b. Controls sub-menu: Mouse Pointer --------------------------------------------------------
-// Stored as Options.ini [ControlOptions] MouseMode: 1 = match the Windows cursor (also the default
-// when the key is missing), 0 = stock. List index 0 = match, 1 = stock.
+// --- Controls sub-menu: Mouse Pointer. Options.ini [ControlOptions] MouseMode: 1 = match the Windows cursor
+// (default), 0 = stock. List index 0 = match, 1 = stock.
 
 Init_t o_CtlInit = nullptr;
 Method_t o_CtlRefresh = nullptr;
@@ -559,8 +543,8 @@ void __fastcall h_CtlExit(void* self, void* edx) {
     aircraft_track_reevaluate();  // as in h_Exit
 }
 
-// --- 2c. Other sub-menu: Tacview Recording -----------------------------------------------------------
-// Stored as Options.ini [OtherOptions] TacviewRecording: 0 = Off (default), 1 = On. List index = value.
+// --- Other sub-menu: Tacview Recording. Options.ini [OtherOptions] TacviewRecording: 0 = Off (default), 1 = On.
+// List index = value.
 
 Init_t o_OthInit = nullptr;
 Method_t o_OthRefresh = nullptr;
@@ -616,8 +600,6 @@ void __fastcall h_OthExit(void* self, void* edx) {
 }
 
 SRWLOCK g_opts_lock = SRWLOCK_INIT;
-
-// --- Text for our keys ---------------------------------------------------------------------------
 
 using GetText_t = const wchar_t*(__fastcall*)(void*, void*, const wchar_t*, const wchar_t*);
 using CopyText_t = int(__fastcall*)(void*, void*, const wchar_t*, const wchar_t*, wchar_t*, size_t);

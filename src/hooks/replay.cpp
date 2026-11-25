@@ -1,20 +1,14 @@
-// Replay with network-style smoothing (developer tool, part of the object probe; see probe_hooks.cpp).
-// Inert unless the probe is on: replay_on_modules_loaded() is only called from probe_on_modules_loaded(),
-// and the hotkeys live in the probe's hotkey thread, which only exists then.
+// Replay with network-style smoothing (developer tool, part of the probe). Inert unless the probe is on.
 //
-// Ctrl+Shift+T replays the latest recording (recorder.cpp) onto the AI aircraft nearest to the player,
-// as if it arrived over a network: a simulated sender plays the recording at game time, and one sample
-// per feed period (60, 10, 5 or 2 Hz; Ctrl+Shift+Y cycles) counts as "received". The receiver keeps the
-// last 8 received samples and, on every Update of the target, shows the state at render time
-// t_rec - delay: Hermite interpolation between received samples, dead reckoning past the newest, and a
-// correction offset that decays over 200 ms whenever a new sample (or a rate change) makes the shown
-// state jump. The target is flagged REMOTEOBJECT (no AI, no flight model), so we are the only writer.
-// The math is in replay_math.h (pure functions, compile-time self-check). Metrics compare what we wrote
-// with the recording itself at the same render time, once per second of game time.
+// Ctrl+Shift+T replays the latest recording (recorder.cpp) onto the AI aircraft nearest to the player as if
+// it arrived over a network: one sample per feed period (60, 10, 5 or 2 Hz; Ctrl+Shift+Y cycles) counts as
+// received, and the receiver shows the state at render time t - delay (Hermite interpolation, dead reckoning
+// past the newest sample, decaying correction offset). The target is flagged REMOTEOBJECT, so we are the only
+// writer. Math is in replay_math.h. Metrics compare what we wrote with the recording once per game second.
 //
 // Threads: the hotkey thread only sets g_toggle_request and g_rate_idx (atomics). Everything else runs on
-// the game thread, inside the "after Update" callback of sim_hooks.cpp. Nothing is logged under the
-// probe's lock, and nothing is allocated per step.
+// the game thread in the sim "after Update" callback. Nothing is logged under the probe's lock, and nothing
+// is allocated per step.
 #include <windows.h>
 
 #include <atomic>
@@ -157,8 +151,6 @@ struct Run {
 };
 Run g_run;
 
-// --- Liveness ------------------------------------------------------------------------------------
-
 struct LiveCtx {
     void* target;
     unsigned long long target_seq;
@@ -212,8 +204,6 @@ bool still_live() {
     g_run.gen = gen;
     return true;
 }
-
-// --- Start ---------------------------------------------------------------------------------------
 
 struct StartCtx {
     void* player;       // in
@@ -357,8 +347,6 @@ void diag_log(double t_rec, const double actual[3], bool flag_ok) {
     g_run.diag_cleared = false;
     g_run.diag_next_log = std::floor(t_rec) + 1.0;
 }
-
-// --- The receiver --------------------------------------------------------------------------------
 
 void flush_metrics(double t_rec) {
     LOG("replay: t=%.0fs rate %d Hz delay %.0f ms err max %.2f m mean %.2f m ang %.2f deg accel %.1f g (truth %.1f g)",
@@ -509,8 +497,6 @@ void receive_step() {
 
     if (t_render >= rec_time(g_run.count - 1)) stop_run("end of recording", true);
 }
-
-// --- The step callback ---------------------------------------------------------------------------
 
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
     if (g_toggle_request.load(std::memory_order_relaxed) &&

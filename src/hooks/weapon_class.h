@@ -4,13 +4,15 @@
 
 namespace lazysf2::hooks {
 
-// The recorder's classes of weapon (the values are TacviewRec::kMissile, kBomb and kRocket).
+/// <summary>The recorder's classes of weapon (the values are TacviewRec::kMissile, kBomb and kRocket).</summary>
 enum class WeaponClass : uint8_t { Missile = 1, Bomb = 2, Rocket = 3 };
 
-// The weapon data's type field (the object's data pointer at +0x14c, then +0x298) is the ini's WeaponDataType:
-// 0 is a free-fall bomb (the loader reads its retarded, fin and spin stabilised and lift/drag settings), 1 and 7 are
-// guided missiles (7 also allows decoys), 2 is a rocket pod. The game's missile object only sets itself up for 0, 1
-// and 7; any other type that shows up is recorded as a missile.
+/// <summary>
+/// The weapon data's type field (the object's data pointer at +0x14c, then +0x298) is the ini's WeaponDataType:
+/// 0 is a free-fall bomb (the loader reads its retarded, fin and spin stabilised and lift/drag settings), 1 and 7 are
+/// guided missiles (7 also allows decoys), 2 is a rocket pod. The game's missile object only sets itself up for 0, 1
+/// and 7; any other type that shows up is recorded as a missile.
+/// </summary>
 inline WeaponClass classify_weapon_type(int32_t data_type) {
     switch (data_type) {
         case 0:

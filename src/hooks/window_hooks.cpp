@@ -1,9 +1,9 @@
 // Game window hooks.
-// - Borderless: the stock window is already a monitor-sized WS_POPUP (recon-notes.md §4.1), but it
-//   is created WS_EX_TOPMOST and the exe re-asserts HWND_TOPMOST later (exe +0x5790, +0x5830). A
-//   topmost borderless window covers everything after Alt-Tab, so we drop topmost in both places.
-// - All modes: the Alt-Tab fix in h_ShowWindow, the game window handle, and a permanent subclass
-//   used to apply display-mode changes on the window thread.
+// - Borderless: the stock window is already a monitor-sized WS_POPUP, but it is created WS_EX_TOPMOST and the exe
+//   re-asserts HWND_TOPMOST later (exe +0x5790, +0x5830), so both places drop topmost. See
+//   lazy-sf2-recon: recon-notes section 4.1.
+// - All modes: the Alt-Tab fix in h_ShowWindow, the game window handle, and a permanent subclass used to apply
+//   display-mode changes on the window thread.
 #include <windows.h>
 
 #include <MinHook.h>
@@ -137,12 +137,9 @@ BOOL WINAPI h_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy, 
     return o_SetWindowPos(hwnd, after, x, y, cx, cy, flags);
 }
 
-// Alt-Tab fix: on every activation the exe calls ShowWindow(SW_MAXIMIZE) on its monitor-sized
-// popup (+0x5cee). The window is then flagged "restore to maximized", and after the exe minimizes
-// it on focus loss (+0x5819, SW_SHOWMINNOACTIVE), Windows never performs that restore: SW_RESTORE
-// and SC_RESTORE are silent no-ops (no WM_QUERYOPEN), the exe's activation retry loop spins
-// forever, and the player can't get back into the game. SW_SHOWNORMAL gives the same full-monitor
-// window without the maximized flag, so later restores work (recon-notes.md, Alt-Tab section).
+// Alt-Tab fix: the exe calls ShowWindow(SW_MAXIMIZE) on every activation (+0x5cee), after which Windows never
+// performs the restore from its own minimize (+0x5819) and the activation retry loop spins forever.
+// SW_SHOWNORMAL gives the same full-monitor window without the maximized flag. See lazy-sf2-recon: recon-notes (Alt-Tab).
 BOOL WINAPI h_ShowWindow(HWND hwnd, int cmd) {
     // Borderless: on focus loss the exe minimizes itself (+0x5819, SW_SHOWMINNOACTIVE). Keep the
     // window visible behind the Start menu / other windows instead; the game still pauses as stock.

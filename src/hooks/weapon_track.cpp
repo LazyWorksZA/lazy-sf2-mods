@@ -1,26 +1,17 @@
-// Weapon tracker: follows the missiles, bombs and rockets that are in flight (MissileObject.dll), for the Tacview
-// recorder. Same enable rule, install decisions and reload handling as the aircraft tracker (aircraft_track.cpp): the
-// hooks exist only while the probe is on or the Tacview Recording setting is on, the decision is taken when a new
-// MissileObject.dll image appears (module watch, no file read) and when an Options page is left, and a reloaded image
-// gets fresh hooks after the stale MinHook entries at its base are removed.
+// Weapon tracker: follows missiles, bombs and rockets in flight (MissileObject.dll) for the Tacview recorder.
+// Same enable rule, install decisions and reload handling as the aircraft tracker (aircraft_track.cpp).
 //
-// What is hooked (fixed RVAs, July 2013 build only):
-//  - the release call (+0x50e0), a method of the object's second interface (this = object + 0x14). Its argument is
-//    the station the weapon is attached to, or null. The aircraft calls it with 1 when it builds a pylon store and with
-//    0 when it fires. We track a weapon when that call returns with a null argument, so pylon stores (dozens or
-//    hundreds in a big mission) never enter the table and the 256 limit is about weapons that really fly.
-//  - the scalar deleting destructor (+0xa7f0). We remove the entry before the original runs, so the recorder's
-//    sampler (which holds the table's lock shared while it reads) never sees an object that is being freed.
-// MissileObject's constructor (+0x4fb0) is NOT hooked here: missile_spawn.cpp (developer probe only) owns that
-// target, and MinHook allows one hook per address. The two hook sets do not overlap, so they cannot clash.
+// Hooked (fixed RVAs, July 2013 build only):
+//  - the release call (+0x50e0), a method of the object's second interface (this = object + 0x14). A weapon is
+//    tracked when it returns with a null "attached to" argument, so pylon stores never enter the table.
+//  - the scalar deleting destructor (+0xa7f0). The entry is removed before the original runs, so the recorder's
+//    sampler (which holds the table lock shared) never sees an object being freed.
+// MissileObject's constructor (+0x4fb0) is NOT hooked here: missile_spawn.cpp owns it (MinHook allows one hook
+// per address). A weapon created without a release call (the probe's spawn test) is not tracked.
 //
-// A weapon created by CreateObject without a release (the probe's spawn test, or a future network spawn) is not
-// tracked: the game never runs the release call for it.
-//
-// Per weapon, at release: the weapon data's type name and type (object +0x14c), the shooter (object +0x100, a
-// pointer to the aircraft object; matched against the aircraft table by address, so an unknown pointer gives no
-// parent). At sample time (recorder, game thread): flags (+0x0c, side bits), position (+0x20, double[3]) and
-// angles (+0xe8, float[3]) are read by the recorder with SEH guards.
+// Read per weapon at release: data type name and type, and the shooter (matched against the aircraft table by
+// address; an unknown pointer gives no parent). Read by the recorder at sample time with SEH guards: flags,
+// position, angles.
 #include <windows.h>
 
 #include <atomic>
@@ -41,8 +32,7 @@ namespace {
 constexpr DWORD kMissileTimestamp = 0x51d220d1, kMissileImageSize = 0x46000;
 constexpr DWORD kReleaseRva = 0x50e0;  // void __thiscall release(this = object + 0x14, int* attached_to)  (ret 4)
 constexpr DWORD kDtorRva = 0xa7f0;     // void* __thiscall scalar_deleting_dtor(this, byte flags)  (ret 4)
-// Globals filled by the module's init through OBJ+0x2c (flag name -> bit mask). The missile's own side logic only
-// uses FRIENDLY and ENEMY (it copies those two bits from the shooter when it is released); NEUTRAL is not loaded.
+// Flag-mask globals (FRIENDLY, ENEMY; no NEUTRAL in this module).
 constexpr DWORD kFriendlyMaskRva = 0x40588;
 constexpr DWORD kEnemyMaskRva = 0x4058c;
 constexpr size_t kInterfaceDelta = 0x14;  // the release call's this is the object + 0x14
@@ -179,8 +169,6 @@ void clear_table() {
     g_count = 0;
     ReleaseSRWLockExclusive(&g_lock);
 }
-
-// --- Install and re-hook (mirrors aircraft_track.cpp) --------------------------------------------
 
 void remove_weapon_hooks(HMODULE base) {
     for (DWORD rva : {kReleaseRva, kDtorRva}) {

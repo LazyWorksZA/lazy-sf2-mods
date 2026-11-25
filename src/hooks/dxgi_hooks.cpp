@@ -1,17 +1,12 @@
-// Display mode at the DXGI layer.
+// Display mode at the DXGI layer. In Borderless mode the game's exclusive-fullscreen calls (SetFullscreenState,
+// ResizeTarget and friends; see lazy-sf2-recon: recon-notes section 4.3) become no-ops so the swap chain stays windowed
+// inside the monitor-sized popup. In Fullscreen mode everything passes through unchanged.
 //
-// GraphicsEngineDX10 always creates its swap chain windowed, then calls _DoFullScreen
-// (ResizeTarget + SetFullscreenState(TRUE) + ResizeTarget + ResizeBuffers) when its fullscreen flag
-// is set, at start-up and every time the game regains focus (recon-notes.md §4.3). In Borderless
-// mode we turn the exclusive-mode calls into no-ops, so the swap chain stays windowed inside the
-// stock monitor-sized popup. In Fullscreen mode everything passes through unchanged.
+// The mode can change while the game runs: dxgi_apply_display_mode() moves the existing swap chain into or out
+// of exclusive mode and must run on the game window's thread.
 //
-// The mode can change while the game runs (Options menu). dxgi_apply_display_mode() then moves
-// the existing swap chain into or out of exclusive mode the way the game itself does; it must run
-// on the game window's thread.
-//
-// We hook the functions behind the COM vtables of whatever dxgi.dll the game loads, so this
-// works the same with the system DXGI and with DXVK.
+// We hook the functions behind the COM vtables of whatever dxgi.dll the game loads, so this works the same
+// with the system DXGI and with DXVK.
 #include <windows.h>
 
 #include <d3d10.h>
@@ -59,9 +54,9 @@ std::atomic<bool> g_factory_hooked{false};
 std::atomic<bool> g_swapchain_hooked{false};
 SRWLOCK g_install_lock = SRWLOCK_INIT;
 
-// The game's swap chain and factory, and what it last asked for. Not reference-counted (holding
-// a reference would move the game's final Release): the Release hooks below clear these when the
-// game's last reference goes. Every user loads the atomic once into a local and null-checks it.
+// The game's swap chain and factory. Not reference-counted (holding a reference would move the game's final
+// Release): the Release hooks clear these when the last reference goes. Load the atomic once into a local and
+// null-check it.
 std::atomic<IDXGISwapChain*> g_swapchain{nullptr};
 std::atomic<IDXGIFactory*> g_factory{nullptr};
 HWND g_output_window = nullptr;
@@ -76,8 +71,6 @@ void set_alt_enter_handling(bool borderless) {
     HRESULT hr = factory->MakeWindowAssociation(g_output_window, flags);
     LOG("dxgi: MakeWindowAssociation(0x%x) -> 0x%08lx", flags, hr);
 }
-
-// --- IDXGISwapChain ---------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
     char caller[96];
@@ -164,12 +157,9 @@ HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain* self, UINT sync, UINT flags)
     return hr;
 }
 
-// The game renders at its own resolution (DisplayWidth/Height). After its explicit
-// ResizeBuffers(2, W, H), its _DoFullScreen calls ResizeBuffers(0, 0, 0) = "size of the window".
-// In stock exclusive mode ResizeTarget made the window W x H first, so that is the same thing; but
-// when the window covers a monitor of another size (Borderless, or the chosen Screen), the buffers
-// would follow the monitor while the game keeps rendering W x H, pushing the picture off-screen.
-// So 0 x 0 becomes the game's last explicit size, and DXGI scales it to the window / display mode.
+// The game renders at its own resolution, and its _DoFullScreen calls ResizeBuffers(0, 0, 0) ("window size").
+// When the window covers a monitor of another size (Borderless, or the chosen Screen) that would resize the
+// buffers away from the game's resolution, so 0 x 0 becomes the game's last explicit size and DXGI scales it.
 UINT g_game_buffer_w = 0, g_game_buffer_h = 0;
 
 HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
@@ -191,12 +181,10 @@ HRESULT STDMETHODCALLTYPE h_ResizeBuffers(IDXGISwapChain* self, UINT count, UINT
     return hr;
 }
 
-// --- Forgetting released objects ----------------------------------------------------------------
-// IUnknown::Release is vtable slot 2. When the game's final Release returns 0 the object is gone,
-// so we drop our pointer. No locks and no allocation here: Release can run on any thread, even
-// under the loader lock at exit. After the original returns 0 `self` is only compared, never used.
-// The swap chain and the factory may share one Release function (DXVK can), and MinHook allows
-// one hook per address: a shared address gets a single hook, and each detour checks both pointers.
+// IUnknown::Release is vtable slot 2. When the game's final Release returns 0 the object is gone, so we drop
+// our pointer. No locks and no allocation: Release can run on any thread, even under the loader lock at exit.
+// After the original returns 0 `self` is only compared, never used. The swap chain and the factory may share one
+// Release function (DXVK can) and MinHook allows one hook per address, so each detour checks both pointers.
 constexpr int kReleaseSlot = 2;
 using Release_t = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
 Release_t o_SwapRelease = nullptr;
@@ -241,8 +229,6 @@ void hook_swapchain(IDXGISwapChain* sc) {
                           "IDXGISwapChain::Release");
     }
 }
-
-// --- IDXGIFactory -----------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE h_CreateSwapChain(IDXGIFactory* self, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc,
                                             IDXGISwapChain** out) {
@@ -310,8 +296,6 @@ bool dxgi_is_exclusive() {
     return exclusive != FALSE;
 }
 
-// --- Live switching -----------------------------------------------------------------------------
-
 void dxgi_apply_display_mode() {
     const bool borderless = config::borderless();
     input_apply_settings();  // Windows key follows the display mode; mouse follows its setting
@@ -368,8 +352,6 @@ void dxgi_apply_display_mode() {
         o_ResizeTarget(sc, &mode);
     }
 }
-
-// --- dxgi.dll load watch ----------------------------------------------------------------------
 
 void dxgi_on_modules_loaded() {
     if (g_dxgi_hooked.load()) return;

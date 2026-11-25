@@ -1,27 +1,23 @@
 // Simulation step hook and game clock. Part of the aircraft tracker (aircraft_track.cpp), which installs and
-// removes the hook (sim_install / sim_remove) only while a client needs tracking: the probe, or the Tacview
-// Recording setting. Nothing is hooked otherwise.
+// removes the hook (sim_install / sim_remove) only while a client needs tracking.
 //
-// Hooks the aircraft's own Update(dt) (AircraftObject.dll, main vtable slot 9). The game calls it once
-// per simulation step for every aircraft, on its main thread, and not while the game is paused. After
-// the original returns, the hook adds dt to a game clock when the aircraft is the player's, and then
-// calls the registered "after Update" callbacks. Features that need game time (recorder, replay) use
-// the clock and the callbacks instead of wall time, so they pause with the game.
+// Hooks the aircraft's own Update(dt) (AircraftObject.dll, main vtable slot 9), called once per simulation step
+// for every aircraft on the game thread, and not while paused. After the original returns the hook adds dt to
+// the game clock when the aircraft is the player's, then calls the registered "after Update" callbacks. Features
+// that need game time (recorder, replay) use the clock and callbacks, so they pause with the game.
 //
-// Calling convention: __thiscall(void* aircraft, float dt), one 4-byte stack argument, the callee pops
-// it ("ret 4"). The repo's __fastcall(self, edx, float dt) pattern matches that exactly.
+// __thiscall(void* aircraft, float dt) with the callee popping one 4-byte argument matches the repo's
+// __fastcall(self, edx, float dt) pattern.
 //
-// All state below is touched from the game's main thread only (the hook), except the callback slots and
-// the run-active flag, which are atomics.
+// All state is touched from the game thread only, except the callback slots and the run-active flag (atomics).
 //
-// Finding the player: the tracker marks it (LiveAircraft::is_player: the first aircraft constructed since the
-// table was last empty). The hook caches its pointer and construction seq. When the player is destroyed it is
-// unknown (sim_player_known() is false) until the table empties and a new one is constructed; the hook never falls
-// back to another aircraft. A step of the cached player costs one pointer compare, plus one tick read;
-// once per second, and whenever the tracker's destroy generation changed, it re-checks the cache under the
-// probe lock (this catches an address reused by another aircraft). The step of another aircraft takes the lock only
-// when no player is cached and none was lost (or the destroy generation changed), when the destroy generation changed
-// while a player is cached, or when the cached player has not stepped for 250 ms; and then at most once per 50 ms.
+// Finding the player: the tracker marks it (LiveAircraft::is_player). The hook caches its pointer and seq. When
+// the player is destroyed it is unknown (sim_player_known() false) until the table empties and a new one is
+// constructed; the hook never falls back to another aircraft. A step of the cached player costs a pointer
+// compare plus a tick read; it re-checks the cache under the probe lock once per second and whenever the
+// destroy generation changes (this catches an address reused by another aircraft). Steps of other aircraft take
+// the lock only when needed (no player cached, destroy generation changed, or the player has not stepped for
+// 250 ms), at most once per 50 ms.
 #include <windows.h>
 
 #include <atomic>
