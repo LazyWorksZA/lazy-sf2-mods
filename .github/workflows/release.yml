@@ -94,6 +94,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create '${{ github.ref_name }}' --title 'LazySF2 ${{ steps.ver.outputs.version }}' `
+          gh release create '${{ github.ref_name }}' --title 'Lazy SF2 Patch ${{ steps.ver.outputs.version }}' `
             --notes-file notes.md --verify-tag `
             dist/LazySF2-win.msi dist/LazySF2-win-Setup.exe dist/winmm.dll dist/SHA256SUMS.txt

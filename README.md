@@ -1,4 +1,4 @@
-# lazy-sf2-mods
+# Lazy SF2 Patch
 
 These are quality-of-life mods for **Strike Fighters 2**, the merged install with the final July 2013 patch.
 
@@ -32,7 +32,7 @@ The reverse-engineering notes are kept in a separate private repository.
 Every release file is built by GitHub Actions from the tagged commit, never on a developer's machine. To confirm that a download came from this repository's code:
 
 ```powershell
-gh attestation verify LazySF2-win.msi --repo LazyWorksZA/lazy-sf2-mods
+gh attestation verify LazySF2-win.msi --repo LazyWorksZA/lazy-sf2-patch
 ```
 
 The release notes also list each file's SHA-256.
@@ -51,10 +51,10 @@ The release notes also list each file's SHA-256.
 | Path | Contents |
 |---|---|
 | `src/` | The mod: winmm proxy (`proxy/`), hooks (`hooks/`), config and logging |
-| `installer/` | The headless LazySF2 helper (C#, Velopack install/uninstall hooks), installer texts, and `build-installer.ps1` |
+| `installer/` | The headless Lazy SF2 Patch helper (C#, Velopack install/uninstall hooks), installer texts, and `build-installer.ps1` |
 | `scripts/` | Install and uninstall for development, using a file manifest |
 | `tools/` | The winmm proxy generator, the `.cat` unpacker, Ghidra scripts, Process Monitor helpers, and the unattended test driver |
-| `tacview/` | The LazySF2 Tacview add-on (Lua), built into the DLL |
+| `tacview/` | The Lazy SF2 Patch Tacview add-on (Lua), built into the DLL |
 | `docs/` | The briefs (borderless, network, quality of life) and the [host stream format](docs/stream-format.md) |
 | `.github/` | CI (build and tests on every push) and the release workflow |
 

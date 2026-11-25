@@ -66,7 +66,7 @@ void append_header(std::string& out, const char* reference_time, double ref_lon,
     append_escaped(out, title);
     // Tacview's "Auto" terrain layer set picks layers from DataSource; an unknown source selects Real World, where
     // the LazySF2 terrain lives. Without it Tacview keeps the last set used (for example BMS) and hides our terrain.
-    out += ",DataSource=Strike Fighters 2,DataRecorder=LazySF2";
+    out += ",DataSource=Strike Fighters 2,DataRecorder=Lazy SF2 Patch";
     if (theater && *theater) {
         out += ",Theater=";
         append_escaped(out, theater);

@@ -44,7 +44,7 @@ Copy-Item (Join-Path $root 'THIRD_PARTY_NOTICES.md') (Join-Path $publish 'THIRD_
 # 3. Installer texts. The license page shows our license followed by the third-party notices.
 New-Item -ItemType Directory -Force $meta | Out-Null
 $license = Join-Path $meta 'license.md'
-$licenseText = "# LazySF2`n`n" + (Get-Content (Join-Path $root 'LICENSE') -Raw).Trim() + "`n`n---`n`n" +
+$licenseText = "# Lazy SF2 Patch`n`n" + (Get-Content (Join-Path $root 'LICENSE') -Raw).Trim() + "`n`n---`n`n" +
                (Get-Content (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Raw)
 [IO.File]::WriteAllText($license, $licenseText, (New-Object Text.UTF8Encoding $false))
 
@@ -52,7 +52,7 @@ $licenseText = "# LazySF2`n`n" + (Get-Content (Join-Path $root 'LICENSE') -Raw).
 if ($Clean -and (Test-Path $releases)) { Remove-Item $releases -Recurse -Force }
 if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { $env:Path += ";$env:USERPROFILE\.dotnet\tools" }
 vpk pack --packId LazySF2 --packVersion $Version --packDir $publish --mainExe LazySF2.exe `
-    --packTitle 'LazySF2' --packAuthors 'Lazy Works' --runtime win-x64 --framework net10.0-x64-runtime --shortcuts '' `
+    --packTitle 'Lazy SF2 Patch' --packAuthors 'Lazy Works' --runtime win-x64 --framework net10.0-x64-runtime --shortcuts '' `
     --msi --instLocation PerMachine `
     --instWelcome (Join-Path $PSScriptRoot 'welcome.txt') --instLicense $license `
     --instConclusion (Join-Path $PSScriptRoot 'conclusion.txt') `

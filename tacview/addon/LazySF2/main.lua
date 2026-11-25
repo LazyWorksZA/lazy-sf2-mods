@@ -1,6 +1,6 @@
 -- LazySF2 terrain switch
 -- Shows the ground of the recorded Strike Fighters 2 theatre and hides the other LazySF2 grounds, and all of them for other recordings.
--- Part of the lazy-sf2-mods winmm.dll mod. The mod writes this file; do not edit it here.
+-- Part of the Lazy SF2 Patch (winmm.dll). The mod writes this file; do not edit it here.
 
 local Tacview = require("Tacview195")
 
@@ -8,9 +8,9 @@ local Prefix = "LazySF2."
 local SettingName = "TheatreSwitch"
 
 local currentAddOn = Tacview.AddOns.Current
-currentAddOn.SetTitle("LazySF2")
+currentAddOn.SetTitle("Lazy SF2 Patch")
 currentAddOn.SetVersion("1.0.0")
-currentAddOn.SetAuthor("lazy-sf2-mods")
+currentAddOn.SetAuthor("Lazy Works")
 currentAddOn.SetNotes("Shows the terrain of the Strike Fighters 2 theatre of the recording, with its airfield patches, and hides the other LazySF2 terrains.")
 
 -- false: not applied yet; nil: no LazySF2 theatre; text: the theatre applied.
@@ -95,5 +95,5 @@ local function OnUpdate(dt, absoluteTime)
 	Tacview.Log.Info("terrain " .. (theatre or "none (not a LazySF2 recording)"))
 end
 
-Tacview.UI.Menus.AddOption(nil, "LazySF2 theatre switch", IsSwitchEnabled(), OnToggle)
+Tacview.UI.Menus.AddOption(nil, "Lazy SF2 Patch: theatre switch", IsSwitchEnabled(), OnToggle)
 Tacview.Events.Update.RegisterListener(OnUpdate)
