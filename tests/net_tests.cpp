@@ -1,6 +1,7 @@
 // Console tests for the network protocol and an ENet loopback. Not shipped, no game needed.
 #include <enet/enet.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <chrono>
@@ -15,9 +16,13 @@
 
 #include "acmi/acmi_convert.h"
 #include "acmi/acmi_format.h"
+#include "acmi/airfields.h"
+#include "tacview_addon_lua.h"
+#include "acmi/ini.h"
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
+#include "acmi/terrain_texture.h"
 #include "hooks/options_other_splice.h"
 #include "hooks/weapon_class.h"
 #include "hooks/world_walk_logic.h"
@@ -1541,7 +1546,11 @@ void terrain_tests() {
     const uint8_t want[12] = {0x04, 0x01, 5, 0, 0xcd, 0xab, 1, 0, 2, 0, 3, 0};
     expect(raw.size() == 12 && std::memcmp(raw.data(), want, 12) == 0, "terrain raw: north row first, little-endian");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2000, 2000, 500.0, -25.0, -4.5);
+    expect(terrain_file_stem("LazySF2.T") == "LazySF2-T" && terrain_file_stem("LazySF2.A_b-1") == "LazySF2-A_b-1" &&
+               terrain_file_stem("").empty(),
+           "terrain file stem: dots become dashes");
+
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
     const auto m = make_mapping(-4.5);
     const std::string east = num(-25.0 + 1999 * 500.0 * m.lon_scale, 9);
     const std::string north = num(-4.5 + 1999 * 500.0 * m.lat_scale, 9);
@@ -1550,7 +1559,7 @@ void terrain_tests() {
         return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat +
                    "</Latitude>");
     };
-    expect(has("<CustomHeightmap Layer=\"Real World\" ID=\"LazySF2.T\">") && has("<File>LazySF2.T.raw</File>") &&
+    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2.T\">") && has("<File>LazySF2-T.raw</File>") &&
                has("<Width>2000</Width>") && has("<Height>2000</Height>") && has("<BigEndian>0</BigEndian>") &&
                has("<AltitudeFactor>1</AltitudeFactor>") && has("<Projection>Quad</Projection>"),
            "terrain xml: structure");
@@ -1567,14 +1576,22 @@ void terrain_tests() {
     std::string h1, h2;
     TacviewCore{cfg}.header(h1, "2026-11-24T20:15:00Z");
     expect(h1 == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,Theater=LazySF2.DESERT\n",
-           "header: Theater= after the title");
+                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=LazySF2,Theater=LazySF2.DESERT,LazySF2Theater=LazySF2.DESERT\n",
+           "header: Theater= and LazySF2Theater= after the title");
     TacviewCore{TacviewCoreConfig{}}.header(h2, "2026-11-24T20:15:00Z");
-    expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2\n") != std::string::npos,
+    expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2,DataSource=") != std::string::npos,
            "header: no Theater= by default");
 }
 
+void addon_embed_test() {
+    const std::string lua = kTacviewAddonLua;
+    expect(!lua.empty() && lua.rfind("-- LazySF2 terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
+    expect(lua.find("LazySF2Theater") != std::string::npos && lua.find("SetTitle(\"LazySF2\")") != std::string::npos,
+           "tacview add-on: embedded text reads LazySF2Theater and sets the add-on title");
+}
+
 void tacview_tests() {
+    addon_embed_test();
     using namespace lazysf2::acmi;
     using lazysf2::hooks::AircraftSide;
     std::printf("tacview recorder\n");
@@ -1585,7 +1602,7 @@ void tacview_tests() {
         std::string out;
         core.header(out, "2026-11-24T20:15:00Z");
         expect(out == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                      "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2\n",
+                      "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2,DataSource=Strike Fighters 2,DataRecorder=LazySF2\n",
                "tacview: header");
         core.add(make_rec(1, true, AircraftSide::Friendly, "F-4E,lead", 100.0, 1000, 2000, 3000, 0.1f, -1.5707964f, 0.2f));
         core.add(make_rec(2, false, AircraftSide::Enemy, "MiG-21", 100.0, 5, 6, 7, 0, 0, 0));
@@ -2282,6 +2299,607 @@ void other_page_splice_tests() {
     expect(lazysf2::hooks::splice_other_page(bad) == 0 && bad == L"[OptionsScreen]\r\n", "unexpected file left unchanged");
 }
 
+namespace {
+using lazysf2::acmi::Image;
+
+// Synthetic images: a 2x2 picture with red top-left, green top-right, blue bottom-left, white bottom-right.
+std::vector<uint8_t> make_tga(int type, int bpp, bool top_origin, bool rle) {
+    const uint8_t px[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};  // as viewed, row by row
+    std::vector<uint8_t> f = {0, 0, static_cast<uint8_t>(type), 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0,
+                              static_cast<uint8_t>(bpp), static_cast<uint8_t>(top_origin ? 0x20 : 0)};
+    const int order_top[4] = {0, 1, 2, 3}, order_bottom[4] = {2, 3, 0, 1};
+    const int* order = top_origin ? order_top : order_bottom;
+    auto put = [&](int i) {
+        f.push_back(px[i][2]);
+        f.push_back(px[i][1]);
+        f.push_back(px[i][0]);
+        if (bpp == 32) f.push_back(200);
+    };
+    if (!rle) {
+        for (int i = 0; i < 4; ++i) put(order[i]);
+    } else {
+        f.push_back(0x80 | 0);  // a run of 1
+        put(order[0]);
+        f.push_back(0x02);  // 3 raw pixels
+        for (int i = 1; i < 4; ++i) put(order[i]);
+    }
+    return f;
+}
+
+std::vector<uint8_t> make_bmp(int bpp, bool bottom_up, int w = 3, int h = 2) {
+    // Pixel (x, y) as viewed has the value 10*y + x in the red channel (or index), green 7, blue 9.
+    const int stride = ((w * bpp + 31) / 32) * 4;
+    const int pal = bpp == 8 ? 256 * 4 : 0;
+    const uint32_t off = 14 + 40 + pal;
+    std::vector<uint8_t> f(off + static_cast<size_t>(stride) * h, 0xee);  // padding bytes are junk
+    std::fill(f.begin(), f.begin() + off, uint8_t{0});
+    auto w16 = [&](size_t p, uint16_t v) { f[p] = v & 0xff; f[p + 1] = v >> 8; };
+    auto w32 = [&](size_t p, uint32_t v) { for (int i = 0; i < 4; ++i) f[p + i] = static_cast<uint8_t>(v >> (8 * i)); };
+    f[0] = 'B';
+    f[1] = 'M';
+    w32(2, static_cast<uint32_t>(f.size()));
+    w32(10, off);
+    w32(14, 40);
+    w32(18, static_cast<uint32_t>(w));
+    w32(22, static_cast<uint32_t>(bottom_up ? h : -h));
+    w16(26, 1);
+    w16(28, static_cast<uint16_t>(bpp));
+    for (int i = 0; i < pal / 4; ++i) {  // palette entry i: B=9, G=7, R=i
+        f[54 + i * 4] = 9;
+        f[54 + i * 4 + 1] = 7;
+        f[54 + i * 4 + 2] = static_cast<uint8_t>(i);
+        f[54 + i * 4 + 3] = 0;
+    }
+    for (int y = 0; y < h; ++y) {
+        const int row = bottom_up ? h - 1 - y : y;
+        uint8_t* p = &f[off + static_cast<size_t>(stride) * row];
+        for (int x = 0; x < w; ++x) {
+            const uint8_t v = static_cast<uint8_t>(10 * y + x);
+            if (bpp == 8) {
+                p[x] = v;
+            } else {
+                const int b = bpp / 8;
+                p[x * b] = 9;
+                p[x * b + 1] = 7;
+                p[x * b + 2] = v;
+                if (b == 4) p[x * b + 3] = 0;
+            }
+        }
+    }
+    return f;
+}
+
+Image solid(int w, int h, uint8_t r, uint8_t g, uint8_t b) {
+    Image im;
+    im.w = w;
+    im.h = h;
+    for (int i = 0; i < w * h; ++i) {
+        im.px.push_back(r);
+        im.px.push_back(g);
+        im.px.push_back(b);
+        im.px.push_back(255);
+    }
+    return im;
+}
+
+std::vector<uint8_t> utf16le(const std::wstring& s, bool bom = true) {
+    std::vector<uint8_t> v;
+    if (bom) {
+        v.push_back(0xff);
+        v.push_back(0xfe);
+    }
+    for (wchar_t c : s) {
+        v.push_back(static_cast<uint8_t>(c & 0xff));
+        v.push_back(static_cast<uint8_t>(c >> 8));
+    }
+    return v;
+}
+
+std::vector<uint8_t> ansi(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
+
+void texture_tests() {
+    using namespace lazysf2::acmi;
+    std::printf("tacview texture\n");
+    const auto pix = [](const Image& im, int x, int y, int c) { return im.px[(static_cast<size_t>(y) * im.w + x) * 4 + c]; };
+
+    // TGA: both origins, uncompressed and RLE, 24 and 32 bpp. The picture as viewed is always the same.
+    bool tga_ok = true;
+    for (int bpp : {24, 32}) {
+        for (bool top : {false, true}) {
+            for (bool rle : {false, true}) {
+                const auto f = make_tga(rle ? 10 : 2, bpp, top, rle);
+                Image im;
+                tga_ok &= decode_image(f.data(), f.size(), im) && im.w == 2 && im.h == 2 && pix(im, 0, 0, 0) == 255 &&
+                          pix(im, 0, 0, 1) == 0 && pix(im, 1, 0, 1) == 255 && pix(im, 0, 1, 2) == 255 &&
+                          pix(im, 1, 1, 0) == 255 && pix(im, 1, 1, 2) == 255 && pix(im, 0, 0, 3) == (bpp == 32 ? 200 : 255);
+            }
+        }
+    }
+    expect(tga_ok, "tga: uncompressed and RLE, 24 and 32 bpp, both origins decode top-down");
+    {
+        auto f = make_tga(2, 24, false, false);
+        f[17] |= 0x10;  // right to left
+        Image im;
+        expect(decode_image(f.data(), f.size(), im) && pix(im, 1, 0, 0) == 255 && pix(im, 0, 0, 1) == 255,
+               "tga: right-to-left origin bit");
+    }
+    {
+        auto f = make_tga(2, 24, false, false);
+        Image im;
+        f.pop_back();
+        expect(!decode_image(f.data(), f.size(), im), "tga: truncated pixel data rejected");
+        auto r = make_tga(10, 24, true, true);
+        r.resize(r.size() - 3);
+        expect(!decode_image(r.data(), r.size(), im), "tga: truncated RLE rejected");
+        auto big = make_tga(2, 24, true, false);
+        big[12] = 0x01;
+        big[13] = 0x20;  // width 8193
+        expect(!decode_image(big.data(), big.size(), im), "tga: too wide rejected");
+        auto z = make_tga(2, 24, true, false);
+        z[12] = z[13] = 0;
+        expect(!decode_image(z.data(), z.size(), im), "tga: zero width rejected");
+        auto t = make_tga(3, 24, true, false);
+        expect(!decode_image(t.data(), t.size(), im), "tga: unsupported type rejected");
+        auto rl = make_tga(10, 24, true, true);
+        rl[18] = 0x7f;  // a raw packet of 128 pixels in a 4-pixel image
+        expect(!decode_image(rl.data(), rl.size(), im), "tga: RLE packet past the image rejected");
+        expect(!decode_image(nullptr, 0, im) && !decode_image(f.data(), 5, im), "tga: empty and tiny input rejected");
+    }
+
+    // BMP: palettised, 24 and 32 bpp, both orientations; width 3 gives row padding.
+    bool bmp_ok = true;
+    for (int bpp : {8, 24, 32}) {
+        for (bool up : {true, false}) {
+            const auto f = make_bmp(bpp, up);
+            Image im;
+            bmp_ok &= decode_image(f.data(), f.size(), im) && im.w == 3 && im.h == 2 && pix(im, 0, 0, 0) == 0 &&
+                      pix(im, 2, 0, 0) == 2 && pix(im, 0, 1, 0) == 10 && pix(im, 2, 1, 0) == 12 && pix(im, 1, 1, 1) == 7 &&
+                      pix(im, 1, 1, 2) == 9 && pix(im, 1, 1, 3) == 255;
+        }
+    }
+    expect(bmp_ok, "bmp: 8, 24 and 32 bpp, bottom-up and top-down, row padding");
+    {
+        auto f = make_bmp(24, true);
+        Image im;
+        f.resize(f.size() - 1);
+        expect(!decode_image(f.data(), f.size(), im), "bmp: truncated pixel data rejected");
+        auto c = make_bmp(24, true);
+        c[30] = 1;  // RLE-compressed
+        expect(!decode_image(c.data(), c.size(), im), "bmp: compressed rejected");
+        auto b4 = make_bmp(24, true);
+        b4[28] = 4;
+        expect(!decode_image(b4.data(), b4.size(), im), "bmp: 4 bpp rejected");
+        auto o = make_bmp(24, true);
+        o[10] = o[11] = o[12] = 0xff;  // pixel offset far outside
+        expect(!decode_image(o.data(), o.size(), im), "bmp: pixel offset outside the file rejected");
+        auto hu = make_bmp(24, true);
+        hu[20] = 0xff;
+        hu[21] = 0x7f;  // width ~2 billion
+        expect(!decode_image(hu.data(), hu.size(), im), "bmp: huge width rejected");
+    }
+
+    // rotate_cw on [a b; c d]
+    {
+        Image im = solid(2, 2, 0, 0, 0);
+        const uint8_t v[4] = {1, 2, 3, 4};  // a b c d
+        for (int i = 0; i < 4; ++i) im.px[i * 4] = v[i];
+        Image r1, r2, r3, r0, r4;
+        rotate_cw(im, 1, r1);
+        rotate_cw(im, 2, r2);
+        rotate_cw(im, 3, r3);
+        rotate_cw(im, 0, r0);
+        rotate_cw(im, 4, r4);
+        auto at = [&](const Image& i, int x, int y) { return pix(i, x, y, 0); };
+        expect(at(r1, 0, 0) == 3 && at(r1, 1, 0) == 1 && at(r1, 0, 1) == 4 && at(r1, 1, 1) == 2, "rotate_cw: one turn is [c a; d b]");
+        expect(at(r2, 0, 0) == 4 && at(r2, 1, 1) == 1, "rotate_cw: two turns");
+        expect(at(r3, 0, 0) == 2 && at(r3, 1, 0) == 4 && at(r3, 0, 1) == 1 && at(r3, 1, 1) == 3, "rotate_cw: three turns is [b d; a c]");
+        expect(at(r0, 0, 0) == 1 && at(r4, 1, 1) == 4, "rotate_cw: zero and four turns leave it");
+        Image wide = solid(3, 1, 0, 0, 0), rw;
+        rotate_cw(wide, 1, rw);
+        expect(rw.w == 1 && rw.h == 3, "rotate_cw: a non-square image swaps its sides");
+    }
+
+    // box_downsample
+    {
+        Image im = solid(4, 4, 0, 0, 0), out;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) im.px[(y * 4 + x) * 4] = static_cast<uint8_t>(x < 2 ? (y < 2 ? 10 : 20) : (y < 2 ? 30 : 40));
+        box_downsample(im, 2, out);
+        expect(out.w == 2 && out.h == 2 && pix(out, 0, 0, 0) == 10 && pix(out, 1, 0, 0) == 30 && pix(out, 0, 1, 0) == 20 &&
+                   pix(out, 1, 1, 0) == 40,
+               "box_downsample: 4x4 to 2x2");
+        box_downsample(im, 1, out);
+        expect(pix(out, 0, 0, 0) == 25, "box_downsample: the mean");
+        box_downsample(im, 8, out);
+        expect(out.w == 8 && pix(out, 0, 0, 0) == 10 && pix(out, 7, 7, 0) == 40, "box_downsample: a small source repeats pixels");
+        Image none;
+        box_downsample(none, 4, out);
+        expect(out.w == 0 && out.px.empty(), "box_downsample: empty in, empty out");
+    }
+
+    // compose: 2x2 tiles of 2x2 pixels. Row 0 of the game's order is south.
+    {
+        std::vector<Image> tiles(3);
+        tiles[1] = solid(2, 2, 100, 0, 0);
+        tiles[2] = solid(2, 2, 0, 0, 0);
+        tiles[2].px[0] = 200;  // top-left pixel red-ish: tile "2" has a marker at its top-left
+        const std::vector<RGB> colours = {{9, 9, 9}, {1, 1, 1}, {2, 2, 2}, {3, 3, 3}};
+        const uint16_t index[4] = {1, 2, 0, 3};  // (0,0)=1 (1,0)=2 (0,1)=0 (1,1)=3 in (tx, ty)
+        const uint8_t rot[4] = {0, 1, 0, 0};     // tile (1,0) turned once
+        RGBImage out;
+        compose(2, 2, 2, index, rot, tiles, colours, out);
+        const auto g = [&](int x, int y, int c) { return out.px[(static_cast<size_t>(y) * out.w + x) * 3 + c]; };
+        expect(out.w == 4 && out.h == 4, "compose: size");
+        expect(g(0, 2, 0) == 100 && g(1, 3, 0) == 100, "compose: tile (0,0) is at the bottom-left");
+        expect(g(0, 0, 0) == 9 && g(3, 0, 0) == 3, "compose: tile (0,1) top-left and (1,1) top-right; no image uses its colour");
+        // tile (1,0): bottom-right block (columns 2-3, rows 2-3), turned once clockwise: the top-left marker moves to the top-right.
+        expect(g(3, 2, 0) == 200 && g(2, 2, 0) == 0 && g(2, 3, 0) == 0 && g(3, 3, 0) == 0, "compose: rotation r turns the tile clockwise");
+        const uint16_t bad[4] = {50, 50, 50, 50};
+        compose(2, 2, 2, bad, rot, tiles, colours, out);
+        expect(g(0, 0, 0) == 128, "compose: an index out of range gives grey");
+        compose(0, 2, 2, index, rot, tiles, colours, out);
+        expect(out.px.empty(), "compose: no tiles, no image");
+    }
+
+    // paint_runway: 100 m pixels, a 100 x 100 image covering 10 km square.
+    {
+        RGBImage img;
+        img.w = img.h = 100;
+        img.px.assign(100 * 100 * 3, 200);
+        // Centre (5000, 5000): row 50, column 50. Heading 90: along east-west.
+        paint_runway(img, 100.0, 5000, 5000, kPi / 2, 1000, 90);
+        const auto painted = [&](int x, int y) { return img.px[(static_cast<size_t>(y) * 100 + x) * 3] == 64; };
+        int count = 0;
+        for (size_t i = 0; i < img.px.size(); i += 3) count += img.px[i] == 64;
+        expect(painted(50, 49) && painted(50, 50), "paint_runway: the centre is painted");
+        expect(painted(46, 49) && painted(53, 49) && !painted(40, 49) && !painted(60, 49), "paint_runway: heading 90 is a horizontal stripe");
+        expect(!painted(50, 45) && !painted(50, 55), "paint_runway: not vertical");
+        expect(count >= 20 && count <= 24, "paint_runway: a 90 m runway is painted 2 pixels wide at 100 m per pixel");
+        RGBImage v;
+        v.w = v.h = 100;
+        v.px.assign(100 * 100 * 3, 200);
+        paint_runway(v, 100.0, 5000, 5000, 0.0, 1000, 90);  // heading 0: north-south
+        expect(v.px[(46 * 100 + 49) * 3] == 64 && v.px[(54 * 100 + 49) * 3] == 64 && v.px[(50 * 100 + 40) * 3] == 200,
+               "paint_runway: heading 0 is a vertical stripe");
+        RGBImage n;
+        n.w = n.h = 100;
+        n.px.assign(100 * 100 * 3, 200);
+        paint_runway(n, 100.0, 5000, 9500, 0.0, 2000, 90);  // runs off the north edge: row 0 is north
+        expect(n.px[(0 * 100 + 49) * 3] == 64 && n.px[(99 * 100 + 49) * 3] == 200, "paint_runway: row 0 is north, clipped at the edge");
+        paint_runway(n, 100.0, 1e9, 1e9, 0.0, 10, 10);
+        paint_runway(n, 100.0, std::nan(""), 0, 0.0, 10, 10);
+        expect(true, "paint_runway: far away and non-finite input do nothing");
+    }
+
+    // ini
+    {
+        const auto u16 = utf16le(L"[TargetArea001]\r\nName=Ramstein Airbase\r\nPosition=1000.5,2000\r\n; comment\r\n[Other]\r\nKey = Value  ; note\r\n");
+        const Ini a = parse_ini(u16.data(), u16.size());
+        const auto s1 = a.get("targetarea001", "NAME"), s2 = a.get("OTHER", "key");
+        expect(s1 && *s1 == "Ramstein Airbase" && s2 && *s2 == "Value", "ini: UTF-16LE with a BOM, case-insensitive, trimmed, comments cut");
+        const auto an = ansi(std::string("[A]\r\nName=Zweibr") + "ü" + "cken\r\n");
+        const Ini b = parse_ini(an.data(), an.size());
+        const auto s3 = b.get("a", "name");
+        expect(s3 && *s3 == "Zweibr\xc3\xbc" "cken", "ini: ANSI text read as Latin-1 into UTF-8");
+        const auto eu = utf16le(std::wstring(L"[A]\r\nName=Zweibr") + wchar_t(0xfc) + L"cken\r\n");
+        const Ini c = parse_ini(eu.data(), eu.size());
+        expect(c.get("A", "Name") && *c.get("A", "Name") == "Zweibr\xc3\xbc" "cken", "ini: UTF-16 non-ASCII becomes UTF-8");
+        expect(a.get("nope", "x") == nullptr && a.get("other", "x") == nullptr, "ini: missing section or key is null");
+        double v[2];
+        expect(parse_numbers("-1066.00, 2392.5", v, 2) && v[0] == -1066.0 && v[1] == 2392.5 && !parse_numbers("1", v, 2) &&
+                   !parse_numbers("x,2", v, 2),
+               "ini: number lists");
+    }
+
+    // airfields
+    {
+        const auto targets = utf16le(
+            L"[TargetArea001]\r\nName=Ramstein Airbase\r\nPosition=100000,200000\r\nAirfieldDataFile=af_one.ini\r\n"
+            L"Target[001].Type=Runway1\r\nTarget[001].Offset=0,0\r\nTarget[001].Heading=90\r\n"
+            L"Target[002].Type=Tower1\r\nTarget[002].Heading=45\r\n\r\n"
+            L"[TargetArea002]\r\nName=USS Somebody\r\nPosition=5,5\r\nAirfieldDataFile=carrier.ini\r\nCarrierStation=1\r\n\r\n"
+            L"[TargetArea003]\r\nName=Far Away\r\nPosition=5,5\r\nAirfieldDataFile=off.ini\r\nOffMapAirBase=TRUE\r\n\r\n"
+            L"[TargetArea004]\r\nName=Town\r\nPosition=5,5\r\n\r\n"
+            L"[TargetArea005]\r\nName=Missing File\r\nPosition=300,400\r\nAirfieldDataFile=gone.ini\r\n"
+            L"Target[001].Type=Runway2\r\nTarget[001].Heading=30\r\n");
+        const Ini t = parse_ini(targets.data(), targets.size());
+        int loads = 0;
+        const AirfieldLoader loader = [&](const std::string& name) -> std::vector<uint8_t> {
+            ++loads;
+            if (name != "af_one.ini") return {};
+            return ansi("[Runway001]\r\nHeading=0\r\nOffset=0,1000\r\nLength=2500\r\nWidth=90\r\n"
+                        "[Runway002]\r\nHeading=-30\r\nOffset=100,0\r\nLength=1200\r\nWidth=60\r\n");
+        };
+        const auto af = airfields_from(t, loader);
+        expect(af.size() == 2 && af[0].name == "Ramstein Airbase" && af[1].name == "Missing File", "airfields: carriers, off-map bases and non-airfields skipped");
+        expect(loads == 2, "airfields: only airfields' inis are loaded");
+        const double deg = kPi / 180;
+        const Airfield& a = af[0];
+        expect(a.x == 100000 && a.y == 200000 && a.runways.size() == 2, "airfields: position and two runways");
+        // A = 90 degrees, offset (0, 1000): centre = position + (1000, 0).
+        expect(std::fabs(a.runways[0].x - 101000) < 1e-6 && std::fabs(a.runways[0].y - 200000) < 1e-6, "airfields: the runway offset is turned by the area heading");
+        expect(std::fabs(a.runways[0].heading - 90 * deg) < 1e-9 && a.runways[0].length == 2500 && a.runways[0].width == 90, "airfields: heading is area plus ini, size as given");
+        // Offset (100, 0) at A = 90: (x cosA + y sinA, -x sinA + y cosA) = (0, -100).
+        expect(std::fabs(a.runways[1].x - 100000) < 1e-6 && std::fabs(a.runways[1].y - 199900) < 1e-6 &&
+                   std::fabs(a.runways[1].heading - 60 * deg) < 1e-9,
+               "airfields: the second runway");
+        expect(std::fabs(a.heading - 90 * deg) < 1e-9, "airfields: the airfield heading is the first runway's");
+        expect(af[1].runways.empty() && std::fabs(af[1].heading - 30 * deg) < 1e-9 && af[1].x == 300, "airfields: an unreadable ini keeps the airfield, with the area heading");
+        // height_at: a 3x2 grid, south row first, 500 m apart.
+        const uint16_t grid[6] = {0, 100, 200, 1000, 1100, 1200};
+        expect(height_at(grid, 3, 2, 500.0, 0, 0) == 0 && height_at(grid, 3, 2, 500.0, 1000, 500) == 1200, "height_at: the corner samples");
+        expect(std::fabs(height_at(grid, 3, 2, 500.0, 250, 250) - 550) < 1e-9 && std::fabs(height_at(grid, 3, 2, 500.0, 750, 0) - 150) < 1e-9,
+               "height_at: interpolates between the four nearest samples");
+        expect(height_at(grid, 3, 2, 500.0, -1, 0) == 0 && height_at(grid, 3, 2, 500.0, 1001, 0) == 0 && height_at(nullptr, 3, 2, 500.0, 0, 0) == 0,
+               "height_at: outside the grid, or no grid, is 0");
+        const Ini none = parse_ini(nullptr, 0);
+        expect(airfields_from(none, loader).empty(), "airfields: an empty ini has none");
+    }
+
+    // texture xml
+    {
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
+        const auto m = make_mapping(-4.5);
+        const std::string east = num(-25.0 + 1000000.0 * m.lon_scale, 9), north = num(-4.5 + 1000000.0 * m.lat_scale, 9);
+        auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
+        auto corner = [&](const char* tag, const std::string& lon, const std::string& lat) {
+            return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat + "</Latitude>");
+        };
+        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2.T\">") &&
+                   has("<File>LazySF2-T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
+               "texture xml: structure");
+        expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&
+                   corner("TopLeft", "-25", north),
+               "texture xml: corners are the outer edges of the extent");
+    }
+
+    // runway patches
+    {
+        auto rwy = [](double x, double y, double heading, double len, double wid) {
+            Runway r;
+            r.x = x; r.y = y; r.heading = heading; r.length = len; r.width = wid;
+            return r;
+        };
+        auto rgb = [](const RGBImage& im, int col, int row) { return &im.px[(static_cast<size_t>(row) * im.w + col) * 3]; };
+        auto is = [](const uint8_t* p, int r, int g, int b) { return p[0] == r && p[1] == g && p[2] == b; };
+
+        // patch_tiles: snapped outward to whole tiles, clamped to the field
+        Airfield a;
+        a.x = 5100; a.y = 5100;
+        a.runways.push_back(rwy(5100, 5100, 0.0, 100, 20));
+        PatchTiles pt;
+        expect(patch_tiles(a, 2000.0, 10, 10, pt), "patch_tiles: an airfield with a runway has a patch");
+        expect(pt.tx0 == 2 && pt.ty0 == 2 && pt.nx == 2 && pt.ny == 2 && pt.x0 == 4000 && pt.y0 == 4000 && pt.w_m == 4000 && pt.h_m == 4000,
+               "patch_tiles: the 2000 m square 4100..6100 snaps outward to tiles 2 and 3");
+        a.runways[0] = rwy(5100, 5100, 0.0, 6000, 20);
+        expect(patch_tiles(a, 2000.0, 10, 10, pt) && pt.tx0 == 0 && pt.nx == 5 && pt.ny == 5,
+               "patch_tiles: a long runway widens the patch (about 6400 m, then outward)");
+        Airfield corner;
+        corner.x = 500; corner.y = 19500;
+        corner.runways.push_back(rwy(500, 19500, 0.0, 100, 20));
+        expect(patch_tiles(corner, 2000.0, 10, 10, pt) && pt.tx0 == 0 && pt.nx == 1 && pt.ty0 == 9 && pt.ny == 1 && pt.x0 == 0 && pt.y0 == 18000,
+               "patch_tiles: clamped to the tile field");
+        Airfield outside;
+        outside.x = -9000; outside.y = 5000;
+        outside.runways.push_back(rwy(-9000, 5000, 0.0, 100, 20));
+        expect(!patch_tiles(outside, 2000.0, 10, 10, pt), "patch_tiles: nothing inside the field, no patch");
+        Airfield none;
+        none.x = 1; none.y = 1;
+        expect(!patch_tiles(none, 2000.0, 10, 10, pt), "patch_tiles: no runways, no patch");
+
+        // compose_patch: the 2 x 2 tiles (1,1)..(2,2) of a 3 x 3 field at native size, one of them turned
+        std::vector<Image> tiles(3);
+        tiles[1] = solid(4, 4, 100, 0, 0);
+        tiles[2] = solid(4, 4, 0, 100, 0);
+        tiles[2].px[0] = 200;  // a marker at the top-left of texture 2
+        const std::vector<RGB> colours = {{9, 9, 9}, {1, 1, 1}, {2, 2, 2}};
+        const uint16_t field[9] = {0, 0, 0, 0, 1, 2, 0, 2, 0};  // row 0 south
+        const uint8_t frot[9] = {0, 0, 0, 0, 0, 1, 0, 0, 0};
+        PatchTiles reg;
+        reg.tx0 = 1; reg.ty0 = 1; reg.nx = 2; reg.ny = 2;
+        RGBImage patch;
+        compose_patch(reg, 3, 4, field, frot, tiles, colours, patch);
+        expect(patch.w == 8 && patch.h == 8, "compose_patch: native size, 2 x 2 tiles of 4 px");
+        expect(rgb(patch, 0, 4)[0] == 100 && rgb(patch, 3, 7)[0] == 100, "compose_patch: tile (1,1) is bottom-left");
+        expect(rgb(patch, 0, 0)[0] == 200 && rgb(patch, 1, 0)[0] == 0 && rgb(patch, 1, 0)[1] == 100, "compose_patch: tile (1,2) is top-left, unturned");
+        expect(rgb(patch, 4, 0)[0] == 9 && rgb(patch, 7, 3)[0] == 9, "compose_patch: tile (2,2) has no image: its colour");
+        // tile (2,1) is bottom-right, turned once clockwise: the marker moves from the top-left to the top-right
+        expect(rgb(patch, 7, 4)[0] == 200 && rgb(patch, 4, 4)[0] == 0 && rgb(patch, 4, 7)[0] == 0, "compose_patch: a rotated tile");
+        expect(rgb(patch, 4, 4)[1] == 100, "compose_patch: the rotated tile keeps its colour");
+
+        // draw_runways: an opaque patch, 8 m per pixel (a 2000 m square), heading 0, 3000 m x 90 m runway
+        Airfield r0;
+        r0.x = 1000; r0.y = 1000;
+        r0.runways.push_back(rwy(1000, 1000, 0.0, 1200, 90));
+        RGBImage im;
+        im.w = im.h = 250;
+        im.px.assign(static_cast<size_t>(250) * 250 * 3, 77);
+        draw_runways(im, r0, 0, 0, 2000, 2000);
+        expect(is(rgb(im, 0, 0), 77, 77, 77) && is(rgb(im, 249, 249), 77, 77, 77), "draw_runways: the ground is left alone");
+        const int cx = 125, cy = 125;
+        auto asphalt = [&](int c, int r) { return is(rgb(im, c, r), 58, 58, 60); };
+        expect(asphalt(cx - 3, cy - 60) && asphalt(cx + 3, cy - 60) && is(rgb(im, cx - 12, cy), 77, 77, 77) && is(rgb(im, cx + 12, cy), 77, 77, 77),
+               "draw_runways: a vertical stripe about 90 m wide");
+        expect(is(rgb(im, cx, cy - 80), 77, 77, 77) && is(rgb(im, cx, cy + 80), 77, 77, 77) && asphalt(cx + 2, cy - 70),
+               "draw_runways: the stripe is as long as the runway");
+        int edges = 0;
+        for (int c = 0; c < im.w; ++c)
+            if (is(rgb(im, c, cy - 40), 200, 200, 200)) ++edges;
+        expect(edges == 2, "draw_runways: one edge-line pixel along each long side");
+        int centre = 0, dashed = 0;
+        for (int r = cy - 70; r < cy + 70; ++r) {
+            bool any = false;
+            for (int c = cx - 1; c <= cx; ++c) any = any || is(rgb(im, c, r), 230, 230, 230);
+            (any ? centre : dashed)++;
+        }
+        expect(centre > 40 && dashed > 20, "draw_runways: the centre line is dashed");
+        Airfield e;
+        e.x = 1000; e.y = 1000;
+        e.runways.push_back(rwy(1000, 1000, kPi / 2, 1000, 20));
+        RGBImage ew;
+        ew.w = ew.h = 250;
+        ew.px.assign(static_cast<size_t>(250) * 250 * 3, 77);
+        draw_runways(ew, e, 0, 0, 2000, 2000);
+        expect(is(rgb(ew, cx - 40, cy - 1), 58, 58, 60) || is(rgb(ew, cx - 40, cy), 58, 58, 60),
+               "draw_runways: heading 90 is a horizontal stripe (a narrow runway is drawn at least 3 px)");
+        expect(is(rgb(ew, cx, cy - 10), 77, 77, 77) && is(rgb(ew, cx, cy + 10), 77, 77, 77) && is(rgb(ew, cx - 70, cy), 77, 77, 77),
+               "draw_runways: heading 90 stays narrow and short");
+        RGBImage nonsquare;
+        nonsquare.w = 200; nonsquare.h = 100;
+        nonsquare.px.assign(static_cast<size_t>(200) * 100 * 3, 77);
+        Airfield ns;
+        ns.runways.push_back(rwy(2000, 500, 0.0, 600, 60));
+        draw_runways(nonsquare, ns, 0, 0, 4000, 1000);  // 20 m per px across, 10 m per px up
+        expect(is(rgb(nonsquare, 100, 50), 58, 58, 60) && is(rgb(nonsquare, 100, 10), 77, 77, 77) && is(rgb(nonsquare, 100, 90), 77, 77, 77),
+               "draw_runways: a rectangular patch has its own scale on each axis");
+
+        // the size cap and the tile pixel budget
+        int fw = 0, fh = 0;
+        fit_patch_size(1024, 1024, fw, fh);
+        expect(fw == 1024 && fh == 1024, "fit_patch_size: a patch that fits is unchanged");
+        fit_patch_size(4096, 3072, fw, fh);
+        expect(fw == 2048 && fh == 1536, "fit_patch_size: shrunk to 2048 on the long side, same shape");
+        RGBImage big, shrunk;
+        big.w = 4; big.h = 2;
+        big.px = {10, 10, 10, 30, 30, 30, 50, 50, 50, 70, 70, 70, 10, 10, 10, 30, 30, 30, 50, 50, 50, 70, 70, 70};
+        resize_box_rgb(big, 2, 1, shrunk);
+        expect(shrunk.w == 2 && shrunk.h == 1 && shrunk.px[0] == 20 && shrunk.px[3] == 60, "resize_box_rgb: box mean");
+        resize_box_rgb(big, 8, 8, shrunk);
+        expect(shrunk.px.empty(), "resize_box_rgb: never enlarges");
+        expect(patch_tile_px(1024, 4, kPatchCacheBytes) == 512, "patch_tile_px: capped at 512");
+        expect(patch_tile_px(256, 4, kPatchCacheBytes) == 256, "patch_tile_px: a smaller native size is kept");
+        // 64 MB holds 64 tiles of 512 px as RGBA (1 MiB each), 256 of 256 px
+        expect(patch_tile_px(1024, 64, kPatchCacheBytes) == 512 && patch_tile_px(1024, 65, kPatchCacheBytes) == 256,
+               "patch_tile_px: halved when the set exceeds the budget");
+        expect(patch_tile_px(1024, 257, kPatchCacheBytes) == 128 && patch_tile_px(1024, 100000, kPatchCacheBytes) == 64,
+               "patch_tile_px: halved again, never below 64");
+        expect(patch_tile_px(32, 100000, kPatchCacheBytes) == 32, "patch_tile_px: a tiny native size is not enlarged");
+        expect(patch_tile_px(512, 64, kPatchCacheBytes) * patch_tile_px(512, 64, kPatchCacheBytes) * 4u * 64u <= kPatchCacheBytes,
+               "patch_tile_px: the bytes held fit the budget");
+        expect(patch_compose_px(512, 3, 2) == 512 && patch_compose_px(512, 10, 10) == 204 && patch_compose_px(512, 5000, 1) == 1,
+               "patch_compose_px: a big patch is composed from smaller tiles, never below 1 px");
+        {
+            std::vector<Image> cache(4);
+            cache[0] = solid(512, 512, 10, 20, 30);
+            cache[1] = solid(256, 256, 40, 50, 60);
+            cache[3] = solid(512, 512, 70, 80, 90);  // [2] stays empty: a texture that did not decode
+            const int sz = unify_tile_size(cache, 512);
+            expect(sz == 256 && cache[0].w == 256 && cache[0].h == 256 && cache[3].w == 256 && cache[2].w == 0 && cache[1].w == 256,
+                   "unify_tile_size: all tiles brought to the smallest size, an empty one stays empty");
+            expect(cache[0].px[0] == 10 && cache[3].px[1] == 80 && cache[1].px[2] == 60, "unify_tile_size: the colours are kept");
+            std::vector<Image> empty_cache(2);
+            expect(unify_tile_size(empty_cache, 128) == 128, "unify_tile_size: nothing decoded gives the cap");
+            std::vector<Image> capped(1);
+            capped[0] = solid(64, 64, 1, 2, 3);
+            expect(unify_tile_size(capped, 32) == 32 && capped[0].w == 32, "unify_tile_size: a tile above the cap is brought down to it");
+        }
+
+        const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2-T-AF001.jpg", 1000, 2000, 3000, 3000},
+                                               {"LazySF2.T.AF002", "LazySF2-T-AF002.jpg", 5000, 6000, 2000, 2000}};
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
+        const auto m = make_mapping(-4.5);
+        auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
+        const size_t base = xml.find("Id=\"LazySF2.T\""), p1 = xml.find("Id=\"LazySF2.T.AF001\""), p2 = xml.find("Id=\"LazySF2.T.AF002\"");
+        expect(base != std::string::npos && base < p1 && p1 < p2, "texture xml: base entry first, then the patches in order");
+        expect(has("<File>LazySF2-T-AF001.jpg</File>") && has("<File>LazySF2-T-AF002.jpg</File>"), "texture xml: patch files");
+        const std::string bl_lon = num(-25.0 + 1000 * m.lon_scale, 9), bl_lat = num(-4.5 + 2000 * m.lat_scale, 9);
+        const std::string tr_lon = num(-25.0 + 4000 * m.lon_scale, 9), tr_lat = num(-4.5 + 5000 * m.lat_scale, 9);
+        const std::string first = xml.substr(p1, xml.find("</CustomTexture>", p1) - p1);
+        const size_t i_bl = first.find("<BottomLeft>"), i_br = first.find("<BottomRight>"), i_tr = first.find("<TopRight>"), i_tl = first.find("<TopLeft>");
+        expect(i_bl < i_br && i_br < i_tr && i_tr < i_tl, "texture xml: patch corner order");
+        expect(first.find("<Longitude>" + bl_lon + "</Longitude>\n\t\t\t\t<Latitude>" + bl_lat + "</Latitude>", i_bl) < i_br &&
+                   first.find("<Longitude>" + tr_lon + "</Longitude>\n\t\t\t\t<Latitude>" + tr_lat + "</Latitude>", i_tr) < i_tl,
+               "texture xml: patch corners from the world square");
+        expect(has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"), "texture xml: patch structure");
+    }
+}
+}  // namespace
+
+void aerodrome_core_tests() {
+    using namespace lazysf2::acmi;
+    using lazysf2::hooks::AircraftSide;
+    std::printf("tacview aerodromes\n");
+    TacviewCoreConfig cfg;
+    cfg.ref_lat = -4.5;
+    cfg.ref_lon = -25.0;
+    TacviewCore core{cfg};
+    std::string out;
+    auto aero = [](uint64_t seq, const char* name, double x, double y, double z, float heading) {
+        TacviewRec r = make_rec(seq, false, AircraftSide::Friendly, name, 5.0, x, y, z, 0.0f, heading, 0.0f);
+        r.obj_class = TacviewRec::kAerodrome;
+        return r;
+    };
+    core.add(aero(1, "Ramstein, Airbase", 100000, 200000, 250, static_cast<float>(kPi / 2)));
+    core.add(aero(2, "Sembach", 1000, 2000, 0, 0.0f));
+    core.end_frame(5.0, out, TacviewRec::kSeriesAerodrome);
+    auto ls = lines_of(out);
+    const auto m = make_mapping(-4.5);
+    expect(ls.size() == 3 && ls[0] == "#0.000", "aerodromes: one frame with both");
+    expect(ls[1].rfind("6000001,T=" + num(100000 * m.lon_scale, 9) + "|" + num(200000 * m.lat_scale, 9) + "|250|", 0) == 0,
+           "aerodromes: id 0x6000000+seq, position from the world metres, altitude");
+    expect(ls[1].find("|250|0|0|90|100000|200000|90,Name=") != std::string::npos,
+           "aerodromes: the heading is written");
+    expect(ls[1].find(",Name=Ramstein" + std::string(1, 92) + ", Airbase,Type=Ground+Static+Aerodrome") != std::string::npos &&
+               ls[1].find("Coalition") == std::string::npos && ls[1].find("Color") == std::string::npos,
+           "aerodromes: name escaped, type Ground+Static+Aerodrome, no coalition");
+    expect(ls[2].rfind("6000002,T=", 0) == 0, "aerodromes: the second id");
+
+    // Written once: frames of other series neither repeat nor remove them.
+    std::string o2;
+    core.add(make_rec(1, true, AircraftSide::Friendly, "P", 6.0, 0, 0, 100, 0, 0, 0));
+    core.end_frame(6.0, o2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+    expect(o2.find("6000001") == std::string::npos && o2.find("-6000001") == std::string::npos, "aerodromes: other frames leave them alone");
+    std::string o3;
+    core.end_frame(7.0, o3, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile | TacviewRec::kSeriesBullet);
+    expect(o3.find("6000001") == std::string::npos, "aerodromes: a ground-only frame leaves them alone too");
+    // The last frame lists every series: it removes them.
+    std::string o4;
+    core.end_frame(8.0, o4);
+    expect(o4.find("-6000001\n") != std::string::npos && o4.find("-6000002\n") != std::string::npos,
+           "aerodromes: the final frame removes them");
+    expect(core.live_objects() == 0, "aerodromes: none left");
+    static_assert(TacviewRec::series_of(TacviewRec::kAerodrome) == TacviewRec::kSeriesAerodrome, "series");
+    static_assert(TacviewRec::kSeriesAerodrome != TacviewRec::kSeriesBullet && (TacviewRec::kSeriesAerodrome & 0x3f) == 0, "series bit is its own");
+}
+
+void placement_tests() {
+    using namespace lazysf2::acmi;
+    const Placement none = place_theatre(false, 10.817, 51.111, 1000000.0, 1000000.0);
+    expect(none.ref_lon == -25.0 && none.ref_lat == -4.5 && none.scale_lat == -4.5, "placement: no geo is the default frame");
+
+    const Placement p = place_theatre(true, 10.817, 51.111, 1000000.0, 1000000.0);
+    const Mapping m = make_mapping(51.111);
+    expect(p.scale_lat == 51.111, "placement: scale latitude is the ini latitude");
+    expect(std::fabs(m.lon_scale - 1.0 / 69895.4) < 3e-9,  // 111320 * cos(51.111 deg) = 69895.4 m
+           "placement: lon_scale uses cos(51.111)");
+    expect(std::fabs(p.ref_lon + 500000.0 * m.lon_scale - 10.817) < 1e-6 &&
+               std::fabs(p.ref_lat + 500000.0 * m.lat_scale - 51.111) < 1e-6,
+           "placement: the square's centre maps back to the geo point");
+    expect(p.ref_lon < 10.817 && p.ref_lat < 51.111, "placement: the corner is south-west of the centre");
+
+    expect(geo_is_set(10.817, 51.111), "geo: a real point is set");
+    expect(!geo_is_set(-96.8, 30.2) && !geo_is_set(-96.8 + 1e-7, 30.2 - 1e-7), "geo: the game default pair is not set");
+    expect(!geo_is_set(static_cast<double>(-96.8f), static_cast<double>(30.2f)), "geo: the float-widened game default is not set");
+    expect(geo_is_set(-96.8 + 1e-3, 30.2), "geo: near the default but not float precision is set");
+    const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    expect(!geo_is_set(nan, 10) && !geo_is_set(10, nan) && !geo_is_set(inf, 10) && !geo_is_set(10, -inf),
+           "geo: NaN and infinity are not set");
+    expect(!geo_is_set(181, 10) && !geo_is_set(10, 86) && !geo_is_set(10, -86), "geo: out of range is not set");
+    const Placement edge = place_theatre(true, 179.9, 85.0, 1000000.0, 1000000.0);
+    expect(edge.ref_lon >= -180.0 && edge.ref_lon <= 180.0 && edge.ref_lat >= -89.0, "placement: the corner is clamped");
+
+    const std::string txml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
+                                         p.scale_lat);
+    expect(txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * m.lon_scale, 9) + "</Longitude>") != std::string::npos &&
+               txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * make_mapping(p.ref_lat).lon_scale, 9) + "</Longitude>") ==
+                   std::string::npos,
+           "placement: texture_xml uses the scale latitude, not the corner latitude");
+
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
+    expect(xml.find(num(p.ref_lon + 1000.0 * m.lon_scale, 9)) != std::string::npos,
+           "placement: terrain_xml uses the scale latitude");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -2304,6 +2922,9 @@ int main() {
     tracker_logic_tests();
     tacview_tests();
     terrain_tests();
+    texture_tests();
+    aerodrome_core_tests();
+    placement_tests();
     other_page_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

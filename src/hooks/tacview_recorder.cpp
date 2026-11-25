@@ -2,6 +2,7 @@
 // Inert while Off (no hooks, thread, memory or file). Game thread only copies into a ring: no allocation, I/O or logging.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "acmi/tacview_core.h"
 #include "acmi/tacview_writer.h"
@@ -30,6 +32,7 @@ constexpr size_t kOffWeaponPos = 0x20, kOffWeaponAngles = 0xe8;
 constexpr size_t kOffActive = 0x04;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
+constexpr size_t kMaxAerodromes = 512;
 
 static_assert(static_cast<uint8_t>(WeaponClass::Missile) == acmi::TacviewRec::kMissile &&
                   static_cast<uint8_t>(WeaponClass::Bomb) == acmi::TacviewRec::kBomb &&
@@ -51,6 +54,8 @@ size_t g_dead_n = 0;
 uint64_t g_wdead_sent[256];  // the same for weapons (a repeat is harmless: the core ignores it)
 size_t g_wdead_n = 0;
 bool g_walk_on = false;                          // the walker started with this recording
+std::string g_theater;       // the theatre id of this recording; empty when the terrain was not captured
+bool g_aero_pending = false;  // this recording's aerodromes are not written yet
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -235,19 +240,33 @@ StartResult start_recording(uint32_t epoch) {
     std::snprintf(iso, sizeof(iso), "%04u-%02u-%02uT%02u:%02u:%02uZ", utc.wYear, utc.wMonth, utc.wDay, utc.wHour,
                   utc.wMinute, utc.wSecond);
     acmi::TacviewCoreConfig cfg;  // reference 0/0, aircraft 10 Hz, weapons 20 Hz
-    // Every recording shares one frame (the SW corner at this point, over open ocean); a capture failure only means no Theater=.
-    cfg.ref_lon = kTerrainRefLon;
-    cfg.ref_lat = kTerrainRefLat;
     TerrainInfo terrain;
+    g_theater.clear();
     if (terrain_capture(terrain)) {
         cfg.theater = terrain.id;
+        g_theater = terrain.id;
         if (!terrain.full_name.empty()) cfg.title += " - " + terrain.full_name;
     }
+    // The theatre's ini point is the centre of its square; without one the square sits over open ocean. A capture
+    // failure only means no Theater=. The export gets the same placement.
+    const acmi::Placement place =
+        acmi::place_theatre(terrain.has_geo, terrain.geo_lon, terrain.geo_lat, (terrain.w - 1) * terrain.spacing,
+                            (terrain.h - 1) * terrain.spacing);
+    if (terrain.has_geo)
+        LOG("tacview: theatre placed at its ini point (%.5f, %.5f); south-west corner (%.5f, %.5f)", terrain.geo_lon,
+            terrain.geo_lat, place.ref_lon, place.ref_lat);
+    else
+        LOG("tacview: theatre has no usable ini position; using the open-ocean frame (%.1f, %.1f)", place.ref_lon,
+            place.ref_lat);
+    cfg.ref_lon = place.ref_lon;
+    cfg.ref_lat = place.ref_lat;
+    cfg.scale_lat = place.scale_lat;
     if (!g_writer->open(g_dir, local, iso, cfg, writer_log, display_path)) {
         LOG("tacview: not recording: could not start the writer");
         return StartResult::Failed;
     }
-    terrain_export_start(terrain);
+    terrain_export_start(terrain, place);
+    g_aero_pending = !g_theater.empty();
     g_table_empty.store(false, std::memory_order_relaxed);
     g_recording = true;
     g_epoch = epoch;
@@ -261,6 +280,44 @@ StartResult start_recording(uint32_t epoch) {
     g_walk_on = g_walk_buf && world_walk_start();
     if (!g_walk_buf) LOG("tacview: out of memory for the world walker; only aircraft and weapons are recorded");
     return StartResult::Started;
+}
+
+// The theatre's airfields, as one frame of their own, once the export thread has read them. Game thread.
+void write_aerodromes(double t) {
+    std::shared_ptr<const std::vector<AerodromeMark>> shared;
+    switch (terrain_aerodromes(g_theater, shared)) {
+        case AerodromeList::Pending: return;
+        case AerodromeList::None: g_aero_pending = false; return;
+        case AerodromeList::Ready: break;
+    }
+    const std::vector<AerodromeMark>& list = *shared;
+    const size_t n = std::min(list.size(), kMaxAerodromes);
+    if (!g_writer->begin_frame(n)) return;  // the ring was full (counted): tried again at the next step
+    for (size_t i = 0; i < n; ++i) {
+        acmi::TacviewRec& r = g_writer->slot(i);
+        r.kind = acmi::TacviewRec::kObject;
+        r.obj_class = acmi::TacviewRec::kAerodrome;
+        r.side = 0;
+        r.is_player = 0;
+        r.parent_class = acmi::TacviewRec::kAircraft;
+        r.destroyed = 0;
+        r.seq = i + 1;
+        r.parent_seq = 0;
+        r.t = t;
+        r.pos[0] = list[i].x;
+        r.pos[1] = list[i].y;
+        r.pos[2] = list[i].z;
+        r.ang[0] = 0;
+        r.ang[1] = static_cast<float>(list[i].heading);
+        r.ang[2] = 0;
+        size_t k = 0;
+        for (; k < acmi::kRecNameChars && k < list[i].name.size(); ++k) r.name[k] = list[i].name[k];
+        r.name[k] = '\0';
+        r.type[0] = '\0';
+    }
+    g_writer->commit_frame(n, t, acmi::TacviewRec::kSeriesAerodrome);
+    g_aero_pending = false;
+    LOG("tacview: %zu aerodromes recorded", n);
 }
 
 // The world walker's objects, as a frame of their own at the same game time. Game thread.
@@ -304,6 +361,7 @@ void on_step(void* /*aircraft*/, float /*dt*/, bool is_player) {
         }
     }
     const double t = sim_game_time();
+    if (g_aero_pending) write_aerodromes(t);
     const double interval = g_weapons_live ? kSnapshotIntervalWeapons : kSnapshotInterval;
     if (!(t >= g_last_snapshot && t - g_last_snapshot < interval - 1e-9)) {
         g_last_snapshot = t;

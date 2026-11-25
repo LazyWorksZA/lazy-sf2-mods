@@ -18,6 +18,13 @@ std::string terrain_id(std::wstring_view base_name) {
     return id;
 }
 
+std::string terrain_file_stem(const std::string& id) {
+    std::string s = id;
+    for (char& c : s)
+        if (c == '.') c = '-';
+    return s;
+}
+
 void terrain_raw_north_first(const uint16_t* south_first, int w, int h, std::vector<uint8_t>& out) {
     out.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
     size_t o = 0;
@@ -42,12 +49,12 @@ void corner(std::string& x, const char* tag, double lon, double lat) {
 }  // namespace
 
 std::string terrain_xml(const std::string& id, const std::string& raw_file, int w, int h, double spacing, double ref_lon,
-                        double ref_lat) {
-    const Mapping m = make_mapping(ref_lat);
+                        double ref_lat, double scale_lat) {
+    const Mapping m = make_mapping(scale_lat);
     const double west = ref_lon, east = ref_lon + (w - 1) * spacing * m.lon_scale;
     const double south = ref_lat, north = ref_lat + (h - 1) * spacing * m.lat_scale;
     std::string x = "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?>\n<Resources>\n\t<CustomHeightmapList>\n";
-    x += "\t\t<CustomHeightmap Layer=\"Real World\" ID=\"" + id + "\">\n";
+    x += "\t\t<CustomHeightmap Layer=\"Real World\" Id=\"" + id + "\">\n";
     x += "\t\t\t<File>" + raw_file + "</File>\n\t\t\t<Visible>true</Visible>\n\t\t\t<BigEndian>0</BigEndian>\n";
     x += "\t\t\t<Width>" + std::to_string(w) + "</Width>\n\t\t\t<Height>" + std::to_string(h) + "</Height>\n";
     x += "\t\t\t<AltitudeFactor>1</AltitudeFactor>\n\t\t\t<AltitudeOffset>0</AltitudeOffset>\n";
