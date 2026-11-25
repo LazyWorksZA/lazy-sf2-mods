@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Player features
+
+- **Pilot Twist** (Options › Controls, default Off): in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to about 33 degrees further, as if you twist in the seat, and leans you a few centimetres toward that side.
+
 ### Developer tools (off unless enabled)
 
 - **Probe hotkeys for the Phase 4 recon.** Ctrl+Shift+J moves the player's own jet 1 km ahead and turns it 90 degrees right; Ctrl+Shift+K moves it 1 km ahead only. Either then logs the jet's state once a second for 5 s. The probe also logs once per flight whether the player's aircraft steps before or after the other aircraft in a frame.

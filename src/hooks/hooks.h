@@ -50,6 +50,12 @@ void input_on_modules_loaded();
 void input_apply_settings();
 
 /// <summary>
+/// Pilot Twist (pilot_twist.cpp): hooks ViewManager.dll's inside view once it is loaded. The hooks stay in place and
+/// act only while config::pilot_twist() is on. Module watch callback.
+/// </summary>
+void pilot_twist_on_modules_loaded();
+
+/// <summary>
 /// Hooks the exe's file service so the Options menu can offer Display Mode (Options.ini [GraphicsOptions]
 /// DisplayMode). Call from DllMain.
 /// </summary>

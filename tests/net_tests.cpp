@@ -30,6 +30,7 @@
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
+#include "hooks/pilot_twist_math.h"
 #include "bot_client.h"
 #include <miniz.h>
 
@@ -3254,6 +3255,87 @@ void placement_tests() {
            "placement: terrain_xml uses the scale latitude");
 }
 
+void pilot_twist_tests() {
+    namespace pt = LazyWorks::SF2Patch::hooks::pilot_twist;
+    std::printf("pilot twist\n");
+    auto close_to = [](double a, double b, double eps) { return std::fabs(a - b) <= eps; };
+    const float d = pt::kDeg;
+
+    // Curve: zero up to the start angle, full from the full angle, smooth and signed in between.
+    expect(pt::target_weight(0.0f) == 0.0f && pt::target_weight(59.0f * d) == 0.0f, "twist: no effect below 60 degrees");
+    expect(pt::target_weight(150.0f * d) == 1.0f && pt::target_weight(170.0f * d) == 1.0f, "twist: full from 150 degrees");
+    expect(close_to(pt::target_weight(105.0f * d), 0.5, 1e-5), "twist: half way at the midpoint (smoothstep)");
+    expect(pt::target_weight(-120.0f * d) == -pt::target_weight(120.0f * d) && pt::target_weight(-120.0f * d) < 0,
+           "twist: signed like the yaw");
+    float prev = 0.0f;
+    bool monotonic = true;
+    for (int deg = 0; deg <= 180; ++deg) {
+        const float w = pt::target_weight(deg * d);
+        if (w < prev - 1e-6f || w < 0.0f || w > 1.0f) monotonic = false;
+        prev = w;
+    }
+    expect(monotonic, "twist: the curve rises monotonically within [0, 1]");
+    expect(close_to(pt::target_weight(2.0f * pt::kPi - 120.0f * d), pt::target_weight(-120.0f * d), 1e-5),
+           "twist: yaw is wrapped first");
+    expect(pt::target_weight(std::numeric_limits<float>::quiet_NaN()) == 0.0f, "twist: NaN yaw has no effect");
+
+    // Filter: a first-order lag of kFilterSeconds, never past the target, snaps after a long gap.
+    expect(pt::filter_step(0.0f, 1.0f, 0.0f) == 0.0f, "filter: no time, no change");
+    expect(close_to(pt::filter_step(0.0f, 1.0f, pt::kFilterSeconds), 1.0 - std::exp(-1.0), 1e-5),
+           "filter: 63% after one time constant");
+    expect(pt::filter_step(0.2f, 1.0f, 1.0f) == 1.0f, "filter: a long gap jumps to the target");
+    float w = 0.0f;
+    bool bounded = true;
+    for (int i = 0; i < 60; ++i) {  // one second at 60 fps
+        w = pt::filter_step(w, 1.0f, 1.0f / 60.0f);
+        if (w > 1.0f) bounded = false;
+    }
+    expect(bounded && w > 0.99f, "filter: converges in a second without overshoot");
+    expect(pt::filter_step(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.01f) == 0.5f, "filter: recovers from NaN");
+
+    // Twist: adds up to kMaxTwist, within the widened seat limit and +-180 degrees.
+    const float lo = -152.0f * d, hi = 152.0f * d;
+    expect(pt::twisted_yaw(30.0f * d, 0.0f, lo, hi, true) == 30.0f * d, "twist: none at zero weight");
+    expect(close_to(pt::twisted_yaw(100.0f * d, 0.5f, lo, hi, true), 100.0f * d + 0.5f * pt::kMaxTwist, 1e-5),
+           "twist: weight times the maximum");
+    expect(close_to(pt::twisted_yaw(152.0f * d, 1.0f, lo, hi, true), 180.0f * d, 1e-5), "twist: capped at 180 degrees");
+    expect(close_to(pt::twisted_yaw(-152.0f * d, -1.0f, lo, hi, true), -180.0f * d, 1e-5), "twist: capped at -180 degrees");
+    expect(close_to(pt::twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 153.0f * d, 1e-4),
+           "twist: within the seat limit plus the twist");
+    expect(close_to(pt::twisted_yaw(130.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 133.0f * d, 1e-4),
+           "twist: stops at the narrow seat limit plus the twist");
+    expect(close_to(pt::twisted_yaw(140.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 140.0f * d, 1e-4),
+           "twist: never pulls back a yaw already past the widened limit");
+    expect(close_to(pt::twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 173.0f * d, 1e-4), "twist: unlimited view, +-180 only");
+    // No compounding: the mapping is a pure function of the head yaw, so feeding the same head yaw again gives the same
+    // view yaw (the hook restores the head yaw after the camera is built).
+    const float once = pt::twisted_yaw(120.0f * d, pt::target_weight(120.0f * d), lo, hi, true);
+    expect(once == pt::twisted_yaw(120.0f * d, pt::target_weight(120.0f * d), lo, hi, true), "twist: same input, same output");
+
+    // Lean: toward the look side and up, in body axes, capped together with the tracker's own movement.
+    const pt::Vec3 full = pt::lean_body(1.0f, 0.0f);
+    expect(close_to(full.x, pt::kLeanSide, 1e-6) && full.y == 0.0 && close_to(full.z, pt::kLeanUp, 1e-6), "lean: full right and up");
+    const pt::Vec3 left = pt::lean_body(-0.5f, 0.0f);
+    expect(close_to(left.x, -0.5 * pt::kLeanSide, 1e-6) && close_to(left.z, 0.5 * pt::kLeanUp, 1e-6), "lean: left is negative x, still up");
+    const pt::Vec3 none = pt::lean_body(0.0f, 0.0f);
+    expect(none.x == 0.0 && none.z == 0.0, "lean: none at zero weight");
+    const pt::Vec3 tracked = pt::lean_body(1.0f, 0.05f);
+    expect(close_to(tracked.x, pt::kCapSide - 0.05, 1e-6) && close_to(tracked.z, pt::kCapUp - 0.05, 1e-6), "lean: the sum with the tracker is capped");
+    const pt::Vec3 big = pt::lean_body(1.0f, 0.2f);
+    expect(big.x == 0.0 && big.z == 0.0, "lean: no room left when the tracker already moves that far");
+    expect(close_to(pt::lean_body(1.0f, 0.03f).x, pt::kLeanSide, 1e-6), "lean: the stock 3 cm tracker range leaves the lean whole");
+
+    // Body to world: rows are the body axes in world coordinates.
+    const float ident[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const pt::Vec3 wi = pt::body_to_world(ident, {0.06, 0.0, 0.03});
+    expect(wi.x == 0.06 && wi.y == 0.0 && close_to(wi.z, 0.03, 1e-9), "lean: identity orientation leaves the offset alone");
+    const float heading_east[9] = {0, -1, 0, 1, 0, 0, 0, 0, 1};  // nose east (+x), right wing south (-y)
+    const pt::Vec3 we = pt::body_to_world(heading_east, {0.06, 0.0, 0.0});
+    expect(close_to(we.x, 0.0, 1e-9) && close_to(we.y, -0.06, 1e-9), "lean: right of an east-heading jet is south");
+    const float inverted[9] = {-1, 0, 0, 0, 1, 0, 0, 0, -1};  // rolled 180 degrees
+    expect(close_to(pt::body_to_world(inverted, {0.0, 0.0, 0.03}).z, -0.03, 1e-9), "lean: up follows the airframe, not the world");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -3281,6 +3363,7 @@ int main() {
     aerodrome_core_tests();
     placement_tests();
     gameplay_row_splice_tests();
+    pilot_twist_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

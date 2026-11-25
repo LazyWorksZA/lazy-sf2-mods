@@ -20,6 +20,7 @@ LoadLibraryExW_t o_LoadLibraryExW = nullptr;
 void notify() {
     dxgi_on_modules_loaded();  // behaves as stock unless the display mode is Borderless
     input_on_modules_loaded();  // keyboard Windows key always; mouse only in Cursor mode
+    pilot_twist_on_modules_loaded();  // stock unless Pilot Twist is on
     menu_on_modules_loaded();  // the Display Mode option is offered in every mode
     aircraft_track_on_modules_loaded();  // hooks only if the probe or Tacview Recording needs it
     weapon_track_on_modules_loaded();  // MissileObject.dll: same rule as the aircraft tracker
