@@ -142,6 +142,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = wl[i].weapon_class;
         r.destroyed = 0;
+        r.parent_class = acmi::TacviewRec::kAircraft;  // ring slots are reused
         r.kind = acmi::TacviewRec::kObject;
         r.is_player = 0;
         r.type[0] = '\0';  // weapons have no type field (ring slots are reused)

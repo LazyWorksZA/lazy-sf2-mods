@@ -1924,6 +1924,84 @@ void tacview_tests() {
                "tacview world: a destroyed vehicle gets the event and the removal");
     }
 
+    // Tracer rounds: identity by prediction, angles from the velocity, the core's bullet type and parent.
+    {
+        using namespace lazysf2::hooks;
+        uint64_t next = 1;
+        SlotMem m;
+        const float vel[3] = {800.0f, 0.0f, 0.0f};
+        double pos[3] = {0, 0, 100};
+        BulletStep s = bullet_step(m, true, pos, vel, 10.0, next);
+        expect(s.present && s.is_new && m.seq == 1, "bullet identity: first sighting");
+        pos[0] = 40.0;  // 0.05 s at 800 m/s
+        s = bullet_step(m, true, pos, vel, 10.05, next);
+        expect(s.present && !s.is_new && m.seq == 1, "bullet identity: on the predicted path keeps the seq");
+        pos[0] = 40.0 + 100.0 + 250.0;  // gravity and drag are small: 350 m off is another round
+        s = bullet_step(m, true, pos, vel, 10.10, next);
+        expect(s.present && s.is_new && m.seq == 2, "bullet identity: more than 300 m from the prediction is a new round");
+        pos[0] = 0;
+        s = bullet_step(m, false, pos, vel, 10.15, next);
+        expect(!s.present && !m.live, "bullet identity: inactive is not present");
+        s = bullet_step(m, true, pos, vel, 10.20, next);
+        expect(s.is_new && m.seq == 3, "bullet identity: live again after a gap is new");
+        const double nanpos[3] = {std::nan(""), 0, 0};
+        s = bullet_step(m, true, nanpos, vel, 10.25, next);
+        s = bullet_step(m, true, pos, vel, 10.30, next);
+        expect(s.is_new, "bullet identity: a non-finite position counts as a jump");
+
+        float ang[3];
+        const float north_up[3] = {0.0f, 100.0f, 100.0f};
+        angles_from_velocity(north_up, ang);
+        expect(std::fabs(ang[0] - 0.785398f) < 1e-4f && std::fabs(ang[1]) < 1e-5f && ang[2] == 0.0f,
+               "bullet angles: north and climbing 45 degrees");
+        const float east_down[3] = {50.0f, 0.0f, -50.0f};
+        angles_from_velocity(east_down, ang);
+        expect(std::fabs(ang[0] + 0.785398f) < 1e-4f && std::fabs(ang[1] - 1.570796f) < 1e-4f,
+               "bullet angles: heading east, diving 45 degrees");
+    }
+    {
+        using lazysf2::hooks::AircraftSide;
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        auto bullet = [](uint64_t seq, uint64_t parent, uint8_t parent_cls, double t) {
+            TacviewRec r = make_rec(seq, false, AircraftSide::Unknown, "", t, 10, 20, 30, 0.1f, 1.0f, 0.0f);
+            r.obj_class = TacviewRec::kBullet;
+            r.parent_seq = parent;
+            r.parent_class = parent_cls;
+            return r;
+        };
+        TacviewRec site = make_rec(7, false, AircraftSide::Enemy, "ZSU-23", 5.0, 0, 0, 0, 0, 0, 0);
+        site.obj_class = TacviewRec::kGroundStatic;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 5.0, 0, 0, 100, 0, 0, 0));
+        core.add(site);
+        core.add(bullet(1, 1, TacviewRec::kAircraft, 5.0));
+        core.add(bullet(2, 7, TacviewRec::kGroundStatic, 5.0));
+        core.add(bullet(3, 0, TacviewRec::kAircraft, 5.0));
+        core.add(bullet(4, 9, TacviewRec::kGroundStatic, 5.0));
+        core.end_frame(5.0, out);
+        const auto ls = lines_of(out);
+        expect(ls.size() == 7, "tacview bullets: header-less frame with six objects");
+        expect(ls[3].rfind("4000001,T=", 0) == 0 &&
+                   ls[3].find(",Type=Projectile+Bullet,Coalition=Allies,Color=Blue,Parent=1") != std::string::npos &&
+                   ls[3].find("Name=") == std::string::npos,
+               "tacview bullets: id 0x4000000+seq, type, the player as parent, side from the parent");
+        expect(ls[4].find(",Type=Projectile+Bullet,Coalition=Enemies,Color=Red,Parent=2000007") != std::string::npos,
+               "tacview bullets: a ground object parent has an id in the ground range");
+        expect(ls[5].find("Parent") == std::string::npos, "tacview bullets: no Parent when it could not be resolved");
+        expect(ls[6].find("Parent=2000009") != std::string::npos, "tacview bullets: an unseen ground parent still gets an id");
+        // Bullets are removed only by a frame of their series.
+        std::string o2;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 5.1, 1, 0, 100, 0, 0, 0));
+        core.end_frame(5.1, o2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+        expect(o2.find("-4000001") == std::string::npos, "tacview bullets: an aircraft frame does not remove them");
+        std::string o3;
+        core.add(bullet(1, 1, TacviewRec::kAircraft, 5.2));
+        core.end_frame(5.2, o3, TacviewRec::kSeriesBullet);
+        expect(o3.find("-4000002") != std::string::npos && o3.find("-4000001") == std::string::npos &&
+                   o3.find("-4000003") != std::string::npos,
+               "tacview bullets: a bullet frame removes the rounds that are gone");
+    }
+
     // Weapon type classification and the ring slot size.
     {
         using lazysf2::hooks::WeaponClass;

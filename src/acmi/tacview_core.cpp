@@ -69,6 +69,7 @@ void TacviewCore::add(const TacviewRec& r) {
             case TacviewRec::Family::Weapon: id = kWeaponIdBase + n; break;
             case TacviewRec::Family::Ground: id = kGroundIdBase + n; break;
             case TacviewRec::Family::CounterMeasure: id = kCounterMeasureIdBase + n; break;
+            case TacviewRec::Family::Bullet: id = kBulletIdBase + n; break;
         }
         objs_.push_back({r.seq, r.obj_class, r.side, TacviewRec::series_of(r.obj_class), false, id, -1e300, 0});
         s = &objs_.back();
@@ -97,14 +98,21 @@ void TacviewCore::add(const TacviewRec& r) {
         p.name = name;
         char parent_id[16] = {};
         auto side = static_cast<hooks::AircraftSide>(r.side);
-        if (weapon) {
-            p.type = r.obj_class == TacviewRec::kBomb     ? "Weapon+Bomb"
-                     : r.obj_class == TacviewRec::kRocket ? "Weapon+Rocket"
-                                                           : "Weapon+Missile";
+        if (weapon || family == TacviewRec::Family::Bullet) {
+            if (weapon) {
+                p.type = r.obj_class == TacviewRec::kBomb     ? "Weapon+Bomb"
+                         : r.obj_class == TacviewRec::kRocket ? "Weapon+Rocket"
+                                                               : "Weapon+Missile";
+            } else {
+                p.name = nullptr;
+                p.type = "Projectile+Bullet";
+            }
             if (r.parent_seq != 0) {
-                uint32_t pid = kOtherIdBase + static_cast<uint32_t>(r.parent_seq);  // an aircraft we have not seen
+                const auto pfam = TacviewRec::family_of(r.parent_class);
+                uint32_t pid = (pfam == TacviewRec::Family::Ground ? kGroundIdBase : kOtherIdBase) +
+                               static_cast<uint32_t>(r.parent_seq);  // a shooter we have not seen
                 for (const State& o : objs_) {
-                    if (o.seq == r.parent_seq && o.obj_class == TacviewRec::kAircraft) {
+                    if (o.seq == r.parent_seq && TacviewRec::family_of(o.obj_class) == pfam) {
                         pid = o.id;
                         if (side == hooks::AircraftSide::Unknown) side = static_cast<hooks::AircraftSide>(o.side);
                         break;

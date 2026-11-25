@@ -32,6 +32,7 @@ constexpr Build kGroundObject{L"GroundObject.dll", "GroundObject.dll", 0x51d220a
 constexpr Build kGroundMobile{L"GroundMobileObject.dll", "GroundMobileObject.dll", 0x51d220a2, 0x47000};
 constexpr Build kNaval{L"NavalObject.dll", "NavalObject.dll", 0x51d220cd, 0x4a000};
 constexpr Build kCounterMeasure{L"CounterMeasureObject.dll", "CounterMeasureObject.dll", 0x51d2208a, 0x25000};
+constexpr Build kBullet{L"BulletObject.dll", "BulletObject.dll", 0x51d22099, 0x32000};
 
 // ObjectManager: the manager object, its group table (0x54 bytes a group) and the primary vtable that proves it.
 constexpr DWORD kManagerRva = 0x234d0, kManagerVtableRva = 0x1d55c;
@@ -41,7 +42,8 @@ constexpr uint32_t kMaxGroups = 64, kMaxSlots = 65536;
 constexpr uint8_t kSlotInUse = 1;
 
 // Primary vtables (RVA in the class DLL) and the counter-measure kind table.
-constexpr DWORD kGroundVtable = 0x3d8dc, kMobileVtable = 0x347a4, kNavalVtable = 0x375f4, kCmVtable = 0x1937c;
+constexpr DWORD kGroundVtable = 0x3d8dc, kMobileVtable = 0x347a4, kNavalVtable = 0x375f4, kCmVtable = 0x1937c,
+                kBulletVtable = 0x211fc;
 constexpr DWORD kCmKindTableRva = 0x1e4a0, kCmKindStride = 0x132c;
 
 // Every object: active flag and status flags.
@@ -51,23 +53,26 @@ constexpr size_t kOffPos = 0x38, kOffAngles = 0x100, kOffTypeRec = 0x360, kOffDa
 constexpr size_t kTypeRecName = 0x04;
 // Counter-measure.
 constexpr size_t kOffCmPos = 0x20, kOffCmKind = 0x70, kOffCmLife = 0x78;
+// Bullet: tracer flag (int), shooter object id, position, velocity.
+constexpr size_t kOffBulletTracer = 0x10, kOffBulletShooter = 0x1c, kOffBulletPos = 0x38, kOffBulletVel = 0x50;
 
-constexpr size_t kMaxGround = 4096, kMaxCm = 256, kMaxMarkers = 256;
+constexpr size_t kMaxGround = 4096, kMaxCm = 256, kMaxMarkers = 256, kMaxBullets = 128;
 
-// Rates, in game seconds between walks: static 1 Hz, mobile 5 Hz, counter-measures 10 Hz.
-enum Due : int { kDueStatic, kDueMobile, kDueCm, kDueCount };
-constexpr double kInterval[kDueCount] = {1.0, 0.2, 0.1};
+// Rates, in game seconds between walks: static 1 Hz, mobile 5 Hz, counter-measures 10 Hz, tracers 20 Hz.
+enum Due : int { kDueStatic, kDueMobile, kDueCm, kDueBullet, kDueCount };
+constexpr double kInterval[kDueCount] = {1.0, 0.2, 0.1, 0.05};
 constexpr uint8_t kDueSeries[kDueCount] = {TacviewRec::kSeriesGroundStatic, TacviewRec::kSeriesGroundMobile,
-                                           TacviewRec::kSeriesCounterMeasure};
+                                           TacviewRec::kSeriesCounterMeasure, TacviewRec::kSeriesBullet};
 
 struct Modules {
     uintptr_t manager = 0;  // ObjectManager base
-    uintptr_t ground = 0, mobile = 0, naval = 0, cm = 0;
+    uintptr_t ground = 0, mobile = 0, naval = 0, cm = 0, bullet = 0;
 };
 
 struct Stats {
-    uint32_t peak[5] = {};  // buildings, vehicles, ships, flares, chaff: most live in one walk
+    uint32_t peak[6] = {};  // buildings, vehicles, ships, flares, chaff, tracers: most live in one walk
     uint32_t unknown_vtable = 0, ground_capped = 0, cm_capped = 0, markers = 0, markers_dropped = 0, bad_walks = 0;
+    uint32_t bullet_capped = 0, bullets_seen = 0;  // tracer sightings over the cap; distinct tracers recorded
     uint32_t walks = 0;
 };
 
@@ -75,8 +80,8 @@ struct Walk {
     bool on = false;
     Modules mods;
     uint32_t side_masks[3] = {};
-    std::vector<SlotMem> ground, cm;
-    uint64_t next_ground = 1, next_cm = 1;
+    std::vector<SlotMem> ground, cm, bullet;
+    uint64_t next_ground = 1, next_cm = 1, next_bullet = 1;
     double last[kDueCount] = {};
     Stats stats;
     bool logged_first = false, logged_unknown = false, logged_cap = false;
@@ -101,7 +106,7 @@ bool name_is(const wchar_t* w, const wchar_t* base) {
 }
 
 struct Groups {
-    uintptr_t ground = 0, cm = 0;
+    uintptr_t ground = 0, cm = 0, bullet = 0, aircraft = 0;
 };
 
 // Finds the groups by name each walk (a handful of compares). False if the manager is not what we expect.
@@ -119,6 +124,8 @@ bool find_groups(const Modules& mods, Groups* out) {
             if (!nm) continue;
             if (name_is(nm, L"GroundObject")) out->ground = grp;
             else if (name_is(nm, L"CounterMeasure")) out->cm = grp;
+            else if (name_is(nm, L"Bullet")) out->bullet = grp;
+            else if (name_is(nm, L"Aircraft")) out->aircraft = grp;
         }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -207,6 +214,59 @@ bool read_cm(uintptr_t obj, double pos[3], float* life, uintptr_t* kind_ptr) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// A tracer round's pose and shooter id. False if unreadable or not a tracer.
+bool read_bullet(uintptr_t obj, double pos[3], float vel[3], uint32_t* shooter) {
+    __try {
+        const char* b = reinterpret_cast<const char*>(obj);
+        if (*reinterpret_cast<const int*>(b + kOffBulletTracer) == 0) return false;
+        std::memcpy(pos, b + kOffBulletPos, 3 * sizeof(double));
+        std::memcpy(vel, b + kOffBulletVel, 3 * sizeof(float));
+        *shooter = *reinterpret_cast<const uint32_t*>(b + kOffBulletShooter);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The object a shooter id names: group = id >> 24, slot = id & 0xffffff (a pointer is read, never kept).
+bool resolve_shooter(const Modules& mods, uint32_t id, uintptr_t* group, uint32_t* slot, uintptr_t* obj) {
+    __try {
+        const uintptr_t mgr = mods.manager + kManagerRva;
+        const uint32_t ngroups = *reinterpret_cast<const uint32_t*>(mgr + kMgrGroupCount);
+        const uintptr_t arr = *reinterpret_cast<const uintptr_t*>(mgr + kMgrGroups);
+        const uint32_t gi = id >> 24;
+        *slot = id & 0xffffff;
+        if (!arr || gi >= ngroups || gi >= kMaxGroups) return false;
+        *group = arr + gi * kGroupStride;
+        const uint32_t count = *reinterpret_cast<const uint32_t*>(*group + kGrpCount);
+        const uintptr_t* slots = *reinterpret_cast<const uintptr_t* const*>(*group + kGrpSlots);
+        if (!slots || *slot >= count || *slot >= kMaxSlots) return false;
+        *obj = slots[*slot];
+        return *obj != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Our seq for the shooter of a bullet, in the family named by *cls; 0 if it cannot be resolved.
+uint64_t shooter_seq(const Groups& gr, uint32_t id, uint8_t* cls) {
+    uintptr_t group = 0, obj = 0;
+    uint32_t slot = 0;
+    if (!resolve_shooter(g.mods, id, &group, &slot, &obj)) return 0;
+    if (group == gr.aircraft) {
+        *cls = TacviewRec::kAircraft;
+        return aircraft_seq_for_object(reinterpret_cast<const void*>(obj));
+    }
+    if (group == gr.ground && slot < g.ground.size()) {
+        const SlotMem& m = g.ground[slot];
+        if (m.live && m.ptr == obj) {
+            *cls = m.cls;
+            return m.seq;
+        }
+    }
+    return 0;
 }
 
 void set_nan_pose(TacviewRec& r) { r.pos[0] = r.pos[1] = r.pos[2] = std::nan(""); }
@@ -325,6 +385,46 @@ uint8_t walk_counter_measures(uintptr_t grp, double t, TacviewRec* out, size_t c
     return TacviewRec::kSeriesCounterMeasure;
 }
 
+// Tracer rounds, at most kMaxBullets at a time.
+uint8_t walk_bullets(uintptr_t grp, const Groups& gr, double t, TacviewRec* out, size_t cap, size_t& n) {
+    GroupView v;
+    if (!read_group(grp, &v)) {
+        ++g.stats.bad_walks;
+        return 0;
+    }
+    if (v.count > g.bullet.size()) g.bullet.resize(v.count);
+    const uint32_t gcount = static_cast<uint32_t>(g.bullet.size());
+    size_t present = 0;
+    for (uint32_t i = 0; i < v.count && i < gcount; ++i) {
+        SlotMem& m = g.bullet[i];
+        Head h;
+        const bool ok = read_head(v, i, &h);
+        bool is_live = ok && h.obj && h.state == kSlotInUse && h.active && h.vtable == g.mods.bullet + kBulletVtable;
+        double pos[3] = {};
+        float vel[3] = {};
+        uint32_t shooter = 0;
+        if (is_live && !read_bullet(h.obj, pos, vel, &shooter)) is_live = false;  // not a tracer, or unreadable
+        if (is_live && (present >= kMaxBullets || n >= cap)) {  // over the cap: skipped, counted
+            is_live = false;
+            ++g.stats.bullet_capped;
+        }
+        const BulletStep s = bullet_step(m, is_live, pos, vel, t, g.next_bullet);
+        if (!s.present) continue;
+        TacviewRec& r = out[n];
+        fill_common(r, TacviewRec::kBullet, m.seq, t);
+        std::memcpy(r.pos, pos, sizeof(pos));
+        angles_from_velocity(vel, r.ang);
+        uint8_t pcls = TacviewRec::kAircraft;
+        r.parent_seq = shooter_seq(gr, shooter, &pcls);
+        r.parent_class = pcls;
+        if (s.is_new) ++g.stats.bullets_seen;
+        ++n;
+        ++present;
+    }
+    if (present > g.stats.peak[5]) g.stats.peak[5] = static_cast<uint32_t>(present);
+    return TacviewRec::kSeriesBullet;
+}
+
 }  // namespace
 
 bool world_walk_start() {
@@ -332,7 +432,7 @@ bool world_walk_start() {
     g.mods = Modules{};
     g.stats = Stats{};
     g.logged_first = g.logged_unknown = g.logged_cap = false;
-    g.next_ground = g.next_cm = 1;
+    g.next_ground = g.next_cm = g.next_bullet = 1;
     for (double& l : g.last) l = -1e300;
     uint32_t f = 0, e = 0, nt = 0;
     aircraft_side_masks(&f, &e, &nt);
@@ -344,6 +444,7 @@ bool world_walk_start() {
     g.mods.mobile = resolve(kGroundMobile);
     g.mods.naval = resolve(kNaval);
     g.mods.cm = resolve(kCounterMeasure);
+    g.mods.bullet = resolve(kBullet);
     if (!g.mods.manager) {
         LOG("world: ObjectManager.dll is missing or not the expected build; ground objects, flares and chaff are not recorded");
         return false;
@@ -351,13 +452,15 @@ bool world_walk_start() {
     try {
         g.ground.assign(kMaxGround, SlotMem{});  // grows later if a flight has more slots
         g.cm.assign(kMaxCm, SlotMem{});
+        g.bullet.assign(1024, SlotMem{});
     } catch (const std::bad_alloc&) {
         LOG("world: out of memory for the slot state; ground objects, flares and chaff are not recorded");
         return false;
     }
     g.on = true;
-    LOG("world: walker on (ground %s, vehicles %s, ships %s, flares and chaff %s)", g.mods.ground ? "yes" : "no",
-        g.mods.mobile ? "yes" : "no", g.mods.naval ? "yes" : "no", g.mods.cm ? "yes" : "no");
+    LOG("world: walker on (ground %s, vehicles %s, ships %s, flares and chaff %s, tracers %s)",
+        g.mods.ground ? "yes" : "no", g.mods.mobile ? "yes" : "no", g.mods.naval ? "yes" : "no",
+        g.mods.cm ? "yes" : "no", g.mods.bullet ? "yes" : "no");
     return true;
 }
 
@@ -380,6 +483,8 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
         mask |= walk_ground(gr.ground, ground_due, t, out, cap, n);
     if ((due & TacviewRec::kSeriesCounterMeasure) && gr.cm && g.mods.cm)
         mask |= walk_counter_measures(gr.cm, t, out, cap, n);
+    if ((due & TacviewRec::kSeriesBullet) && gr.bullet && g.mods.bullet)
+        mask |= walk_bullets(gr.bullet, gr, t, out, cap, n);
     for (int k = 0; k < kDueCount; ++k)
         if (mask & kDueSeries[k]) g.last[k] = t;
     *series_mask = mask;
@@ -387,16 +492,18 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
     // Outside the loops: one line each.
     if (!g.logged_first) {
         g.logged_first = true;
-        LOG("world: first walk: GroundObject group %s, CounterMeasure group %s", gr.ground ? "found" : "NOT found",
-            gr.cm ? "found" : "NOT found");
+        LOG("world: first walk: GroundObject group %s, CounterMeasure group %s, Bullet group %s, Aircraft group %s",
+            gr.ground ? "found" : "NOT found", gr.cm ? "found" : "NOT found", gr.bullet ? "found" : "NOT found",
+            gr.aircraft ? "found" : "NOT found");
     }
     if (g.stats.unknown_vtable && !g.logged_unknown) {
         g.logged_unknown = true;
         LOG("world: a live object in the ground group has an unknown class (skipped)");
     }
-    if ((g.stats.ground_capped || g.stats.cm_capped) && !g.logged_cap) {
+    if ((g.stats.ground_capped || g.stats.cm_capped || g.stats.bullet_capped) && !g.logged_cap) {
         g.logged_cap = true;
-        LOG("world: record cap reached (ground %zu, counter-measures %zu); more objects are skipped", kMaxGround, kMaxCm);
+        LOG("world: record cap reached (ground %zu, counter-measures %zu, tracers %zu); more objects are skipped",
+            kMaxGround, kMaxCm, kMaxBullets);
     }
     return n;
 }
@@ -404,10 +511,12 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
 void world_walk_stop() {
     if (!g.on) return;
     g.on = false;
-    LOG("world: stopped: peak live %u buildings, %u vehicles, %u ships, %u flares, %u chaff; %u destroyed events "
-        "(%u dropped); %u unknown-class sightings, %u capped ground, %u capped counter-measures, %u failed walks",
-        g.stats.peak[0], g.stats.peak[1], g.stats.peak[2], g.stats.peak[3], g.stats.peak[4], g.stats.markers,
-        g.stats.markers_dropped, g.stats.unknown_vtable, g.stats.ground_capped, g.stats.cm_capped, g.stats.bad_walks);
+    LOG("world: stopped: peak live %u buildings, %u vehicles, %u ships, %u flares, %u chaff, %u tracers (%u recorded "
+        "in all); %u destroyed events (%u dropped); %u unknown-class sightings, %u capped ground, %u capped "
+        "counter-measures, %u capped tracers, %u failed walks",
+        g.stats.peak[0], g.stats.peak[1], g.stats.peak[2], g.stats.peak[3], g.stats.peak[4], g.stats.peak[5],
+        g.stats.bullets_seen, g.stats.markers, g.stats.markers_dropped, g.stats.unknown_vtable, g.stats.ground_capped,
+        g.stats.cm_capped, g.stats.bullet_capped, g.stats.bad_walks);
 }
 
 }  // namespace lazysf2::hooks
