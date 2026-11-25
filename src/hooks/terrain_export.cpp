@@ -669,7 +669,7 @@ int remove_legacy_files(const std::wstring& dir, const std::string& id) {
     return removed;
 }
 
-// Writes the embedded Tacview add-on to %APPDATA%\Tacview\AddOns\LazySF2\main.lua, only when the content differs.
+// Writes the embedded Tacview add-on to %APPDATA%\Tacview\AddOns\LazySF2Patch\main.lua, only when the content differs.
 // Once per session: the export thread runs one job at a time, so a plain static is enough.
 void install_addon(const std::wstring& appdata) {
     static bool done = false;
@@ -679,7 +679,7 @@ void install_addon(const std::wstring& appdata) {
     CreateDirectoryW(dir.c_str(), nullptr);
     dir += L"\\AddOns";
     CreateDirectoryW(dir.c_str(), nullptr);
-    dir += L"\\LazySF2";
+    dir += L"\\azysf2patch";
     CreateDirectoryW(dir.c_str(), nullptr);
     const std::wstring path = dir + L"\\main.lua", tmp = path + L".tmp";
     std::string current;
@@ -704,7 +704,7 @@ void install_addon(const std::wstring& appdata) {
         ok = ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
         if (!ok) DeleteFileW(tmp.c_str());
     }
-    if (ok) log_once(21, "tacview terrain: wrote the Tacview add-on (AddOns\\LazySF2\\main.lua)");
+    if (ok) log_once(21, "tacview terrain: wrote the Tacview add-on (AddOns\\LazySF2Patch\\main.lua)");
     else log_once(22, "tacview terrain: could not write the Tacview add-on");
 }
 
@@ -720,15 +720,15 @@ bool export_files(Job& job) {
     }
     install_addon(root);
     root += L"\\Tacview\\Data\\Terrain";
-    const int removed = remove_legacy_files(root + L"\\Custom\\LazySF2", job.id) +
-                        remove_legacy_files(root + L"\\Textures\\LazySF2", job.id);
+    const int removed = remove_legacy_files(root + L"\\Custom\\azysf2patch", job.id) +
+                        remove_legacy_files(root + L"\\Textures\\azysf2patch", job.id);
     if (removed > 0) LOG("tacview terrain: %s: removed %d old file(s) (dotted names Tacview could not load, or old png patches)", job.id.c_str(), removed);
-    const bool ok = export_heightmap(job, root + L"\\Custom\\LazySF2");
+    const bool ok = export_heightmap(job, root + L"\\Custom\\azysf2patch");
     if (!job.texture) return ok;
     try {
         const std::vector<acmi::Airfield> airfields = read_airfields(job);
         publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
-        export_texture(job, airfields, root + L"\\Textures\\LazySF2");
+        export_texture(job, airfields, root + L"\\Textures\\azysf2patch");
     } catch (...) {  // the heightmap is done: only the texture and the airfields are lost
         log_once(18, "tacview terrain: no texture: out of memory");
     }

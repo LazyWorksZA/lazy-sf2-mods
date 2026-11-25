@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32;
 
-namespace LazySF2.Manager;
+namespace LazySF2Patch.Manager;
 
 /// <summary>
 /// Puts the mod into the Strike Fighters 2 folder and takes it out again, with the same rules as

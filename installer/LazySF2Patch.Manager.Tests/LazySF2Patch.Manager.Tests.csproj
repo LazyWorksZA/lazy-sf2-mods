@@ -16,7 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\LazySF2.Manager\LazySF2.Manager.csproj" />
+    <ProjectReference Include="..\LazySF2Patch.Manager\LazySF2Patch.Manager.csproj" />
   </ItemGroup>
 
 </Project>

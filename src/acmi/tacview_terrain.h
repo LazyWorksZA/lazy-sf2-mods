@@ -10,7 +10,7 @@ namespace lazysf2::acmi {
 
 constexpr size_t kTerrainIdMaxChars = 48;
 
-/// <summary>"LazySF2." plus the base name with anything but ASCII letters, digits, '_' and '-' mapped to '_'; capped at 48 chars. Empty in, empty out.</summary>
+/// <summary>"LazySF2Patch." plus the base name with anything but ASCII letters, digits, '_' and '-' mapped to '_'; capped at 48 chars. Empty in, empty out.</summary>
 std::string terrain_id(std::wstring_view base_name);
 
 /// <summary>The id as a file stem: dots become dashes, because Tacview cannot load a texture whose name has more than one dot.</summary>

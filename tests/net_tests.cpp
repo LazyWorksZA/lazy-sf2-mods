@@ -1687,9 +1687,9 @@ std::string read_whole(const std::wstring& p) {
 void terrain_tests() {
     using namespace lazysf2::acmi;
     std::printf("tacview terrain\n");
-    expect(terrain_id(L"DESERT") == "LazySF2.DESERT", "terrain id: plain name");
-    expect(terrain_id(std::wstring(L"Angola v1/") + wchar_t(0xe9) + L",x") == "LazySF2.Angola_v1___x", "terrain id: other characters become _");
-    expect(terrain_id(L"A-b_9") == "LazySF2.A-b_9", "terrain id: dash and underscore kept");
+    expect(terrain_id(L"DESERT") == "LazySF2Patch.DESERT", "terrain id: plain name");
+    expect(terrain_id(std::wstring(L"Angola v1/") + wchar_t(0xe9) + L",x") == "LazySF2Patch.Angola_v1___x", "terrain id: other characters become _");
+    expect(terrain_id(L"A-b_9") == "LazySF2Patch.A-b_9", "terrain id: dash and underscore kept");
     expect(terrain_id(L"").empty(), "terrain id: empty in, empty out");
     expect(terrain_id(std::wstring(100, L'X')).size() == 48, "terrain id: capped at 48 chars");
 
@@ -1699,11 +1699,11 @@ void terrain_tests() {
     const uint8_t want[12] = {0x04, 0x01, 5, 0, 0xcd, 0xab, 1, 0, 2, 0, 3, 0};
     expect(raw.size() == 12 && std::memcmp(raw.data(), want, 12) == 0, "terrain raw: north row first, little-endian");
 
-    expect(terrain_file_stem("LazySF2.T") == "LazySF2-T" && terrain_file_stem("LazySF2.A_b-1") == "LazySF2-A_b-1" &&
+    expect(terrain_file_stem("LazySF2Patch.T") == "LazySF2Patch-T" && terrain_file_stem("LazySF2Patch.A_b-1") == "LazySF2Patch-A_b-1" &&
                terrain_file_stem("").empty(),
            "terrain file stem: dots become dashes");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
+    const std::string xml = terrain_xml("LazySF2Patch.T", "LazySF2Patch-T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
     const auto m = make_mapping(-4.5);
     const std::string east = num(-25.0 + 1999 * 500.0 * m.lon_scale, 9);
     const std::string north = num(-4.5 + 1999 * 500.0 * m.lat_scale, 9);
@@ -1712,7 +1712,7 @@ void terrain_tests() {
         return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat +
                    "</Latitude>");
     };
-    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2.T\">") && has("<File>LazySF2-T.raw</File>") &&
+    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2Patch.T\">") && has("<File>LazySF2Patch-T.raw</File>") &&
                has("<Width>2000</Width>") && has("<Height>2000</Height>") && has("<BigEndian>0</BigEndian>") &&
                has("<AltitudeFactor>1</AltitudeFactor>") && has("<Projection>Quad</Projection>"),
            "terrain xml: structure");
@@ -1724,13 +1724,13 @@ void terrain_tests() {
            "terrain xml: 1000 km square sits over the Atlantic");
 
     TacviewCoreConfig cfg;
-    cfg.theater = "LazySF2.DESERT";
+    cfg.theater = "LazySF2Patch.DESERT";
     cfg.title = "Strike Fighters 2 - Desert";
     std::string h1, h2;
     TacviewCore{cfg}.header(h1, "2026-11-24T20:15:00Z");
     expect(h1 == "FileType=text/acmi/tacview\nFileVersion=2.2\n0,ReferenceTime=2026-11-24T20:15:00Z,"
-                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=Lazy SF2 Patch,Theater=LazySF2.DESERT,LazySF2Theater=LazySF2.DESERT\n",
-           "header: Theater= and LazySF2Theater= after the title");
+                 "ReferenceLongitude=0,ReferenceLatitude=0,Title=Strike Fighters 2 - Desert,DataSource=Strike Fighters 2,DataRecorder=Lazy SF2 Patch,Theater=LazySF2Patch.DESERT,LazySF2PatchTheater=LazySF2Patch.DESERT\n",
+           "header: Theater= and LazySF2PatchTheater= after the title");
     TacviewCore{TacviewCoreConfig{}}.header(h2, "2026-11-24T20:15:00Z");
     expect(h2.find("Theater") == std::string::npos && h2.find("Title=Strike Fighters 2,DataSource=") != std::string::npos,
            "header: no Theater= by default");
@@ -1738,9 +1738,9 @@ void terrain_tests() {
 
 void addon_embed_test() {
     const std::string lua = kTacviewAddonLua;
-    expect(!lua.empty() && lua.rfind("-- LazySF2 terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
-    expect(lua.find("LazySF2Theater") != std::string::npos && lua.find("SetTitle(\"Lazy SF2 Patch\")") != std::string::npos,
-           "tacview add-on: embedded text reads LazySF2Theater and sets the add-on title");
+    expect(!lua.empty() && lua.rfind("-- Lazy SF2 Patch terrain switch", 0) == 0, "tacview add-on: embedded text is non-empty and has its header line");
+    expect(lua.find("LazySF2PatchTheater") != std::string::npos && lua.find("SetTitle(\"Lazy SF2 Patch\")") != std::string::npos,
+           "tacview add-on: embedded text reads LazySF2PatchTheater and sets the add-on title");
 }
 
 void tacview_tests() {
@@ -2992,15 +2992,15 @@ void texture_tests() {
 
     // texture xml
     {
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
+        const std::string xml = texture_xml("LazySF2Patch.T", "LazySF2Patch-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
         const auto m = make_mapping(-4.5);
         const std::string east = num(-25.0 + 1000000.0 * m.lon_scale, 9), north = num(-4.5 + 1000000.0 * m.lat_scale, 9);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
         auto corner = [&](const char* tag, const std::string& lon, const std::string& lat) {
             return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat + "</Latitude>");
         };
-        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2.T\">") &&
-                   has("<File>LazySF2-T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
+        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2Patch.T\">") &&
+                   has("<File>LazySF2Patch-T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
                "texture xml: structure");
         expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&
                    corner("TopLeft", "-25", north),
@@ -3148,14 +3148,14 @@ void texture_tests() {
             expect(unify_tile_size(capped, 32) == 32 && capped[0].w == 32, "unify_tile_size: a tile above the cap is brought down to it");
         }
 
-        const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2-T-AF001.jpg", 1000, 2000, 3000, 3000},
-                                               {"LazySF2.T.AF002", "LazySF2-T-AF002.jpg", 5000, 6000, 2000, 2000}};
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
+        const std::vector<PatchEntry> extra = {{"LazySF2Patch.T.AF001", "LazySF2Patch-T-AF001.jpg", 1000, 2000, 3000, 3000},
+                                               {"LazySF2Patch.T.AF002", "LazySF2Patch-T-AF002.jpg", 5000, 6000, 2000, 2000}};
+        const std::string xml = texture_xml("LazySF2Patch.T", "LazySF2Patch-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
         const auto m = make_mapping(-4.5);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
-        const size_t base = xml.find("Id=\"LazySF2.T\""), p1 = xml.find("Id=\"LazySF2.T.AF001\""), p2 = xml.find("Id=\"LazySF2.T.AF002\"");
+        const size_t base = xml.find("Id=\"LazySF2Patch.T\""), p1 = xml.find("Id=\"LazySF2Patch.T.AF001\""), p2 = xml.find("Id=\"LazySF2Patch.T.AF002\"");
         expect(base != std::string::npos && base < p1 && p1 < p2, "texture xml: base entry first, then the patches in order");
-        expect(has("<File>LazySF2-T-AF001.jpg</File>") && has("<File>LazySF2-T-AF002.jpg</File>"), "texture xml: patch files");
+        expect(has("<File>LazySF2Patch-T-AF001.jpg</File>") && has("<File>LazySF2Patch-T-AF002.jpg</File>"), "texture xml: patch files");
         const std::string bl_lon = num(-25.0 + 1000 * m.lon_scale, 9), bl_lat = num(-4.5 + 2000 * m.lat_scale, 9);
         const std::string tr_lon = num(-25.0 + 4000 * m.lon_scale, 9), tr_lat = num(-4.5 + 5000 * m.lat_scale, 9);
         const std::string first = xml.substr(p1, xml.find("</CustomTexture>", p1) - p1);
@@ -3242,14 +3242,14 @@ void placement_tests() {
     const Placement edge = place_theatre(true, 179.9, 85.0, 1000000.0, 1000000.0);
     expect(edge.ref_lon >= -180.0 && edge.ref_lon <= 180.0 && edge.ref_lat >= -89.0, "placement: the corner is clamped");
 
-    const std::string txml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
+    const std::string txml = texture_xml("LazySF2Patch.T", "LazySF2Patch-T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
                                          p.scale_lat);
     expect(txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * m.lon_scale, 9) + "</Longitude>") != std::string::npos &&
                txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * make_mapping(p.ref_lat).lon_scale, 9) + "</Longitude>") ==
                    std::string::npos,
            "placement: texture_xml uses the scale latitude, not the corner latitude");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
+    const std::string xml = terrain_xml("LazySF2Patch.T", "LazySF2Patch-T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
     expect(xml.find(num(p.ref_lon + 1000.0 * m.lon_scale, 9)) != std::string::npos,
            "placement: terrain_xml uses the scale latitude");
 }
