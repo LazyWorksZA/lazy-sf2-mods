@@ -15,7 +15,7 @@ namespace LazyWorks::SF2Patch::net {
 ///    sample cannot stick forever).
 ///  - Drift: a line of offset against wall time is fitted by least squares through the lowest-RTT half of the window.
 ///    Its slope is skew() (clamped to +-kMaxSkew); now() follows that line. The fit needs kFitMinSamples samples in
-///    that half spanning kFitMinSpan; before that the skew is 0 and now() follows the best sample.
+///    that half spanning kFitMinSpan, and a slope over kSkewSignificance standard errors; otherwise the skew is 0. now() follows the line through the mean of that half.
 ///  - The host's game time freezes while it is paused or in a menu. A Pong whose host time did not advance while wall
 ///    time did (kFreezeWall) puts the clock on hold: now() stays at the last host time and callers send no States. The
 ///    first advance after that clears the window (every sample is stale by the length of the pause) and resumes. A
@@ -23,6 +23,8 @@ namespace LazyWorks::SF2Patch::net {
 ///    short pauses and a host that restarted its clock. No Pong for kStale also puts callers on hold.
 /// </summary>
 class ClockSync {
+    // Single-thread-owned and unsynchronised: it is a small copyable value, so another thread must read a copy
+    // (a snapshot taken under a lock), never the live object.
 public:
     static constexpr int kWindow = 32;
     static constexpr double kFreezeWall = 0.1;  // wall seconds with no host advance that mean "frozen"
@@ -31,8 +33,9 @@ public:
     static constexpr double kStale = 3.0;
     static constexpr double kMaxRtt = 2.0;
     static constexpr double kMaxSkew = 0.02;
-    static constexpr int kFitMinSamples = 4;
-    static constexpr double kFitMinSpan = 1.0;  // wall seconds the fitted samples must cover
+    static constexpr int kFitMinSamples = 8;
+    static constexpr double kSkewSignificance = 3.0;  // slope must exceed this many standard errors
+    static constexpr double kFitMinSpan = 3.0;  // wall seconds the fitted samples must cover
 
     bool welcomed() const { return welcomed_; }
     bool have_pong() const { return pongs_ > 0; }
@@ -46,6 +49,7 @@ public:
     int resets() const { return resets_; }
 
     void on_welcome(double wall_rx, double host_time, double half_rtt) {
+        if (welcomed_) ++resets_;  // a re-Welcome re-seeds the clock: readers must step, not slew
         welcomed_ = true;
         offset_ = host_time - (wall_rx - half_rtt);
         line_off_ = offset_;
@@ -122,12 +126,8 @@ private:
         const int best = slot(order[0]);
         offset_ = off_[best];
         best_rtt_ = rtt_[best];
-        line_off_ = offset_;
-        line_wall_ = t_[best];
-        skew_ = 0.0;
         const int m = n_ / 2 > 0 ? n_ / 2 : 1;
-        if (m < kFitMinSamples) return;
-        double mt = 0, mo = 0, tmin = t_[slot(order[0])], tmax = tmin;
+        double mt = 0, mo = 0, tmin = t_[best], tmax = tmin;
         for (int i = 0; i < m; ++i) {
             const int s = slot(order[i]);
             mt += t_[s];
@@ -135,9 +135,12 @@ private:
             if (t_[s] < tmin) tmin = t_[s];
             if (t_[s] > tmax) tmax = t_[s];
         }
-        if (tmax - tmin < kFitMinSpan) return;
         mt /= m;
         mo /= m;
+        line_off_ = mo;  // the mean of the lowest-RTT half: less jittery than the single best sample
+        line_wall_ = mt;
+        skew_ = 0.0;
+        if (m < kFitMinSamples || tmax - tmin < kFitMinSpan) return;
         double num = 0, den = 0;
         for (int i = 0; i < m; ++i) {
             const int s = slot(order[i]);
@@ -145,11 +148,19 @@ private:
             den += (t_[s] - mt) * (t_[s] - mt);
         }
         if (!(den > 0.0)) return;
-        skew_ = num / den;
+        const double slope = num / den;
+        double ss = 0;
+        for (int i = 0; i < m; ++i) {
+            const int s = slot(order[i]);
+            const double r = off_[s] - mo - slope * (t_[s] - mt);
+            ss += r * r;
+        }
+        // Jitter alone gives slopes of a few tenths of a percent: trust the slope only when it stands clear of its
+        // own standard error (zero is then the best guess for a host that keeps pace with wall time).
+        if (std::fabs(slope) * std::sqrt(den) < kSkewSignificance * std::sqrt(ss / (m - 2))) return;
+        skew_ = slope;
         if (skew_ > kMaxSkew) skew_ = kMaxSkew;
         else if (skew_ < -kMaxSkew) skew_ = -kMaxSkew;
-        line_off_ = mo;
-        line_wall_ = mt;
     }
 
     bool welcomed_ = false, frozen_ = false;
@@ -189,6 +200,7 @@ public:
         out_ += dt * (1.0 + c.skew());  // the estimate moves at this rate, so the gap does not grow on its own
         double gap = target - out_;
         if (std::fabs(gap) > ClockSync::kJump) {  // slewing would take too long: treat as a reset
+            ++steps_;
             out_ = target;
             return out_;
         }
@@ -199,10 +211,12 @@ public:
 
     /// <summary>True if the last read found the host's clock frozen.</summary>
     bool held() const { return held_; }
+    /// <summary>Steps taken by the gap rule (not counting the ClockSync's own resets); readers watch it with resets().</summary>
+    int steps() const { return steps_; }
 
 private:
     bool started_ = false, held_ = false;
-    int resets_ = 0;
+    int resets_ = 0, steps_ = 0;
     double out_ = 0, last_wall_ = 0;
 };
 
