@@ -550,7 +550,7 @@ static bool capture_impl(TerrainInfo& out) {
     if (g_exported.count(out.id)) return true;
     if (g_busy.load(std::memory_order_acquire)) {
         log_once(10, "tacview terrain: an export is still running; this flight does not start another");
-        mark_no_aerodromes(out.id);
+        if (g_pending_id != out.id) mark_no_aerodromes(out.id);  // same theatre: its running job publishes the list
         return true;
     }
 
@@ -585,7 +585,7 @@ bool terrain_capture(TerrainInfo& out) {
 void terrain_export_start(TerrainInfo& info) {
     if (!info.samples) return;
     if (g_busy.load(std::memory_order_acquire)) {
-        mark_no_aerodromes(info.id);
+        if (g_pending_id != info.id) mark_no_aerodromes(info.id);  // same theatre: its running job publishes the list
         return;
     }
     if (g_thread.joinable()) g_thread.join();  // its job has ended (g_busy is clear): this returns at once
