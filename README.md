@@ -55,7 +55,7 @@ The release notes also list each file's SHA-256.
 | `scripts/` | Install and uninstall for development, using a file manifest |
 | `tools/` | The winmm proxy generator, the `.cat` unpacker, Ghidra scripts, Process Monitor helpers, and the unattended test driver |
 | `tacview/` | The LazySF2 Tacview add-on (Lua), built into the DLL |
-| `docs/` | The briefs and the [host stream format](docs/stream-format.md) |
+| `docs/` | The briefs (borderless, network, quality of life) and the [host stream format](docs/stream-format.md) |
 | `.github/` | CI (build and tests on every push) and the release workflow |
 
 ## Roadmap
@@ -76,10 +76,17 @@ The release notes also list each file's SHA-256.
 6. Sessions: handshake, content hashing, our own multiplayer screens, master server. Spawns use a theatre's dogfight file when it has one, otherwise a runway or air start.
 7. Public multiplayer release: NAT traversal with relay.
 
-**Later** (parked until multiplayer is further along)
+**Quality of life** (the [QoL brief](docs/SF2%20Quality-of-Life%20Follow-up%20%E2%80%94%20Claude%20Code%20Brief.md); each item ships on its own)
 
-- Esc in flight: an option to pause first instead of ending the flight at once.
-- Tacview: move old recordings to a theatre's current position; compressed `.zip.acmi`; non-ASCII aerodrome names.
+1. Smart scaling for distant aircraft (investigating).
+2. Z-fighting and depth precision (investigating).
+3. Per-mission start position, with end-of-runway starts.
+4. Clickable cockpits (feasibility first).
+
+Smaller items: Esc in flight pauses first instead of ending the flight; Tacview: move old recordings to a theatre's current position, non-ASCII aerodrome names.
+
+**Later**
+
 - Auto-update, and Authenticode signing of the installer.
 
 ## Contributing
