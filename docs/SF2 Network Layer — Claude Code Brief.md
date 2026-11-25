@@ -1,6 +1,6 @@
 # SF2 Network Layer — Claude Code Brief
 
-Nov 24, 2026 · @Jozias van der Westhuizen
+Nov 24, 2026
 
 This brief covers adding multiplayer back into Strike Fighters 2. That means sessions, replication, recording to Tacview ACMI for debriefs, and the debug tooling to build it all as a solo developer. It follows the borderless fullscreen brief and reuses that brief's recon and hooking work. Nothing here is built until the borderless work is done and the recon below says it's workable.
 

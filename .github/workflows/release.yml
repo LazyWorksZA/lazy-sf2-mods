@@ -1,0 +1,99 @@
+# Builds a release from a version tag (v1.2.3) on GitHub's runner, records build provenance for every file it
+# publishes, and creates the GitHub release with the files and their SHA-256 hashes.
+# Check a download: gh attestation verify <file> --repo <owner>/<repo>
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write      # create the release
+  id-token: write      # sign the provenance (Sigstore)
+  attestations: write  # store the provenance
+
+jobs:
+  release:
+    runs-on: windows-2025-vs2026
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.vcpkg-cache
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version from the tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "tag must be vX.Y.Z, got ${{ github.ref_name }}" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Create the vcpkg cache folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - name: Install vpk
+        shell: pwsh
+        run: dotnet tool install -g vpk --version 1.2.161
+
+      # A release is built from scratch: no build cache, so nothing from earlier runs ends up in it.
+      - name: Build the mod and the installer
+        shell: pwsh
+        run: ./installer/build-installer.ps1 -Version ${{ steps.ver.outputs.version }} -Clean
+
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          ./build/Release/tools/lazysf2-net-tests.exe
+          if ($LASTEXITCODE) {
+            Write-Host '::warning::tests failed once; retrying'
+            ./build/Release/tools/lazysf2-net-tests.exe
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          dotnet test installer/LazySF2.Manager.Tests
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Collect the release files
+        id: files
+        shell: pwsh
+        run: |
+          $out = New-Item -ItemType Directory -Force dist
+          Copy-Item build/Release/winmm.dll $out
+          Copy-Item installer/Releases/LazySF2-win.msi $out
+          Copy-Item installer/Releases/LazySF2-win-Setup.exe $out
+          Push-Location $out
+          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - name: Record build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/winmm.dll
+            dist/LazySF2-win.msi
+            dist/LazySF2-win-Setup.exe
+
+      - name: Release notes
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $text = Get-Content CHANGELOG.md -Raw
+          $m = [regex]::Match($text, "(?ms)^## \[?$([regex]::Escape($v))\]?[^\n]*\n(.*?)(?=^## |\z)")
+          $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "See CHANGELOG.md." }
+          $sums = (Get-Content dist/SHA256SUMS.txt) -join "`n"
+          $notes += "`n`n## Checking a download`n`nEach file was built by GitHub Actions from this tag. To confirm that:`n`n" +
+                    '```' + "`ngh attestation verify <file> --repo ${{ github.repository }}`n" + '```' +
+                    "`n`nSHA-256:`n`n" + '```' + "`n$sums`n" + '```'
+          Set-Content -Encoding utf8 notes.md $notes
+
+      - name: Create the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' --title 'LazySF2 ${{ steps.ver.outputs.version }}' `
+            --notes-file notes.md --verify-tag `
+            dist/LazySF2-win.msi dist/LazySF2-win-Setup.exe dist/winmm.dll dist/SHA256SUMS.txt

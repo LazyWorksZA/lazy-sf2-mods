@@ -57,6 +57,7 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
 
 - The reverse-engineering notes have moved to a separate private repository, together with their history. This repo's history was rewritten to remove them.
 - Code comments are trimmed to short `///` XML doc comments.
+- **CI and releases on GitHub Actions.** Every push is built and tested. A version tag (`vX.Y.Z`) builds the release on GitHub's runner, records signed build provenance for each file (check it with `gh attestation verify`), and publishes the MSI, `Setup.exe`, `winmm.dll` and their SHA-256 hashes.
 - Security hardening:
   - the elevated helper uses a manifest allow-list and refuses reparse points;
   - hooks remove stale entries safely;
