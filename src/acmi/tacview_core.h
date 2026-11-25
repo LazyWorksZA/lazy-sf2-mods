@@ -21,6 +21,8 @@
 // Aircraft and weapons have a rate limit each (10 Hz and 20 Hz: weapons move fast). Ground objects (0x2000000+seq) and
 // countermeasures (0x3000000+seq) have none here: the world walker samples them at its own rates. Ground objects are
 // Ground+Static+Building, Ground+Vehicle or Sea+Watercraft with the type name as Name; flares and chaff are Misc+Decoy+...
+// An aerodrome (0x6000000+seq) is a static Ground+Static+Aerodrome with its name and heading, written once: the recorder
+// lists it in one frame of its own, and only the final frame (every series) removes it.
 // A frame says which series it lists completely (end_frame's series_mask), so a 1 Hz series is not removed in between.
 #pragma once
 
@@ -40,6 +42,7 @@ constexpr uint32_t kGroundIdBase = 0x2000000;  // ground objects, vehicles and s
 constexpr uint32_t kCounterMeasureIdBase = 0x3000000;  // flares and chaff
 constexpr uint32_t kBulletIdBase = 0x4000000;  // tracer rounds
 constexpr uint32_t kExplosionIdBase = 0x5000000;  // explosion objects, numbered by the core
+constexpr uint32_t kAerodromeIdBase = 0x6000000;  // airfields, written once per recording
 // Explosion size (the Radius property, metres) by what blew up, and how long the object stays (game seconds).
 constexpr double kExplosionRadiusBomb = 30, kExplosionRadiusRocket = 8, kExplosionRadiusMissile = 12;
 constexpr double kExplosionRadiusAircraft = 20, kExplosionRadiusGround = 25;
@@ -51,25 +54,29 @@ constexpr size_t kRecTypeChars = 31;  // aircraft type name (Tacview model key),
 struct TacviewRec {
     static constexpr uint8_t kObject = 0, kEndFrame = 1;
     static constexpr uint8_t kAircraft = 0, kMissile = 1, kBomb = 2, kRocket = 3;
-    static constexpr uint8_t kGroundStatic = 4, kGroundVehicle = 5, kShip = 6, kFlare = 7, kChaff = 8, kBullet = 9;
+    static constexpr uint8_t kGroundStatic = 4, kGroundVehicle = 5, kShip = 6, kFlare = 7, kChaff = 8, kBullet = 9,
+                             kAerodrome = 10;
     /// <summary>The kinds of object that share an id range and a sequence counter.</summary>
-    enum class Family : uint8_t { Aircraft, Weapon, Ground, CounterMeasure, Bullet };
+    enum class Family : uint8_t { Aircraft, Weapon, Ground, CounterMeasure, Bullet, Aerodrome };
     static constexpr Family family_of(uint8_t cls) {
         if (cls == kAircraft) return Family::Aircraft;
         if (cls >= kGroundStatic && cls <= kShip) return Family::Ground;
         if (cls == kFlare || cls == kChaff) return Family::CounterMeasure;
         if (cls == kBullet) return Family::Bullet;
+        if (cls == kAerodrome) return Family::Aerodrome;
         return Family::Weapon;  // missile, bomb, rocket, and any unknown value
     }
     /// <summary>Frame series: a frame lists some series completely, and only those can lose objects (removal).</summary>
     static constexpr uint8_t kSeriesAircraft = 1, kSeriesWeapon = 2, kSeriesGroundStatic = 4, kSeriesGroundMobile = 8,
-                             kSeriesCounterMeasure = 16, kSeriesBullet = 32, kSeriesAll = 0xff;
+                             kSeriesCounterMeasure = 16, kSeriesBullet = 32, kSeriesAerodrome = 64,
+                             kSeriesAll = 0xff;
     static constexpr uint8_t series_of(uint8_t cls) {
         switch (family_of(cls)) {
             case Family::Aircraft: return kSeriesAircraft;
             case Family::Ground: return cls == kGroundStatic ? kSeriesGroundStatic : kSeriesGroundMobile;
             case Family::CounterMeasure: return kSeriesCounterMeasure;
             case Family::Bullet: return kSeriesBullet;
+            case Family::Aerodrome: return kSeriesAerodrome;
             default: return kSeriesWeapon;
         }
     }

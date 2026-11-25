@@ -2642,6 +2642,53 @@ void texture_tests() {
 }
 }  // namespace
 
+void aerodrome_core_tests() {
+    using namespace lazysf2::acmi;
+    using lazysf2::hooks::AircraftSide;
+    std::printf("tacview aerodromes\n");
+    TacviewCoreConfig cfg;
+    cfg.ref_lat = -4.5;
+    cfg.ref_lon = -25.0;
+    TacviewCore core{cfg};
+    std::string out;
+    auto aero = [](uint64_t seq, const char* name, double x, double y, double z, float heading) {
+        TacviewRec r = make_rec(seq, false, AircraftSide::Friendly, name, 5.0, x, y, z, 0.0f, heading, 0.0f);
+        r.obj_class = TacviewRec::kAerodrome;
+        return r;
+    };
+    core.add(aero(1, "Ramstein, Airbase", 100000, 200000, 250, static_cast<float>(kPi / 2)));
+    core.add(aero(2, "Sembach", 1000, 2000, 0, 0.0f));
+    core.end_frame(5.0, out, TacviewRec::kSeriesAerodrome);
+    auto ls = lines_of(out);
+    const auto m = make_mapping(-4.5);
+    expect(ls.size() == 3 && ls[0] == "#0.000", "aerodromes: one frame with both");
+    expect(ls[1].rfind("6000001,T=" + num(100000 * m.lon_scale, 9) + "|" + num(200000 * m.lat_scale, 9) + "|250|", 0) == 0,
+           "aerodromes: id 0x6000000+seq, position from the world metres, altitude");
+    expect(ls[1].find("|250|0|0|90|100000|200000|90,Name=") != std::string::npos,
+           "aerodromes: the heading is written");
+    expect(ls[1].find(",Name=Ramstein" + std::string(1, 92) + ", Airbase,Type=Ground+Static+Aerodrome") != std::string::npos &&
+               ls[1].find("Coalition") == std::string::npos && ls[1].find("Color") == std::string::npos,
+           "aerodromes: name escaped, type Ground+Static+Aerodrome, no coalition");
+    expect(ls[2].rfind("6000002,T=", 0) == 0, "aerodromes: the second id");
+
+    // Written once: frames of other series neither repeat nor remove them.
+    std::string o2;
+    core.add(make_rec(1, true, AircraftSide::Friendly, "P", 6.0, 0, 0, 100, 0, 0, 0));
+    core.end_frame(6.0, o2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+    expect(o2.find("6000001") == std::string::npos && o2.find("-6000001") == std::string::npos, "aerodromes: other frames leave them alone");
+    std::string o3;
+    core.end_frame(7.0, o3, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile | TacviewRec::kSeriesBullet);
+    expect(o3.find("6000001") == std::string::npos, "aerodromes: a ground-only frame leaves them alone too");
+    // The last frame lists every series: it removes them.
+    std::string o4;
+    core.end_frame(8.0, o4);
+    expect(o4.find("-6000001\n") != std::string::npos && o4.find("-6000002\n") != std::string::npos,
+           "aerodromes: the final frame removes them");
+    expect(core.live_objects() == 0, "aerodromes: none left");
+    static_assert(TacviewRec::series_of(TacviewRec::kAerodrome) == TacviewRec::kSeriesAerodrome, "series");
+    static_assert(TacviewRec::kSeriesAerodrome != TacviewRec::kSeriesBullet && (TacviewRec::kSeriesAerodrome & 0x3f) == 0, "series bit is its own");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -2665,6 +2712,7 @@ int main() {
     tacview_tests();
     terrain_tests();
     texture_tests();
+    aerodrome_core_tests();
     other_page_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
