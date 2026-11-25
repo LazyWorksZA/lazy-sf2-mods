@@ -59,8 +59,9 @@ jobs:
         run: |
           $out = New-Item -ItemType Directory -Force dist
           Copy-Item build/Release/winmm.dll $out
-          Copy-Item installer/Releases/LazySF2-win.msi $out
-          Copy-Item installer/Releases/LazySF2-win-Setup.exe $out
+          # Velopack names its files after the package id; publish them under the product name and version.
+          Copy-Item installer/Releases/LazySF2-win.msi (Join-Path $out 'Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi')
+          Copy-Item installer/Releases/LazySF2-win-Setup.exe (Join-Path $out 'Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe')
           Push-Location $out
           Get-ChildItem -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
@@ -73,8 +74,8 @@ jobs:
         with:
           subject-path: |
             dist/winmm.dll
-            dist/LazySF2-win.msi
-            dist/LazySF2-win-Setup.exe
+            dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi
+            dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe
 
       - name: Release notes
         shell: pwsh
@@ -96,4 +97,4 @@ jobs:
         run: |
           gh release create '${{ github.ref_name }}' --title 'Lazy SF2 Patch ${{ steps.ver.outputs.version }}' `
             --notes-file notes.md --verify-tag `
-            dist/LazySF2-win.msi dist/LazySF2-win-Setup.exe dist/winmm.dll dist/SHA256SUMS.txt
+            dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe dist/winmm.dll dist/SHA256SUMS.txt

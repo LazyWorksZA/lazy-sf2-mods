@@ -27,12 +27,12 @@ The reverse-engineering notes are kept in a separate private repository.
 
 ## Quick start
 
-**Players:** download `LazySF2-win.msi` from the [Releases](../../releases) page and run it. See [`INSTALL.md`](INSTALL.md).
+**Players:** download `Lazy-SF2-Patch-<version>.msi` from the [Releases](../../releases) page and run it. See [`INSTALL.md`](INSTALL.md).
 
 Every release file is built by GitHub Actions from the tagged commit, never on a developer's machine. To confirm that a download came from this repository's code:
 
-```powershell
-gh attestation verify LazySF2-win.msi --repo LazyWorksZA/lazy-sf2-patch
+```
+gh attestation verify <downloaded file> --repo LazyWorksZA/lazy-sf2-patch
 ```
 
 The release notes also list each file's SHA-256.

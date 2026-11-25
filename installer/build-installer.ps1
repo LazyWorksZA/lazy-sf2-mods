@@ -58,4 +58,28 @@ vpk pack --packId LazySF2 --packVersion $Version --packDir $publish --mainExe La
     --instConclusion (Join-Path $PSScriptRoot 'conclusion.txt') `
     --outputDir $releases
 if ($LASTEXITCODE) { throw "vpk pack failed ($LASTEXITCODE)" }
+
+# 5. Velopack's MSI sets no icon for Installed apps: add ours (Icon table + ARPPRODUCTICON).
+function Set-MsiArpIcon([string]$msi, [string]$ico) {
+    $wi = New-Object -ComObject WindowsInstaller.Installer
+    $db = $wi.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $wi, @($msi, 1))   # 1 = transact
+    function Invoke-Sql([string]$sql, $record = $null) {
+        $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($sql))
+        $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $(if ($record) { @($record) } else { $null }))
+        $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+    }
+    $tables = $db.GetType().InvokeMember('TablePersistent', 'GetProperty', $null, $db, @('Icon'))
+    if ($tables -ne 1) { Invoke-Sql 'CREATE TABLE `Icon` (`Name` CHAR(72) NOT NULL, `Data` OBJECT NOT NULL PRIMARY KEY `Name`)' }
+    $rec = $wi.GetType().InvokeMember('CreateRecord', 'InvokeMethod', $null, $wi, @(2))
+    $rec.GetType().InvokeMember('StringData', 'SetProperty', $null, $rec, @(1, 'app.ico'))
+    $rec.GetType().InvokeMember('SetStream', 'InvokeMethod', $null, $rec, @(2, $ico))
+    $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('INSERT INTO `Icon` (`Name`, `Data`) VALUES (?, ?)'))
+    $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, @($rec))
+    $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+    Invoke-Sql "INSERT INTO ``Property`` (``Property``, ``Value``) VALUES ('ARPPRODUCTICON', 'app.ico')"
+    $db.GetType().InvokeMember('Commit', 'InvokeMethod', $null, $db, $null)
+    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($db)
+}
+Set-MsiArpIcon (Join-Path $releases 'LazySF2-win.msi') (Join-Path $PSScriptRoot 'assets\app.ico')
+
 Get-ChildItem $releases | Select-Object Name, Length
