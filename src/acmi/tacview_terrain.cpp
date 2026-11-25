@@ -18,6 +18,13 @@ std::string terrain_id(std::wstring_view base_name) {
     return id;
 }
 
+std::string terrain_file_stem(const std::string& id) {
+    std::string s = id;
+    for (char& c : s)
+        if (c == '.') c = '-';
+    return s;
+}
+
 void terrain_raw_north_first(const uint16_t* south_first, int w, int h, std::vector<uint8_t>& out) {
     out.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
     size_t o = 0;

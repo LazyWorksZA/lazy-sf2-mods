@@ -13,6 +13,9 @@ constexpr size_t kTerrainIdMaxChars = 48;
 /// <summary>"LazySF2." plus the base name with anything but ASCII letters, digits, '_' and '-' mapped to '_'; capped at 48 chars. Empty in, empty out.</summary>
 std::string terrain_id(std::wstring_view base_name);
 
+/// <summary>The id as a file stem: dots become dashes, because Tacview cannot load a texture whose name has more than one dot.</summary>
+std::string terrain_file_stem(const std::string& id);
+
 /// <summary>Little-endian u16 raw, north row first: the game keeps the south row first, so the rows are reversed.</summary>
 void terrain_raw_north_first(const uint16_t* south_first, int w, int h, std::vector<uint8_t>& out);
 

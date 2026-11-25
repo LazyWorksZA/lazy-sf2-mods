@@ -1545,7 +1545,11 @@ void terrain_tests() {
     const uint8_t want[12] = {0x04, 0x01, 5, 0, 0xcd, 0xab, 1, 0, 2, 0, 3, 0};
     expect(raw.size() == 12 && std::memcmp(raw.data(), want, 12) == 0, "terrain raw: north row first, little-endian");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
+    expect(terrain_file_stem("LazySF2.T") == "LazySF2-T" && terrain_file_stem("LazySF2.A_b-1") == "LazySF2-A_b-1" &&
+               terrain_file_stem("").empty(),
+           "terrain file stem: dots become dashes");
+
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2000, 2000, 500.0, -25.0, -4.5, -4.5);
     const auto m = make_mapping(-4.5);
     const std::string east = num(-25.0 + 1999 * 500.0 * m.lon_scale, 9);
     const std::string north = num(-4.5 + 1999 * 500.0 * m.lat_scale, 9);
@@ -1554,7 +1558,7 @@ void terrain_tests() {
         return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat +
                    "</Latitude>");
     };
-    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2.T\">") && has("<File>LazySF2.T.raw</File>") &&
+    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2.T\">") && has("<File>LazySF2-T.raw</File>") &&
                has("<Width>2000</Width>") && has("<Height>2000</Height>") && has("<BigEndian>0</BigEndian>") &&
                has("<AltitudeFactor>1</AltitudeFactor>") && has("<Projection>Quad</Projection>"),
            "terrain xml: structure");
@@ -2625,7 +2629,7 @@ void texture_tests() {
 
     // texture xml
     {
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5);
         const auto m = make_mapping(-4.5);
         const std::string east = num(-25.0 + 1000000.0 * m.lon_scale, 9), north = num(-4.5 + 1000000.0 * m.lat_scale, 9);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
@@ -2633,7 +2637,7 @@ void texture_tests() {
             return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat + "</Latitude>");
         };
         expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2.T\">") &&
-                   has("<File>LazySF2.T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
+                   has("<File>LazySF2-T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
                "texture xml: structure");
         expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&
                    corner("TopLeft", "-25", north),
@@ -2713,14 +2717,14 @@ void texture_tests() {
         RGBAImage ne;
         expect(!runway_patch(none, ne, x0, y0, side), "runway_patch: no runways, no patch");
 
-        const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2.T.AF001.png", 1000, 2000, 3000},
-                                               {"LazySF2.T.AF002", "LazySF2.T.AF002.png", 5000, 6000, 2000}};
-        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
+        const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2-T-AF001.png", 1000, 2000, 3000},
+                                               {"LazySF2.T.AF002", "LazySF2-T-AF002.png", 5000, 6000, 2000}};
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, -4.5, extra);
         const auto m = make_mapping(-4.5);
         auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
         const size_t base = xml.find("Id=\"LazySF2.T\""), p1 = xml.find("Id=\"LazySF2.T.AF001\""), p2 = xml.find("Id=\"LazySF2.T.AF002\"");
         expect(base != std::string::npos && base < p1 && p1 < p2, "texture xml: base entry first, then the patches in order");
-        expect(has("<File>LazySF2.T.AF001.png</File>") && has("<File>LazySF2.T.AF002.png</File>"), "texture xml: patch files");
+        expect(has("<File>LazySF2-T-AF001.png</File>") && has("<File>LazySF2-T-AF002.png</File>"), "texture xml: patch files");
         const std::string bl_lon = num(-25.0 + 1000 * m.lon_scale, 9), bl_lat = num(-4.5 + 2000 * m.lat_scale, 9);
         const std::string tr_lon = num(-25.0 + 4000 * m.lon_scale, 9), tr_lat = num(-4.5 + 5000 * m.lat_scale, 9);
         const std::string first = xml.substr(p1, xml.find("</CustomTexture>", p1) - p1);
@@ -2806,14 +2810,14 @@ void placement_tests() {
     const Placement edge = place_theatre(true, 179.9, 85.0, 1000000.0, 1000000.0);
     expect(edge.ref_lon >= -180.0 && edge.ref_lon <= 180.0 && edge.ref_lat >= -89.0, "placement: the corner is clamped");
 
-    const std::string txml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
+    const std::string txml = texture_xml("LazySF2.T", "LazySF2-T.jpg", 8, 8, 1000.0, 1000.0, p.ref_lon, p.ref_lat,
                                          p.scale_lat);
     expect(txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * m.lon_scale, 9) + "</Longitude>") != std::string::npos &&
                txml.find("<Longitude>" + num(p.ref_lon + 1000.0 * make_mapping(p.ref_lat).lon_scale, 9) + "</Longitude>") ==
                    std::string::npos,
            "placement: texture_xml uses the scale latitude, not the corner latitude");
 
-    const std::string xml = terrain_xml("LazySF2.T", "LazySF2.T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
+    const std::string xml = terrain_xml("LazySF2.T", "LazySF2-T.raw", 2, 2, 1000.0, p.ref_lon, p.ref_lat, p.scale_lat);
     expect(xml.find(num(p.ref_lon + 1000.0 * m.lon_scale, 9)) != std::string::npos,
            "placement: terrain_xml uses the scale latitude");
 }

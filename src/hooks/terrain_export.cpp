@@ -319,12 +319,13 @@ bool make_dir(const std::wstring& dir, const std::string& id) {
 // True when the files are in place.
 bool export_heightmap(const Job& job, const std::wstring& dir) {
     if (!make_dir(dir, job.id)) return false;
-    const std::wstring stem = dir + L"\\" + std::wstring(job.id.begin(), job.id.end());
+    const std::string file_stem = acmi::terrain_file_stem(job.id);
+    const std::wstring stem = dir + L"\\" + std::wstring(file_stem.begin(), file_stem.end());
     const uint64_t raw_bytes = static_cast<uint64_t>(job.w) * static_cast<uint64_t>(job.h) * 2;
     const bool have_raw = exists_with_size(stem + L".raw", raw_bytes);
     // The xml is small: always rewritten, so a changed reference point never leaves stale corners.
     const std::string xml =
-        acmi::terrain_xml(job.id, job.id + ".raw", job.w, job.h, job.spacing,
+        acmi::terrain_xml(job.id, file_stem + ".raw", job.w, job.h, job.spacing,
                           job.place.ref_lon, job.place.ref_lat, job.place.scale_lat);
     bool ok = true;
     if (!have_raw) {
@@ -422,7 +423,8 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
     const TextureCapture& t = *job.texture;
     if (t.tiles_w == 0) return;  // already logged at capture
     if (!make_dir(dir, job.id)) return;
-    const std::wstring stem = dir + L"\\" + std::wstring(job.id.begin(), job.id.end());
+    const std::string file_stem = acmi::terrain_file_stem(job.id);
+    const std::wstring stem = dir + L"\\" + std::wstring(file_stem.begin(), file_stem.end());
     const std::wstring shown = log::log_path(dir);
     const int n = kTexturePixelsPerTile;
     const double extent_x = t.tiles_w * t.tile_m, extent_y = t.tiles_h * t.tile_m;
@@ -479,7 +481,8 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
             if (!acmi::runway_patch(airfields[i], patch, e.x0, e.y0, e.side_m)) continue;
             std::snprintf(suffix, sizeof suffix, ".AF%03zu", i + 1);
             e.id = job.id + suffix;
-            e.file = e.id + ".png";
+            std::snprintf(suffix, sizeof suffix, "-AF%03zu", i + 1);
+            e.file = file_stem + suffix + ".png";
             const std::wstring path = dir + L"\\" + std::wstring(e.file.begin(), e.file.end());
             if (exists(path)) {
                 ++present;
@@ -504,11 +507,39 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
         LOG("tacview terrain: %s: %d runway patches (%d written, %d already present, %d failed)", job.id.c_str(),
             written + present, written, present, failed);
     // The xml is small: always rewritten, so a changed reference point never leaves stale corners.
-    const std::string xml = acmi::texture_xml(job.id, job.id + ".jpg", t.tiles_w * n, t.tiles_h * n, extent_x, extent_y,
+    const std::string xml = acmi::texture_xml(job.id, file_stem + ".jpg", t.tiles_w * n, t.tiles_h * n, extent_x, extent_y,
                                               job.place.ref_lon, job.place.ref_lat, job.place.scale_lat,
                                               patches);
     if (!write_atomic(stem + L".xml", [&](HANDLE f) { return write_all(f, xml.data(), xml.size()); }))
         LOG("tacview terrain: %s: could not write the texture xml (error %lu)", job.id.c_str(), GetLastError());
+}
+
+/// <summary>Deletes the dotted file names earlier versions wrote for this theatre (Tacview cannot load them). Returns the count removed.</summary>
+int remove_legacy_files(const std::wstring& dir, const std::string& id) {
+    const std::wstring wid(id.begin(), id.end());
+    const std::wstring base = dir + L"\\" + wid;
+    int removed = 0;
+    for (const wchar_t* ext : {L".raw", L".jpg", L".raw.tmp", L".jpg.tmp"})
+        if (DeleteFileW((base + ext).c_str())) ++removed;
+    std::vector<std::wstring> found;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((base + L".AF*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        const std::wstring prefix = wid + L".AF";
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::wstring name = fd.cFileName;
+            if (name.compare(0, prefix.size(), prefix) != 0) continue;
+            size_t i = prefix.size();
+            while (i < name.size() && name[i] >= L'0' && name[i] <= L'9') ++i;
+            const std::wstring rest = name.substr(i);
+            if (i > prefix.size() && (rest == L".png" || rest == L".png.tmp")) found.push_back(name);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    for (const std::wstring& name : found)
+        if (DeleteFileW((dir + L"\\" + name).c_str())) ++removed;
+    return removed;
 }
 
 // True when the heightmap is in place. The texture and the airfields are best-effort.
@@ -522,6 +553,9 @@ bool export_files(Job& job) {
         return false;
     }
     root += L"\\Tacview\\Data\\Terrain";
+    const int removed = remove_legacy_files(root + L"\\Custom\\LazySF2", job.id) +
+                        remove_legacy_files(root + L"\\Textures\\LazySF2", job.id);
+    if (removed > 0) LOG("tacview terrain: %s: removed %d old dotted file(s) Tacview could not load", job.id.c_str(), removed);
     const bool ok = export_heightmap(job, root + L"\\Custom\\LazySF2");
     if (!job.texture) return ok;
     try {
