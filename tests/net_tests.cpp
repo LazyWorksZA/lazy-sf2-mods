@@ -1916,6 +1916,16 @@ void tacview_tests() {
         c2.end_frame(2.0, p2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
         c2.end_frame(2.5, p3);
         expect(p3.find("-5000001") != std::string::npos, "explosion: the last frame removes pending explosions");
+        // A core that continues a file after a crash exit numbers its explosions after the lost core's.
+        TacviewCore c3{TacviewCoreConfig{}};
+        c3.seed_explosions(c2.next_explosion());
+        std::string q1, q2;
+        c3.add(obj(TacviewRec::kBomb, 2, 3.0, 100));
+        c3.end_frame(3.0, q1, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        c3.add(marker(TacviewRec::kBomb, 2, 3.5, TacviewRec::kDetonated));
+        c3.end_frame(3.5, q2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        expect(q2.find("5000002,T=") != std::string::npos && q2.find("5000001,T=") == std::string::npos,
+               "explosion: a seeded core does not reuse the lost core's ids");
     }
 
     // The world walker's identity rules, over synthetic slot snapshots.

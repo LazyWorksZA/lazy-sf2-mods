@@ -115,6 +115,7 @@ private:
     std::atomic<bool> t0_set_{false};
     std::atomic<double> t0_{0};
     std::atomic<long long> last_ms_{-1};
+    std::atomic<uint32_t> next_explosion_{1};  // the writer core's next explosion number, for flush_orphaned
     std::atomic<bool> summary_logged_{false};
     std::atomic<bool> created_{false};  // the file exists
 };
