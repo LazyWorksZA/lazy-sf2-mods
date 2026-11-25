@@ -41,7 +41,8 @@ void append_escaped(std::string& out, const char* s) {
     }
 }
 
-void append_header(std::string& out, const char* reference_time, double ref_lon, double ref_lat, const char* title) {
+void append_header(std::string& out, const char* reference_time, double ref_lon, double ref_lat, const char* title,
+                   const char* theater) {
     out += "FileType=text/acmi/tacview\nFileVersion=2.2\n";
     // ReferenceLongitude/Latitude are added to each object's Longitude/Latitude (spec, "Global properties"),
     // so the T= values are offsets from the reference point.
@@ -49,6 +50,10 @@ void append_header(std::string& out, const char* reference_time, double ref_lon,
     out += reference_time;
     out += ",ReferenceLongitude=" + num(ref_lon, 9) + ",ReferenceLatitude=" + num(ref_lat, 9) + ",Title=";
     append_escaped(out, title);
+    if (theater && *theater) {
+        out += ",Theater=";
+        append_escaped(out, theater);
+    }
     out += '\n';
 }
 

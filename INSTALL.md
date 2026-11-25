@@ -35,6 +35,12 @@ All three are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.
 
 No game files and no registry keys are changed. Removing these files returns the game to stock.
 
+## Tacview terrain
+
+With **Tacview Recording** on, the first flight you record in each theatre also writes that theatre's heightmap (elevation only, no texture) to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre, so Tacview should show the Strike Fighters terrain under the aircraft. The theatres are not to real scale, so each one sits as its own square over open ocean and not over its real place on the map.
+
+If you don't see it, check that Tacview's terrain or custom elevation options are on. This is unverified: it hasn't been tried in Tacview yet. These files are outside the game folder, so uninstalling the mod leaves them. You can delete the `LazySF2` folder yourself.
+
 ## How to tell it's working
 
 - Options → Graphics shows **Display Mode** and **Screen**, and Options → Controls shows **Mouse Pointer**.

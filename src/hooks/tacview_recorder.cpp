@@ -13,6 +13,7 @@
 #include "acmi/tacview_writer.h"
 #include "config.h"
 #include "hooks/hooks.h"
+#include "hooks/terrain_export.h"
 #include "hooks/weapon_class.h"
 #include "log.h"
 
@@ -177,10 +178,19 @@ StartResult start_recording(uint32_t epoch) {
     std::snprintf(iso, sizeof(iso), "%04u-%02u-%02uT%02u:%02u:%02uZ", utc.wYear, utc.wMonth, utc.wDay, utc.wHour,
                   utc.wMinute, utc.wSecond);
     acmi::TacviewCoreConfig cfg;  // reference 0/0, aircraft 10 Hz, weapons 20 Hz
+    // Every recording shares one frame (the SW corner at this point, over open ocean); a capture failure only means no Theater=.
+    cfg.ref_lon = kTerrainRefLon;
+    cfg.ref_lat = kTerrainRefLat;
+    TerrainInfo terrain;
+    if (terrain_capture(terrain)) {
+        cfg.theater = terrain.id;
+        if (!terrain.full_name.empty()) cfg.title += " - " + terrain.full_name;
+    }
     if (!g_writer->open(g_dir, local, iso, cfg, writer_log, display_path)) {
         LOG("tacview: not recording: could not start the writer");
         return StartResult::Failed;
     }
+    terrain_export_start(terrain);
     g_table_empty.store(false, std::memory_order_relaxed);
     g_recording = true;
     g_epoch = epoch;
@@ -258,6 +268,7 @@ void tacview_recorder_menu_moment() {
 }
 
 void tacview_recorder_shutdown() {
+    terrain_export_shutdown();
     if (!g_writer) return;
     g_recording = false;
     g_writer->close(true, "process exit");

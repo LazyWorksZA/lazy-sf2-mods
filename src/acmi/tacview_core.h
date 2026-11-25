@@ -52,6 +52,8 @@ struct TacviewCoreConfig {
     double ref_lon = 0;
     double max_rate = 10;         // aircraft: transforms per second per object at most; 0 or less means no limit
     double max_rate_weapon = 20;  // weapons: the same, for every object that is not an aircraft
+    std::string title = "Strike Fighters 2";
+    std::string theater;  // the Tacview custom terrain id; empty writes no Theater=
 };
 
 struct TacviewCoreStats {
