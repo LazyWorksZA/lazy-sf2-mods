@@ -56,8 +56,8 @@ Work in five phases. Each phase ends at a checkpoint: stop there, report back, a
 **Deliverables**
 
 - A git repo with the DLL source and a one-command x86 build.
-- `docs/recon-notes.md`: the living findings file.
-- `docs/option-trace.md`: the Phase 3 end-to-end trace.
+- `recon-notes.md`: the living findings file (now in the private `lazy-sf2-recon` repo).
+- `option-trace.md`: the Phase 3 end-to-end trace (also in `lazy-sf2-recon`).
 - The menu data changes, packaged as a normal SF2 mod-folder drop-in.
 - `INSTALL.md`: install, uninstall, and how to tell it's working.
 

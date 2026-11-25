@@ -6,7 +6,7 @@ This is the repo's **only** instructions file. Don't add a `CLAUDE.md` or tool-s
 
 ## What this is
 
-This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a 32-bit x86 D3D10 game with a D3D9 fallback. The mod is a `winmm.dll` proxy that hooks the game with MinHook. The briefs in `docs/` set the scope and the phases. `docs/recon-notes.md` is the living findings file; read the section that concerns you before starting.
+This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a 32-bit x86 D3D10 game with a D3D9 fallback. The mod is a `winmm.dll` proxy that hooks the game with MinHook. The briefs in `docs/` set the scope and the phases. The reverse-engineering notes live in a separate private repo, `lazy-sf2-recon` (check it out next to this one, at `../lazy-sf2-recon`). Its `recon-notes.md` is the living findings file; read the section that concerns you before starting.
 
 ## Ground rules (non-negotiable)
 
@@ -19,9 +19,9 @@ This repo holds runtime mods for Strike Fighters 2, the July 2013 final patch: a
 3. **Test against the original install. Don't run a copy of the game.** EULA 3(b) allows copies only as backups. The backups in `G:\SF2-backup\` exist only to restore files.
 4. **Stay compatible with DXVK, but don't vendor it.** Don't assume we own `d3d9.dll`, `dxgi.dll` or the `d3d10*.dll` files. Hook the COM objects the game actually gets, rather than replacing system DLLs.
    - DXVK isn't part of this project: never commit it, ship it, or install it with the mod. We only make sure the mod works when a player has installed it.
-   - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `docs/recon-notes.md` §15).
+   - For compatibility tests, keep it outside the repo (for example `G:\DevTools\dxvk`), add it to the game folder only for the test, and remove it afterwards (see `lazy-sf2-recon`, `recon-notes.md` §15).
 5. **Stop at each phase checkpoint** listed in the brief, report, and wait for review. If something contradicts the brief, stop and say so; don't work around it.
-6. **Write findings down as you go** in `docs/recon-notes.md`: addresses as RVAs (offsets from the module base), function roles, file formats and open questions.
+6. **Write findings down as you go** in the `lazy-sf2-recon` repo, never in this one: addresses as RVAs (offsets from the module base), function roles, file formats and open questions.
 7. **Third-party notices.** Every third-party component we *distribute* (statically linked libraries such as MinHook; shipped assemblies and binaries such as Velopack's) must be listed in `THIRD_PARTY_NOTICES.md` with its full license text, taken from the package itself rather than from memory. The installer ships that file with `LICENSE`. When you add, upgrade or remove a dependency, update the file in the same change.
 8. **Privacy.** Process Monitor captures and logs contain the machine's hostname and user paths. Keep them in `G:\SF2-recon`, and keep them out of commits.
 
@@ -76,6 +76,7 @@ The test project is only for development: it is not published or shipped.
 - Each feature is its own `src/hooks/*.cpp`. Features that need modules loaded later register with the module watch (`module_watch.cpp`) instead of hooking `LoadLibrary` again.
 - Settings go in `src/config.*`. Defaults must give stock behaviour, unless the brief says a feature is always on.
 - Log every hook install and every behaviour change once, with `LOG(...)`. Don't log every frame.
+- **Comments stay minimal.** Use `///` XML doc comments (`<summary>`, and `<param>`/`<returns>` only when they add something) on functions and types whose purpose isn't obvious. Don't restate the code. Keep short "why" comments for threading, lifetime and other non-obvious constraints. How the game works inside belongs in `lazy-sf2-recon`; point to it (`// See lazy-sf2-recon: recon-notes §4.3.`) instead of explaining it in the code.
 
 ## Workflow
 

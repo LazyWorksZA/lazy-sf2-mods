@@ -22,7 +22,7 @@ The mod is a single `winmm.dll` placed next to `StrikeFighters2.exe`.
 - **The Options rows** are added in memory as the game reads its menu files; no game files are shipped or changed.
 - Everything hooks the DirectX objects the game actually loads, so it also works with DXVK.
 
-The full reverse-engineering notes are in [`docs/recon-notes.md`](docs/recon-notes.md).
+The reverse-engineering notes are kept in a separate private repository.
 
 ## Quick start
 
@@ -45,7 +45,7 @@ The full reverse-engineering notes are in [`docs/recon-notes.md`](docs/recon-not
 | `installer/` | The headless LazySF2 helper (C#, Velopack install/uninstall hooks), installer texts, and `build-installer.ps1` |
 | `scripts/` | Install and uninstall for development, using a file manifest |
 | `tools/` | The winmm proxy generator, the `.cat` unpacker, Ghidra scripts, Process Monitor helpers, and the unattended test driver |
-| `docs/` | Briefs, [recon notes](docs/recon-notes.md) and the [Options-menu trace](docs/option-trace.md) |
+| `docs/` | The briefs and the [host stream format](docs/stream-format.md) |
 
 ## Roadmap (borderless brief)
 
