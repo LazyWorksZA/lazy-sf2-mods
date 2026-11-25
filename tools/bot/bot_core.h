@@ -42,13 +42,15 @@ inline double wrap_pi(double a) {  // into (-pi, pi]
     return a;
 }
 
-// Bank of a coordinated level turn at load factor n: n = 1/cos(bank).
+/// <summary>Bank of a coordinated level turn at load factor n: n = 1/cos(bank).</summary>
 inline double bank_for_load(double n) { return std::acos(1.0 / n); }
-// Turn rate of a coordinated turn: g * tan(bank) / V. Right turns (bank > 0) are positive (heading increases).
+/// <summary>Turn rate of a coordinated turn: g * tan(bank) / V. Right turns (bank &gt; 0) are positive (heading increases).</summary>
 inline double turn_rate(double bank) { return kG * std::tan(bank) / kSpeed; }
 
-// One scripted flight. Position is integrated from the velocity in small sub-steps (midpoint heading), so the
-// reported velocity is the derivative of the reported path.
+/// <summary>
+/// One scripted flight. Position is integrated from the velocity in small sub-steps (midpoint heading), so the
+/// reported velocity is the derivative of the reported path.
+/// </summary>
 class Flight {
 public:
     struct Sample {
@@ -66,7 +68,7 @@ public:
     }
     double time() const { return t_; }
 
-    // Advances to host game time t (never backwards).
+    /// <summary>Advances to host game time t (never backwards).</summary>
     void advance_to(double t) {
         while (t - t_ > 1e-9) {  // ignore a remainder below a nanosecond (a rate from it would be rounding noise)
             const double dt = (t - t_) < kStep ? (t - t_) : kStep;
@@ -176,7 +178,7 @@ public:
         best_rtt_ = half_rtt * 2.0;
     }
 
-    // Returns false if the Pong was ignored.
+    /// <summary>Returns false if the Pong was ignored.</summary>
     bool on_pong(double wall_send, double wall_rx, double host_time) {
         if (!welcomed_) return false;
         const double rtt = wall_rx - wall_send;
@@ -215,10 +217,12 @@ public:
         return true;
     }
 
-    // True while States must not be sent: the host's clock is frozen, or nothing has come for kStale: no Pong since
-    // the last one, or, if none ever arrived, none since the Welcome (the Welcome's clock goes stale, too).
+    /// <summary>
+    /// True while States must not be sent: the host's clock is frozen, or nothing has come for kStale: no Pong since
+    /// the last one, or, if none ever arrived, none since the Welcome (the Welcome's clock goes stale, too).
+    /// </summary>
     bool on_hold(double wall) const { return frozen_ || (welcomed_ && wall - last_pong_wall_ > kStale); }
-    // The host's game time as of wall. Held at the last known host time while frozen.
+    /// <summary>The host's game time as of wall. Held at the last known host time while frozen.</summary>
     double now(double wall) const { return frozen_ ? held_ : wall + offset_; }
 
 private:

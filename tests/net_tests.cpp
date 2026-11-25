@@ -161,8 +161,6 @@ void loopback() {
     enet_host_flush(client);
 }
 
-// --- The host's network core (the part of host mode that needs no game) ---------------------------
-
 void parse_tests() {
     std::printf("parse_host_spec\n");
     char a[48];
@@ -585,8 +583,6 @@ void host_core_tests() {
 
 }  // namespace
 
-// --- The synthetic client (tools/bot) -------------------------------------------------------------
-
 namespace bot = lazysf2::bot;
 
 void bot_flight_tests() {
@@ -970,8 +966,6 @@ void bot_loopback_tests() {
     }
 }
 
-// --- Stream recording -------------------------------------------------------------------------------
-
 void stream_log(const char* line) { std::printf("    log: %s\n", line); }
 
 std::vector<uint8_t> read_file(const std::wstring& path) {
@@ -1252,7 +1246,6 @@ void stream_tests() {
     remove_dir(dir);
 }
 
-// ---- ACMI export ----
 void acmi_tests() {
     std::printf("acmi export\n");
     std::vector<uint8_t> f(48 + 100000);
@@ -1478,7 +1471,6 @@ void tracker_logic_tests() {
     expect(decide_on_options_exit(true, false, false) == OptionsExitAction::Nothing, "options exit: not wanted, not hooked -> nothing");
 }
 
-// ---- Tacview recorder core and writer (no game) ----
 lazysf2::acmi::TacviewRec make_rec(uint64_t seq, bool player, lazysf2::hooks::AircraftSide side, const char* name,
                                    double t, double x, double y, double z, float pitch, float heading, float roll) {
     lazysf2::acmi::TacviewRec r;
@@ -1710,7 +1702,7 @@ void tacview_tests() {
         expect(count_of(o3, "\n10001,T=") == 0, "tacview weapons: no id collision with aircraft");
     }
 
-    // Reviewer's two core cases: a NaN sample of an existing object, and end_frame after an empty frame.
+    // NaN sample of an existing object; end_frame after an empty frame.
     {
         TacviewCore core{TacviewCoreConfig{}};
         std::string out;

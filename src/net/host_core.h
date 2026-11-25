@@ -1,22 +1,18 @@
 #pragma once
-// The host's network core: an ENet host on its own thread, and two small queues to the game thread.
-// No game or Windows-API dependencies except what ENet brings, so the loopback tests run it without the game.
-//
-// Threads:
-//  - The network thread owns ENet: it creates the host, services it every 5 ms, and destroys it. Nothing else
-//    ever calls ENet.
-//  - The game thread (any single caller thread, in the tests) talks to the core only through poll(), send(),
-//    disconnect(), set_welcomed() and set_host_time(). Each takes a mutex for a few copies of a few dozen
-//    bytes, or is an atomic. The queues are fixed rings, allocated with the object.
-//  - The in ring has a reserve for control events (Connect, Disconnect, Hello, Bye: at most 4 per connection, because
-//    Hello and Bye are accepted once each). States may use only the rest of the ring, and each slot only its share of
-//    that (kStateQuota), so one client's States can never fill the ring and crowd another client's join or leave out.
-//  - The network thread answers Pings itself (a Pong with the host game time the game thread last published), so
-//    clock sync works while the game is paused or in a menu.
-//  - The network thread decodes and checks every received packet before it queues it (length, magic, version,
-//    type, channel, sender, number ranges), and drops bad ones with a counted log line once a second.
-//    ENet itself allocates per packet; that is its own and cannot be avoided.
-//  - Nothing logs while a lock is held. The log callback is only called from the network thread.
+/// <summary>
+/// The host's network core: an ENet host on its own thread, plus two small queues to the game thread. No game
+/// or Windows-API dependencies beyond what ENet brings, so the loopback tests run it without the game.
+/// </summary>
+/// <remarks>
+/// Threads: the network thread owns ENet (creates, services every 5 ms, destroys it); nothing else calls ENet.
+/// The game thread (any single caller in the tests) uses only poll(), send(), disconnect(), set_welcomed() and
+/// set_host_time(), each a short mutex or an atomic. The queues are fixed rings.
+/// The in ring reserves room for control events (Connect, Disconnect, Hello, Bye: at most 4 per connection) and
+/// gives each slot a State quota (kStateQuota), so one client's States cannot crowd out another's join or leave.
+/// The network thread answers Pings itself (so clock sync works while the game is paused) and decodes and checks
+/// every packet before queueing it, dropping bad ones with a counted log line once a second.
+/// Nothing logs while a lock is held; the log callback is called from the network thread only.
+/// </remarks>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +26,7 @@ namespace lazysf2::net {
 inline constexpr int kMaxClients = 4;
 inline constexpr uint32_t kTimeoutMs = 5000;  // no packet from a peer for this long (wall clock) ends it
 
-// What the game thread reads from the core.
+/// <summary>What the game thread reads from the core.</summary>
 struct HostEvent {
     enum Kind : uint8_t { Connect = 1, Disconnect = 2, Message = 3 };
     Kind kind = Connect;
@@ -54,8 +50,10 @@ struct HostCounters {
     uint32_t dropped_control = 0; // Connect or Disconnect events lost: the ring was completely full
 };
 
-// Parses LAZYSF2_HOST: "port" or "address:port", the address a numeric IPv4 one (default 127.0.0.1) and the port
-// 1..65535. Writes the address to addr (cap bytes) and the port to *port. False for anything else.
+/// <summary>
+/// Parses LAZYSF2_HOST: "port" or "address:port", the address a numeric IPv4 one (default 127.0.0.1) and the port
+/// 1..65535. Writes the address to addr (cap bytes) and the port to *port. False for anything else.
+/// </summary>
 bool parse_host_spec(const char* spec, char* addr, size_t cap, uint16_t* port);
 
 class HostCore {
@@ -68,41 +66,47 @@ public:
     HostCore(const HostCore&) = delete;
     HostCore& operator=(const HostCore&) = delete;
 
-    // Starts the network thread and returns at once (it never waits for the thread, so it is safe to call
-    // where the loader lock is held). address is a numeric IPv4 address. Port 0 picks a free port; see port().
-    // The thread binds, logs "net: host on udp <addr>:<port>" (or the failure) through log, and sets state().
+    /// <summary>
+    /// Starts the network thread and returns at once (never waits for it, so it is safe under the loader lock).
+    /// address is a numeric IPv4 address; port 0 picks a free port (see port()). The thread binds, logs
+    /// "net: host on udp addr:port" or the failure through log, and sets state().
+    /// </summary>
     bool start(const char* address, uint16_t port, LogFn log);
-    // Ends the thread: sockets closed, ENet shut down. With in_loader_lock the thread is not joined (a join
-    // can deadlock there): stop() waits at most 1 s for it to report that it has cleaned up, and then detaches it.
-    // Residual risk: that report comes just before the thread returns, so on a real FreeLibrary the thread may still
-    // be running its last instructions (in this DLL's code) when the DLL is unmapped, and a thread that did not
-    // finish within 1 s is still running ENet code. Either is a crash at unload. Accepted: developer tool, and
-    // the game never unloads the DLL except at process exit.
+    /// <summary>
+    /// Ends the thread. With in_loader_lock the thread is not joined (a join can deadlock there): waits at most
+    /// 1 s for it to report clean-up, then detaches it. Accepted residual risk: on FreeLibrary the thread may
+    /// still be running its last instructions, or ENet code, when the DLL is unmapped. Developer tool only.
+    /// </summary>
     void stop(bool in_loader_lock);
 
     State state() const { return state_.load(std::memory_order_acquire); }
     uint16_t port() const { return port_.load(std::memory_order_acquire); }  // the bound port, once Running
 
     // --- Game thread ---
-    // Moves up to max queued events into out. Costs one atomic load when the queue is empty.
+    /// <summary>Moves up to max queued events into out. One atomic load when the queue is empty.</summary>
     size_t poll(HostEvent* out, size_t max);
-    // Queues a message (at most 63 bytes) for a slot. False if the queue is full or the message is too large.
-    // gen is the connection generation from the HostEvent that introduced the client: a message for a slot that
-    // has been reassigned since is dropped, never delivered to the new client.
+    /// <summary>
+    /// Queues a message (at most 63 bytes) for a slot. False if the queue is full or the message too large.
+    /// gen is the connection generation from the HostEvent that introduced the client: a message for a slot
+    /// reassigned since is dropped, never delivered to the new client.
+    /// </summary>
     bool send(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, uint8_t channel, bool reliable);
-    // Asks the network thread to disconnect the slot's peer (gracefully, after what is already queued for it).
-    // False if the out queue is full (the peer's own silence timeout then ends it).
+    /// <summary>
+    /// Asks the network thread to disconnect the slot's peer after what is already queued for it. False if the
+    /// out queue is full (the peer's own silence timeout then ends it).
+    /// </summary>
     bool disconnect(uint8_t slot, uint32_t gen);
-    // State packets from a slot are only passed on while it is welcomed. Set it before sending the Welcome.
-    // Ignored if gen is no longer the slot's current connection.
+    /// <summary>Lets State packets from a slot through. Set before sending the Welcome. Ignored for a stale gen.</summary>
     void set_welcomed(uint8_t slot, uint32_t gen, bool welcomed);
-    // The host's game clock, for the range check of State times. The game thread updates it every step.
+    /// <summary>The host's game clock, for the range check of State times. Updated every step by the game thread.</summary>
     void set_host_time(double t) {
         host_time_.store(t, std::memory_order_relaxed);
         host_time_valid_.store(true, std::memory_order_release);
     }
-    // The session is over (the last client left, or the player changed): the published time is stale. Pings are
-    // not answered, and States are not passed, until set_host_time is called again.
+    /// <summary>
+    /// The session is over: the published time is stale. Pings are not answered and States not passed until
+    /// set_host_time is called again.
+    /// </summary>
     void reset_host_time() { host_time_valid_.store(false, std::memory_order_release); }
     uint32_t rtt_ms(uint8_t slot) const;  // ENet's smoothed round trip time, 0 for a bad slot
     HostCounters counters() const;
@@ -116,10 +120,12 @@ private:
         uint8_t data[63] = {};
     };
     static constexpr size_t kInCap = 512, kOutCap = 256;
-    // Entries of the in ring that only control events may use: States are refused once the ring is this close to
-    // full, so a client that floods States while the game is paused or in a menu cannot hide a Disconnect.
+    /// <summary>
+    /// Entries of the in ring that only control events may use: States are refused once the ring is this close to
+    /// full, so a client that floods States while the game is paused or in a menu cannot hide a Disconnect.
+    /// </summary>
     static constexpr size_t kControlReserve = 64;
-    // At most this many States per slot in the ring at once; the quotas of all slots together fit outside the reserve.
+    /// <summary>At most this many States per slot in the ring at once; the quotas of all slots together fit outside the reserve.</summary>
     static constexpr size_t kStateQuota = (kInCap - kControlReserve) / kMaxClients;
     // The reserve covers every kind of control event for every client (4 each), twice over: enough for clients that
     // do not reconnect faster than the game drains the ring.
@@ -139,8 +145,10 @@ private:
     std::atomic<bool> finished_{false};  // the network thread has cleaned up and is about to return
     std::atomic<double> host_time_{0.0};
     std::atomic<bool> host_time_valid_{false};
-    // Per slot, one word: (connection generation << 1) | welcomed. 0 = the slot is free. One word, so that
-    // set_welcomed's generation check and its store are a single compare-and-swap.
+    /// <summary>
+    /// Per slot, one word: (connection generation &lt;&lt; 1) | welcomed. 0 = the slot is free. One word, so that
+    /// set_welcomed's generation check and its store are a single compare-and-swap.
+    /// </summary>
     std::atomic<uint64_t> slot_state_[kMaxClients] = {};
     std::atomic<uint32_t> rtt_[kMaxClients] = {};
 

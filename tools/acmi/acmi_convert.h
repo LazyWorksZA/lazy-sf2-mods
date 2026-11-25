@@ -26,8 +26,10 @@ struct Info {
     size_t objects = 0;       // objects created
 };
 
-// Fills `out` with the ACMI text. Returns false only when the header is invalid (nothing is written then).
-// A truncated or corrupt tail is not an error: info.end says what happened, and what was read is converted.
+/// <summary>
+/// Fills `out` with the ACMI text. Returns false only when the header is invalid (nothing is written then).
+/// A truncated or corrupt tail is not an error: info.end says what happened, and what was read is converted.
+/// </summary>
 bool convert_stream(const uint8_t* data, size_t size, const Options& opt, std::string& out, Info& info);
 
 }  // namespace lazysf2::acmi

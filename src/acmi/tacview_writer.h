@@ -35,41 +35,49 @@ public:
     using LogFn = void (*)(const char* line);               // called from the writer thread (and from close(true))
     using DisplayFn = std::wstring (*)(const std::wstring&);  // path to show in the log; may be null
 
-    // ring_slots must be a power of two. The ring is allocated here (the first recording), not at load.
+    /// <summary>ring_slots must be a power of two. The ring is allocated here (the first recording), not at load.</summary>
     explicit TacviewWriter(uint32_t ring_slots = 8192);
     ~TacviewWriter() { close(true, "destroyed"); }
     TacviewWriter(const TacviewWriter&) = delete;
     TacviewWriter& operator=(const TacviewWriter&) = delete;
 
-    // True when no writer thread is running or it has finished (so open() will not wait). Game thread: check this
-    // before open(), and retry later when false.
+    /// <summary>
+    /// True when no writer thread is running or it has finished (so open() will not wait). Game thread: check this
+    /// before open(), and retry later when false.
+    /// </summary>
     bool idle() const;
-    // For tests: asks the thread to finish and waits for it, however long it takes.
+    /// <summary>For tests: asks the thread to finish and waits for it, however long it takes.</summary>
     void close_and_join(const char* why = "closed");
 
     bool ready() const { return ring_ != nullptr; }  // false if the ring could not be allocated
 
-    // Starts a recording in folder dir (the Tacview folder; created if missing). local_now names the file. The
-    // header's ReferenceTime is utc_iso. False if one is still open or the thread could not start.
+    /// <summary>
+    /// Starts a recording in folder dir (the Tacview folder; created if missing). local_now names the file. The
+    /// header's ReferenceTime is utc_iso. False if one is still open or the thread could not start.
+    /// </summary>
     bool open(const std::wstring& dir, const SYSTEMTIME& local_now, const char* utc_iso, const TacviewCoreConfig& cfg,
               LogFn log, DisplayFn display, uint64_t max_bytes = kTacviewMaxFileBytes);
-    // Open and not failed or capped: the producer should keep going.
+    /// <summary>Open and not failed or capped: the producer should keep going.</summary>
     bool accepting() const { return open_.load(std::memory_order_acquire) && !failed_.load(std::memory_order_acquire); }
 
-    // Producer thread only. Reserves n object slots plus the end marker for one frame; false if the ring cannot
-    // hold the frame (counted as dropped) or nothing is open. Fill slot(0..n-1), then commit_frame.
+    /// <summary>
+    /// Producer thread only. Reserves n object slots plus the end marker for one frame; false if the ring cannot
+    /// hold the frame (counted as dropped) or nothing is open. Fill slot(0..n-1), then commit_frame.
+    /// </summary>
     bool begin_frame(size_t n);
     TacviewRec& slot(size_t i) { return ring_[(head_.load(std::memory_order_relaxed) + static_cast<uint32_t>(i)) & (cap_ - 1)]; }
-    // Publishes the frame: the first `used` reserved slots (used <= n) and an end marker at game time t.
+    /// <summary>Publishes the frame: the first `used` reserved slots (used &lt;= n) and an end marker at game time t.</summary>
     void commit_frame(size_t used, double t);
 
-    // Asks the thread to finish: it drains the ring, flushes and closes the file, then logs the summary (with why, a
-    // string literal). Returns at once, except wait_and_detach (see above).
+    /// <summary>
+    /// Asks the thread to finish: it drains the ring, flushes and closes the file, then logs the summary (with why, a
+    /// string literal). Returns at once, except wait_and_detach (see above).
+    /// </summary>
     void close(bool wait_and_detach, const char* why);
 
     uint32_t dropped_frames() const { return dropped_.load(std::memory_order_relaxed); }
     uint64_t bytes_written() const { return written_.load(std::memory_order_relaxed); }
-    // The final file path (after the thread has created it), empty before. Not for the game thread's hot path.
+    /// <summary>The final file path (after the thread has created it), empty before. Not for the game thread's hot path.</summary>
     std::wstring path() const;
 
 private:

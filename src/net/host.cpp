@@ -1,30 +1,14 @@
-// Host mode (developer tool, part of the object probe; see probe_hooks.cpp): remote clients drive AI aircraft
-// in the running game, as their avatars.
+// Host mode (developer tool, part of the probe): remote clients drive AI aircraft in the running game as their
+// avatars. Inert unless LAZYSF2_HOST is set and the probe is on.
 //
-// Inert unless LAZYSF2_HOST is set and the probe is on. host_install() reads the variable once; with it unset
-// nothing else happens: no thread, no socket, no hook, no callback, and one log line saying so.
+// Threading: the network thread (host_core.cpp) owns ENet. Everything here runs on the game thread inside the
+// sim "after Update" callback and talks to the network thread only through HostCore's two queues. Nothing here
+// calls ENet, and nothing logs under the probe's lock.
 //
-// Threads: the network thread (host_core.cpp) owns ENet. This file is the game-thread side. Everything here
-// runs on the game's main thread inside the "after Update" callback of sim_hooks.cpp, and talks to the network
-// thread only through HostCore's two queues. Nothing here calls ENet, and nothing logs under the probe's lock.
-//
-// What happens, per client (a slot 0..3; the client_id on the wire is slot + 1):
-//  - Hello (reliable): the player's callback picks the nearest live AI aircraft that is not the player and not
-//    already an avatar, flags it REMOTEOBJECT (no AI, no flight model), zeroes its rates and puts it 300 m ahead
-//    of the player (50 m to the right per slot, the player's heading), and sends Welcome with that spawn and the
-//    host's game time. Until the first State arrives the avatar flies on
-//    with the player's velocity (formation), with zero rates.
-//  - Ping: answered by the network thread with a Pong carrying the host game time published at the last player
-//    step, which is the clock the clients stamp States in. It keeps working while the game is paused.
-//  - State: checked on the network thread (formats, ranges), queued, and on the avatar's own step turned into the
-//    same receiver as replay.cpp: samples keyed by their game_time in a ring, the state shown at now - delay by
-//    Hermite interpolation, dead reckoning past the newest sample, and a correction offset that decays over 200 ms
-//    when a new sample makes the shown state jump. The delay is 1.5 x the median of the last 16 packet intervals,
-//    within [50, 600] ms, and moves towards that by at most 5% of the elapsed game time per step.
-//  - Bye, five seconds of silence, the avatar being destroyed, or the player changing: the avatar's flags are
-//    restored (the AI takes it back), the slot is freed, and a line is logged.
-// Puppet and replay refuse to start while a client holds an avatar (host_has_clients()), and the host refuses a
-// client while one of them runs, so no two features ever drive the same aircraft.
+// Per client (slot 0..3; client_id on the wire is slot + 1): Hello claims the nearest live AI aircraft and
+// answers Welcome; State packets are smoothed as in replay.cpp; Bye, 5 s of silence, the avatar being
+// destroyed or a player change gives the aircraft back to the AI. Puppet and replay refuse to start while a
+// client holds an avatar (host_has_clients()), and the host refuses clients while one of them runs.
 #include <windows.h>
 
 #include <atomic>
@@ -73,17 +57,13 @@ double dist3(const double a[3], const double b[3]) {
     return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
 }
 
-// --- State ---------------------------------------------------------------------------------------
-
 // Set once by host_install(), then read-only.
 bool g_enabled = false;
 char g_addr[48] = {};
 uint16_t g_port = 0;
 
-// The big objects (the core's rings, the stream writer's 1 MB ring, the avatars) live on the heap and are created in
-// host_on_modules_loaded(), only when host mode is on. As globals they would be zero-filled bytes in the DLL's .data
-// section, shipped to every player. They are never freed: they live as long as the process (host_shutdown() stops
-// the threads, and a destructor at DLL unload could join one under the loader lock).
+// The big objects live on the heap, created in host_on_modules_loaded() only when host mode is on (as globals
+// they would bloat the DLL's .data). Never freed: a destructor at DLL unload could join a thread under the loader lock.
 net::HostCore* g_core = nullptr;
 net::StreamWriter* g_stream = nullptr;  // the recording of the session (stream_record.h): written by its own thread
 double g_now = 0;            // host game time at the latest step, for records made outside a step
@@ -195,8 +175,6 @@ void request_disconnect(int slot, uint32_t gen) {
     if (!g_core->disconnect(static_cast<uint8_t>(slot), gen)) ++g_send_fail;  // the 5 s silence timeout ends it then
 }
 
-// --- Liveness ------------------------------------------------------------------------------------
-
 struct LiveCtx {
     void* obj[net::kMaxClients];
     unsigned long long seq[net::kMaxClients];
@@ -265,8 +243,6 @@ void release_dead() {
         if (g_av[s].active && !live[s]) release(s, "avatar destroyed", false, kByeAvatarLost, net::LeaveReason::HostEnded);
     }
 }
-
-// --- Hello ---------------------------------------------------------------------------------------
 
 struct PickCtx {
     // in
@@ -430,8 +406,6 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         c.spawn[1], c.spawn[2], static_cast<double>(c.heading) * 180.0 / kPi);
 }
 
-// --- Receiving States ------------------------------------------------------------------------------
-
 // A checked State from the network thread. Keeps only samples that are newer than the newest, in both the
 // sequence number and the time, and measures the packet interval for the delay.
 void accept_state(Avatar& a, const net::StateMsg& s) {
@@ -471,8 +445,6 @@ void push_ring(Avatar& a, const Samp& s) {
     }
     a.ring[a.ring_n++] = s;
 }
-
-// --- Driving the avatar ----------------------------------------------------------------------------
 
 // Before the first State: the spawn, moved on with the player's velocity at the time of the Hello (dead reckoning in
 // formation), level, with zero rates.
@@ -577,8 +549,6 @@ void avatar_step(int slot, double now) {
     write_at(obj, kOffMatrix, m, 9);
     write_at(obj, kOffAngles, ang, 3);
 }
-
-// --- Events and the per-second line ----------------------------------------------------------------
 
 void handle_message(const HostEvent& e, void* player, double now) {
     const int slot = e.slot;
@@ -709,8 +679,6 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
 }
 
 }  // namespace
-
-// --- Public --------------------------------------------------------------------------------------
 
 void host_install() {
     wchar_t w[96] = {};

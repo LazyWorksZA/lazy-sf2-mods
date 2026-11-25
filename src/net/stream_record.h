@@ -32,19 +32,23 @@ public:
     StreamWriter(const StreamWriter&) = delete;
     StreamWriter& operator=(const StreamWriter&) = delete;
 
-    // Creates dir\stream_NNN.lzst (CREATE_NEW, the first free NNN from 001), writes the header and starts the
-    // writer thread. theatre may be null. False (and one log line) if no file could be created.
-    // max_bytes is the size cap for the whole file (kStreamMaxFileBytes in the game; the tests use a small one).
+    /// <summary>
+    /// Creates dir\stream_NNN.lzst (CREATE_NEW, the first free NNN from 001), writes the header and starts the
+    /// writer thread. theatre may be null. False (and one log line) if no file could be created.
+    /// max_bytes is the size cap for the whole file (kStreamMaxFileBytes in the game; the tests use a small one).
+    /// </summary>
     bool open(const wchar_t* dir, double start_game_time, const char* theatre, LogFn log,
               uint64_t max_bytes = kStreamMaxFileBytes);
     bool is_open() const { return open_.load(std::memory_order_acquire); }
 
-    // Producer thread only. A no-op unless open. Payload is at most kStreamMaxPayload bytes.
+    /// <summary>Producer thread only. A no-op unless open. Payload is at most kStreamMaxPayload bytes.</summary>
     void record(StreamKind kind, double time, const void* payload, size_t len);
 
-    // Asks the thread to finish: it drains the ring, flushes and closes the file. Returns at once. With
-    // wait_and_detach (shutdown, possibly under the loader lock) it also waits at most 1 s for the thread to be
-    // done and then detaches it, because a join there can deadlock.
+    /// <summary>
+    /// Asks the thread to finish: it drains the ring, flushes and closes the file. Returns at once. With
+    /// wait_and_detach (shutdown, possibly under the loader lock) it also waits at most 1 s for the thread to be
+    /// done and then detaches it, because a join there can deadlock.
+    /// </summary>
     void close(bool wait_and_detach);
 
     uint32_t dropped() const { return dropped_.load(std::memory_order_relaxed); }

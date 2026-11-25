@@ -10,14 +10,14 @@
 
 namespace lazysf2::net {
 
-// Limits for numbers that arrive from the network (Phase 3 controller ruling). Anything else is dropped.
+/// <summary>Limits for numbers that arrive from the network. Anything else is dropped.</summary>
 inline constexpr double kMaxPosition = 1.0e7;   // metres, per axis
 inline constexpr double kMaxVelocity = 2000.0;  // m/s, per axis
 inline constexpr double kMaxAngle = 10.0;       // radians
 inline constexpr double kMaxRate = 50.0;        // rad/s
 inline constexpr double kMaxClockSkew = 3600.0; // seconds either side of the host's game time
 
-// Interpolation delay bounds and ramp.
+/// <summary>Interpolation delay bounds and ramp.</summary>
 inline constexpr double kDelayMin = 0.05, kDelayMax = 0.6;
 inline constexpr double kDelayFactor = 1.5;         // delay = 1.5 * median packet interval
 inline constexpr double kDelayRampFraction = 0.05;  // the delay moves by at most 5% of the elapsed game time
@@ -27,8 +27,10 @@ constexpr bool finite(double x) { return x == x && x - x == 0.0; }  // false for
 constexpr double abs_(double x) { return x < 0 ? -x : x; }
 constexpr bool within(double x, double limit) { return finite(x) && abs_(x) < limit; }
 
-// True if every number in a State is finite and in range, and game_time is within an hour of the host's.
-// host_time must itself be finite (the game's clock is).
+/// <summary>
+/// True if every number in a State is finite and in range, and game_time is within an hour of the host's.
+/// host_time must itself be finite (the game's clock is).
+/// </summary>
 constexpr bool state_in_range(const StateMsg& s, double host_time) {
     if (!within(s.game_time - host_time, kMaxClockSkew)) return false;  // also rejects NaN game_time
     for (int i = 0; i < 3; ++i) {
@@ -40,7 +42,7 @@ constexpr bool state_in_range(const StateMsg& s, double host_time) {
     return true;
 }
 
-// Median of up to kIntervalWindow values (insertion sort of a copy; n is tiny). Returns 0 for n <= 0.
+/// <summary>Median of up to kIntervalWindow values (insertion sort of a copy; n is tiny). Returns 0 for n &lt;= 0.</summary>
 constexpr double median(const double* v, int n) {
     if (n <= 0) return 0.0;
     if (n > kIntervalWindow) n = kIntervalWindow;
@@ -58,19 +60,17 @@ constexpr double median(const double* v, int n) {
 
 constexpr double clamp_(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
-// The delay we want for a median packet interval.
+/// <summary>The delay we want for a median packet interval.</summary>
 constexpr double delay_target(double median_interval) {
     return clamp_(kDelayFactor * median_interval, kDelayMin, kDelayMax);
 }
 
-// Moves the delay towards the target by at most 5% of the elapsed game time (never steps).
+/// <summary>Moves the delay towards the target by at most 5% of the elapsed game time (never steps).</summary>
 constexpr double ramp_delay(double current, double target, double elapsed) {
     const double step = kDelayRampFraction * (elapsed > 0 ? elapsed : 0.0);
     const double d = target - current;
     return d > step ? current + step : (d < -step ? current - step : target);
 }
-
-// --- Self-check (compile time) -------------------------------------------------------------------
 
 constexpr bool near_(double a, double b) { return abs_(a - b) < 1e-12; }
 
