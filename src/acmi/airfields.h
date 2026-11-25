@@ -58,7 +58,7 @@ struct PlacedStructures {
 };
 
 /// <summary>
-/// Every Target[NNN] of the target areas, in the world frame: Position + R(A)Â·Offset, heading A + Heading. As in the
+/// Every Target[NNN] of the target areas, in the world frame: Position + R(A)*Offset, heading A + Heading. As in the
 /// game (SingleMission +0x45420), only an airfield area (AirfieldDataFile) with RotateToRunwayHeading on (the default)
 /// turns its targets, and only those after a runway target, by the heading of the latest one; others keep A = 0.
 /// Skips runways and the types the types ini marks UseGroundObject (the game makes those live objects).
