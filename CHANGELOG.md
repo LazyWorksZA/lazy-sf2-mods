@@ -5,6 +5,12 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+## 1.1.1 (2026-11-25)
+
+### Player features
+
+- Fixed: in Fullscreen with Mouse Pointer set to "Match Windows cursor", the cursor could leave the game screen on a second monitor and click other windows. It now stays inside the game while the game is active, is free after Alt-Tab, and follows a live Screen change. Borderless is unchanged.
+
 ## 1.1.0 (2026-11-25)
 
 ### Player features

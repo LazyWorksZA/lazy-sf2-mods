@@ -229,6 +229,13 @@ int __fastcall h_MouseRead(int* state) {
     HWND hwnd = game_window();
     if (state && hwnd && is(g_mouse, reinterpret_cast<IUnknown*>(state[kStateDevice]))) {
         subclass_for_cursor(hwnd);
+        // Catches live Options changes (mouse mode, display mode) that send no window message; throttled.
+        static std::atomic<ULONGLONG> last_clip_check{0};
+        const ULONGLONG now = GetTickCount64();
+        if (now - last_clip_check.load() >= 250) {
+            last_clip_check = now;
+            cursor_clip_poll("mouse read");
+        }
         if (cursor_mode()) {
             static int last_range[4] = {};
             if (memcmp(last_range, state + kStateLeft, sizeof(last_range)) != 0) {
@@ -288,6 +295,9 @@ void input_on_modules_loaded() {
 void input_apply_settings() {
     reapply(g_keyboard, keyboard_flags(g_keyboard.flags), "keyboard");
     reapply(g_mouse, mouse_flags(g_mouse.flags), "mouse");
+    cursor_clip_update("settings changed");
 }
+
+bool mouse_cursor_mode_active() { return cursor_mode(); }
 
 }  // namespace lazysf2::hooks
