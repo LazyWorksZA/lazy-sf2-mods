@@ -7,12 +7,20 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <cmath>
 #include <cwchar>
+#include <memory>
+#include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/probe_snap_logic.h"
+#include "hooks/terrain_export.h"
+#include "hooks/world_walk.h"
 #include "log.h"
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -75,7 +83,7 @@ size_t dumpable_bytes(const void* p) {
     return room < kPointerDump ? room : kPointerDump;
 }
 
-unsigned g_snapshot = 0;  // hotkey thread only
+std::atomic<unsigned> g_snapshot{0};  // last snapshot number; set once from the folder at start, then manual and auto count up
 
 struct Block {
     size_t offset;
@@ -119,11 +127,8 @@ void copy_cb(const LiveAircraft* list, size_t n, void* vctx) {
     }
 }
 
-void take_snapshot() {
-    const unsigned number = ++g_snapshot;
-    std::vector<Copy> copies;
-    probe_with_aircraft(copy_cb, &copies);
-
+/// <summary>Writes snapshot number: the index, the aircraft dumps and, for an automatic one, world (the object table and terrain text).</summary>
+void write_snapshot(unsigned number, const wchar_t* tag, const std::vector<Copy>& copies, const std::string* world) {
     std::string index = std::to_string(number) + " " + std::to_string(GetTickCount64()) + "\n";
     unsigned aircraft = 0, dumps = 0, errors = 0;
     DWORD last_error = 0;
@@ -135,16 +140,16 @@ void take_snapshot() {
         return false;
     };
     for (const Copy& c : copies) {
-        if (put(g_dir + fmt(L"\\snap%03u_%08x.bin", number, c.id), c.object.data(), c.object.size())) ++aircraft;
+        if (put(g_dir + fmt(L"\\snap%03u%ls_%08x.bin", number, tag, c.id), c.object.data(), c.object.size())) ++aircraft;
         std::string offsets;
         for (const Block& b : c.blocks) {
-            if (!put(g_dir + fmt(L"\\snap%03u_%08x_f%04zx.bin", number, c.id, b.offset), b.bytes.data(),
+            if (!put(g_dir + fmt(L"\\snap%03u%ls_%08x_f%04zx.bin", number, tag, c.id, b.offset), b.bytes.data(),
                      b.bytes.size())) {
                 continue;
             }
-            char tag[16];
-            sprintf_s(tag, "%s%zx", offsets.empty() ? "" : ",", b.offset);
-            offsets += tag;
+            char tag_text[16];
+            sprintf_s(tag_text, "%s%zx", offsets.empty() ? "" : ",", b.offset);
+            offsets += tag_text;
             ++dumps;
         }
         // ptr created_tick vtable offsets name  (the name is last: it may contain spaces)
@@ -158,14 +163,135 @@ void take_snapshot() {
         index += to_utf8(c.name);
         index += "\n";
     }
+    if (world) put(g_dir + fmt(L"\\snap%03u%ls_world.txt", number, tag), world->data(), world->size());
 
-    put(g_dir + fmt(L"\\snap%03u.txt", number), index.data(), index.size());
+    put(g_dir + fmt(L"\\snap%03u%ls.txt", number, tag), index.data(), index.size());
+    const char* kind = *tag ? "auto " : "";
     if (errors) {
-        LOG("probe: snapshot %u: %u aircraft, %u pointer dumps -> %ls, %u write errors (last error %lu)", number,
+        LOG("probe: %ssnapshot %u: %u aircraft, %u pointer dumps -> %ls, %u write errors (last error %lu)", kind, number,
             aircraft, dumps, g_dir.c_str(), errors, last_error);
     } else {
-        LOG("probe: snapshot %u: %u aircraft, %u pointer dumps -> %ls", number, aircraft, dumps, g_dir.c_str());
+        LOG("probe: %ssnapshot %u: %u aircraft, %u pointer dumps -> %ls", kind, number, aircraft, dumps, g_dir.c_str());
     }
+}
+
+void take_snapshot() {
+    const unsigned number = ++g_snapshot;
+    std::vector<Copy> copies;
+    probe_with_aircraft(copy_cb, &copies);
+    write_snapshot(number, L"", copies, nullptr);
+}
+
+// Automatic snapshot, ten seconds into each flight.
+constexpr double kAutoDelaySeconds = 10.0;
+constexpr size_t kAutoKeepFlights = 5;
+
+// Highest snapshot number already in the folder, so a new session never overwrites an old snapshot.
+unsigned scan_highest_snapshot() {
+    unsigned highest = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((g_dir + L"\\snap*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        bool is_auto;
+        const long n = probe_snapshot_number(fd.cFileName, &is_auto);
+        if (n > 0 && static_cast<unsigned>(n) > highest) highest = static_cast<unsigned>(n);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return highest;
+}
+
+// Deletes the files of all but the newest kAutoKeepFlights automatic snapshots. Only names matching snapNNN_auto.
+void prune_auto_snapshots() {
+    std::vector<long> numbers;
+    std::vector<std::pair<long, std::wstring>> files;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((g_dir + L"\\snap*_auto*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        bool is_auto;
+        const long n = probe_snapshot_number(fd.cFileName, &is_auto);
+        if (!is_auto || (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        numbers.push_back(n);
+        files.emplace_back(n, g_dir + L"\\" + fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    const std::vector<long> old = probe_auto_numbers_to_delete(numbers, kAutoKeepFlights);
+    for (const auto& f : files)
+        if (std::find(old.begin(), old.end(), f.first) != old.end()) DeleteFileW(f.second.c_str());
+}
+
+struct AutoJob {
+    unsigned number = 0;
+    std::vector<Copy> copies;
+    std::string world;
+};
+
+DWORD WINAPI auto_snapshot_thread(LPVOID p) {
+    std::unique_ptr<AutoJob> job(static_cast<AutoJob*>(p));
+    write_snapshot(job->number, L"_auto", job->copies, &job->world);
+    prune_auto_snapshots();
+    return 0;
+}
+
+// Game thread: the memory is read here (the object table and terrain readers are game-thread only); the files are
+// written by a short-lived thread. See lazy-sf2-recon: recon-notes §20.
+void take_auto_snapshot(double game_time) {
+    std::unique_ptr<AutoJob> job(new (std::nothrow) AutoJob);
+    if (!job) return;
+    job->number = ++g_snapshot;
+    probe_with_aircraft(copy_cb, &job->copies);
+    char line[160];
+    sprintf_s(line, "auto snapshot %u at game time %.1f s\n", job->number, game_time);
+    job->world = line;
+    world_walk_summary(job->world);
+    TerrainInfo terrain;
+    if (terrain_capture(terrain)) {
+        sprintf_s(line, "terrain: id=%s size=%dx%d spacing=%.1f geo=%s", terrain.id.c_str(), terrain.w, terrain.h,
+                  terrain.spacing, terrain.has_geo ? "yes" : "no");
+        job->world += line;
+        if (terrain.has_geo) {
+            sprintf_s(line, " lon=%.5f lat=%.5f", terrain.geo_lon, terrain.geo_lat);
+            job->world += line;
+        }
+        job->world += " name=" + terrain.full_name + "\n";
+    } else {
+        job->world += "terrain: not available\n";
+    }
+    job->world += "mission (MSN): not read (no safe accessor yet)\n";
+    const unsigned number = job->number;
+    if (HANDLE t = CreateThread(nullptr, 0, auto_snapshot_thread, job.get(), 0, nullptr)) {
+        job.release();
+        CloseHandle(t);
+    } else {
+        LOG("probe: auto snapshot %u: could not start the writer thread (error %lu)", number, GetLastError());
+    }
+}
+
+uint32_t g_auto_epoch = 0xffffffffu;  // game thread only
+bool g_auto_pending = false;
+double g_auto_start_game = 0;
+ULONGLONG g_auto_start_wall = 0;
+
+// Step callback: a new player epoch is a new flight; the snapshot is due kAutoDelaySeconds later (wall time if the
+// game clock is not usable).
+void auto_step(void*, float, bool is_player) {
+    if (!is_player || !sim_player_known()) return;
+    const uint32_t epoch = sim_player_epoch();
+    const double t = sim_game_time();
+    if (epoch != g_auto_epoch) {
+        g_auto_epoch = epoch;
+        g_auto_pending = true;
+        g_auto_start_game = t;
+        g_auto_start_wall = GetTickCount64();
+    }
+    if (!g_auto_pending) return;
+    const bool clock_ok = std::isfinite(t) && t >= g_auto_start_game;
+    const double elapsed = clock_ok ? t - g_auto_start_game
+                                    : static_cast<double>(GetTickCount64() - g_auto_start_wall) / 1000.0;
+    if (elapsed < kAutoDelaySeconds) return;
+    g_auto_pending = false;
+    take_auto_snapshot(t);
 }
 
 bool game_in_front() {
@@ -278,6 +404,13 @@ void probe_on_modules_loaded() {
     replay_on_modules_loaded();    // likewise
     player_jump_on_modules_loaded();
     step_order_on_modules_loaded();
+    g_snapshot = scan_highest_snapshot();
+    if (sim_register_step_callback(auto_step)) {
+        LOG("probe: an automatic snapshot is taken %.0f s into each flight (the newest %zu flights are kept)",
+            kAutoDelaySeconds, kAutoKeepFlights);
+    } else {
+        LOG("probe: no free step callback slot; no automatic snapshots");
+    }
     host_on_modules_loaded();      // starts the network thread (once), only with LAZYSF2_HOST
     if (HANDLE t = CreateThread(nullptr, 0, hotkey_thread, nullptr, 0, nullptr)) {
         CloseHandle(t);
