@@ -58,15 +58,29 @@ The release notes also list each file's SHA-256.
 | `docs/` | The briefs and the [host stream format](docs/stream-format.md) |
 | `.github/` | CI (build and tests on every push) and the release workflow |
 
-## Roadmap (borderless brief)
+## Roadmap
+
+**Done (v1.0.0)**
+
+- Borderless brief: recon, borderless, the Display Mode and Screen options, mouse pointer, Alt-Tab, device lost, DPI, Windows key, DXVK check, MSI installer.
+- Tacview Recording: aircraft, weapons, ground objects, ships, countermeasures, tracers and explosions; each theatre's terrain, ground texture and airfields; the LazySF2 Tacview add-on.
+- Releases built on GitHub Actions with build provenance.
+
+**Now: multiplayer** (the [network brief](docs/SF2%20Network%20Layer%20%E2%80%94%20Claude%20Code%20Brief.md))
 
 1. ~~Recon~~
-2. ~~Borderless spike~~
-3. ~~Trace an existing option~~
-4. ~~Display Mode option in the Options menu~~ (applied live)
-5. ~~Hardening~~: Alt-Tab, device lost, DPI, Windows key, multi-monitor (Screen option), DXVK check, Velopack installer
+2. ~~Puppet spike~~: drive one AI aircraft from a recorded path.
+3. ~~Synthetic client and recording~~: host mode, a bot client, stream recording, ACMI export (developer-only).
+4. **Two real players** (next): replicated player jets, a shared clock, smoothing; the game keeps running (and optionally keeps its sound) without focus; the cursor stays on the game screen in Fullscreen.
+5. Weapons and damage.
+6. Sessions: handshake, content hashing, our own multiplayer screens, master server. Spawns use a theatre's dogfight file when it has one, otherwise a runway or air start.
+7. Public multiplayer release: NAT traversal with relay.
 
-Next: the network brief (multiplayer), then auto-update.
+**Later** (parked until multiplayer is further along)
+
+- Esc in flight: an option to pause first instead of ending the flight at once.
+- Tacview: move old recordings to a theatre's current position; compressed `.zip.acmi`; non-ASCII aerodrome names.
+- Auto-update, and Authenticode signing of the installer.
 
 ## Contributing
 
