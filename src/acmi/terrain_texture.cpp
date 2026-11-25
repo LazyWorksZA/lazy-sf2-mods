@@ -266,8 +266,10 @@ void paint_runway(RGBImage& img, double mpp, double cx, double cy, double headin
     }
 }
 
-bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, double& side_m) {
-    if (a.runways.empty() || !std::isfinite(a.x) || !std::isfinite(a.y)) return false;
+bool patch_tiles(const Airfield& a, double tile_m, int tiles_w, int tiles_h, PatchTiles& out) {
+    out = PatchTiles{};
+    if (a.runways.empty() || !std::isfinite(a.x) || !std::isfinite(a.y) || !(tile_m > 0) || tiles_w < 1 || tiles_h < 1)
+        return false;
     double reach = 0;
     for (const Runway& r : a.runways) {
         if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.heading) || !std::isfinite(r.length) ||
@@ -275,29 +277,108 @@ bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, dou
             return false;
         reach = std::max(reach, std::hypot(r.x - a.x, r.y - a.y) + std::hypot(r.length / 2, r.width / 2));
     }
-    side_m = std::max(kPatchMinSideM, 2 * reach + kPatchMarginM);
-    const int n = std::clamp(static_cast<int>(std::ceil(side_m / kPatchTargetMpp)), kPatchMinPx, kPatchMaxPx);
-    const double mpp = side_m / n;
-    x0 = a.x - side_m / 2;
-    y0 = a.y - side_m / 2;
-    out.w = out.h = n;
-    out.px.assign(static_cast<size_t>(n) * n * 4, 0);
-    constexpr uint8_t kAsphalt[4] = {58, 58, 60, 255}, kEdge[4] = {200, 200, 200, 255}, kCentre[4] = {230, 230, 230, 255};
+    const double half = std::max(kPatchMinSideM, 2 * reach + kPatchMarginM) / 2;
+    const auto span = [&](double centre, int count, int& t0, int& n) {
+        const double lo = std::floor((centre - half) / tile_m), hi = std::ceil((centre + half) / tile_m);
+        const double c0 = std::clamp(lo, 0.0, static_cast<double>(count)), c1 = std::clamp(hi, 0.0, static_cast<double>(count));
+        t0 = static_cast<int>(c0);
+        n = static_cast<int>(c1 - c0);
+    };
+    span(a.x, tiles_w, out.tx0, out.nx);
+    span(a.y, tiles_h, out.ty0, out.ny);
+    if (out.nx < 1 || out.ny < 1) return false;
+    out.x0 = out.tx0 * tile_m;
+    out.y0 = out.ty0 * tile_m;
+    out.w_m = out.nx * tile_m;
+    out.h_m = out.ny * tile_m;
+    return true;
+}
+
+int patch_tile_px(int native, size_t texture_count, size_t budget_bytes) {
+    int px = std::min(native, kPatchTileMaxPx);
+    if (px < 1) return 0;
+    while (px > kPatchTileMinPx &&
+           static_cast<uint64_t>(texture_count) * static_cast<uint64_t>(px) * static_cast<uint64_t>(px) * 3 > budget_bytes)
+        px = std::max(kPatchTileMinPx, px / 2);
+    return px;
+}
+
+void compose_patch(const PatchTiles& pt, int tiles_w, int n, const uint16_t* index, const uint8_t* rot,
+                   const std::vector<Image>& tiles_by_index, const std::vector<RGB>& color_by_index, RGBImage& out) {
+    out = RGBImage{};
+    if (pt.nx < 1 || pt.ny < 1 || tiles_w < 1 || !index || !rot) return;
+    std::vector<uint16_t> sub_index(static_cast<size_t>(pt.nx) * static_cast<size_t>(pt.ny));
+    std::vector<uint8_t> sub_rot(sub_index.size());
+    for (int y = 0; y < pt.ny; ++y)
+        for (int x = 0; x < pt.nx; ++x) {
+            const size_t src = static_cast<size_t>(pt.ty0 + y) * static_cast<size_t>(tiles_w) + static_cast<size_t>(pt.tx0 + x);
+            const size_t dst = static_cast<size_t>(y) * static_cast<size_t>(pt.nx) + static_cast<size_t>(x);
+            sub_index[dst] = index[src];
+            sub_rot[dst] = rot[src];
+        }
+    compose(pt.nx, pt.ny, n, sub_index.data(), sub_rot.data(), tiles_by_index, color_by_index, out);
+}
+
+void fit_patch_size(int w, int h, int& out_w, int& out_h) {
+    out_w = w;
+    out_h = h;
+    const int side = std::max(w, h);
+    if (side <= kPatchMaxSidePx) return;
+    const double f = static_cast<double>(kPatchMaxSidePx) / side;
+    out_w = std::clamp(static_cast<int>(std::lround(w * f)), 1, kPatchMaxSidePx);
+    out_h = std::clamp(static_cast<int>(std::lround(h * f)), 1, kPatchMaxSidePx);
+}
+
+void resize_box_rgb(const RGBImage& in, int w, int h, RGBImage& out) {
+    RGBImage res;
+    if (w >= 1 && h >= 1 && w <= in.w && h <= in.h && in.px.size() == static_cast<size_t>(in.w) * in.h * 3) {
+        res.w = w;
+        res.h = h;
+        res.px.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 3);
+        for (int oy = 0; oy < h; ++oy) {
+            const int y0 = static_cast<int>(static_cast<int64_t>(oy) * in.h / h);
+            const int y1 = std::max(y0 + 1, static_cast<int>(static_cast<int64_t>(oy + 1) * in.h / h));
+            for (int ox = 0; ox < w; ++ox) {
+                const int x0 = static_cast<int>(static_cast<int64_t>(ox) * in.w / w);
+                const int x1 = std::max(x0 + 1, static_cast<int>(static_cast<int64_t>(ox + 1) * in.w / w));
+                uint64_t sum[3] = {};
+                for (int y = y0; y < y1; ++y) {
+                    const uint8_t* p = &in.px[(static_cast<size_t>(y) * in.w + x0) * 3];
+                    for (int x = x0; x < x1; ++x, p += 3)
+                        for (int c = 0; c < 3; ++c) sum[c] += p[c];
+                }
+                const uint64_t cnt = static_cast<uint64_t>(y1 - y0) * static_cast<uint64_t>(x1 - x0);
+                uint8_t* o = &res.px[(static_cast<size_t>(oy) * w + ox) * 3];
+                for (int c = 0; c < 3; ++c) o[c] = static_cast<uint8_t>((sum[c] + cnt / 2) / cnt);
+            }
+        }
+    }
+    out = std::move(res);
+}
+
+void draw_runways(RGBImage& img, const Airfield& a, double x0, double y0, double w_m, double h_m) {
+    if (img.w < 1 || img.h < 1 || !(w_m > 0) || !(h_m > 0) || !std::isfinite(x0) || !std::isfinite(y0)) return;
+    const double mx = w_m / img.w, my = h_m / img.h;
+    const double mpp = std::max(mx, my);
+    constexpr uint8_t kAsphalt[3] = {58, 58, 60}, kEdge[3] = {200, 200, 200}, kCentre[3] = {230, 230, 230};
     constexpr double kDash = 30.0, kGap = 20.0;
     // Three passes, so a line never hides under another runway's asphalt.
     for (int pass = 0; pass < 3; ++pass) {
         for (const Runway& r : a.runways) {
+            if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.heading) || !(r.length > 0) ||
+                !(r.width > 0))
+                continue;
             const double half_len = r.length / 2, half_wid = std::max(r.width, 3 * mpp) / 2;
             const double dx = std::sin(r.heading), dy = std::cos(r.heading);
             const double reach_r = std::hypot(half_len, half_wid) + mpp;
-            const int c0 = std::max(0, static_cast<int>(std::floor((r.x - reach_r - x0) / mpp)));
-            const int c1 = std::min(n - 1, static_cast<int>(std::ceil((r.x + reach_r - x0) / mpp)));
-            const int r0 = std::max(0, static_cast<int>(std::floor((y0 + side_m - (r.y + reach_r)) / mpp)));
-            const int r1 = std::min(n - 1, static_cast<int>(std::ceil((y0 + side_m - (r.y - reach_r)) / mpp)));
+            const int c0 = std::max(0, static_cast<int>(std::floor((r.x - reach_r - x0) / mx)));
+            const int c1 = std::min(img.w - 1, static_cast<int>(std::ceil((r.x + reach_r - x0) / mx)));
+            const int r0 = std::max(0, static_cast<int>(std::floor((y0 + h_m - (r.y + reach_r)) / my)));
+            const int r1 = std::min(img.h - 1, static_cast<int>(std::ceil((y0 + h_m - (r.y - reach_r)) / my)));
             for (int y = r0; y <= r1; ++y) {
-                const double wy = y0 + side_m - (y + 0.5) * mpp - r.y;
+                const double wy = y0 + h_m - (y + 0.5) * my - r.y;
                 for (int x = c0; x <= c1; ++x) {
-                    const double wx = x0 + (x + 0.5) * mpp - r.x;
+                    const double wx = x0 + (x + 0.5) * mx - r.x;
                     const double along = wx * dx + wy * dy, across = wx * dy - wy * dx;
                     if (std::fabs(along) > half_len || std::fabs(across) > half_wid) continue;
                     const uint8_t* c = nullptr;
@@ -305,16 +386,14 @@ bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, dou
                         c = kAsphalt;
                     } else if (pass == 1) {
                         if (std::fabs(across) > half_wid - mpp) c = kEdge;
-                    } else if (std::fabs(across) <= mpp / 2 &&
-                               std::fmod(along + half_len, kDash + kGap) < kDash) {
+                    } else if (std::fabs(across) <= mpp / 2 && std::fmod(along + half_len, kDash + kGap) < kDash) {
                         c = kCentre;
                     }
-                    if (c) std::memcpy(&out.px[(static_cast<size_t>(y) * n + x) * 4], c, 4);
+                    if (c) std::memcpy(&img.px[(static_cast<size_t>(y) * img.w + x) * 3], c, 3);
                 }
             }
         }
     }
-    return true;
 }
 
 std::string texture_xml(const std::string& id, const std::string& file, int /*w_px*/, int /*h_px*/, double extent_x_m,
@@ -340,7 +419,7 @@ std::string texture_xml(const std::string& id, const std::string& file, int /*w_
         x += "\t\t</CustomTexture>\n";
     };
     entry(id, file, 0, 0, extent_x_m, extent_y_m);
-    for (const PatchEntry& p : patches) entry(p.id, p.file, p.x0, p.y0, p.side_m, p.side_m);
+    for (const PatchEntry& p : patches) entry(p.id, p.file, p.x0, p.y0, p.w_m, p.h_m);
     x += "\t</CustomTextureList>\n</Resources>\n";
     return x;
 }

@@ -54,26 +54,50 @@ void compose(int tiles_w, int tiles_h, int n, const uint16_t* index, const uint8
 void paint_runway(RGBImage& img, double metres_per_px, double cx, double cy, double heading_rad, double length,
                   double width);
 
-/// <summary>RGBA8, top row first (row 0 is north). Alpha 0 is fully transparent.</summary>
-struct RGBAImage {
-    int w = 0, h = 0;
-    std::vector<uint8_t> px;
+constexpr double kPatchMarginM = 400.0, kPatchMinSideM = 2000.0;
+constexpr int kPatchTileMaxPx = 512, kPatchTileMinPx = 64, kPatchMaxSidePx = 2048;
+constexpr size_t kPatchCacheBytes = 64u * 1024u * 1024u;  // the decoded tiles the patches need, as RGB
+
+/// <summary>An airfield patch: a rectangle of whole tiles (tx0, ty0 from the south-west tile) and its world extent.</summary>
+struct PatchTiles {
+    int tx0 = 0, ty0 = 0, nx = 0, ny = 0;
+    double x0 = 0, y0 = 0, w_m = 0, h_m = 0;  // south-west corner and size in metres (tile edges)
 };
 
-constexpr double kPatchMarginM = 400.0, kPatchMinSideM = 2000.0, kPatchTargetMpp = 8.0;
-constexpr int kPatchMinPx = 128, kPatchMaxPx = 1024;
+/// <summary>
+/// The tiles covering all the airfield's runways plus a margin (at least 2000 m across), snapped outward to whole tiles
+/// and clamped to the tile field. False when there are no usable runways or nothing of the square is inside the field.
+/// </summary>
+bool patch_tiles(const Airfield& a, double tile_m, int tiles_w, int tiles_h, PatchTiles& out);
 
 /// <summary>
-/// Draws the airfield's runways (asphalt, edge lines, dashed centre line) on a transparent square centred on the
-/// airfield. The square's south-west corner is (x0, y0) metres and its side side_m. False when there are no runways
-/// or the numbers are not usable.
+/// The pixel size of a cached tile: min(native, 512), halved (down to 64) until texture_count tiles fit budget_bytes as RGB.
 /// </summary>
-bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, double& side_m);
+int patch_tile_px(int native, size_t texture_count, size_t budget_bytes);
 
-/// <summary>An extra texture over the base one: a square of side_m metres whose south-west corner is (x0, y0).</summary>
+/// <summary>
+/// Composes the patch's tiles, n x n pixels each, from the theatre's tile field (tiles_w wide, row 0 south): the same
+/// as compose for that region.
+/// </summary>
+void compose_patch(const PatchTiles& pt, int tiles_w, int n, const uint16_t* index, const uint8_t* rot,
+                   const std::vector<Image>& tiles_by_index, const std::vector<RGB>& color_by_index, RGBImage& out);
+
+/// <summary>The size a w x h patch is shrunk to so that neither side is over kPatchMaxSidePx. Unchanged when it fits.</summary>
+void fit_patch_size(int w, int h, int& out_w, int& out_h);
+
+/// <summary>A box resize of an RGB image to w x h, each at most the source size.</summary>
+void resize_box_rgb(const RGBImage& in, int w, int h, RGBImage& out);
+
+/// <summary>
+/// Draws the airfield's runways (asphalt, edge lines, dashed centre line) on img, whose south-west corner is (x0, y0)
+/// metres and which spans w_m x h_m metres.
+/// </summary>
+void draw_runways(RGBImage& img, const Airfield& a, double x0, double y0, double w_m, double h_m);
+
+/// <summary>An extra texture over the base one: a rectangle of w_m x h_m metres whose south-west corner is (x0, y0).</summary>
 struct PatchEntry {
     std::string id, file;
-    double x0 = 0, y0 = 0, side_m = 0;
+    double x0 = 0, y0 = 0, w_m = 0, h_m = 0;
 };
 
 /// <summary>
