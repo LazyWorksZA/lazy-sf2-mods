@@ -55,6 +55,7 @@ The test project is only for development: it is not published or shipped.
   - The helper's install, update and uninstall hooks use the same manifest rules as `scripts/install.ps1`. Hooks have 15–30 s and no UI. The MSI runs them elevated. The per-user `Setup.exe` falls back to a UAC prompt on the next normal start, and its uninstall falls back to an elevated `cmd /c del`.
   - Velopack's MSI doesn't start the helper after installing and has no "launch" checkbox. The finish page tells players how to start the game.
 - **Settings** live in the player's `Options.ini`, written by the game's own Options menu (rows the mod adds): `[GraphicsOptions] DisplayMode/DisplayMonitor`, `[ControlOptions] MouseMode` and `[OtherOptions] TacviewRecording`. They take effect when the player leaves the Options screen. The mod reads them once per process: if you edit `Options.ini` by hand during a session, the change applies after a restart, and only the Options UI applies live. There is no mod settings file.
+- **Tacview terrain:** with Tacview Recording on, the first recorded flight in each theatre per game session also writes that theatre's heightmap (`<id>.raw` and `<id>.xml`) to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`, and the recording names it in `Theater=`. These files are outside the game folder and not in `lazysf2.manifest.txt`: uninstall leaves them.
 
 ## Reverse-engineering tools
 

@@ -28,6 +28,7 @@ add_library(lazysf2 SHARED
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp
     src/hooks/tacview_recorder.cpp
+    src/hooks/terrain_export.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
