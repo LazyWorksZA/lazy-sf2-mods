@@ -965,6 +965,30 @@ void bot_loopback_tests() {
                    code(30, 5, nan, 0, "127.0.0.1:7777") == 1 && code(30, 5, 0, inf, "127.0.0.1:7777") == 1,
                "the bot rejects non-finite numbers and a port with trailing characters");
     }
+    {  // a host that never answers: the bot gives up after about 4 s with code 3, before and after the connect
+        using Clk = std::chrono::steady_clock;
+        auto timed = [](const std::string& host, int* code) {
+            bot::BotConfig c;
+            c.host = host;
+            c.duration = 5.0;
+            const auto t0 = Clk::now();
+            *code = bot::run_bot(c).code;
+            return std::chrono::duration<double>(Clk::now() - t0).count();
+        };
+        int code_none = -1, code_mute = -1;
+        const double s_none = timed("127.0.0.1:9", &code_none);  // nothing listens there
+        HostCore core;  // accepts the connection, but no game thread ever sends the Welcome
+        core.start("127.0.0.1", 0, [](const char*) {});
+        for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        double s_mute = 0;
+        if (core.state() == HostCore::State::Running) s_mute = timed("127.0.0.1:" + std::to_string(core.port()), &code_mute);
+        core.stop(false);
+        std::printf("  mute host: no listener -> code %d after %.1f s; no Welcome -> code %d after %.1f s\n", code_none,
+                    s_none, code_mute, s_mute);
+        expect(code_none == 3 && s_none > 3.5 && s_none < 9.0, "no answer to connect: exit code 3 after about 4 s");
+        expect(code_mute == 3 && s_mute > 3.5 && s_mute < 9.0, "no Welcome: exit code 3 after about 4 s");
+    }
     {
         const BotSession r = run_clean_session(bot::Script::Climb, 20.0, 1.0, 0.0, 0.0, 0.0);
         check_session(r, 20.0, 0.8, 1.2, "climb, 20 Hz, 1 s");

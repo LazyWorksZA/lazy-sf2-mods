@@ -16,8 +16,9 @@ void usage() {
         "Defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter.\n"
         "--jitter delays each State by a random 0..MS before it is sent, so States can overtake each other: on the\n"
         "sequenced (unreliable) channel a late State is dropped by the host, so jitter also acts as extra loss.\n"
-        "--drop exits without Bye (tests the host's 5 s timeout). Exit code 0 ok, 1 bad arguments, 2 cannot connect,\n"
-        "3 no Welcome, 4 the host closed the connection or is not answering.\n");
+        "--drop exits without Bye (tests the host's 5 s timeout). Exit code 0 ok, 1 bad arguments, 2 cannot connect\n"
+        "(bad address, refused), 3 no answer to connect or no Welcome within 4 s, 4 the host closed the connection or\n"
+        "went silent for 4 s.\n");
 }
 
 bool to_double(const char* s, double* out) {
