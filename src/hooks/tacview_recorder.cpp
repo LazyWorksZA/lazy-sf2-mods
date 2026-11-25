@@ -41,6 +41,7 @@ std::wstring g_dir;                       // ...\Tacview, resolved once
 bool g_dir_tried = false;
 bool g_recording = false;
 uint32_t g_epoch = 0;        // sim_player_epoch() at the start
+std::atomic<DWORD> g_thread{0};  // the game thread that started the recording (read by the tracker on any thread)
 bool g_skip_valid = false;   // a start failed or the writer failed during this player's flight: do not retry it
 uint32_t g_skip_epoch = 0;
 double g_last_snapshot = 0;
@@ -250,6 +251,7 @@ StartResult start_recording(uint32_t epoch) {
     g_table_empty.store(false, std::memory_order_relaxed);
     g_recording = true;
     g_epoch = epoch;
+    g_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
     g_last_snapshot = -1e300;
     g_weapons_live = false;
     weapon_track_new_flight();
@@ -319,7 +321,16 @@ void tacview_recorder_on_modules_loaded() {
     if (!sim_register_step_callback(on_step)) LOG("tacview: no free step callback slot; the recorder is off");
 }
 
-void tacview_recorder_table_empty() { g_table_empty.store(true, std::memory_order_release); }
+void tacview_recorder_table_empty() {
+    // On the recording's thread, close now: no aircraft update follows a flight's end, and the next menu moment may
+    // be the next flight. Elsewhere, leave it to the next step or menu moment.
+    if (GetCurrentThreadId() == g_thread.load(std::memory_order_relaxed) && g_recording) {  // thread first
+        g_table_empty.store(false, std::memory_order_relaxed);
+        stop_recording("table empty", true);
+        return;
+    }
+    g_table_empty.store(true, std::memory_order_release);
+}
 
 namespace {
 void count_cb(const LiveAircraft*, size_t n, void* ctx) { *static_cast<size_t*>(ctx) = n; }

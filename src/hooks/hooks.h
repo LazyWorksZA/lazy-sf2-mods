@@ -78,7 +78,8 @@ void tacview_recorder_on_modules_loaded();
 void tacview_recorder_menu_moment();
 /// <summary>
 /// Called by the tracker (any thread, after releasing its lock) when the aircraft table has just become
-/// empty. Only sets an atomic flag, which the recorder acts on at the next step or menu moment.
+/// empty. On the recording's game thread it closes the recording at once (final frame, log line); on any other thread it sets a flag that
+/// the next step or menu moment acts on.
 /// </summary>
 void tacview_recorder_table_empty();
 /// <summary>DllMain detach: closes the file. At process exit it also writes what the dead writer left in its ring.</summary>
