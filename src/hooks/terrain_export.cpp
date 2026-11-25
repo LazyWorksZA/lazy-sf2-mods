@@ -642,7 +642,7 @@ int remove_legacy_files(const std::wstring& dir, const std::string& id) {
     const std::wstring wid(id.begin(), id.end());
     const std::wstring base = dir + L"\\" + wid;
     int removed = 0;
-    for (const wchar_t* ext : {L".raw", L".jpg", L".raw.tmp", L".jpg.tmp"})
+    for (const wchar_t* ext : {L".raw", L".jpg", L".xml", L".raw.tmp", L".jpg.tmp", L".xml.tmp"})
         if (DeleteFileW((base + ext).c_str())) ++removed;
     std::vector<std::wstring> found;
     // The dotted names, and the dash names of the earlier transparent png patches: exact patterns, our folder only.
