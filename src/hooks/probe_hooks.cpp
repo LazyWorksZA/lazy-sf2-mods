@@ -176,7 +176,7 @@ bool game_in_front() {
 
 DWORD WINAPI hotkey_thread(LPVOID) {
     bool was_down = false, puppet_was_down = false, missile_was_down = false, rec_was_down = false,
-         replay_was_down = false, rate_was_down = false;
+         replay_was_down = false, rate_was_down = false, jump_was_down = false, nudge_was_down = false;
     for (;;) {
         Sleep(50);
         const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
@@ -199,6 +199,12 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         const bool rate_down = mods && (GetAsyncKeyState('Y') & 0x8000);
         if (rate_down && !rate_was_down) replay_cycle_rate();
         rate_was_down = rate_down;
+        const bool jump_down = mods && (GetAsyncKeyState('J') & 0x8000);
+        if (jump_down && !jump_was_down) player_jump_request(true);
+        jump_was_down = jump_down;
+        const bool nudge_down = mods && (GetAsyncKeyState('K') & 0x8000);
+        if (nudge_down && !nudge_was_down) player_jump_request(false);
+        nudge_was_down = nudge_down;
     }
 }
 
@@ -270,6 +276,8 @@ void probe_on_modules_loaded() {
     if (g_dev_started.exchange(true)) return;
     recorder_on_modules_loaded();  // registers its step callback (once)
     replay_on_modules_loaded();    // likewise
+    player_jump_on_modules_loaded();
+    step_order_on_modules_loaded();
     host_on_modules_loaded();      // starts the network thread (once), only with LAZYSF2_HOST
     if (HANDLE t = CreateThread(nullptr, 0, hotkey_thread, nullptr, 0, nullptr)) {
         CloseHandle(t);

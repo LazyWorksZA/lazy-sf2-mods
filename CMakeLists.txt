@@ -71,6 +71,8 @@ add_library(lazysf2 SHARED
     src/hooks/sim_hooks.cpp
     src/hooks/recorder.cpp
     src/hooks/replay.cpp
+    src/hooks/player_jump.cpp
+    src/hooks/step_order.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
     src/net/host.cpp
