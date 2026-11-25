@@ -14,10 +14,11 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
   - flares and chaff at 10 Hz;
   - tracer rounds at 20 Hz, up to 128 at a time, linked to the shooter;
   - a Destroyed event when an aircraft or a ground object, vehicle or ship is destroyed;
-  - explosions for detonations and kills.
+  - explosions for detonations and kills;
+  - the theatre's airfields as aerodrome markers with their names.
   
   The file is flushed to disk every 200 ms or 32 KB and capped at 512 MB.
-- **Tacview terrain.** With Tacview Recording on, the first flight in each theatre also exports that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre (`Theater=`), so Tacview shows the SF2 terrain under the flight. The theatre is placed as its own map on an equatorial patch of open Atlantic, with game distances kept to within about 0.3%. Elevation only for now; a ground texture comes later.
+- **Tacview terrain.** With Tacview Recording on, the first flight in each theatre also exports that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre (`Theater=`), so Tacview shows the SF2 terrain under the flight. The theatre is placed as its own map on an equatorial patch of open Atlantic, with game distances kept to within about 0.3%. It also builds a ground texture from the theatre's own tiles, with the runways painted in, in `%APPDATA%\Tacview\Data\Terrain\Textures\LazySF2\`. The files are made once per theatre and kept: delete them to have them made again.
 - **Options › Other page.** A new fifth tab under Gameplay holds the mod's own settings. The four stock tabs move up to make room.
 - **Mouse Pointer** (Options › Controls). In Cursor mode the game's pointer follows the Windows cursor, which fixes pointer drift with remote-control tools such as RustDesk.
 - **Screen** (Options › Graphics) picks the monitor the game runs on.
