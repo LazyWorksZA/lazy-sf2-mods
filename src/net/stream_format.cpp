@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 size_t encode_stream_header(double start_game_time, const char* theatre, uint8_t* out, size_t cap) {
     if (!out || cap < sizeof(StreamHeader)) return 0;
@@ -92,4 +92,4 @@ const char* stream_status_name(StreamStatus s) {
     return "?";
 }
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

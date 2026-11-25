@@ -10,9 +10,9 @@
 #include <random>
 #include <vector>
 
-namespace lazysf2::bot {
+namespace LazyWorks::SF2Patch::bot {
 
-using namespace lazysf2::net;
+using namespace LazyWorks::SF2Patch::net;
 
 namespace {
 
@@ -345,4 +345,4 @@ BotResult run_bot(const BotConfig& cfg) {
     return res;
 }
 
-}  // namespace lazysf2::bot
+}  // namespace LazyWorks::SF2Patch::bot

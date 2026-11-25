@@ -7,7 +7,7 @@
 
 #include "acmi/tacview_core.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>The most records one world_walk_run() can produce.</summary>
 constexpr size_t kWorldWalkMaxRecords = 4096 + 256 + 256 + 128;
@@ -31,4 +31,4 @@ void world_walk_frame_dropped(const acmi::TacviewRec* recs, size_t n);
 /// <summary>The recording ended: logs the summary once.</summary>
 void world_walk_stop();
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

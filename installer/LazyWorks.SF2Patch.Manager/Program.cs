@@ -3,10 +3,10 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Velopack;
 
-namespace LazySF2.Manager;
+namespace LazyWorks.SF2Patch.Manager;
 
 /// <summary>
-/// Headless helper that Velopack installs with LazySF2. It has no window: it only runs Velopack's
+/// Headless helper that Velopack installs with the Lazy SF2 Patch. It has no window: it only runs Velopack's
 /// install/update/uninstall hooks, which copy the mod into the Strike Fighters 2 folder and remove it
 /// again. All settings live in the game (Options > Graphics and Options > Controls).
 /// </summary>
@@ -69,15 +69,15 @@ static class Program
         string text = r switch
         {
             ModInstaller.Result.Ok =>
-                $"LazySF2 is installed in:\n{game}\n\nSettings are in the game:\n" +
+                $"Lazy SF2 Patch is installed in:\n{game}\n\nSettings are in the game:\n" +
                 "  Options > Graphics: Display Mode, Screen\n  Options > Controls: Mouse Pointer\n\n" +
-                "To remove it, uninstall LazySF2 from Windows' Installed apps.",
+                "To remove it, uninstall Lazy SF2 Patch from Windows' Installed apps.",
             ModInstaller.Result.GameNotFound => "Strike Fighters 2 wasn't found (no installer registry entry).",
             ModInstaller.Result.Foreign => $"Another winmm.dll is already in\n{game}\nLazySF2 left it untouched.",
             ModInstaller.Result.AccessDenied => "Administrator rights are needed to copy the mod into the game folder.",
-            _ => "Couldn't copy the mod into the game folder. Is Strike Fighters 2 running? Close it and run LazySF2 again.",
+            _ => "Couldn't copy the mod into the game folder. Is Strike Fighters 2 running? Close it and run Lazy SF2 Patch again.",
         };
-        MessageBoxW(IntPtr.Zero, text, "LazySF2", r == ModInstaller.Result.Ok ? 0x40u : 0x30u);  // info / warning
+        MessageBoxW(IntPtr.Zero, text, "Lazy SF2 Patch", r == ModInstaller.Result.Ok ? 0x40u : 0x30u);  // info / warning
     }
 
     /// <summary>Runs this exe elevated with one argument and waits. Null if the UAC prompt was declined.</summary>

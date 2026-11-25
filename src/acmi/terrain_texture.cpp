@@ -7,7 +7,7 @@
 #include "acmi/acmi_format.h"
 #include "acmi/airfields.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 namespace {
 
@@ -446,4 +446,4 @@ std::string texture_xml(const std::string& id, const std::string& file, int /*w_
     return x;
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

@@ -2,7 +2,7 @@
 // Pure logic for the aircraft tracker (aircraft_track.cpp), kept free of Windows headers so the tests can use it.
 #include <cstdint>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>
 /// An aircraft's side, from the object's side flag bits (FRIENDLY, ENEMY, NEUTRAL): the object manager hands out
@@ -57,4 +57,4 @@ inline OptionsExitAction decide_on_options_exit(bool dll_loaded, bool hooked, bo
     return OptionsExitAction::Nothing;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

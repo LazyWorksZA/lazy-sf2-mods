@@ -8,7 +8,7 @@
 
 #include "hooks/aircraft_side.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>Strips WS_EX_TOPMOST from the game window at creation and keeps it non-topmost (Borderless).</summary>
 bool install_window_hooks();
@@ -262,4 +262,4 @@ void host_shutdown();
 /// <summary>True while any client holds an avatar. Puppet and replay refuse to start then, and the host refuses clients while one runs.</summary>
 bool host_has_clients();
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

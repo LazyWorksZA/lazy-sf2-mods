@@ -22,7 +22,7 @@ extern "C" FARPROC g_winmm_real[WINMM_EXPORT_COUNT] = {};
 #include "proxy/winmm_exports.inc"
 #undef WINMM_EXPORT
 
-namespace lazysf2::proxy {
+namespace LazyWorks::SF2Patch::proxy {
 namespace {
 
 struct ExportInfo {
@@ -75,4 +75,4 @@ void shutdown() {
     // process teardown.
 }
 
-}  // namespace lazysf2::proxy
+}  // namespace LazyWorks::SF2Patch::proxy

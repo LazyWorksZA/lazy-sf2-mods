@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 namespace {
 constexpr size_t kBufBytes = 64 * 1024;
@@ -211,4 +211,4 @@ void StreamWriter::run() {
     finished_.store(true, std::memory_order_release);
 }
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

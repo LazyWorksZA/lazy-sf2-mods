@@ -9,7 +9,7 @@
 #include "acmi/acmi_format.h"
 #include "net/protocol.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 namespace {
 
 using net::StreamKind;
@@ -228,4 +228,4 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
     return true;
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

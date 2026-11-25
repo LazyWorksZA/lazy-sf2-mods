@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 struct IniSection {
     std::string name;  // lower case
@@ -34,4 +34,4 @@ bool parse_numbers(const std::string& value, double* out, size_t count);
 
 std::string to_lower_ascii(std::string_view s);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

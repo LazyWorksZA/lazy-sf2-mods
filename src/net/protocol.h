@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 inline constexpr uint16_t kMagic = 0x5A4C;  // bytes 'L','Z' on the wire (little-endian)
 inline constexpr uint8_t kVersion = 1;
@@ -125,4 +125,4 @@ const char* status_name(Status s);
 /// </summary>
 bool protocol_selftest(const char** why = nullptr);
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

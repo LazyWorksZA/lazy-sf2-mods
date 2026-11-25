@@ -8,7 +8,7 @@
 
 #include "net/receiver_math.h"
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 namespace {
 
@@ -449,4 +449,4 @@ void HostCore::run() {
     finished_.store(true);
 }
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

@@ -7,7 +7,7 @@
 
 #include "acmi/acmi_format.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 namespace {
 bool finite3(const double* p) { return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]); }
@@ -245,4 +245,4 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
     pending_.clear();
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

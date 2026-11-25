@@ -7,7 +7,7 @@
 
 #include "acmi/acmi_format.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 namespace {
 
@@ -111,4 +111,4 @@ double height_at(const uint16_t* samples, int w, int h, double spacing, double x
     return (s(i, j) * (1 - u) + s(i + 1, j) * u) * (1 - v) + (s(i, j + 1) * (1 - u) + s(i + 1, j + 1) * u) * v;
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

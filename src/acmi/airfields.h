@@ -9,7 +9,7 @@
 
 #include "acmi/ini.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr int kMaxRunways = 4;
 
@@ -41,4 +41,4 @@ std::vector<Airfield> airfields_from(const Ini& targets, const AirfieldLoader& l
 /// </summary>
 double height_at(const uint16_t* samples, int w, int h, double spacing, double x, double y);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

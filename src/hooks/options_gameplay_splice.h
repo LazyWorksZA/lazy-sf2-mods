@@ -2,7 +2,7 @@
 // Pure text edit of OptionsScreen.ini for the Tacview Recording row on the Gameplay page (no game calls, unit tested).
 #include <string>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>Keys answered by the text hook (see menu_hooks.cpp).</summary>
 inline constexpr wchar_t kTacviewLabelKey[] = L"TXT_LAZY_TACVIEW_RECORDING";
@@ -15,4 +15,4 @@ inline constexpr wchar_t kTacviewInfoKey[] = L"TXT_LAZY_TACVIEW_INFO";
 /// </summary>
 int splice_gameplay_row(std::wstring& text);
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

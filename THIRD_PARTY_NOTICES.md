@@ -6,7 +6,7 @@ software below, whose notices must travel with it.
 | Component | Where it ends up | License |
 |---|---|---|
 | MinHook 1.3.4 (with Hacker Disassembler Engine 32/64) | statically linked into `winmm.dll` (the mod) | BSD 2-Clause |
-| Velopack 1.2.161 | `Velopack.dll` in the LazySF2 manager, and the installer's `Setup.exe` / `Update.exe` | MIT |
+| Velopack 1.2.161 | `Velopack.dll` in the Lazy SF2 Patch helper, and the installer's `Setup.exe` / `Update.exe` | MIT |
 | ENet 1.3.18 | statically linked into `winmm.dll` (the mod) and the synthetic client (developer tools) | MIT |
 | miniz 3.1.2 | statically linked into `winmm.dll` (the mod): packs finished Tacview recordings into `.zip.acmi` | MIT |
 | "Jet fighter" icon by Delapouite (game-icons.net) | the installer and app icon (`installer/assets/app.ico`), recoloured | CC BY 3.0 |

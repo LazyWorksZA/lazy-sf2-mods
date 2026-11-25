@@ -5,7 +5,7 @@
 
 #include "acmi/terrain_texture.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>
 /// Writes img to path (created or overwritten). Call from a thread that has initialised COM. False on any failure;
@@ -13,4 +13,4 @@ namespace lazysf2::hooks {
 /// </summary>
 bool write_jpeg_wic(const acmi::RGBImage& img, const std::wstring& path, float quality);
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

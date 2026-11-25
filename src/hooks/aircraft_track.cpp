@@ -13,7 +13,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 // Bumped whenever a tracked aircraft is destroyed or its address is reused, and when the tracker re-hooks (see hooks.h).
 std::atomic<uint32_t> g_aircraft_generation{0};
@@ -407,4 +407,4 @@ void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count
     ReleaseSRWLockShared(&g_lock);
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

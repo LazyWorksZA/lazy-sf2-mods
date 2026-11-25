@@ -21,7 +21,7 @@
 
 #include "net/stream_format.h"
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 class StreamWriter {
 public:
@@ -84,4 +84,4 @@ private:
     Slot ring_[kRingCap];
 };
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

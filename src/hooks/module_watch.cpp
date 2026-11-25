@@ -9,7 +9,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 using LoadLibraryExW_t = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
@@ -45,4 +45,4 @@ bool install_module_watch() {
     return true;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks
