@@ -9,7 +9,7 @@
 
 #include "acmi/acmi_format.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>One of the theatre's tile textures, as the terrain engine holds it.</summary>
 struct TextureEntry {
@@ -71,4 +71,4 @@ enum class AerodromeList { Pending, Ready, None };
 /// </summary>
 AerodromeList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out);
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

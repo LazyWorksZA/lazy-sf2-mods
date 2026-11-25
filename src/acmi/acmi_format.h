@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr double kMetresPerDegree = 111320.0;
 constexpr double kPi = 3.14159265358979323846;
@@ -97,4 +97,4 @@ struct ObjectProps {
 };
 void append_props(std::string& out, const ObjectProps& p);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

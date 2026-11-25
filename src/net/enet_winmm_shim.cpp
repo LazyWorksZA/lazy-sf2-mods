@@ -11,7 +11,7 @@ using TimePeriod_t = UINT(WINAPI*)(UINT);
 
 template <typename Fn>
 Fn real_fn(const char* name) {
-    const HMODULE real = lazysf2::proxy::real_module();
+    const HMODULE real = LazyWorks::SF2Patch::proxy::real_module();
     return real ? reinterpret_cast<Fn>(GetProcAddress(real, name)) : nullptr;
 }
 

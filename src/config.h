@@ -6,7 +6,7 @@
 // Saved Games uses the shell); hooks check them when they are called, not when they are installed.
 #include <string>
 
-namespace lazysf2::config {
+namespace LazyWorks::SF2Patch::config {
 
 /// <summary>Options.ini [ControlOptions] MouseMode (Options &gt; Controls &gt; Mouse Pointer).</summary>
 enum class MouseMode : int {
@@ -49,4 +49,4 @@ int tacview_recording_peek();
 /// </summary>
 std::wstring game_data_dir();
 
-}  // namespace lazysf2::config
+}  // namespace LazyWorks::SF2Patch::config

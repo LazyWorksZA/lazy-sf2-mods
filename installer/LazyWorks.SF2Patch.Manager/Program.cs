@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Velopack;
 
-namespace LazySF2Patch.Manager;
+namespace LazyWorks.SF2Patch.Manager;
 
 /// <summary>
 /// Headless helper that Velopack installs with the Lazy SF2 Patch. It has no window: it only runs Velopack's

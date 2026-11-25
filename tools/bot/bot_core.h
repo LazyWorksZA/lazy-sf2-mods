@@ -11,7 +11,7 @@
 
 #include "net/protocol.h"
 
-namespace lazysf2::bot {
+namespace LazyWorks::SF2Patch::bot {
 
 inline constexpr double kPi = 3.14159265358979323846;
 inline constexpr double kSpeed = 220.0;                   // m/s along the path
@@ -232,4 +232,4 @@ private:
     int n_ = 0, head_ = 0, pongs_ = 0, resets_ = 0;
 };
 
-}  // namespace lazysf2::bot
+}  // namespace LazyWorks::SF2Patch::bot

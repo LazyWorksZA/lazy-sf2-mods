@@ -9,7 +9,7 @@
 
 #include "acmi/airfields.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr int kMaxImageDim = 2048;
 constexpr uint8_t kTarmac[3] = {64, 64, 64};
@@ -117,4 +117,4 @@ std::string texture_xml(const std::string& id, const std::string& file, int w_px
                         double extent_y_m, double ref_lon, double ref_lat, double scale_lat,
                         const std::vector<PatchEntry>& patches = {});
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

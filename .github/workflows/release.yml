@@ -50,7 +50,7 @@ jobs:
             ./build/Release/tools/lazysf2-net-tests.exe
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
-          dotnet test installer/LazySF2Patch.Manager.Tests
+          dotnet test installer/LazyWorks.SF2Patch.Manager.Tests
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Collect the release files

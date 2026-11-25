@@ -22,7 +22,7 @@
 #include "hooks/world_walk.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -423,4 +423,4 @@ void tacview_recorder_shutdown(bool process_exit) {
     g_writer->close(true, "process exit");
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

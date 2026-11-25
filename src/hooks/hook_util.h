@@ -9,7 +9,7 @@
 
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 inline void* vtable_slot(void* com_object, int slot) { return (*static_cast<void***>(com_object))[slot]; }
 
@@ -47,4 +47,4 @@ inline void describe_address(const void* addr, char* out, size_t n) {
                 static_cast<unsigned long>(static_cast<const BYTE*>(addr) - reinterpret_cast<const BYTE*>(m)));
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

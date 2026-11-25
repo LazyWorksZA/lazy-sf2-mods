@@ -17,7 +17,7 @@
 #include "hooks/options_gameplay_splice.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 // Build stamps and RVAs.
@@ -758,4 +758,4 @@ void menu_on_modules_loaded() {
     ReleaseSRWLockExclusive(&g_opts_lock);
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

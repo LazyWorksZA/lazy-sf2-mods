@@ -41,7 +41,7 @@ The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 .\build.ps1                    # enters the VS dev shell (x86) and runs the CMake preset; output build\Release\winmm.dll
 .\scripts\install.ps1 [-MouseMode Cursor|Stock]
 .\scripts\uninstall.ps1
-dotnet test installer\LazySF2Patch.Manager.Tests   # xUnit tests for the installer helper
+dotnet test installer\LazyWorks.SF2Patch.Manager.Tests   # xUnit tests for the installer helper
 ```
 
 The test project is only for development: it is not published or shipped.
@@ -52,7 +52,7 @@ The test project is only for development: it is not published or shipped.
 - **Developer tools** (`lazysf2-bot`, `lazysf2-acmi`, `lazysf2-net-tests`) build into `build\Release\tools\`, not next to `winmm.dll`, so they never load the proxy as their own winmm. The installer copies only `build\Release\winmm.dll`.
 - **Runtime log:** `lazysf2.log` in the game folder. Use it to check that hooks were installed and what they did.
 - **`LAZYSF2_DISABLE=1`** runs the mod as a pure pass-through proxy.
-- **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the headless C# helper (`installer/LazySF2Patch.Manager`, framework-dependent .NET 10, no WinForms), and runs `vpk pack --msi`.
+- **Installer:** `installer\build-installer.ps1 -Version x.y.z [-Clean]` builds the mod, publishes the headless C# helper (`installer/LazyWorks.SF2Patch.Manager`, framework-dependent .NET 10, no WinForms), and runs `vpk pack --msi`.
   - The player-facing artefact is `LazySF2Patch-win.msi`, published as `Lazy-SF2-Patch-<version>.msi` by the release workflow: a wizard (welcome, license with third-party notices, finish), per machine, elevated, with no shortcuts. Velopack's `Setup.exe` is built as well.
   - It needs the .NET 10 SDK and `vpk`, installed with `dotnet tool install -g vpk --version 1.2.161`. Keep that version in step with the `Velopack` package version in the csproj.
   - The output in `installer\Releases` and `installer\publish*` is ignored by git.
@@ -77,7 +77,7 @@ The test project is only for development: it is not published or shipped.
 
 ## Code conventions
 
-- C++20, `/W4 /permissive-`, everything in namespace `lazysf2`. The build must have no warnings.
+- C++20, `/W4 /permissive-`, everything in namespace `LazyWorks::SF2Patch` (C# uses `LazyWorks.SF2Patch.*`). The build must have no warnings.
 - Each feature is its own `src/hooks/*.cpp`. Features that need modules loaded later register with the module watch (`module_watch.cpp`) instead of hooking `LoadLibrary` again.
 - Settings go in `src/config.*`. Defaults must give stock behaviour, unless the brief says a feature is always on.
 - Log every hook install and every behaviour change once, with `LOG(...)`. Don't log every frame.

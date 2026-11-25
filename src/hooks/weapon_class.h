@@ -2,7 +2,7 @@
 // Pure logic for the weapon tracker (weapon_track.cpp), kept free of Windows headers so the tests can use it.
 #include <cstdint>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>The recorder's classes of weapon (the values are TacviewRec::kMissile, kBomb and kRocket).</summary>
 enum class WeaponClass : uint8_t { Missile = 1, Bomb = 2, Rocket = 3 };
@@ -24,4 +24,4 @@ inline WeaponClass classify_weapon_type(int32_t data_type) {
     }
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

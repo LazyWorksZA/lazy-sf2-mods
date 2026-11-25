@@ -19,7 +19,7 @@ bool hooks_disabled() {
 void log_host() {
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    LOG("lazysf2 " __DATE__ " " __TIME__ " loaded into %ls", lazysf2::log::log_path(exe).c_str());
+    LOG("lazysf2 " __DATE__ " " __TIME__ " loaded into %ls", LazyWorks::SF2Patch::log::log_path(exe).c_str());
 }
 
 // The exe is DPI-unaware: at scaling other than 100% Windows gives it a virtual desktop. Declaring the process
@@ -43,9 +43,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH: {
             DisableThreadLibraryCalls(module);
-            lazysf2::log::open();
+            LazyWorks::SF2Patch::log::open();
             log_host();
-            if (!lazysf2::proxy::init()) return FALSE;
+            if (!LazyWorks::SF2Patch::proxy::init()) return FALSE;
 
             if (hooks_disabled()) {
                 LOG("LAZYSF2_DISABLE=1: hooks not installed");
@@ -58,26 +58,26 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 return TRUE;  // keep the proxy working even if hooking is impossible
             }
             // Settings come from Options.ini and are read later, on first use outside DllMain.
-            bool ok = lazysf2::hooks::install_window_hooks();
-            ok &= lazysf2::hooks::install_menu_hooks();
-            lazysf2::hooks::install_probe_hooks();  // reads LAZYSF2_PROBE_DIR once; no hooks yet
-            lazysf2::hooks::host_install();         // reads LAZYSF2_HOST once; no threads yet
-            ok &= lazysf2::hooks::install_module_watch();
+            bool ok = LazyWorks::SF2Patch::hooks::install_window_hooks();
+            ok &= LazyWorks::SF2Patch::hooks::install_menu_hooks();
+            LazyWorks::SF2Patch::hooks::install_probe_hooks();  // reads LAZYSF2_PROBE_DIR once; no hooks yet
+            LazyWorks::SF2Patch::hooks::host_install();         // reads LAZYSF2_HOST once; no threads yet
+            ok &= LazyWorks::SF2Patch::hooks::install_module_watch();
             s = MH_EnableHook(MH_ALL_HOOKS);
             LOG("hooks installed: %s, enable: %s", ok ? "ok" : "PARTIAL", MH_StatusToString(s));
             break;
         }
         case DLL_PROCESS_DETACH:
-            lazysf2::hooks::cursor_clip_release_at_exit();
-            lazysf2::hooks::tacview_recorder_shutdown(reserved != nullptr);  // also at process exit: the file stays readable
+            LazyWorks::SF2Patch::hooks::cursor_clip_release_at_exit();
+            LazyWorks::SF2Patch::hooks::tacview_recorder_shutdown(reserved != nullptr);  // also at process exit: the file stays readable
             if (reserved == nullptr) {  // FreeLibrary, not process exit
-                lazysf2::hooks::host_shutdown();
+                LazyWorks::SF2Patch::hooks::host_shutdown();
                 MH_DisableHook(MH_ALL_HOOKS);
                 MH_Uninitialize();
             }
-            lazysf2::proxy::shutdown();
+            LazyWorks::SF2Patch::proxy::shutdown();
             LOG("lazysf2 unloading");
-            lazysf2::log::close();
+            LazyWorks::SF2Patch::log::close();
             break;
         default:
             break;

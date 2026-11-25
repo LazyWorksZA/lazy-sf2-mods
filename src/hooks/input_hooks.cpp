@@ -14,7 +14,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 // Core\DirectInput.dll, July 2013 build.
@@ -300,4 +300,4 @@ void input_apply_settings() {
 
 bool mouse_cursor_mode_active() { return cursor_mode(); }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

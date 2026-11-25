@@ -2,7 +2,7 @@
 
 #include <windows.h>
 
-namespace lazysf2::proxy {
+namespace LazyWorks::SF2Patch::proxy {
 
 /// <summary>
 /// Loads the real 32-bit system winmm.dll and fills the export jump table.
@@ -17,4 +17,4 @@ void shutdown();
 /// </summary>
 HMODULE real_module();
 
-}  // namespace lazysf2::proxy
+}  // namespace LazyWorks::SF2Patch::proxy

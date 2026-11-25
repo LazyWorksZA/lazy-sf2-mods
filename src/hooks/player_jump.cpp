@@ -13,7 +13,7 @@
 #include "hooks/replay_math.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -182,4 +182,4 @@ void player_jump_on_modules_loaded() {
     }
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

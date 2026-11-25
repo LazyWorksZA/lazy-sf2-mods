@@ -13,7 +13,7 @@
 #include "hooks/weapon_class.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -335,4 +335,4 @@ void probe_with_weapons(void (*callback)(const LiveWeapon* list, size_t count, v
     ReleaseSRWLockShared(&g_lock);
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

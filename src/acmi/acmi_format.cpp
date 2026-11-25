@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdio>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 Mapping make_mapping(double ref_lat_deg) {
     return {1.0 / (kMetresPerDegree * std::cos(ref_lat_deg / kRadToDeg)), 1.0 / kMetresPerDegree};
@@ -176,4 +176,4 @@ void append_props(std::string& out, const ObjectProps& p) {
     }
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

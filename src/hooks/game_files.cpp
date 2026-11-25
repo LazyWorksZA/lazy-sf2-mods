@@ -9,7 +9,7 @@
 #include "hooks/hook_util.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -150,4 +150,4 @@ bool read_game_file(const std::wstring& full_path, std::vector<uint8_t>& out) {
     }
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

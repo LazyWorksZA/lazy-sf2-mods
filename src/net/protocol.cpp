@@ -3,7 +3,7 @@
 #include <bit>
 #include <cstring>
 
-namespace lazysf2::net {
+namespace LazyWorks::SF2Patch::net {
 
 static_assert(std::endian::native == std::endian::little, "the wire format is little-endian and copied raw");
 
@@ -260,4 +260,4 @@ bool protocol_selftest(const char** why) {
 
 #undef LZ_CHECK
 
-}  // namespace lazysf2::net
+}  // namespace LazyWorks::SF2Patch::net

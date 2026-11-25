@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>LazySF2Patch</AssemblyName>
-    <RootNamespace>LazySF2Patch.Manager</RootNamespace>
+    <RootNamespace>LazyWorks.SF2Patch.Manager</RootNamespace>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <Version>0.1.0</Version>
@@ -21,7 +21,7 @@
     <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
   <ItemGroup>
-    <InternalsVisibleTo Include="LazySF2Patch.Manager.Tests" />
+    <InternalsVisibleTo Include="LazyWorks.SF2Patch.Manager.Tests" />
   </ItemGroup>
 
 </Project>

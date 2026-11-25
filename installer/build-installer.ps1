@@ -8,7 +8,7 @@
 
 .NOTES
   Needs the .NET 10 SDK and vpk 1.2.161 (dotnet tool install -g vpk --version 1.2.161; keep it in
-  step with the Velopack package version in LazySF2Patch.Manager.csproj).
+  step with the Velopack package version in LazyWorks.SF2Patch.Manager.csproj).
 
   The MSI is a normal installer wizard (welcome, license with third-party notices, finish), installs
   per machine and runs elevated, so its hooks can always write the game folder. The helper it
@@ -32,7 +32,7 @@ $meta = Join-Path $PSScriptRoot 'publish-meta'
 
 # 2. The helper, with the mod DLL as its payload.
 if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
-dotnet publish (Join-Path $PSScriptRoot 'LazySF2Patch.Manager') -c Release -o $publish -p:Version=$Version
+dotnet publish (Join-Path $PSScriptRoot 'LazyWorks.SF2Patch.Manager') -c Release -o $publish -p:Version=$Version
 if ($LASTEXITCODE) { throw "dotnet publish failed ($LASTEXITCODE)" }
 Remove-Item (Join-Path $publish '*.pdb') -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force (Join-Path $publish 'payload') | Out-Null

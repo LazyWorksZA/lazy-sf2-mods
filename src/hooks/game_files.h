@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 constexpr size_t kMaxGameFileBytes = 64u * 1024 * 1024;
 
@@ -16,4 +16,4 @@ constexpr size_t kMaxGameFileBytes = 64u * 1024 * 1024;
 /// </summary>
 bool read_game_file(const std::wstring& full_path, std::vector<uint8_t>& out);
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

@@ -4,7 +4,7 @@
 
 #include "acmi/acmi_format.h"
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 std::string terrain_id(std::wstring_view base_name) {
     if (base_name.empty()) return {};
@@ -67,4 +67,4 @@ std::string terrain_xml(const std::string& id, const std::string& raw_file, int 
     return x;
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

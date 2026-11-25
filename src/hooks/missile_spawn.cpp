@@ -11,7 +11,7 @@
 #include "hooks/hooks.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 // 0 idle, 1 spawn requested (hotkey), 2 following a spawned missile.
 std::atomic<int> g_missile_state{0};
@@ -263,4 +263,4 @@ void missile_spawn_on_modules_loaded() {
                       reinterpret_cast<void**>(&o_MissileCtor), "MissileObject ctor");
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

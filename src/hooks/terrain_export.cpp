@@ -28,7 +28,7 @@
 #include "tacview_addon_lua.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -869,4 +869,4 @@ AerodromeList terrain_aerodromes(const std::string& id, std::shared_ptr<const st
     return AerodromeList::Ready;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

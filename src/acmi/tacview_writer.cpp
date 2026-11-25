@@ -6,7 +6,7 @@
 #include <cstring>
 #include <new>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 namespace {
 constexpr size_t kFlushBytes = 32 * 1024;
@@ -317,4 +317,4 @@ void TacviewWriter::run() {
     finished_.store(true, std::memory_order_release);
 }
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 constexpr size_t kTerrainIdMaxChars = 48;
 
@@ -26,4 +26,4 @@ void terrain_raw_north_first(const uint16_t* south_first, int w, int h, std::vec
 std::string terrain_xml(const std::string& id, const std::string& raw_file, int w, int h, double spacing, double ref_lon,
                         double ref_lat, double scale_lat);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

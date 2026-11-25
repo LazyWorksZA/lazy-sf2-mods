@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-namespace lazysf2::acmi {
+namespace LazyWorks::SF2Patch::acmi {
 
 /// <summary>
 /// Compresses plain (a path ending in ".acmi") to the same path with ".zip.acmi". It writes "<zip>.tmp", reopens it and
@@ -44,4 +44,4 @@ unsigned delete_stale_zip_temps(const std::wstring& dir);
 /// <summary>For tests: makes zips fail once they have read this many bytes (0 turns it off).</summary>
 void zip_test_fail_after(uint64_t bytes);
 
-}  // namespace lazysf2::acmi
+}  // namespace LazyWorks::SF2Patch::acmi

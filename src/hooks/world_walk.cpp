@@ -15,7 +15,7 @@
 #include "hooks/world_walk_logic.h"
 #include "log.h"
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 namespace {
 
@@ -555,4 +555,4 @@ void world_walk_stop() {
         g.stats.cm_capped, g.stats.bullet_capped, g.stats.bad_walks);
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks

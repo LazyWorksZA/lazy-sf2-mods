@@ -6,7 +6,7 @@
 
 #include <vector>
 
-namespace lazysf2::hooks {
+namespace LazyWorks::SF2Patch::hooks {
 
 using Microsoft::WRL::ComPtr;
 
@@ -53,4 +53,4 @@ bool write_jpeg_wic(const acmi::RGBImage& img, const std::wstring& path, float q
     return true;
 }
 
-}  // namespace lazysf2::hooks
+}  // namespace LazyWorks::SF2Patch::hooks
