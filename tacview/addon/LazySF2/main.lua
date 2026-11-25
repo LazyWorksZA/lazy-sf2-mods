@@ -1,5 +1,5 @@
 -- LazySF2 terrain switch
--- Shows the ground of the recorded Strike Fighters 2 theatre and hides the other LazySF2 grounds.
+-- Shows the ground of the recorded Strike Fighters 2 theatre and hides the other LazySF2 grounds, and all of them for other recordings.
 -- Part of the lazy-sf2-mods winmm.dll mod. The mod writes this file; do not edit it here.
 
 local Tacview = require("Tacview195")
@@ -35,15 +35,16 @@ local function StartsWith(text, prefix)
 end
 
 -- Shows the ids that belong to the theatre (the id itself and its "." patches); hides the other LazySF2 ids.
--- With no theatre, shows every LazySF2 id. Ids of other add-ons and games are left alone.
-local function Apply(theatre, list, show, hide)
+-- With no theatre, hides every LazySF2 id (they sit on real places), or shows them all when showAll is set.
+-- Ids of other add-ons and games are left alone.
+local function Apply(theatre, showAll, list, show, hide)
 	if not list then
 		return
 	end
 
 	for _, id in ipairs(list) do
 		if StartsWith(id, Prefix) then
-			if not theatre or id == theatre or StartsWith(id, theatre .. ".") then
+			if showAll or (theatre and (id == theatre or StartsWith(id, theatre .. "."))) then
 				show(id)
 			else
 				hide(id)
@@ -52,9 +53,9 @@ local function Apply(theatre, list, show, hide)
 	end
 end
 
-local function ApplyAll(theatre)
-	Apply(theatre, Tacview.Terrain.GetTextureList(), Tacview.Terrain.ShowTexture, Tacview.Terrain.HideTexture)
-	Apply(theatre, Tacview.Terrain.GetElevationMapList(), Tacview.Terrain.ShowElevationMap, Tacview.Terrain.HideElevationMap)
+local function ApplyAll(theatre, showAll)
+	Apply(theatre, showAll, Tacview.Terrain.GetTextureList(), Tacview.Terrain.ShowTexture, Tacview.Terrain.HideTexture)
+	Apply(theatre, showAll, Tacview.Terrain.GetElevationMapList(), Tacview.Terrain.ShowElevationMap, Tacview.Terrain.HideElevationMap)
 end
 
 local function ReadText(name, absoluteTime)
@@ -69,7 +70,7 @@ local function OnUpdate(dt, absoluteTime)
 	if not IsSwitchEnabled() then
 		if releasePending then
 			releasePending = false
-			ApplyAll(nil)
+			ApplyAll(nil, true)
 		end
 		return
 	end
@@ -91,7 +92,7 @@ local function OnUpdate(dt, absoluteTime)
 	lastTheatre = theatre
 	reapply = true
 	ApplyAll(theatre)
-	Tacview.Log.Info("LazySF2: terrain " .. (theatre or "all LazySF2 terrains"))
+	Tacview.Log.Info("LazySF2: terrain " .. (theatre or "no LazySF2 terrain"))
 end
 
 Tacview.UI.Menus.AddOption(nil, "LazySF2 theatre switch", IsSwitchEnabled(), OnToggle)

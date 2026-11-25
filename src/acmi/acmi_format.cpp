@@ -12,7 +12,8 @@ Mapping make_mapping(double ref_lat_deg) {
 
 bool geo_is_set(double lon, double lat) {
     if (!std::isfinite(lon) || !std::isfinite(lat) || lon < -180.0 || lon > 180.0 || lat < -85.0 || lat > 85.0) return false;
-    return !(std::fabs(lon - -96.8) < 1e-6 && std::fabs(lat - 30.2) < 1e-6);
+    // The engine reads floats and widens them, so the default arrives as (double)-96.8f.
+    return !(static_cast<float>(lon) == -96.8f && static_cast<float>(lat) == 30.2f);
 }
 
 Placement place_theatre(bool has_geo, double lon, double lat, double extent_x_m, double extent_y_m) {

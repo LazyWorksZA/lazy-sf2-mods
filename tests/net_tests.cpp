@@ -2879,7 +2879,8 @@ void placement_tests() {
 
     expect(geo_is_set(10.817, 51.111), "geo: a real point is set");
     expect(!geo_is_set(-96.8, 30.2) && !geo_is_set(-96.8 + 1e-7, 30.2 - 1e-7), "geo: the game default pair is not set");
-    expect(geo_is_set(-96.8 + 1e-3, 30.2), "geo: near the default but not within 1e-6 is set");
+    expect(!geo_is_set(static_cast<double>(-96.8f), static_cast<double>(30.2f)), "geo: the float-widened game default is not set");
+    expect(geo_is_set(-96.8 + 1e-3, 30.2), "geo: near the default but not float precision is set");
     const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
     expect(!geo_is_set(nan, 10) && !geo_is_set(10, nan) && !geo_is_set(inf, 10) && !geo_is_set(10, -inf),
            "geo: NaN and infinity are not set");
