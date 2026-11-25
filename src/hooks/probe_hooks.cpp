@@ -287,7 +287,7 @@ DWORD WINAPI auto_snapshot_thread(LPVOID p) {
 // Game thread: the memory is read here (the object table and terrain readers are game-thread only); the files are
 // written by a short-lived thread. Developer-only: the copy of up to kAutoMaxAircraft aircraft (about 100 KB and 200
 // system calls each) and the world text (capped lines) run in one frame, so the frame may hitch. An exception drops
-// the snapshot. See lazy-sf2-recon: recon-notes ง20.
+// the snapshot. See lazy-sf2-recon: recon-notes ยง20.
 void take_auto_snapshot(double game_time) {
     static std::atomic<bool> logged_busy{false}, logged_fail{false};
     if (!writer_idle()) {  // a slow disk: skip this flight rather than stall or pile up writers
