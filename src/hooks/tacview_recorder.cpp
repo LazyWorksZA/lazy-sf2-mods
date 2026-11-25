@@ -178,12 +178,13 @@ StartResult start_recording(uint32_t epoch) {
     std::snprintf(iso, sizeof(iso), "%04u-%02u-%02uT%02u:%02u:%02uZ", utc.wYear, utc.wMonth, utc.wDay, utc.wHour,
                   utc.wMinute, utc.wSecond);
     acmi::TacviewCoreConfig cfg;  // reference 0/0, aircraft 10 Hz, weapons 20 Hz
+    // Every recording shares one frame (the SW corner at this point, over open ocean); a capture failure only means no Theater=.
+    cfg.ref_lon = kTerrainRefLon;
+    cfg.ref_lat = kTerrainRefLat;
     TerrainInfo terrain;
-    if (terrain_capture(terrain)) {  // a failure only means no Theater=
+    if (terrain_capture(terrain)) {
         cfg.theater = terrain.id;
         if (!terrain.full_name.empty()) cfg.title += " - " + terrain.full_name;
-        cfg.ref_lon = kTerrainRefLon;
-        cfg.ref_lat = kTerrainRefLat;
     }
     if (!g_writer->open(g_dir, local, iso, cfg, writer_log, display_path)) {
         LOG("tacview: not recording: could not start the writer");

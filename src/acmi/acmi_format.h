@@ -28,7 +28,7 @@ double norm_deg(double d);
 /// </summary>
 void append_escaped(std::string& out, const char* s);
 
-/// <summary>"FileType/FileVersion" lines and the global object (id 0). reference_time is e.g. 2026-11-24T20:15:00Z. A non-empty theater adds Theater=. A non-empty theater adds Theater=.</summary>
+/// <summary>"FileType/FileVersion" lines and the global object (id 0). reference_time is e.g. 2026-11-24T20:15:00Z. A non-empty theater adds Theater=.</summary>
 void append_header(std::string& out, const char* reference_time, double ref_lon, double ref_lat, const char* title,
                    const char* theater = nullptr);
 /// <summary>"#seconds.mmm\n" for a time in whole milliseconds since the start (never negative).</summary>
