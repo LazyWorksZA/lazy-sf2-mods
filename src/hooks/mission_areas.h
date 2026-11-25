@@ -35,6 +35,13 @@ struct PlacedView {
     const void* record = nullptr;
 };
 
+/// <summary>
+/// Game thread. True while the running mission is still the one the last mission_active_areas() call read as Read: the
+/// registry's MSN is the same SingleMission object and its area array and count are unchanged. The records it gave
+/// are only read while this holds.
+/// </summary>
+bool mission_unchanged();
+
 /// <summary>Game thread. Reads placed object i of area a; false when it cannot be read.</summary>
 bool mission_placed(const GameArea& a, int i, PlacedView* out);
 

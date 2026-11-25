@@ -96,6 +96,7 @@ uint8_t g_area_on[kMaxMissionAreas];
 uint8_t g_mark_write[kMaxStructures];  // per mark of the theatre: write it
 PlacedView g_placed[kMaxPlacedPerArea];
 double g_placed_xy[kMaxPlacedPerArea][2];
+uint8_t g_placed_taken[kMaxPlacedPerArea];  // claimed by a mark: one record matches one mark at most
 // The written structures the game drew as plain models: their records, polled for destruction.
 const void* g_watch_rec[kMaxStructures];
 uint32_t g_watch_seq[kMaxStructures];
@@ -260,6 +261,7 @@ void stop_recording(const char* why, bool final_frame = false) {
     g_walk_on = false;
     g_struct_pending = false;
     g_struct_list.reset();  // never the last owner: the export's map keeps the list
+    g_watch_n = 0;          // the mission's records are not read after the recording
     if (final_frame && g_writer->accepting() && g_writer->begin_frame(0)) g_writer->commit_frame(0, sim_game_time());
     g_writer->close(false, why);  // the thread logs the summary
 }
@@ -446,19 +448,20 @@ void pick_structures(const StructureList& list) {
                     g_placed_xy[np][1] = g_placed[np].y;
                     ++np;
                 }
-        size_t hint = 0;
+        std::memset(g_placed_taken, 0, np);
         for (size_t m = first; m < end; ++m) {
             if (!g) {
                 g_mark_write[m] = 1;
                 continue;
             }
-            const size_t i = acmi::find_near(g_placed_xy, np, list.marks[m].x, list.marks[m].y, kPlacedMatchMetres, hint);
+            const size_t i =
+                acmi::find_near(g_placed_xy, np, list.marks[m].x, list.marks[m].y, kPlacedMatchMetres, g_placed_taken);
             if (i >= np) {
                 g_mark_write[m] = 1;  // not found in the game's list: written, but not watched
                 ++unmatched;
                 continue;
             }
-            hint = i + 1;
+            g_placed_taken[i] = 1;
             if (g_placed[i].object) {
                 ++live;
             } else if (!g_placed[i].model) {
@@ -546,9 +549,15 @@ void poll_destroyed_structures(double t) {
     if (g_struct_pending || g_watch_n == 0) return;
     if (t >= g_last_poll && t - g_last_poll < kDestroyedPollSeconds - 1e-9) return;
     g_last_poll = t;
+    if (!mission_unchanged()) {  // the records may be gone: never read them again this recording
+        g_watch_n = 0;
+        LOG("tacview: the mission changed under the recording; structure destruction is no longer tracked");
+        return;
+    }
+    if (!g_writer->can_take(kMaxDestroyedPerFrame)) return;  // ring busy: the next poll tries again
     const size_t n = mission_poll_destroyed(g_watch_rec, g_watch_n, g_watch_dead, g_watch_hits, kMaxDestroyedPerFrame);
     if (n == 0) return;
-    if (!g_writer->begin_frame(n)) {  // counted as dropped; tried again at the next poll
+    if (!g_writer->begin_frame(n)) {  // not expected after can_take; tried again at the next poll
         for (size_t i = 0; i < n; ++i) g_watch_dead[g_watch_hits[i]] = 0;
         return;
     }

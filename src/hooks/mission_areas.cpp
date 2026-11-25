@@ -64,6 +64,27 @@ void release_msn(void* sys, void** obj) {
 }
 
 // 0 ok, 2 unexpected memory. SEH only.
+// What mission_active_areas read last: mission_unchanged() compares against it. Game thread only.
+struct Stamp {
+    HMODULE sm = nullptr;
+    const void* msn = nullptr;
+    const BYTE* arr = nullptr;
+    int count = -1;
+};
+Stamp g_stamp;
+
+// The area array and count of an MSN object; false when unreadable or not SingleMission's. SEH only.
+bool read_owner(HMODULE sm, const BYTE* msn, const BYTE** arr, int* count) {
+    __try {
+        if (*reinterpret_cast<void* const*>(msn) != at_rva(sm, kRvaMsnVtable)) return false;
+        std::memcpy(count, msn + kOffTargets + kOffAreaCount, sizeof(*count));
+        std::memcpy(arr, msn + kOffTargets + kOffAreaArray, sizeof(*arr));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 int read_areas(HMODULE sm, const BYTE* msn, GameArea* out, size_t cap, size_t* n) {
     __try {
         if (*reinterpret_cast<void* const*>(msn) != at_rva(sm, kRvaMsnVtable)) return 2;
@@ -108,6 +129,7 @@ int read_areas(HMODULE sm, const BYTE* msn, GameArea* out, size_t cap, size_t* n
 
 MissionAreas mission_active_areas(GameArea* out, size_t cap, size_t* n) {
     *n = 0;
+    g_stamp = Stamp{};
     static bool exe_checked = false, exe_ok = false;
     HMODULE exe = GetModuleHandleW(nullptr);
     if (!exe_checked) {
@@ -135,7 +157,10 @@ MissionAreas mission_active_areas(GameArea* out, size_t cap, size_t* n) {
     // The registry holds one MSN at a time: the running mission's. Only SingleMission's own object is read.
     MissionAreas result = MissionAreas::NotSingle;
     if (msn == at_rva(sm, kRvaMsn)) {
-        if (read_areas(sm, static_cast<const BYTE*>(msn), out, cap, n) == 0) {
+        if (read_areas(sm, static_cast<const BYTE*>(msn), out, cap, n) == 0 &&
+            read_owner(sm, static_cast<const BYTE*>(msn), &g_stamp.arr, &g_stamp.count)) {
+            g_stamp.sm = sm;
+            g_stamp.msn = msn;
             result = MissionAreas::Read;
         } else {
             *n = 0;
@@ -145,6 +170,19 @@ MissionAreas mission_active_areas(GameArea* out, size_t cap, size_t* n) {
     }
     release_msn(sys, &msn);
     return result;
+}
+
+bool mission_unchanged() {
+    if (!g_stamp.msn || GetModuleHandleW(L"SingleMission.dll") != g_stamp.sm) return false;
+    void* msn = nullptr;
+    void* sys = nullptr;
+    if (get_msn(GetModuleHandleW(nullptr), &msn, &sys) != 0) return false;
+    const BYTE* arr = nullptr;
+    int count = -1;
+    const bool same = msn == g_stamp.msn && read_owner(g_stamp.sm, static_cast<const BYTE*>(msn), &arr, &count) &&
+                      arr == g_stamp.arr && count == g_stamp.count;
+    release_msn(sys, &msn);
+    return same;
 }
 
 bool mission_placed(const GameArea& a, int i, PlacedView* out) {

@@ -189,8 +189,8 @@ private:
         uint64_t seen;
         double pos[3];  // where an explosion goes
     };
-    std::vector<Static> statics_;
-    std::vector<uint32_t> dead_statics_;  // destroyed in the current frame: removed at its end  // structures: kept out of objs_, so their thousands never slow the per-object lookup
+    std::vector<Static> statics_;  // structures: kept out of objs_, so their thousands never slow the per-object lookup
+    std::vector<uint32_t> dead_statics_;  // destroyed in the current frame: removed at its end
     std::unordered_map<uint64_t, size_t> static_index_;  // seq to index in statics_
     void add_structure(const TacviewRec& r);
     std::string pending_;  // transform lines of the current frame

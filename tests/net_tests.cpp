@@ -3460,9 +3460,11 @@ void structure_tests() {
     }
     {
         const double pts[4][2] = {{0, 0}, {10, 0}, {20, 0}, {10, 0.5}};
-        expect(find_near(pts, 4, 10.4, 0, 2.0, 0) == 1 && find_near(pts, 4, 10.4, 0.4, 2.0, 2) == 3 &&
-                   find_near(pts, 4, 0.5, 0, 2.0, 3) == 0 && find_near(pts, 4, 50, 0, 2.0, 0) == 4 && find_near(pts, 0, 0, 0, 2.0, 0) == 0,
-               "find_near: from the hint, then from the start; n when none");
+        const uint8_t taken[4] = {0, 1, 0, 0};
+        expect(find_near(pts, 4, 10.4, 0, 2.0, nullptr) == 1 && find_near(pts, 4, 10.1, 0.4, 2.0, nullptr) == 3 &&
+                   find_near(pts, 4, 10.4, 0, 2.0, taken) == 3 && find_near(pts, 4, 0.5, 0, 2.0, taken) == 0 &&
+                   find_near(pts, 4, 50, 0, 2.0, nullptr) == 4 && find_near(pts, 0, 0, 0, 2.0, nullptr) == 0,
+               "find_near: the nearest within the tolerance, never a taken one; n when none");
     }
 
     TacviewWriter w(64);
