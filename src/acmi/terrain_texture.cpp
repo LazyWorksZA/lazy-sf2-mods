@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "acmi/acmi_format.h"
+#include "acmi/airfields.h"
 
 namespace lazysf2::acmi {
 
@@ -265,25 +266,81 @@ void paint_runway(RGBImage& img, double mpp, double cx, double cy, double headin
     }
 }
 
+bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, double& side_m) {
+    if (a.runways.empty() || !std::isfinite(a.x) || !std::isfinite(a.y)) return false;
+    double reach = 0;
+    for (const Runway& r : a.runways) {
+        if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.heading) || !std::isfinite(r.length) ||
+            !std::isfinite(r.width) || r.length <= 0 || r.width <= 0)
+            return false;
+        reach = std::max(reach, std::hypot(r.x - a.x, r.y - a.y) + std::hypot(r.length / 2, r.width / 2));
+    }
+    side_m = std::max(kPatchMinSideM, 2 * reach + kPatchMarginM);
+    const int n = std::clamp(static_cast<int>(std::ceil(side_m / kPatchTargetMpp)), kPatchMinPx, kPatchMaxPx);
+    const double mpp = side_m / n;
+    x0 = a.x - side_m / 2;
+    y0 = a.y - side_m / 2;
+    out.w = out.h = n;
+    out.px.assign(static_cast<size_t>(n) * n * 4, 0);
+    constexpr uint8_t kAsphalt[4] = {58, 58, 60, 255}, kEdge[4] = {200, 200, 200, 255}, kCentre[4] = {230, 230, 230, 255};
+    constexpr double kDash = 30.0, kGap = 20.0;
+    // Three passes, so a line never hides under another runway's asphalt.
+    for (int pass = 0; pass < 3; ++pass) {
+        for (const Runway& r : a.runways) {
+            const double half_len = r.length / 2, half_wid = std::max(r.width, 3 * mpp) / 2;
+            const double dx = std::sin(r.heading), dy = std::cos(r.heading);
+            const double reach_r = std::hypot(half_len, half_wid) + mpp;
+            const int c0 = std::max(0, static_cast<int>(std::floor((r.x - reach_r - x0) / mpp)));
+            const int c1 = std::min(n - 1, static_cast<int>(std::ceil((r.x + reach_r - x0) / mpp)));
+            const int r0 = std::max(0, static_cast<int>(std::floor((y0 + side_m - (r.y + reach_r)) / mpp)));
+            const int r1 = std::min(n - 1, static_cast<int>(std::ceil((y0 + side_m - (r.y - reach_r)) / mpp)));
+            for (int y = r0; y <= r1; ++y) {
+                const double wy = y0 + side_m - (y + 0.5) * mpp - r.y;
+                for (int x = c0; x <= c1; ++x) {
+                    const double wx = x0 + (x + 0.5) * mpp - r.x;
+                    const double along = wx * dx + wy * dy, across = wx * dy - wy * dx;
+                    if (std::fabs(along) > half_len || std::fabs(across) > half_wid) continue;
+                    const uint8_t* c = nullptr;
+                    if (pass == 0) {
+                        c = kAsphalt;
+                    } else if (pass == 1) {
+                        if (std::fabs(across) > half_wid - mpp) c = kEdge;
+                    } else if (std::fabs(across) <= mpp / 2 &&
+                               std::fmod(along + half_len, kDash + kGap) < kDash) {
+                        c = kCentre;
+                    }
+                    if (c) std::memcpy(&out.px[(static_cast<size_t>(y) * n + x) * 4], c, 4);
+                }
+            }
+        }
+    }
+    return true;
+}
+
 std::string texture_xml(const std::string& id, const std::string& file, int /*w_px*/, int /*h_px*/, double extent_x_m,
-                        double extent_y_m, double ref_lon, double ref_lat) {
+                        double extent_y_m, double ref_lon, double ref_lat, const std::vector<PatchEntry>& patches) {
     // The extent is the tiles' outer edges; the heightmap's corners are sample points, which is a different thing.
     const Mapping m = make_mapping(ref_lat);
-    const double west = ref_lon, east = ref_lon + extent_x_m * m.lon_scale;
-    const double south = ref_lat, north = ref_lat + extent_y_m * m.lat_scale;
     std::string x =
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?>\n<Resources>\n\t<CustomTextureList>\n";
-    x += "\t\t<CustomTexture Layer=\"Real World\" Id=\"" + id + "\">\n";
-    x += "\t\t\t<File>" + file + "</File>\n\t\t\t<Visible>true</Visible>\n\t\t\t<Projection>Quad</Projection>\n";
-    const auto corner = [&](const char* tag, double lon, double lat) {
-        x += std::string("\t\t\t<") + tag + ">\n\t\t\t\t<Longitude>" + num(lon, 9) + "</Longitude>\n\t\t\t\t<Latitude>" +
-             num(lat, 9) + "</Latitude>\n\t\t\t</" + tag + ">\n";
+    const auto entry = [&](const std::string& eid, const std::string& efile, double ex0, double ey0, double w_m, double h_m) {
+        const double west = ref_lon + ex0 * m.lon_scale, east = ref_lon + (ex0 + w_m) * m.lon_scale;
+        const double south = ref_lat + ey0 * m.lat_scale, north = ref_lat + (ey0 + h_m) * m.lat_scale;
+        x += "\t\t<CustomTexture Layer=\"Real World\" Id=\"" + eid + "\">\n";
+        x += "\t\t\t<File>" + efile + "</File>\n\t\t\t<Visible>true</Visible>\n\t\t\t<Projection>Quad</Projection>\n";
+        const auto corner = [&](const char* tag, double lon, double lat) {
+            x += std::string("\t\t\t<") + tag + ">\n\t\t\t\t<Longitude>" + num(lon, 9) + "</Longitude>\n\t\t\t\t<Latitude>" +
+                 num(lat, 9) + "</Latitude>\n\t\t\t</" + tag + ">\n";
+        };
+        corner("BottomLeft", west, south);
+        corner("BottomRight", east, south);
+        corner("TopRight", east, north);
+        corner("TopLeft", west, north);
+        x += "\t\t</CustomTexture>\n";
     };
-    corner("BottomLeft", west, south);
-    corner("BottomRight", east, south);
-    corner("TopRight", east, north);
-    corner("TopLeft", west, north);
-    x += "\t\t</CustomTexture>\n\t</CustomTextureList>\n</Resources>\n";
+    entry(id, file, 0, 0, extent_x_m, extent_y_m);
+    for (const PatchEntry& p : patches) entry(p.id, p.file, p.x0, p.y0, p.side_m, p.side_m);
+    x += "\t</CustomTextureList>\n</Resources>\n";
     return x;
 }
 

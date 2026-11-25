@@ -420,9 +420,6 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
     const std::wstring shown = log::log_path(dir);
     const int n = kTexturePixelsPerTile;
     const double extent_x = t.tiles_w * t.tile_m, extent_y = t.tiles_h * t.tile_m;
-    // The xml is small: always rewritten, so a changed reference point never leaves stale corners.
-    const std::string xml = acmi::texture_xml(job.id, job.id + ".jpg", t.tiles_w * n, t.tiles_h * n, extent_x, extent_y,
-                                              kTerrainRefLon, kTerrainRefLat);
     const bool have_jpg = exists(stem + L".jpg");
     if (!have_jpg) {
         try {
@@ -465,6 +462,44 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
     } else {
         LOG("tacview terrain: the %s texture is already present in %ls", job.id.c_str(), shown.c_str());
     }
+    // The patches depend only on the airfields, so they are made whether or not the base texture was.
+    std::vector<acmi::PatchEntry> patches;
+    int written = 0, present = 0, failed = 0;
+    try {
+        char suffix[16];
+        for (size_t i = 0; i < airfields.size(); ++i) {
+            acmi::RGBAImage patch;
+            acmi::PatchEntry e;
+            if (!acmi::runway_patch(airfields[i], patch, e.x0, e.y0, e.side_m)) continue;
+            std::snprintf(suffix, sizeof suffix, ".AF%03zu", i + 1);
+            e.id = job.id + suffix;
+            e.file = e.id + ".png";
+            const std::wstring path = dir + L"\\" + std::wstring(e.file.begin(), e.file.end());
+            if (exists(path)) {
+                ++present;
+            } else {
+                const std::wstring tmp = path + L".tmp";
+                bool ok = write_png_wic(patch, tmp);
+                if (ok) ok = MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+                if (!ok) DeleteFileW(tmp.c_str());
+                if (!ok) {
+                    ++failed;
+                    LOG("tacview terrain: %s: could not write the runway patch for airfield %zu; skipped", job.id.c_str(), i + 1);
+                    continue;
+                }
+                ++written;
+            }
+            patches.push_back(std::move(e));
+        }
+    } catch (...) {
+        log_once(16, "tacview terrain: runway patches stopped: out of memory");
+    }
+    if (written + present + failed > 0)
+        LOG("tacview terrain: %s: %d runway patches (%d written, %d already present, %d failed)", job.id.c_str(),
+            written + present, written, present, failed);
+    // The xml is small: always rewritten, so a changed reference point never leaves stale corners.
+    const std::string xml = acmi::texture_xml(job.id, job.id + ".jpg", t.tiles_w * n, t.tiles_h * n, extent_x, extent_y,
+                                              kTerrainRefLon, kTerrainRefLat, patches);
     if (!write_atomic(stem + L".xml", [&](HANDLE f) { return write_all(f, xml.data(), xml.size()); }))
         LOG("tacview terrain: %s: could not write the texture xml (error %lu)", job.id.c_str(), GetLastError());
 }

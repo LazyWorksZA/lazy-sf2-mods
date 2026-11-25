@@ -2639,6 +2639,98 @@ void texture_tests() {
                    corner("TopLeft", "-25", north),
                "texture xml: corners are the outer edges of the extent");
     }
+
+    // runway patches
+    {
+        auto rwy = [](double x, double y, double heading, double len, double wid) {
+            Runway r;
+            r.x = x; r.y = y; r.heading = heading; r.length = len; r.width = wid;
+            return r;
+        };
+        auto px_at = [](const RGBAImage& im, int col, int row) { return &im.px[(static_cast<size_t>(row) * im.w + col) * 4]; };
+        auto is = [](const uint8_t* p, int r, int g, int b, int a) { return p[0] == r && p[1] == g && p[2] == b && p[3] == a; };
+        Airfield a;
+        a.x = 10000; a.y = 20000;
+        a.runways.push_back(rwy(10000, 20000, 0.0, 3000, 90));
+        RGBAImage im;
+        double x0 = 0, y0 = 0, side = 0;
+        expect(runway_patch(a, im, x0, y0, side), "runway_patch: an airfield with a runway has a patch");
+        const double want = 2 * std::hypot(1500.0, 45.0) + 400.0;
+        expect(std::fabs(side - want) < 1e-6 && im.w == std::ceil(want / 8) && im.h == im.w && x0 == 10000 - side / 2 && y0 == 20000 - side / 2,
+               "runway_patch: side is 2 x reach + 400 m margin, 8 m per pixel");
+        expect(im.px.size() == static_cast<size_t>(im.w) * im.h * 4, "runway_patch: RGBA buffer size");
+        expect(is(px_at(im, 0, 0), 0, 0, 0, 0) && is(px_at(im, im.w - 1, 0), 0, 0, 0, 0) &&
+                   is(px_at(im, 0, im.h - 1), 0, 0, 0, 0) && is(px_at(im, im.w - 1, im.h - 1), 0, 0, 0, 0),
+               "runway_patch: the corners are transparent");
+        const double mpp = side / im.w;
+        const int cx = im.w / 2, cy = im.h / 2;
+        auto opaque = [&](int c, int r) { return px_at(im, c, r)[3] == 255; };
+        expect(opaque(cx, cy - 100) && opaque(cx - 3, cy) && opaque(cx + 3, cy) && !opaque(cx - 12, cy) && !opaque(cx + 12, cy),
+               "runway_patch: heading 0 is a vertical stripe about 90 m wide");
+        expect(!opaque(cx, cy - 190) && !opaque(cx, cy + 190) && opaque(cx + 2, cy - 180),
+               "runway_patch: the stripe is as long as the runway");
+        // the left edge column, 45 m west of the centre line, is the edge colour
+        int edges = 0;
+        for (int c = 0; c < im.w; ++c) {
+            const uint8_t* p = px_at(im, c, cy - 50);
+            if (is(p, 200, 200, 200, 255)) ++edges;
+        }
+        expect(edges == 2, "runway_patch: one edge-line pixel along each long side");
+        expect(is(px_at(im, cx - 6, cy - 50), 58, 58, 60, 255) || is(px_at(im, cx - 5, cy - 50), 58, 58, 60, 255),
+               "runway_patch: asphalt between the lines");
+        int centre = 0, dashed = 0;
+        for (int r = cy - 150; r < cy + 150; ++r) {
+            bool any = false;
+            for (int c = cx - 1; c <= cx; ++c) any = any || is(px_at(im, c, r), 230, 230, 230, 255);
+            (any ? centre : dashed)++;
+        }
+        expect(centre > 80 && dashed > 40, "runway_patch: the centre line is dashed");
+        (void)mpp;
+
+        Airfield e;
+        e.x = 5000; e.y = 5000;
+        e.runways.push_back(rwy(5000, 5000, kPi / 2, 2000, 45));
+        RGBAImage ew;
+        expect(runway_patch(e, ew, x0, y0, side), "runway_patch: heading 90");
+        expect(std::fabs(side - (2 * std::hypot(1000.0, 22.5) + 400.0)) < 1e-6 && ew.w == 301, "runway_patch: side from the corner distance");
+        const int ex = ew.w / 2;  // the centre is the pixel boundary, so test one pixel either side
+        auto opq = [&](int c, int r) { return px_at(ew, c, r)[3] == 255; };
+        expect(opq(ex - 100, ex) && opq(ex + 100, ex) && !opq(ex, ex - 10) && !opq(ex, ex + 10) && !opq(ex - 140, ex),
+               "runway_patch: heading 90 is a horizontal stripe (a narrow runway is drawn at least 3 px)");
+
+        Airfield big;
+        big.x = 0; big.y = 0;
+        big.runways.push_back(rwy(0, 0, 0.0, 20000, 90));
+        RGBAImage bg;
+        expect(runway_patch(big, bg, x0, y0, side) && bg.w == 1024 && std::fabs(side / bg.w * bg.w - side) < 1e-9,
+               "runway_patch: at most 1024 px");
+        Airfield tiny;
+        tiny.runways.push_back(rwy(0, 0, 0.0, 100, 20));
+        RGBAImage ti;
+        expect(runway_patch(tiny, ti, x0, y0, side) && side == 2000.0 && ti.w == 250, "runway_patch: at least 2000 m");
+        Airfield none;
+        none.x = 1; none.y = 1;
+        RGBAImage ne;
+        expect(!runway_patch(none, ne, x0, y0, side), "runway_patch: no runways, no patch");
+
+        const std::vector<PatchEntry> extra = {{"LazySF2.T.AF001", "LazySF2.T.AF001.png", 1000, 2000, 3000},
+                                               {"LazySF2.T.AF002", "LazySF2.T.AF002.png", 5000, 6000, 2000}};
+        const std::string xml = texture_xml("LazySF2.T", "LazySF2.T.jpg", 4000, 4000, 1000000.0, 1000000.0, -25.0, -4.5, extra);
+        const auto m = make_mapping(-4.5);
+        auto has = [&](const std::string& piece) { return xml.find(piece) != std::string::npos; };
+        const size_t base = xml.find("Id=\"LazySF2.T\""), p1 = xml.find("Id=\"LazySF2.T.AF001\""), p2 = xml.find("Id=\"LazySF2.T.AF002\"");
+        expect(base != std::string::npos && base < p1 && p1 < p2, "texture xml: base entry first, then the patches in order");
+        expect(has("<File>LazySF2.T.AF001.png</File>") && has("<File>LazySF2.T.AF002.png</File>"), "texture xml: patch files");
+        const std::string bl_lon = num(-25.0 + 1000 * m.lon_scale, 9), bl_lat = num(-4.5 + 2000 * m.lat_scale, 9);
+        const std::string tr_lon = num(-25.0 + 4000 * m.lon_scale, 9), tr_lat = num(-4.5 + 5000 * m.lat_scale, 9);
+        const std::string first = xml.substr(p1, xml.find("</CustomTexture>", p1) - p1);
+        const size_t i_bl = first.find("<BottomLeft>"), i_br = first.find("<BottomRight>"), i_tr = first.find("<TopRight>"), i_tl = first.find("<TopLeft>");
+        expect(i_bl < i_br && i_br < i_tr && i_tr < i_tl, "texture xml: patch corner order");
+        expect(first.find("<Longitude>" + bl_lon + "</Longitude>\n\t\t\t\t<Latitude>" + bl_lat + "</Latitude>", i_bl) < i_br &&
+                   first.find("<Longitude>" + tr_lon + "</Longitude>\n\t\t\t\t<Latitude>" + tr_lat + "</Latitude>", i_tr) < i_tl,
+               "texture xml: patch corners from the world square");
+        expect(has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"), "texture xml: patch structure");
+    }
 }
 }  // namespace
 

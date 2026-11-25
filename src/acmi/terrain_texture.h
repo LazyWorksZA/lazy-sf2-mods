@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "acmi/airfields.h"
+
 namespace lazysf2::acmi {
 
 constexpr int kMaxImageDim = 2048;
@@ -52,8 +54,33 @@ void compose(int tiles_w, int tiles_h, int n, const uint16_t* index, const uint8
 void paint_runway(RGBImage& img, double metres_per_px, double cx, double cy, double heading_rad, double length,
                   double width);
 
-/// <summary>A Tacview CustomTextureList with one texture whose corners are the outer edges of the extent.</summary>
+/// <summary>RGBA8, top row first (row 0 is north). Alpha 0 is fully transparent.</summary>
+struct RGBAImage {
+    int w = 0, h = 0;
+    std::vector<uint8_t> px;
+};
+
+constexpr double kPatchMarginM = 400.0, kPatchMinSideM = 2000.0, kPatchTargetMpp = 8.0;
+constexpr int kPatchMinPx = 128, kPatchMaxPx = 1024;
+
+/// <summary>
+/// Draws the airfield's runways (asphalt, edge lines, dashed centre line) on a transparent square centred on the
+/// airfield. The square's south-west corner is (x0, y0) metres and its side side_m. False when there are no runways
+/// or the numbers are not usable.
+/// </summary>
+bool runway_patch(const Airfield& a, RGBAImage& out, double& x0, double& y0, double& side_m);
+
+/// <summary>An extra texture over the base one: a square of side_m metres whose south-west corner is (x0, y0).</summary>
+struct PatchEntry {
+    std::string id, file;
+    double x0 = 0, y0 = 0, side_m = 0;
+};
+
+/// <summary>
+/// A Tacview CustomTextureList with the base texture, whose corners are the outer edges of the extent, then one entry
+/// per patch.
+/// </summary>
 std::string texture_xml(const std::string& id, const std::string& file, int w_px, int h_px, double extent_x_m,
-                        double extent_y_m, double ref_lon, double ref_lat);
+                        double extent_y_m, double ref_lon, double ref_lat, const std::vector<PatchEntry>& patches = {});
 
 }  // namespace lazysf2::acmi

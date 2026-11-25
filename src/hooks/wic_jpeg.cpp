@@ -53,4 +53,38 @@ bool write_jpeg_wic(const acmi::RGBImage& img, const std::wstring& path, float q
     return true;
 }
 
+bool write_png_wic(const acmi::RGBAImage& img, const std::wstring& path) {
+    if (img.w < 1 || img.h < 1 || img.px.size() != static_cast<size_t>(img.w) * static_cast<size_t>(img.h) * 4)
+        return false;
+    ComPtr<IWICImagingFactory> factory;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))))
+        return false;
+    ComPtr<IWICStream> stream;
+    if (FAILED(factory->CreateStream(&stream)) || FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)))
+        return false;
+    ComPtr<IWICBitmapEncoder> encoder;
+    if (FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)))
+        return false;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (FAILED(encoder->CreateNewFrame(&frame, nullptr)) || FAILED(frame->Initialize(nullptr))) return false;
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    if (FAILED(frame->SetSize(static_cast<UINT>(img.w), static_cast<UINT>(img.h))) ||
+        FAILED(frame->SetPixelFormat(&format)) || format != GUID_WICPixelFormat32bppBGRA)
+        return false;
+    std::vector<BYTE> row(static_cast<size_t>(img.w) * 4);
+    for (int y = 0; y < img.h; ++y) {
+        const uint8_t* src = &img.px[static_cast<size_t>(y) * static_cast<size_t>(img.w) * 4];
+        for (int x = 0; x < img.w; ++x) {
+            row[static_cast<size_t>(x) * 4] = src[x * 4 + 2];
+            row[static_cast<size_t>(x) * 4 + 1] = src[x * 4 + 1];
+            row[static_cast<size_t>(x) * 4 + 2] = src[x * 4];
+            row[static_cast<size_t>(x) * 4 + 3] = src[x * 4 + 3];
+        }
+        if (FAILED(frame->WritePixels(1, static_cast<UINT>(row.size()), static_cast<UINT>(row.size()), row.data())))
+            return false;
+    }
+    return SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit()) && SUCCEEDED(stream->Commit(STGC_DEFAULT));
+}
+
 }  // namespace lazysf2::hooks
