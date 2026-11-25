@@ -48,7 +48,7 @@ add_library(lazysf2 SHARED
     src/hooks/dxgi_hooks.cpp
     src/hooks/input_hooks.cpp
     src/hooks/menu_hooks.cpp
-    src/hooks/options_other_splice.cpp
+    src/hooks/options_gameplay_splice.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp
     src/hooks/tacview_recorder.cpp
@@ -104,7 +104,7 @@ add_executable(lazysf2-net-tests
     src/acmi/terrain_texture.cpp
     src/acmi/airfields.cpp
     src/acmi/ini.cpp
-    src/hooks/options_other_splice.cpp
+    src/hooks/options_gameplay_splice.cpp
 )
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
 target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)

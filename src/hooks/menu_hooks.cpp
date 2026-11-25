@@ -1,5 +1,5 @@
 // Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer (Controls), Tacview Recording
-// (Other). Splices menu text as the file service reads it; hooks the OptionsScreen sub-menu classes at fixed RVAs.
+// (Gameplay). Splices menu text as the file service reads it; hooks the OptionsScreen sub-menu classes at fixed RVAs.
 // See lazy-sf2-recon: option-trace.md.
 #include <windows.h>
 
@@ -14,7 +14,7 @@
 #include "monitors.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
-#include "hooks/options_other_splice.h"
+#include "hooks/options_gameplay_splice.h"
 #include "log.h"
 
 namespace lazysf2::hooks {
@@ -36,12 +36,12 @@ constexpr DWORD kCtlInitRva = 0x3500;     // Controls page Init
 constexpr DWORD kCtlExitRva = 0x1f40;     // Controls page Exit
 constexpr DWORD kCtlRefreshRva = 0x1fa0;  // Controls page Refresh
 constexpr DWORD kCtlChangedRva = 0x2010;  // Controls page Changed
-// Other sub-menu class (vtable +0x1e9e8): Init is a short wrapper; the other three are JMP stubs to the shared
-// base, which stays unhooked (every page uses it).
-constexpr DWORD kOthInitRva = 0x5f20;     // Other page Init
-constexpr DWORD kOthExitRva = 0x5f30;     // Other page Exit
-constexpr DWORD kOthRefreshRva = 0x5ee0;  // Other page Refresh
-constexpr DWORD kOthChangedRva = 0x5ef0;  // Other page Changed
+// Gameplay sub-menu class (vtable +0x1e934). Its methods use fixed control IDs 1..15 and 23..32, so our higher IDs
+// are left alone.
+constexpr DWORD kGplInitRva = 0x4540;     // Gameplay page Init
+constexpr DWORD kGplExitRva = 0x4220;     // Gameplay page Exit (saves [GameplayOptions])
+constexpr DWORD kGplRefreshRva = 0x4230;  // Gameplay page Refresh
+constexpr DWORD kGplChangedRva = 0x3ab0;  // Gameplay page Changed
 constexpr DWORD kIniReadIntRva = 0xa790;  // Options.ini ReadInt
 constexpr DWORD kIniWriteIntRva = 0xa0e0; // Options.ini WriteInt
 constexpr DWORD kIniGlobalRva = 0x26a90;  // Options.ini object used by the screen
@@ -66,7 +66,7 @@ constexpr wchar_t kHintText[] = L"Select fullscreen, or a borderless window for 
 
 std::atomic<int> g_list_id{0};       // control ID assigned to our list (0 = not injected)
 std::atomic<int> g_mouse_list_id{0}; // Controls page: Mouse Pointer list ID (0 = not injected)
-std::atomic<int> g_tac_list_id{0};   // Other page: Tacview Recording list ID (0 = not injected)
+std::atomic<int> g_tac_list_id{0};   // Gameplay page: Tacview Recording list ID (0 = not injected)
 int g_selected = 0;                  // current selection on the Graphics page (UI thread)
 constexpr int kMaxTracked = 8;
 std::atomic<int> g_tracked[kMaxTracked] = {};  // open handles of OptionsScreen.ini (+1, 0 = free)
@@ -313,7 +313,7 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
         return n;
     }
     const int mouse_id = splice_controls(out);
-    const int tac_id = splice_other_page(out);
+    const int tac_id = splice_gameplay_row(out);
     const size_t need = wide ? 2 + out.size() * 2 : out.size();
     if (need + 2 > bytes) {  // keep room for a 2-byte terminator
         LOG("menu: no room to add Display Mode (%zu of %u bytes)", need, bytes);
@@ -328,7 +328,7 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
     g_mouse_list_id = mouse_id;
     g_tac_list_id = tac_id;
     LOG("menu: added Display Mode as MenuItem%03d, Mouse Pointer as Controls MenuItem%03d, Tacview Recording as "
-        "Other MenuItem%03d (%d -> %zu bytes)",
+        "Gameplay MenuItem%03d (%d -> %zu bytes)",
         list_id, mouse_id, tac_id, n, need);
     return static_cast<int>(need);
 }
@@ -534,18 +534,18 @@ void __fastcall h_CtlExit(void* self, void* edx) {
     aircraft_track_reevaluate();  // as in h_Exit
 }
 
-// --- Other sub-menu: Tacview Recording. Options.ini [OtherOptions] TacviewRecording: 0 = Off (default), 1 = On.
-// List index = value.
+// --- Gameplay sub-menu: Tacview Recording. Options.ini [OtherOptions] TacviewRecording: 0 = Off (default), 1 = On.
+// The key keeps its section from the earlier Other page, so saved settings carry over. List index = value.
 
-Init_t o_OthInit = nullptr;
-Method_t o_OthRefresh = nullptr;
-Method_t o_OthChanged = nullptr;
-Method_t o_OthExit = nullptr;
+Init_t o_GplInit = nullptr;
+Method_t o_GplRefresh = nullptr;
+Method_t o_GplChanged = nullptr;
+Method_t o_GplExit = nullptr;
 int g_tac_selected = 0;     // list index (UI thread)
 bool g_tac_ready = false;   // Init ran for this page instance; Exit writes only then
 
-void __fastcall h_OthInit(void* self, void* edx, int* a, int* b) {
-    o_OthInit(self, edx, a, b);
+void __fastcall h_GplInit(void* self, void* edx, int* a, int* b) {
+    o_GplInit(self, edx, a, b);
     void* list = list_by_id(self, g_tac_list_id.load());
     if (!list) return;
     auto add = reinterpret_cast<AddItem_t>(vtable_slot(list, kListAddItem));
@@ -557,25 +557,25 @@ void __fastcall h_OthInit(void* self, void* edx, int* a, int* b) {
                       : 0;
     g_tac_selected = v == 1 ? 1 : 0;
     g_tac_ready = true;
-    LOG("menu: Other page opened, TacviewRecording=%d", v);
+    LOG("menu: Gameplay page opened, TacviewRecording=%d", v);
 }
 
-void __fastcall h_OthRefresh(void* self, void* edx) {
-    o_OthRefresh(self, edx);
+void __fastcall h_GplRefresh(void* self, void* edx) {
+    o_GplRefresh(self, edx);
     if (void* list = list_by_id(self, g_tac_list_id.load())) {
         reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_tac_selected);
     }
 }
 
-void __fastcall h_OthChanged(void* self, void* edx) {
-    o_OthChanged(self, edx);
+void __fastcall h_GplChanged(void* self, void* edx) {
+    o_GplChanged(self, edx);
     if (void* list = list_by_id(self, g_tac_list_id.load())) {
         const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
         if (sel == 0 || sel == 1) g_tac_selected = sel;
     }
 }
 
-void __fastcall h_OthExit(void* self, void* edx) {
+void __fastcall h_GplExit(void* self, void* edx) {
     if (g_tac_list_id.load() && g_tac_ready) {
         g_tac_ready = false;
         const bool on = g_tac_selected == 1;
@@ -586,7 +586,7 @@ void __fastcall h_OthExit(void* self, void* edx) {
         if ((on ? 1 : 0) != config::tacview_recording_peek()) LOG("menu: Tacview Recording set to %s", on ? "On" : "Off");
         config::set_tacview_recording(on);
     }
-    o_OthExit(self, edx);
+    o_GplExit(self, edx);
     aircraft_track_reevaluate();  // after config is updated: installs or removes the aircraft/weapon hooks
 }
 
@@ -601,8 +601,6 @@ std::atomic<bool> g_text_done{false};
 const wchar_t* our_text(const wchar_t* key) {
     if (!key) return nullptr;
     if (wcscmp(key, kHintKey) == 0) return kHintText;
-    if (wcscmp(key, kOtherTabKey) == 0) return L"Other";
-    if (wcscmp(key, kOtherTabInfoKey) == 0) return L"Set other options, such as Tacview recording.";
     if (wcscmp(key, kTacviewLabelKey) == 0) return L"Tacview Recording";
     if (wcscmp(key, kTacviewInfoKey) == 0) return L"Record every flight to a Tacview file in Saved Games.";
     if (wcscmp(key, L"TXT_LAZY_SCREEN_INFO") == 0) return L"Select the monitor to display the game on.";
@@ -655,20 +653,20 @@ void hook_options_screen(HMODULE opts) {
                       reinterpret_cast<void**>(&o_CtlChanged), "OptionsScreen Controls Changed");
     create_and_enable(at_rva(opts, kCtlExitRva), reinterpret_cast<void*>(&h_CtlExit),
                       reinterpret_cast<void**>(&o_CtlExit), "OptionsScreen Controls Exit");
-    create_and_enable(at_rva(opts, kOthInitRva), reinterpret_cast<void*>(&h_OthInit),
-                      reinterpret_cast<void**>(&o_OthInit), "OptionsScreen Other Init");
-    create_and_enable(at_rva(opts, kOthRefreshRva), reinterpret_cast<void*>(&h_OthRefresh),
-                      reinterpret_cast<void**>(&o_OthRefresh), "OptionsScreen Other Refresh");
-    create_and_enable(at_rva(opts, kOthChangedRva), reinterpret_cast<void*>(&h_OthChanged),
-                      reinterpret_cast<void**>(&o_OthChanged), "OptionsScreen Other Changed");
-    create_and_enable(at_rva(opts, kOthExitRva), reinterpret_cast<void*>(&h_OthExit),
-                      reinterpret_cast<void**>(&o_OthExit), "OptionsScreen Other Exit");
+    create_and_enable(at_rva(opts, kGplInitRva), reinterpret_cast<void*>(&h_GplInit),
+                      reinterpret_cast<void**>(&o_GplInit), "OptionsScreen Gameplay Init");
+    create_and_enable(at_rva(opts, kGplRefreshRva), reinterpret_cast<void*>(&h_GplRefresh),
+                      reinterpret_cast<void**>(&o_GplRefresh), "OptionsScreen Gameplay Refresh");
+    create_and_enable(at_rva(opts, kGplChangedRva), reinterpret_cast<void*>(&h_GplChanged),
+                      reinterpret_cast<void**>(&o_GplChanged), "OptionsScreen Gameplay Changed");
+    create_and_enable(at_rva(opts, kGplExitRva), reinterpret_cast<void*>(&h_GplExit),
+                      reinterpret_cast<void**>(&o_GplExit), "OptionsScreen Gameplay Exit");
 }
 
 // Removes the 12 OptionsScreen hooks at this base; entries that don't exist are fine.
 void remove_options_hooks(HMODULE base) {
     for (DWORD rva : {kGfxInitRva, kGfxRefreshRva, kGfxChangedRva, kGfxExitRva, kCtlInitRva, kCtlRefreshRva,
-                      kCtlChangedRva, kCtlExitRva, kOthInitRva, kOthRefreshRva, kOthChangedRva, kOthExitRva}) {
+                      kCtlChangedRva, kCtlExitRva, kGplInitRva, kGplRefreshRva, kGplChangedRva, kGplExitRva}) {
         MH_STATUS s = MH_RemoveHook(at_rva(base, rva));
         (void)s;  // MH_ERROR_NOT_CREATED is expected
     }
