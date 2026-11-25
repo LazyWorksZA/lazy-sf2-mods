@@ -96,14 +96,50 @@ void append_event_destroyed(std::string& out, uint32_t id) {
     out += b;
 }
 
+void format_transform(TransformText& out, const double pos[3], const float ang[3], const Mapping& m) {
+    const double heading = norm_deg(static_cast<double>(ang[1]) * kRadToDeg);
+    out.f[0] = num(pos[0] * m.lon_scale, 9);
+    out.f[1] = num(pos[1] * m.lat_scale, 9);
+    out.f[2] = num(pos[2], 2);
+    out.f[3] = num(static_cast<double>(ang[2]) * kRadToDeg, 2);
+    out.f[4] = num(static_cast<double>(ang[0]) * kRadToDeg, 2);
+    out.f[5] = num(heading, 2);
+    out.f[6] = num(pos[0], 2);
+    out.f[7] = num(pos[1], 2);
+    out.f[8] = num(heading, 2);
+}
+
 void append_transform(std::string& out, uint32_t id, const double pos[3], const float ang[3], const Mapping& m) {
     char idbuf[16];
     std::snprintf(idbuf, sizeof(idbuf), "%x", id);
-    const double heading = norm_deg(static_cast<double>(ang[1]) * kRadToDeg);
+    TransformText t;
+    format_transform(t, pos, ang, m);
     out += idbuf;
-    out += ",T=" + num(pos[0] * m.lon_scale, 9) + "|" + num(pos[1] * m.lat_scale, 9) + "|" + num(pos[2], 2) + "|" +
-           num(static_cast<double>(ang[2]) * kRadToDeg, 2) + "|" + num(static_cast<double>(ang[0]) * kRadToDeg, 2) +
-           "|" + num(heading, 2) + "|" + num(pos[0], 2) + "|" + num(pos[1], 2) + "|" + num(heading, 2);
+    out += ",T=";
+    for (int i = 0; i < 9; ++i) {
+        if (i) out += '|';
+        out += t.f[i];
+    }
+}
+
+bool append_transform_delta(std::string& out, uint32_t id, const TransformText& cur, TransformText& last, bool first) {
+    bool full = first;
+    for (const std::string& s : last.f) full = full || s.empty();
+    bool changed = full;
+    if (!full) {
+        for (int i = 0; i < 9; ++i) changed = changed || cur.f[i] != last.f[i];
+    }
+    if (!changed) return false;
+    char idbuf[16];
+    std::snprintf(idbuf, sizeof(idbuf), "%x", id);
+    out += idbuf;
+    out += ",T=";
+    for (int i = 0; i < 9; ++i) {
+        if (i) out += '|';
+        if (full || cur.f[i] != last.f[i]) out += cur.f[i];
+    }
+    last = cur;
+    return true;
 }
 
 void append_position(std::string& out, uint32_t id, const double pos[3], const Mapping& m) {

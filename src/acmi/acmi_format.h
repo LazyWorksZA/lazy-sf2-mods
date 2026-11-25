@@ -69,6 +69,20 @@ void append_event_destroyed(std::string& out, uint32_t id);
 /// </summary>
 void append_transform(std::string& out, uint32_t id, const double pos[3], const float ang[3], const Mapping& m);
 
+/// <summary>The nine formatted components of a 9-field "T=" transform, in file order. Never empty once filled.</summary>
+struct TransformText {
+    std::string f[9];
+};
+/// <summary>Formats the nine components exactly as append_transform writes them.</summary>
+void format_transform(TransformText& out, const double pos[3], const float ang[3], const Mapping& m);
+/// <summary>
+/// Delta form (spec: components that did not change since the last value may be omitted). Writes "id,T=a|b|..."
+/// with every '|' kept and a component left empty when its text equals last's; then copies cur into last. With
+/// first set, or when last is empty, every component is written. Returns false and writes nothing when no component
+/// changed (and first is false). The line has no newline.
+/// </summary>
+bool append_transform_delta(std::string& out, uint32_t id, const TransformText& cur, TransformText& last, bool first);
+
 /// <summary>"id,T=Lon|Lat|Alt" without the newline: a position only (explosions).</summary>
 void append_position(std::string& out, uint32_t id, const double pos[3], const Mapping& m);
 

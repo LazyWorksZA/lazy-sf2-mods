@@ -109,7 +109,12 @@ void TacviewCore::add(const TacviewRec& r) {
     s->has_last = true;
 
     const Mapping m{lon_scale_, lat_scale_};
-    append_transform(pending_, s->id, r.pos, r.ang, m);
+    TransformText cur;
+    format_transform(cur, r.pos, r.ang, m);
+    if (!append_transform_delta(pending_, s->id, cur, s->text, is_new)) {
+        ++stats_.unchanged;  // nothing differs in text: Tacview keeps the last state
+        return;
+    }
     if (is_new) {
         ++stats_.objects;
         char name[kRecNameChars + 1];
