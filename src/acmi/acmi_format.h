@@ -45,6 +45,9 @@ void append_event_destroyed(std::string& out, uint32_t id);
 /// </summary>
 void append_transform(std::string& out, uint32_t id, const double pos[3], const float ang[3], const Mapping& m);
 
+/// <summary>"id,T=Lon|Lat|Alt" without the newline: a position only (explosions).</summary>
+void append_position(std::string& out, uint32_t id, const double pos[3], const Mapping& m);
+
 /// <summary>Properties written after the first transform of an object. A null or empty member is left out.</summary>
 struct ObjectProps {
     const char* name = nullptr;

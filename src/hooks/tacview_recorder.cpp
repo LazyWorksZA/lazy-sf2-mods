@@ -47,6 +47,8 @@ double g_last_snapshot = 0;
 std::unique_ptr<acmi::TacviewRec[]> g_walk_buf;  // the world walker's records, copied into the ring as one frame
 uint64_t g_dead_sent[64];  // aircraft seqs whose Destroyed marker was sent this recording
 size_t g_dead_n = 0;
+uint64_t g_wdead_sent[256];  // the same for weapons (a repeat is harmless: the core ignores it)
+size_t g_wdead_n = 0;
 bool g_walk_on = false;                          // the walker started with this recording
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
@@ -114,7 +116,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
             if (sent) continue;
             if (g_dead_n < sizeof(g_dead_sent) / sizeof(g_dead_sent[0])) g_dead_sent[g_dead_n++] = list[i].seq;
             r.kind = acmi::TacviewRec::kObject;
-            r.destroyed = 1;
+            r.destroyed = acmi::TacviewRec::kDestroyed;
             r.is_player = list[i].is_player ? 1 : 0;
             r.seq = list[i].seq;
             r.t = c.t;
@@ -144,7 +146,21 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
     }
     size_t live_weapons = 0;
     for (size_t i = 0; i < nw; ++i) {
-        if (!read_active(wl[i].obj)) continue;  // detonated or burnt out: no event, the core removes it
+        if (!read_active(wl[i].obj)) {
+            // Detonated or burnt out: the core removes it and writes an explosion (no Destroyed event), once.
+            bool sent = false;
+            for (size_t k = 0; k < g_wdead_n && !sent; ++k) sent = g_wdead_sent[k] == wl[i].seq;
+            if (sent) continue;
+            if (g_wdead_n < sizeof(g_wdead_sent) / sizeof(g_wdead_sent[0])) g_wdead_sent[g_wdead_n++] = wl[i].seq;
+            acmi::TacviewRec& m = g_writer->slot(used);
+            m.kind = acmi::TacviewRec::kObject;
+            m.obj_class = wl[i].weapon_class;
+            m.destroyed = acmi::TacviewRec::kDetonated;
+            m.seq = wl[i].seq;
+            m.t = c.t;
+            ++used;
+            continue;
+        }
         ++live_weapons;
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = wl[i].weapon_class;
@@ -238,6 +254,7 @@ StartResult start_recording(uint32_t epoch) {
     g_weapons_live = false;
     weapon_track_new_flight();
     g_dead_n = 0;
+    g_wdead_n = 0;
     if (!g_walk_buf) g_walk_buf.reset(new (std::nothrow) acmi::TacviewRec[kWorldWalkMaxRecords]);
     g_walk_on = g_walk_buf && world_walk_start();
     if (!g_walk_buf) LOG("tacview: out of memory for the world walker; only aircraft and weapons are recorded");

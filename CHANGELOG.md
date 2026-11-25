@@ -13,7 +13,8 @@ Newest first. There is no tagged release yet; the installer is at 0.1.0.
   - ground objects (buildings, sites, AAA and SAM) at 1 Hz, and ground vehicles and ships at 5 Hz, with their type names;
   - flares and chaff at 10 Hz;
   - tracer rounds at 20 Hz, up to 128 at a time, linked to the shooter;
-  - a Destroyed event when an aircraft or a ground object, vehicle or ship is destroyed.
+  - a Destroyed event when an aircraft or a ground object, vehicle or ship is destroyed;
+  - explosions for detonations and kills.
   
   The file is flushed to disk every 200 ms or 32 KB and capped at 512 MB.
 - **Tacview terrain.** With Tacview Recording on, the first flight in each theatre also exports that theatre's heightmap to `%APPDATA%\Tacview\Data\Terrain\Custom\LazySF2\`. The recording names the theatre (`Theater=`), so Tacview shows the SF2 terrain under the flight. The theatre is placed as its own map on an equatorial patch of open Atlantic, with game distances kept to within about 0.3%. Elevation only for now; a ground texture comes later. Not yet checked in-game.

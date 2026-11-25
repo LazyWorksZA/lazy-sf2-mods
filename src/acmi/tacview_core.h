@@ -10,7 +10,9 @@
 // The player (rec.is_player) has id 1 and Pilot=Player; any other aircraft has id 0x10000 + seq; a weapon has id
 // 0x1000000 + seq (its own sequence numbers, so the two series can never collide).
 // A record with destroyed set is a marker: if that object is known, the core writes "0,Event=Destroyed|id|" before its
-// removal (it is not counted as seen, so the removal follows in the same frame); an unknown object is ignored.
+// removal (kDestroyed only; it is not counted as seen, so the removal follows in the same frame), and an explosion
+// object (Misc+Explosion with Radius) at its last written position, removed kExplosionLifeSeconds later or by a frame
+// that lists every series (the last one). An unknown object is ignored.
 // A weapon (obj_class other than kAircraft) is written as Weapon+Missile, Weapon+Bomb or Weapon+Rocket, with
 // Parent=<id> when parent_seq names an aircraft, and the parent's coalition and colour when the record has no side.
 // A ground object, vehicle or ship whose pose has not changed since its last written transform gets no new line
@@ -37,6 +39,11 @@ constexpr uint32_t kWeaponIdBase = 0x1000000;
 constexpr uint32_t kGroundIdBase = 0x2000000;  // ground objects, vehicles and ships
 constexpr uint32_t kCounterMeasureIdBase = 0x3000000;  // flares and chaff
 constexpr uint32_t kBulletIdBase = 0x4000000;  // tracer rounds
+constexpr uint32_t kExplosionIdBase = 0x5000000;  // explosion objects, numbered by the core
+// Explosion size (the Radius property, metres) by what blew up, and how long the object stays (game seconds).
+constexpr double kExplosionRadiusBomb = 30, kExplosionRadiusRocket = 8, kExplosionRadiusMissile = 12;
+constexpr double kExplosionRadiusAircraft = 20, kExplosionRadiusGround = 25;
+constexpr double kExplosionLifeSeconds = 2.0;
 constexpr size_t kRecNameChars = 63;
 constexpr size_t kRecTypeChars = 31;  // aircraft type name (Tacview model key), e.g. "F-100D"
 
@@ -72,7 +79,8 @@ struct TacviewRec {
     uint8_t obj_class = kAircraft;  // kAircraft, kMissile, kBomb, kRocket, kGroundStatic ... kChaff
     uint8_t series_mask = kSeriesAll;  // kEndFrame only: the series this frame lists completely
     uint8_t parent_class = kAircraft;  // the class of the parent: a weapon's is an aircraft, a bullet's may be a ground object
-    uint8_t destroyed = 0;  // a marker, not a sample: the object (seq, class) went inactive; only seq and class are used
+    uint8_t destroyed = 0;  // a marker, not a sample, for the object (seq, class); only those are used: kDestroyed or kDetonated
+    static constexpr uint8_t kDestroyed = 1, kDetonated = 2;
     uint64_t seq = 0;         // the tracker's sequence number: unique and never reused within its class
     uint64_t parent_seq = 0;  // weapons and bullets: the shooter's seq (in the family of parent_class), or 0 for none
     double t = 0;      // game time, seconds
@@ -96,6 +104,7 @@ struct TacviewCoreStats {
     uint64_t transforms = 0;
     uint64_t removals = 0;
     uint64_t destroyed_events = 0;
+    uint64_t explosions = 0;
     uint64_t unchanged = 0;     // ground transforms skipped because the pose had not changed
     uint64_t objects = 0;       // distinct objects described
     uint64_t rate_limited = 0;  // transforms skipped by the rate limit
@@ -146,6 +155,14 @@ private:
     double min_dt_ = 0, min_dt_weapon_ = 0;
     std::vector<State> objs_;
     std::string pending_;  // transform lines of the current frame
+    struct Explosion {
+        uint32_t id;
+        double remove_at;  // game time
+        uint64_t frame;    // the frame that wrote it
+    };
+    std::vector<Explosion> explosions_;
+    uint32_t next_explosion_ = 1;
+    void add_explosion(const double pos[3], double radius, double t);
     std::string events_;   // Destroyed events of the current frame: written before the removals
     uint64_t frame_no_ = 1;
     bool have_t0_ = false;

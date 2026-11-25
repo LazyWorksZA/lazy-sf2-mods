@@ -51,8 +51,22 @@ void TacviewCore::add(const TacviewRec& r) {
     if (r.destroyed) {
         if (s && !s->destroyed) {
             s->destroyed = true;
-            append_event_destroyed(events_, s->id);
-            ++stats_.destroyed_events;
+            if (r.destroyed == TacviewRec::kDestroyed) {
+                append_event_destroyed(events_, s->id);
+                ++stats_.destroyed_events;
+            }
+            if (s->has_last) {
+                double radius = kExplosionRadiusMissile;
+                switch (s->obj_class) {
+                    case TacviewRec::kAircraft: radius = kExplosionRadiusAircraft; break;
+                    case TacviewRec::kBomb: radius = kExplosionRadiusBomb; break;
+                    case TacviewRec::kRocket: radius = kExplosionRadiusRocket; break;
+                    default:
+                        if (TacviewRec::family_of(s->obj_class) == TacviewRec::Family::Ground) radius = kExplosionRadiusGround;
+                        break;
+                }
+                add_explosion(s->last_pos, radius, r.t);
+            }
         }
         return;  // not seen in this frame: end_frame removes it
     }
@@ -84,16 +98,14 @@ void TacviewCore::add(const TacviewRec& r) {
         return;
     }
     s->last_t = r.t;
-    if (family == TacviewRec::Family::Ground) {
-        if (!is_new && s->has_last && std::memcmp(s->last_pos, r.pos, sizeof(r.pos)) == 0 &&
-            std::memcmp(s->last_ang, r.ang, sizeof(r.ang)) == 0) {
-            ++stats_.unchanged;
-            return;
-        }
-        std::memcpy(s->last_pos, r.pos, sizeof(r.pos));
-        std::memcpy(s->last_ang, r.ang, sizeof(r.ang));
-        s->has_last = true;
+    if (family == TacviewRec::Family::Ground && !is_new && s->has_last &&
+        std::memcmp(s->last_pos, r.pos, sizeof(r.pos)) == 0 && std::memcmp(s->last_ang, r.ang, sizeof(r.ang)) == 0) {
+        ++stats_.unchanged;
+        return;
     }
+    std::memcpy(s->last_pos, r.pos, sizeof(r.pos));  // the last written pose: where an explosion goes
+    std::memcpy(s->last_ang, r.ang, sizeof(r.ang));
+    s->has_last = true;
 
     const Mapping m{lon_scale_, lat_scale_};
     append_transform(pending_, s->id, r.pos, r.ang, m);
@@ -171,6 +183,14 @@ void TacviewCore::add(const TacviewRec& r) {
     ++stats_.transforms;
 }
 
+void TacviewCore::add_explosion(const double pos[3], double radius, double t) {
+    const uint32_t id = kExplosionIdBase + next_explosion_++;
+    append_position(pending_, id, pos, Mapping{lon_scale_, lat_scale_});
+    pending_ += ",Type=Misc+Explosion,Radius=" + num(radius, 1) + "\n";
+    explosions_.push_back({id, t + kExplosionLifeSeconds, frame_no_});
+    ++stats_.explosions;
+}
+
 void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
     // Removals first: objects of earlier frames that were not added in this one.
     std::string removals;
@@ -185,6 +205,16 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
         }
     }
     ++frame_no_;
+    // Explosions that are due, or all older ones when the frame lists every series (the last frame).
+    for (size_t i = 0; i < explosions_.size();) {
+        const bool last = series_mask == TacviewRec::kSeriesAll && explosions_[i].frame < frame_no_ - 1;
+        if (last || explosions_[i].remove_at <= t) {
+            append_removal(removals, explosions_[i].id);
+            explosions_.erase(explosions_.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
     if (removals.empty() && pending_.empty() && events_.empty()) return;
     if (!std::isfinite(t)) t = last_t_;
     if (!have_t0_) {

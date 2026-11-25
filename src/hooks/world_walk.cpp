@@ -327,7 +327,7 @@ uint8_t walk_ground(uintptr_t grp, uint8_t due_series, double t, TacviewRec* out
         if (s.destroyed) {
             if (markers < kMaxMarkers && n < cap) {
                 fill_common(out[n], m.cls, s.dead_seq, t);
-                out[n++].destroyed = 1;
+                out[n++].destroyed = acmi::TacviewRec::kDestroyed;
                 ++markers;
                 ++g.stats.markers;
             } else {
@@ -508,7 +508,7 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
         size_t sent = 0;
         for (; sent < g.n_pending && n < cap; ++sent) {
             fill_common(out[n], g.pending[sent].cls, g.pending[sent].seq, t);
-            out[n++].destroyed = 1;
+            out[n++].destroyed = acmi::TacviewRec::kDestroyed;
         }
         g.n_pending -= sent;  // a rare overflow of cap stays queued
         for (size_t k = 0; k < g.n_pending; ++k) g.pending[k] = g.pending[sent + k];

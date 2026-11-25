@@ -1849,6 +1849,75 @@ void tacview_tests() {
         expect(o5.find("-2000001") != std::string::npos, "tacview world: a skipped static is still removed when it is gone");
     }
 
+    // Explosions: for a detonated weapon, a destroyed aircraft and a destroyed ground object; not for a plain removal.
+    {
+        using lazysf2::hooks::AircraftSide;
+        TacviewCore core{TacviewCoreConfig{}};
+        auto obj = [](uint8_t cls, uint64_t seq, double t, double x) {
+            TacviewRec r = make_rec(seq, false, AircraftSide::Friendly, "X", t, x, 50, 300, 0, 0, 0);
+            r.obj_class = cls;
+            return r;
+        };
+        auto marker = [](uint8_t cls, uint64_t seq, double t, uint8_t kind) {
+            TacviewRec r = make_rec(seq, false, AircraftSide::Unknown, "", t, 0, 0, 0, 0, 0, 0);
+            r.obj_class = cls;
+            r.destroyed = kind;
+            return r;
+        };
+        std::string o1, o2, o3, o4, o5;
+        core.add(obj(TacviewRec::kBomb, 1, 1.0, 100));
+        core.add(obj(TacviewRec::kRocket, 2, 1.0, 110));
+        core.add(obj(TacviewRec::kMissile, 3, 1.0, 120));
+        core.add(obj(TacviewRec::kBullet, 1, 1.0, 130));
+        core.add(obj(TacviewRec::kGroundStatic, 1, 1.0, 140));
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 150, 50, 300, 0, 0, 0));
+        core.end_frame(1.0, o1, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        // The bomb and the rocket detonate (no event); the bullet is just gone; the building and the player die.
+        core.add(marker(TacviewRec::kBomb, 1, 2.0, TacviewRec::kDetonated));
+        core.add(marker(TacviewRec::kRocket, 2, 2.0, TacviewRec::kDetonated));
+        core.add(marker(TacviewRec::kGroundStatic, 1, 2.0, TacviewRec::kDestroyed));
+        core.add(marker(TacviewRec::kAircraft, 1, 2.0, TacviewRec::kDestroyed));
+        core.add(obj(TacviewRec::kMissile, 3, 2.0, 121));
+        core.end_frame(2.0, o2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        const auto ls = lines_of(o2);
+        auto line_with = [&](const std::string& piece) {
+            for (const std::string& l : ls)
+                if (l.find(piece) != std::string::npos) return l;
+            return std::string();
+        };
+        expect(count_of(o2, "Type=Misc+Explosion") == 4 && count_of(o2, "Event=Destroyed") == 2,
+               "explosion: one per detonated weapon, destroyed aircraft and destroyed ground object; events only for kills");
+        const std::string bomb = line_with("5000001,T=");
+        expect(bomb.find(",Type=Misc+Explosion,Radius=30") != std::string::npos, "explosion: bomb radius 30");
+        expect(bomb.find("T=0.000898311|0.000449156|300") != std::string::npos,
+               "explosion: at the bomb's last written position, position only");
+        expect(line_with("5000002,T=").find("Radius=8") != std::string::npos, "explosion: rocket radius 8");
+        expect(line_with("5000003,T=").find("Radius=25") != std::string::npos, "explosion: ground radius 25");
+        expect(line_with("5000004,T=").find("Radius=20") != std::string::npos, "explosion: aircraft radius 20");
+        expect(count_of(o2, "|Pitch") == 0 && bomb.find("Name=") == std::string::npos, "explosion: no name, no angles");
+        expect(core.stats().explosions == 4, "explosion: counted");
+        // Not due at 3.0; due at 4.0 (2 s after 2.0). A missile was removed with no marker: no explosion.
+        core.add(obj(TacviewRec::kMissile, 3, 3.0, 122));
+        core.end_frame(3.0, o3, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        expect(o3.find("-5000001") == std::string::npos, "explosion: still there after 1 s");
+        core.add(obj(TacviewRec::kMissile, 3, 4.0, 123));
+        core.end_frame(4.0, o4, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        expect(count_of(o4, "-500000") == 4 && count_of(o4, "-5000001" + std::string(1, 10)) == 1,
+               "explosion: removed 2 s later");
+        core.end_frame(5.0, o5, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);  // the missile vanishes with no reason: a removal and no explosion
+        expect(o5.find("-1000003") != std::string::npos && o5.find("Explosion") == std::string::npos,
+               "explosion: a plain removal writes none");
+        // A frame listing every series removes explosions still pending.
+        TacviewCore c2{TacviewCoreConfig{}};
+        std::string p1, p2, p3;
+        c2.add(obj(TacviewRec::kBomb, 1, 1.0, 100));
+        c2.end_frame(1.0, p1, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        c2.add(marker(TacviewRec::kBomb, 1, 2.0, TacviewRec::kDetonated));
+        c2.end_frame(2.0, p2, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon | TacviewRec::kSeriesGroundStatic);
+        c2.end_frame(2.5, p3);
+        expect(p3.find("-5000001") != std::string::npos, "explosion: the last frame removes pending explosions");
+    }
+
     // The world walker's identity rules, over synthetic slot snapshots.
     {
         using namespace lazysf2::hooks;

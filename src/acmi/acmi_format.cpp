@@ -86,6 +86,13 @@ void append_transform(std::string& out, uint32_t id, const double pos[3], const 
            "|" + num(heading, 2) + "|" + num(pos[0], 2) + "|" + num(pos[1], 2) + "|" + num(heading, 2);
 }
 
+void append_position(std::string& out, uint32_t id, const double pos[3], const Mapping& m) {
+    char idbuf[16];
+    std::snprintf(idbuf, sizeof(idbuf), "%x", id);
+    out += idbuf;
+    out += ",T=" + num(pos[0] * m.lon_scale, 9) + "|" + num(pos[1] * m.lat_scale, 9) + "|" + num(pos[2], 2);
+}
+
 void append_props(std::string& out, const ObjectProps& p) {
     if (p.name && *p.name) {
         out += ",Name=";
