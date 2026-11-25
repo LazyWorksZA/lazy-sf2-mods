@@ -59,6 +59,8 @@ void menu_on_modules_loaded();
 
 /// <summary>Reads LAZYSF2_PROBE_DIR once. The probe (developer tool) is active only when it is set. Call from DllMain.</summary>
 void install_probe_hooks();
+/// <summary>DLL detach: waits at most 1 s for an automatic snapshot's writer thread, then leaves it. Not under any lock of ours.</summary>
+void probe_shutdown();
 /// <summary>Starts the developer features (recorder, replay, host, hotkeys) once the aircraft tracker is active.</summary>
 void probe_on_modules_loaded();
 

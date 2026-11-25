@@ -221,6 +221,15 @@ void prune_auto_snapshots() {
         if (std::find(old.begin(), old.end(), f.first) != old.end()) DeleteFileW(f.second.c_str());
 }
 
+std::atomic<HANDLE> g_auto_writer{nullptr};  // the latest writer thread; older ones are waited for when replaced
+
+// Closes a writer handle, waiting at most 1 s for the thread to end (then it is left to finish on its own).
+void retire_writer(HANDLE h) {
+    if (!h) return;
+    WaitForSingleObject(h, 1000);
+    CloseHandle(h);
+}
+
 struct AutoJob {
     unsigned number = 0;
     std::vector<Copy> copies;
@@ -246,7 +255,7 @@ void take_auto_snapshot(double game_time) {
     job->world = line;
     world_walk_summary(job->world);
     TerrainInfo terrain;
-    if (terrain_capture(terrain)) {
+    if (terrain_basics(terrain)) {
         sprintf_s(line, "terrain: id=%s size=%dx%d spacing=%.1f geo=%s", terrain.id.c_str(), terrain.w, terrain.h,
                   terrain.spacing, terrain.has_geo ? "yes" : "no");
         job->world += line;
@@ -262,7 +271,7 @@ void take_auto_snapshot(double game_time) {
     const unsigned number = job->number;
     if (HANDLE t = CreateThread(nullptr, 0, auto_snapshot_thread, job.get(), 0, nullptr)) {
         job.release();
-        CloseHandle(t);
+        retire_writer(g_auto_writer.exchange(t));
     } else {
         LOG("probe: auto snapshot %u: could not start the writer thread (error %lu)", number, GetLastError());
     }
@@ -377,6 +386,8 @@ bool valid_probe_dir(const wchar_t* value, std::wstring& out) {
 }
 
 }  // namespace
+
+void probe_shutdown() { retire_writer(g_auto_writer.exchange(nullptr)); }
 
 const wchar_t* probe_output_dir() { return g_dir.empty() ? nullptr : g_dir.c_str(); }
 

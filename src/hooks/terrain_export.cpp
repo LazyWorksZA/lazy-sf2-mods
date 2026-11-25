@@ -755,7 +755,7 @@ void run_job(Job job) {
 
 }  // namespace
 
-static bool capture_impl(TerrainInfo& out) {
+static bool capture_impl(TerrainInfo& out, bool basics_only) {
     static bool build_known = false, build_ok = false;
     HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
     if (!m) {
@@ -792,6 +792,7 @@ static bool capture_impl(TerrainInfo& out) {
     out.geo_lat = raw.lat;
     out.samples.reset();
     out.texture.reset();
+    if (basics_only) return true;
     settle();
     if (g_exported.count(out.id)) return true;
     if (g_busy.load(std::memory_order_acquire)) {
@@ -819,11 +820,21 @@ static bool capture_impl(TerrainInfo& out) {
 
 bool terrain_capture(TerrainInfo& out) {
     try {
-        return capture_impl(out);
+        return capture_impl(out, false);
     } catch (...) {  // std::bad_alloc from the strings or the set
         out.samples.reset();
         out.texture.reset();
         log_once(7, "tacview terrain: out of memory reading the theatre; no Theater= for this recording");
+        return false;
+    }
+}
+
+bool terrain_basics(TerrainInfo& out) {
+    try {
+        return capture_impl(out, true);
+    } catch (...) {
+        out.samples.reset();
+        out.texture.reset();
         return false;
     }
 }
