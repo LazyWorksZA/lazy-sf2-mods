@@ -273,7 +273,7 @@ std::string texture_xml(const std::string& id, const std::string& file, int /*w_
     const double south = ref_lat, north = ref_lat + extent_y_m * m.lat_scale;
     std::string x =
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?>\n<Resources>\n\t<CustomTextureList>\n";
-    x += "\t\t<CustomTexture Layer=\"Real World\" ID=\"" + id + "\">\n";
+    x += "\t\t<CustomTexture Layer=\"Real World\" Id=\"" + id + "\">\n";
     x += "\t\t\t<File>" + file + "</File>\n\t\t\t<Visible>true</Visible>\n\t\t\t<Projection>Quad</Projection>\n";
     const auto corner = [&](const char* tag, double lon, double lat) {
         x += std::string("\t\t\t<") + tag + ">\n\t\t\t\t<Longitude>" + num(lon, 9) + "</Longitude>\n\t\t\t\t<Latitude>" +

@@ -1554,7 +1554,7 @@ void terrain_tests() {
         return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat +
                    "</Latitude>");
     };
-    expect(has("<CustomHeightmap Layer=\"Real World\" ID=\"LazySF2.T\">") && has("<File>LazySF2.T.raw</File>") &&
+    expect(has("<CustomHeightmap Layer=\"Real World\" Id=\"LazySF2.T\">") && has("<File>LazySF2.T.raw</File>") &&
                has("<Width>2000</Width>") && has("<Height>2000</Height>") && has("<BigEndian>0</BigEndian>") &&
                has("<AltitudeFactor>1</AltitudeFactor>") && has("<Projection>Quad</Projection>"),
            "terrain xml: structure");
@@ -2632,7 +2632,7 @@ void texture_tests() {
         auto corner = [&](const char* tag, const std::string& lon, const std::string& lat) {
             return has(std::string("<") + tag + ">\n\t\t\t\t<Longitude>" + lon + "</Longitude>\n\t\t\t\t<Latitude>" + lat + "</Latitude>");
         };
-        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" ID=\"LazySF2.T\">") &&
+        expect(has("<CustomTextureList>") && has("<CustomTexture Layer=\"Real World\" Id=\"LazySF2.T\">") &&
                    has("<File>LazySF2.T.jpg</File>") && has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"),
                "texture xml: structure");
         expect(corner("BottomLeft", "-25", "-4.5") && corner("BottomRight", east, "-4.5") && corner("TopRight", east, north) &&

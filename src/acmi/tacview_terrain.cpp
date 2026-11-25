@@ -47,7 +47,7 @@ std::string terrain_xml(const std::string& id, const std::string& raw_file, int 
     const double west = ref_lon, east = ref_lon + (w - 1) * spacing * m.lon_scale;
     const double south = ref_lat, north = ref_lat + (h - 1) * spacing * m.lat_scale;
     std::string x = "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\" ?>\n<Resources>\n\t<CustomHeightmapList>\n";
-    x += "\t\t<CustomHeightmap Layer=\"Real World\" ID=\"" + id + "\">\n";
+    x += "\t\t<CustomHeightmap Layer=\"Real World\" Id=\"" + id + "\">\n";
     x += "\t\t\t<File>" + raw_file + "</File>\n\t\t\t<Visible>true</Visible>\n\t\t\t<BigEndian>0</BigEndian>\n";
     x += "\t\t\t<Width>" + std::to_string(w) + "</Width>\n\t\t\t<Height>" + std::to_string(h) + "</Height>\n";
     x += "\t\t\t<AltitudeFactor>1</AltitudeFactor>\n\t\t\t<AltitudeOffset>0</AltitudeOffset>\n";
