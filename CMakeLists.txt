@@ -10,6 +10,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 find_package(minhook CONFIG REQUIRED)
 find_package(unofficial-enet CONFIG REQUIRED)
+find_package(miniz CONFIG REQUIRED)
 
 # The Tacview add-on (tacview/addon/LazySF2/main.lua) is embedded in the DLL as a generated header. The text is split
 # into pieces under MSVC's 16 KB limit for one string literal.
@@ -60,6 +61,7 @@ add_library(lazysf2 SHARED
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
+    src/acmi/acmi_zip.cpp
     src/acmi/terrain_texture.cpp
     src/acmi/airfields.cpp
     src/acmi/ini.cpp
@@ -83,7 +85,7 @@ target_compile_options(lazysf2 PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2 PRIVATE src "${CMAKE_BINARY_DIR}/generated")
 # ENet is linked statically. Do NOT link winmm here: this DLL is itself winmm.dll, and ENet's three winmm imports
 # are satisfied by src/net/enet_winmm_shim.cpp (they call the real system DLL).
-target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet ws2_32 delayimp shell32 ole32 uuid)
+target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet miniz::miniz ws2_32 delayimp shell32 ole32 uuid)
 # ws2_32 is delay-loaded: it is only touched by ENet (enet_initialize, on the network thread, which only exists in
 # host mode), so a player with host mode off never has it loaded into the game.
 target_link_options(lazysf2 PRIVATE /DELAYLOAD:ws2_32.dll)
@@ -101,6 +103,7 @@ add_executable(lazysf2-net-tests
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
+    src/acmi/acmi_zip.cpp
     src/acmi/terrain_texture.cpp
     src/acmi/airfields.cpp
     src/acmi/ini.cpp
@@ -109,7 +112,7 @@ add_executable(lazysf2-net-tests
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
 target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2-net-tests PRIVATE src tools tools/bot "${CMAKE_BINARY_DIR}/generated")
-target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet ws2_32 winmm)
+target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet miniz::miniz ws2_32 winmm)
 # The developer tools go to their own folder (build\<Config>	ools): next to the proxy they would load it as their winmm.dll.
 set_target_properties(lazysf2-net-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
 

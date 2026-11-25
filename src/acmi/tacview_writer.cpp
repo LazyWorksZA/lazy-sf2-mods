@@ -1,5 +1,7 @@
 #include "acmi/tacview_writer.h"
 
+#include "acmi/acmi_zip.h"
+
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -75,6 +77,7 @@ bool TacviewWriter::open(const std::wstring& dir, const SYSTEMTIME& t, const cha
     last_ms_.store(-1);
     next_explosion_.store(1);
     stop_.store(false);
+    no_zip_.store(false);
     finished_.store(false);
     failed_.store(false);
     summary_logged_.store(false);
@@ -113,6 +116,7 @@ void TacviewWriter::commit_frame(size_t used, double t, uint8_t series_mask) {
 void TacviewWriter::close(bool wait_and_detach, const char* why) {
     if (!thread_.joinable()) return;
     if (why) why_.store(why, std::memory_order_relaxed);
+    if (wait_and_detach) no_zip_.store(true, std::memory_order_release);
     open_.store(false, std::memory_order_release);
     stop_.store(true, std::memory_order_release);
     if (!wait_and_detach) return;
@@ -128,13 +132,15 @@ void TacviewWriter::close(bool wait_and_detach, const char* why) {
     thread_.detach();
 }
 
-void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why) {
+void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t zip_bytes) {
     if (summary_logged_.exchange(true)) return;
     char line[512];
     const std::string shown = narrow(display_ ? display_(path()) : path());
-    std::snprintf(line, sizeof(line), "tacview: stopped (%s): %s, %llu transforms, %llu bytes, %u frame(s) dropped",
+    char zipped[48] = {};
+    if (zip_bytes) std::snprintf(zipped, sizeof(zipped), " (%llu zipped)", static_cast<unsigned long long>(zip_bytes));
+    std::snprintf(line, sizeof(line), "tacview: stopped (%s): %s, %llu transforms, %llu bytes%s, %u frame(s) dropped",
                   why ? why : "closed", shown.c_str(), static_cast<unsigned long long>(transforms),
-                  static_cast<unsigned long long>(bytes), dropped_.load(std::memory_order_relaxed));
+                  static_cast<unsigned long long>(bytes), zipped, dropped_.load(std::memory_order_relaxed));
     log_(line);
 }
 
@@ -201,6 +207,8 @@ void TacviewWriter::run() {
             finished_.store(true, std::memory_order_release);
             return;
         }
+        // The finished recording is "<name>.zip.acmi": a leftover one counts as a clash too.
+        if (GetFileAttributesW((path.substr(0, path.size() - 5) + L".zip.acmi").c_str()) != INVALID_FILE_ATTRIBUTES) continue;
         f = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
                         nullptr);
         if (f != INVALID_HANDLE_VALUE) break;
@@ -297,7 +305,21 @@ void TacviewWriter::run() {
     flush();
     CloseHandle(f);
     file_ = nullptr;
-    log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed));
+    uint64_t zip_bytes = 0;
+    if (!failed && !no_zip_.load(std::memory_order_acquire)) {
+        std::wstring zip_path;
+        std::string error;
+        if (compress_acmi(path, zip_path, zip_bytes, error)) {
+            AcquireSRWLockExclusive(&path_lock_);
+            path_ = zip_path;
+            ReleaseSRWLockExclusive(&path_lock_);
+            if (!error.empty()) log_(("tacview: " + error).c_str());
+        } else {
+            zip_bytes = 0;
+            log_(("tacview: could not compress the recording (" + error + "); the plain .acmi is kept").c_str());
+        }
+    }
+    log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed), zip_bytes);
     finished_.store(true, std::memory_order_release);
 }
 

@@ -9,6 +9,11 @@
 // Failure: any failure (folder, file, write) is logged once by the thread and sets failed(); accepting() turns
 // false, the producer should stop and call close(). The size cap does the same. The partial file is kept.
 //
+// Zip: when a recording ends through close(false) (a normal stop or the cap, not a failed write), the thread packs
+// the plain .acmi into "<name>.zip.acmi" (acmi_zip.h) and deletes the plain file; any failure keeps the plain file
+// and is logged once. close(true) (shutdown) and the orphan path never compress: time is short, and a detached
+// thread must not outlive the DLL.
+//
 // Exit: close(true) is for the DLL's shutdown. On process exit ExitProcess has killed the writer thread already:
 // close(true) sees that, does not wait, and appends the ring's frames itself (with a fresh core seeded with the
 // time origin, so the file stays valid). Only what the dead thread held in its own buffer (up to 32 KB or 200 ms) is
@@ -80,14 +85,14 @@ public:
 
     uint32_t dropped_frames() const { return dropped_.load(std::memory_order_relaxed); }
     uint64_t bytes_written() const { return written_.load(std::memory_order_relaxed); }
-    /// <summary>The final file path (after the thread has created it), empty before. Not for the game thread's hot path.</summary>
+    /// <summary>The file path (after the thread has created it; the .zip.acmi once compressed), empty before. Not for the game thread's hot path.</summary>
     std::wstring path() const;
 
 private:
     void run();
     void join_previous();
     void flush_orphaned(const char* why);
-    void log_summary(uint64_t transforms, uint64_t bytes, const char* why);
+    void log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t zip_bytes = 0);
 
     std::thread thread_;
     std::unique_ptr<TacviewRec[]> ring_;
@@ -106,6 +111,7 @@ private:
     std::atomic<bool> open_{false};      // accepting frames
     std::atomic<bool> failed_{false};    // failure or cap: the producer should stop
     std::atomic<bool> stop_{false};
+    std::atomic<bool> no_zip_{false};  // set by close(true)
     std::atomic<bool> finished_{false};  // the thread has closed the file and is about to return
     std::atomic<const char*> why_{"closed"};
     std::atomic<uint32_t> head_{0}, tail_{0};  // producer writes head_, consumer tail_ (free-running)
