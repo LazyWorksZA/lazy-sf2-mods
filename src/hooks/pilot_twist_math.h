@@ -15,10 +15,11 @@ constexpr float kDeg = kPi / 180.0f;
 // Tunables: one place, one line each.
 constexpr float kStartYaw = 60.0f * kDeg;   // head yaw where the effect starts
 constexpr float kFullYaw = 150.0f * kDeg;   // head yaw where it is at full strength
-constexpr float kMaxTwist = 30.0f * kDeg;   // extra view yaw at full strength (also how far past the seat limit)
+constexpr float kMaxTwist = 30.0f * kDeg;   // default extra view yaw at full strength (also how far past the seat limit)
 constexpr float kYawCap = 180.0f * kDeg;    // the twisted view never turns past this
-constexpr float kLeanSide = 0.04f;          // metres toward the side the pilot looks, at full strength
-constexpr float kLeanUp = 0.015f;           // metres up, at full strength
+constexpr float kLeanSide = 0.04f;          // default metres toward the side the pilot looks, at full strength
+constexpr float kLeanUpPerSide = 0.5f;      // the up lean is this share of the sideways lean
+constexpr float kLeanUp = kLeanSide * kLeanUpPerSide;  // default metres up, at full strength
 constexpr float kCapSide = 0.06f;           // our lean plus the game's tracker head offset stays within these
 constexpr float kCapUp = 0.03f;
 constexpr float kFilterSeconds = 0.12f;     // low-pass time constant
@@ -72,17 +73,17 @@ inline float filter_step(float current, float target, float dt) {
 }
 
 /// <summary>
-/// Extra view yaw for this frame's camera: weight * kMaxTwist, keeping yaw + extra within the seat limits widened by
-/// kMaxTwist (when the view limits yaw) and within +-kYawCap. Never pulls back a yaw the game already has past them.
+/// Extra view yaw for this frame's camera: weight * max_twist, keeping yaw + extra within the seat limits widened by
+/// max_twist (when the view limits yaw) and within +-kYawCap. Never pulls back a yaw the game already has past them.
 /// </summary>
-inline float twist_delta(float yaw, float weight, float min_yaw, float max_yaw, bool limited) {
-    if (!(std::fabs(yaw) < 1e4f) || !(std::fabs(weight) <= 1.0f)) return 0.0f;
+inline float twist_delta(float yaw, float weight, float min_yaw, float max_yaw, bool limited, float max_twist = kMaxTwist) {
+    if (!(std::fabs(yaw) < 1e4f) || !(std::fabs(weight) <= 1.0f) || !(max_twist >= 0.0f && max_twist <= kPi)) return 0.0f;
     float lo = -kYawCap, hi = kYawCap;
     if (limited && min_yaw <= max_yaw) {
-        lo = clampf(min_yaw - kMaxTwist, -kYawCap, kYawCap);
-        hi = clampf(max_yaw + kMaxTwist, -kYawCap, kYawCap);
+        lo = clampf(min_yaw - max_twist, -kYawCap, kYawCap);
+        hi = clampf(max_yaw + max_twist, -kYawCap, kYawCap);
     }
-    const float t = clampf(yaw + weight * kMaxTwist, yaw < lo ? yaw : lo, yaw > hi ? yaw : hi);
+    const float t = clampf(yaw + weight * max_twist, yaw < lo ? yaw : lo, yaw > hi ? yaw : hi);
     return t - yaw;
 }
 
@@ -97,12 +98,13 @@ struct TwistState {
 /// Advances the state with this frame's head yaw (the game's smoothed view yaw) and returns the yaw to build this
 /// frame's camera with. The head yaw itself must be put back afterwards (restore_yaw).
 /// </summary>
-inline float camera_yaw(TwistState& s, float head, float dt, float min_yaw, float max_yaw, bool limited) {
+inline float camera_yaw(TwistState& s, float head, float dt, float min_yaw, float max_yaw, bool limited,
+                        float max_twist = kMaxTwist) {
     s.yaw = continuous_yaw(s.have ? s.yaw : 1e9f, head);
     const float target = target_weight(s.yaw);
     s.weight = s.have ? filter_step(s.weight, target, dt) : target;
     s.have = true;
-    return head + twist_delta(s.yaw, s.weight, min_yaw, max_yaw, limited);
+    return head + twist_delta(s.yaw, s.weight, min_yaw, max_yaw, limited, max_twist);
 }
 
 /// <summary>
@@ -116,13 +118,15 @@ constexpr float restore_yaw(float current, float written, float head) { return c
 /// without a tracker). The lean only ever shrinks so that the sum stays within kCapSide sideways and kCapUp up; the
 /// native offset itself is left alone.
 /// </summary>
-inline Vec3 lean_body(float weight, const Vec3& native) {
+inline Vec3 lean_body(float weight, const Vec3& native, float side = kLeanSide) {
+    const float up_full = side * kLeanUpPerSide;
+    if (!(side >= 0.0f && side <= kCapSide)) return {0, 0, 0};
     if (!(std::fabs(weight) <= 1.0f) || !(std::fabs(native.x) < 1e3) || !(std::fabs(native.z) < 1e3)) return {0, 0, 0};
-    const float want_side = weight * kLeanSide;
+    const float want_side = weight * side;
     const float side_room = static_cast<float>(want_side >= 0 ? kCapSide - native.x : kCapSide + native.x);
     const float side_mag = clampf(std::fabs(want_side), 0.0f, side_room > 0.0f ? side_room : 0.0f);
     const float up_room = static_cast<float>(kCapUp - native.z);
-    const float up = clampf(std::fabs(weight) * kLeanUp, 0.0f, up_room > 0.0f ? up_room : 0.0f);
+    const float up = clampf(std::fabs(weight) * up_full, 0.0f, up_room > 0.0f ? up_room : 0.0f);
     return {want_side >= 0 ? side_mag : -side_mag, 0.0, up};
 }
 

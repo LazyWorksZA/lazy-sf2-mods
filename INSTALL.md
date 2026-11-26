@@ -20,11 +20,13 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 | Options → Graphics | **Screen** | "Screen N (W×H)", numbered as in Windows' Settings → Display. Choosing another screen also sets the game resolution to its native size, which applies at the next start. | the stock choice (primary) |
 | Options → Controls (below Keyboard Map) | **Mouse Pointer** | **Match Windows cursor**: the game's pointer sits exactly on the Windows cursor, at Windows' speed and acceleration. **Stock game pointer**: the game builds its own pointer from raw mouse movement, as without the mod. | Match Windows cursor |
 | Options → Controls (below Mouse Pointer) | **Pilot Twist** | **On**: in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 30 degrees further and leans you a little toward that side. **Off**: stock view. | Off |
+| `Options.ini` only (no row yet) | `PilotTwistAngle` | Pilot Twist's extra view yaw in degrees, 0–45. | 30 |
+| `Options.ini` only (no row yet) | `PilotTwistLean` | Pilot Twist's sideways lean in cm, 0–6 (the lean up is half of it; with a head tracker, the tracker's own sideways offset and the lean together stay within 6 cm). | 4 |
 | Options → Gameplay (bottom row) | **Tacview Recording** | **On**: every flight is recorded to a Tacview file (`SF2 <date>.zip.acmi`) in `Saved Games\ThirdWire\StrikeFighters2\Tacview`. **Off**: no recording. | Off |
 
 Changes take effect when you leave the Options screen, like the game's own settings.
 
-All five are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini`: `DisplayMode` and `DisplayMonitor` under `[GraphicsOptions]`, `MouseMode` and `PilotTwist` under `[ControlOptions]`, and `TacviewRecording` under `[OtherOptions]`. Without the mod they do nothing.
+All seven are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini`: `DisplayMode` and `DisplayMonitor` under `[GraphicsOptions]`, `MouseMode`, `PilotTwist`, `PilotTwistAngle` and `PilotTwistLean` under `[ControlOptions]`, and `TacviewRecording` under `[OtherOptions]`. Without the mod they do nothing.
 
 **Why the mouse option exists:** the stock game doesn't use the Windows pointer. It draws its own, moved by raw mouse movement with its own speed and no Windows acceleration. So it never quite matches where Windows' pointer is and feels off, and over remote-control tools (RustDesk, Parsec, ...) it wanders by itself.
 

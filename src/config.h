@@ -41,6 +41,15 @@ void set_pilot_twist(bool on);
 /// <summary>For the module watch: the loaded value only, never loads. -1 = not loaded yet, 0 = off, 1 = on.</summary>
 int pilot_twist_peek();
 
+// Options.ini [ControlOptions] PilotTwistAngle and PilotTwistLean: hand-edited for now (no Options row yet), read
+// with the other settings. Missing or invalid values give the defaults; values out of range are clamped.
+constexpr double kPilotTwistAngleDefault = 30.0, kPilotTwistAngleMax = 45.0;  // degrees of extra view yaw
+constexpr double kPilotTwistLeanDefault = 4.0, kPilotTwistLeanMax = 6.0;      // cm sideways
+/// <summary>The extra view yaw in degrees. Never loads: the default until the settings are loaded (any thread).</summary>
+double pilot_twist_angle_peek();
+/// <summary>The sideways lean in cm. Never loads: the default until the settings are loaded (any thread).</summary>
+double pilot_twist_lean_peek();
+
 /// <summary>Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off), loaded with the other settings.</summary>
 void set_tacview_recording(bool on);  // the Options page, on Exit
 /// <summary>

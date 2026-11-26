@@ -180,7 +180,9 @@ void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
     const float dt = seconds_since_last();
     BYTE* def = at<BYTE*>(view, kViewDef);
     const bool limited = (at<uint32_t>(def, kDefFlags) & kFlagLimitYaw) != 0;
-    const float written = pt::camera_yaw(g_state, head, dt, at<float>(view, kMinYaw), at<float>(view, kMaxYaw), limited);
+    const float max_twist = static_cast<float>(config::pilot_twist_angle_peek()) * pt::kDeg;
+    const float written =
+        pt::camera_yaw(g_state, head, dt, at<float>(view, kMinYaw), at<float>(view, kMaxYaw), limited, max_twist);
     yaw = written;
     o_Camera(view, edx, aircraft);
     yaw = pt::restore_yaw(yaw, written, head);
@@ -248,7 +250,7 @@ void __fastcall h_Eye(void* view, void* edx, const float* aircraft, void* iface)
     pt::Vec3 native_world{};
     if (!native_offset_world(view, &native_world, axis)) return;  // tracker offset unknown: no lean rather than a guess
     const pt::Vec3 native = pt::world_to_body(aircraft, native_world);
-    const pt::Vec3 lean = pt::lean_body(g_state.weight, native);
+    const pt::Vec3 lean = pt::lean_body(g_state.weight, native, static_cast<float>(config::pilot_twist_lean_peek()) / 100.0f);
     const pt::Vec3 d = pt::body_to_world(aircraft, lean);
     g_diag.eye = true;
     g_diag.sum_body[0] = lean.x + native.x;

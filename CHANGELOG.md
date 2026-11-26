@@ -15,7 +15,7 @@ Draft of 1.1.0: at release this heading becomes `## 1.1.0 (<date>)`.
 
 ### Cockpit
 
-- **Pilot Twist** (Options › Controls, default Off): in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 30 degrees further, as if you twist in the seat, and leans you 4 cm toward that side (and 1.5 cm up).
+- **Pilot Twist** (Options › Controls, default Off): in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 30 degrees further, as if you twist in the seat, and leans you 4 cm toward that side (and 2 cm up). Both amounts can be changed by hand in `Options.ini` (`[ControlOptions] PilotTwistAngle`, 0–45 degrees, and `PilotTwistLean`, 0–6 cm); a menu for them is planned.
 
 ### Developer tools (off unless enabled)
 

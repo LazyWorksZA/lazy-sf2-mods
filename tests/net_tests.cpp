@@ -32,6 +32,7 @@
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/pilot_twist_math.h"
+#include "config_parse.h"
 #include "bot_client.h"
 #include <miniz.h>
 
@@ -3666,7 +3667,19 @@ void pilot_twist_tests() {
 
     // Lean: toward the look side and up, in body axes; our lean shrinks so that it plus the game's tracker offset
     // stays within the caps.
-    expect(close_to(pt::kLeanSide, 0.04, 1e-6) && close_to(pt::kLeanUp, 0.015, 1e-6), "lean: 4 cm sideways, 1.5 cm up");
+    expect(close_to(pt::kLeanSide, 0.04, 1e-6) && close_to(pt::kLeanUp, 0.02, 1e-6), "lean: 4 cm sideways, 2 cm up by default");
+    {
+        const pt::Vec3 six = pt::lean_body(1.0f, {0, 0, 0}, 0.06f);
+        expect(close_to(six.x, 0.06, 1e-6) && close_to(six.z, 0.03, 1e-6), "lean: 6 cm sideways gives 3 cm up (half)");
+        const pt::Vec3 off = pt::lean_body(1.0f, {0, 0, 0}, 0.0f);
+        expect(off.x == 0.0 && off.z == 0.0, "lean: 0 cm is no lean");
+        expect(close_to(pt::lean_body(1.0f, {0.03, 0.0, 0.0}, 0.06f).x, 0.03, 1e-6),
+               "lean: the 6 cm cap with the tracker offset holds for a configured lean");
+        expect(pt::lean_body(1.0f, {0, 0, 0}, 0.5f).x == 0.0, "lean: a side past the cap is refused");
+        expect(close_to(pt::twist_delta(100.0f * d, 1.0f, -100.0f * d, 100.0f * d, true, 45.0f * d), 45.0f * d, 1e-5) &&
+                   pt::twist_delta(100.0f * d, 1.0f, -100.0f * d, 100.0f * d, true, 0.0f) == 0.0f,
+               "twist: a configured angle (45, 0)");
+    }
     const pt::Vec3 zero{0, 0, 0};
     const pt::Vec3 full = pt::lean_body(1.0f, zero);
     expect(close_to(full.x, pt::kLeanSide, 1e-6) && full.y == 0.0 && close_to(full.z, pt::kLeanUp, 1e-6), "lean: full right and up");
@@ -3741,6 +3754,26 @@ void pilot_twist_tests() {
            "head hold: at the seat limit the full twist applies");
 }
 
+void pilot_twist_settings_tests() {
+    using LazyWorks::SF2Patch::config::parse_number_setting;
+    std::printf("pilot twist settings\n");
+    auto is = [](const LazyWorks::SF2Patch::config::NumberSetting& s, double v, bool def, bool clamp) {
+        return std::fabs(s.value - v) < 1e-9 && s.defaulted == def && s.clamped == clamp;
+    };
+    expect(is(parse_number_setting(nullptr, 30, 0, 45), 30, true, false), "settings: missing gives the default");
+    expect(is(parse_number_setting(L"", 30, 0, 45), 30, true, false) && is(parse_number_setting(L"  ", 30, 0, 45), 30, true, false),
+           "settings: empty gives the default");
+    expect(is(parse_number_setting(L"25", 30, 0, 45), 25, false, false) && is(parse_number_setting(L" 12.5 ", 30, 0, 45), 12.5, false, false),
+           "settings: a number, blanks allowed, decimals");
+    expect(is(parse_number_setting(L"60", 30, 0, 45), 45, false, true) && is(parse_number_setting(L"-3", 4, 0, 6), 0, false, true),
+           "settings: clamped to the range");
+    expect(is(parse_number_setting(L"abc", 4, 0, 6), 4, true, false) && is(parse_number_setting(L"5cm", 4, 0, 6), 4, true, false) &&
+               is(parse_number_setting(L"nan", 4, 0, 6), 4, true, false) && is(parse_number_setting(L"inf", 4, 0, 6), 4, true, false),
+           "settings: not a number gives the default");
+    expect(is(parse_number_setting(L"0", 4, 0, 6), 0, false, false) && is(parse_number_setting(L"6", 4, 0, 6), 6, false, false),
+           "settings: the limits themselves are kept");
+}
+
 void probe_snapshot_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     bool a = true;
@@ -3798,6 +3831,7 @@ int main() {
     gameplay_row_splice_tests();
     pilot_twist_tests();
     probe_snapshot_tests();
+    pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;
