@@ -98,7 +98,8 @@ private:
     void join_previous();
     void flush_orphaned(const char* why);
     void log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t structures = 0,
-                     uint64_t structures_skipped = 0, uint64_t structures_destroyed = 0);
+                     uint64_t structures_skipped = 0, uint64_t structures_destroyed = 0,
+                     uint64_t destroyed_events = 0);
 
     std::thread thread_;
     std::unique_ptr<TacviewRec[]> ring_;

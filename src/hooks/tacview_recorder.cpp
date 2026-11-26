@@ -104,6 +104,13 @@ uint8_t g_watch_dead[kMaxStructures];
 size_t g_watch_n = 0;
 uint32_t g_watch_hits[kMaxDestroyedPerFrame];
 double g_last_poll = 0;
+// For the developer destroy hotkey only: where each watched record stands, and which area and placed index it is.
+double g_watch_xy[kMaxStructures][2];
+uint16_t g_watch_area[kMaxStructures];
+uint16_t g_watch_index[kMaxStructures];
+uint8_t g_destroy_skip[kMaxStructures];
+int g_placed_index[kMaxPlacedPerArea];  // the game's index of g_placed[k]
+std::atomic<bool> g_destroy_request{false};  // set by the probe hotkey thread
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -444,6 +451,7 @@ void pick_structures(const StructureList& list) {
         if (g)
             for (int i = 0; i < g->n_placed && np < kMaxPlacedPerArea; ++i)
                 if (mission_placed(*g, i, &g_placed[np])) {
+                    g_placed_index[np] = i;
                     g_placed_xy[np][0] = g_placed[np].x;
                     g_placed_xy[np][1] = g_placed[np].y;
                     ++np;
@@ -473,6 +481,10 @@ void pick_structures(const StructureList& list) {
                     g_watch_rec[g_watch_n] = g_placed[i].record;
                     g_watch_seq[g_watch_n] = static_cast<uint32_t>(m + 1);
                     g_watch_dead[g_watch_n] = 0;
+                    g_watch_xy[g_watch_n][0] = g_placed[i].x;
+                    g_watch_xy[g_watch_n][1] = g_placed[i].y;
+                    g_watch_area[g_watch_n] = static_cast<uint16_t>(g - g_game_areas);
+                    g_watch_index[g_watch_n] = static_cast<uint16_t>(g_placed_index[i]);
                     ++g_watch_n;
                 }
             }
@@ -572,6 +584,57 @@ void poll_destroyed_structures(double t) {
     g_writer->commit_frame(n, t, 0);
 }
 
+// Developer probe (Ctrl+Shift+X): sets the damage of the nearest watched, still standing structure to destroyed, so
+// that poll_destroyed_structures() finds it as it would a real kill. Game thread, player step.
+void destroy_nearest(const void* player, double t) {
+    if (g_struct_pending) {
+        LOG("tacview destroy test: ignored, the structures are still being written");
+        return;
+    }
+    if (g_watch_n == 0) {
+        LOG("tacview destroy test: ignored, no structure is watched (not a single mission, none drawn, or tracking "
+            "stopped)");
+        return;
+    }
+    if (!mission_unchanged()) {
+        LOG("tacview destroy test: ignored, the mission changed under the recording");
+        return;
+    }
+    double pos[3];
+    float ang[3];
+    if (!read_pose(player, kOffPos, kOffAngles, pos, ang) || !std::isfinite(pos[0]) || !std::isfinite(pos[1])) {
+        LOG("tacview destroy test: ignored, the player's position is unreadable");
+        return;
+    }
+    for (size_t i = 0; i < g_watch_n; ++i) {
+        const int d = g_watch_dead[i] ? -1 : mission_placed_damage(g_watch_rec[i]);
+        g_destroy_skip[i] = d < 0 || d >= 100;
+    }
+    const size_t i = acmi::find_near(g_watch_xy, g_watch_n, pos[0], pos[1], HUGE_VAL, g_destroy_skip);
+    if (i >= g_watch_n) {
+        LOG("tacview destroy test: ignored, every one of the %zu watched structures is destroyed or unreadable", g_watch_n);
+        return;
+    }
+    int before = -1;
+    if (!mission_set_destroyed(g_watch_rec[i], &before)) {
+        LOG("tacview destroy test: could not write the damage of placed record %p (damage %d)", g_watch_rec[i], before);
+        return;
+    }
+    const uint32_t seq = g_watch_seq[i];
+    std::string name = "?";
+    std::shared_ptr<const StructureList> list;
+    if (terrain_structures(g_theater, list) == StaticList::Ready && list && seq - 1 < list->marks.size())
+        name = list->marks[seq - 1].name;
+    const GameArea& a = g_game_areas[g_watch_area[i]];
+    const double dx = g_watch_xy[i][0] - pos[0], dy = g_watch_xy[i][1] - pos[1];
+    LOG("tacview destroy test: damage %d -> 100 at placed record %p (area %u at (%.0f, %.0f), placed %u of %d): "
+        "structure %u \"%s\" at (%.0f, %.0f), %.0f m from the player; Tacview id %x. The destruction poll (every %.0f s "
+        "of game time, t=%.1f) should write its Destroyed event and explosion",
+        before, g_watch_rec[i], g_watch_area[i], a.x, a.y, g_watch_index[i], a.n_placed, seq, name.c_str(),
+        g_watch_xy[i][0], g_watch_xy[i][1], std::sqrt(dx * dx + dy * dy), acmi::kStructureIdBase + seq,
+        kDestroyedPollSeconds, t);
+}
+
 // A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
     if (g_recording) {
@@ -586,6 +649,8 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         }
     }
     if (!is_player) return;
+    const bool destroy = g_destroy_request.exchange(false, std::memory_order_relaxed);
+    if (destroy && !g_recording) LOG("tacview destroy test: ignored, no Tacview recording is running");
     if (!g_recording) {
         if (config::tacview_recording_peek() != 1) return;
         const uint32_t ep = sim_player_epoch();
@@ -619,6 +684,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
     }
     if (g_struct_pending) write_structures(t);
     poll_destroyed_structures(t);
+    if (destroy) destroy_nearest(aircraft, t);
 }
 
 }  // namespace
@@ -661,6 +727,8 @@ void tacview_recorder_menu_moment() {
     }
     if (!g_writer->accepting()) stop_recording("writer stopped");
 }
+
+void tacview_destroy_nearest_request() { g_destroy_request.store(true, std::memory_order_relaxed); }
 
 void tacview_recorder_shutdown(bool process_exit) {
     terrain_export_shutdown();

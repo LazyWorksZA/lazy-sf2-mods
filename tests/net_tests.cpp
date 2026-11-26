@@ -3532,6 +3532,11 @@ void structure_tests() {
                    find_near(pts, 4, 10.4, 0, 2.0, taken) == 3 && find_near(pts, 4, 0.5, 0, 2.0, taken) == 0 &&
                    find_near(pts, 4, 50, 0, 2.0, nullptr) == 4 && find_near(pts, 0, 0, 0, 2.0, nullptr) == 0,
                "find_near: the nearest within the tolerance, never a taken one; n when none");
+        // The destroy hotkey: the nearest standing structure at any distance; none when all are skipped.
+        const uint8_t all[4] = {1, 1, 1, 1};
+        expect(find_near(pts, 4, 1e6, 0, HUGE_VAL, nullptr) == 2 && find_near(pts, 4, 1e6, 0, HUGE_VAL, taken) == 2 &&
+                   find_near(pts, 4, 9.0, 0.6, HUGE_VAL, taken) == 3 && find_near(pts, 4, 1e6, 0, HUGE_VAL, all) == 4,
+               "find_near: an infinite tolerance takes the nearest free point at any distance");
     }
 
     TacviewWriter w(64);
