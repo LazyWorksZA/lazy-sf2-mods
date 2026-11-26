@@ -1,6 +1,7 @@
 // Pilot Twist (Options > Controls, default Off): in the cockpit view, past about 60 degrees of head yaw the view turns
 // further (torso twist) and the eye moves a few centimetres toward that side and up. Hooks ViewManager.dll's inside
-// view at fixed RVAs. See lazy-sf2-recon: recon-notes §25.
+// view at fixed RVAs. See lazy-sf2-recon: recon-notes §25. Developer hotkeys (probe only): pilot_twist_dev_toggle and
+// pilot_twist_dev_cycle_hold.
 #include <windows.h>
 
 #include <MinHook.h>
@@ -60,8 +61,12 @@ Eye_t o_Eye = nullptr;
 SRWLOCK g_install_lock = SRWLOCK_INIT;
 std::atomic<HMODULE> g_view_dll{nullptr};  // image our (created) hooks belong to
 HMODULE g_bad_base = nullptr;              // image already found unusable (checked once)
-std::atomic<bool> g_enabled{false};        // hooks enabled (Pilot Twist on)
-std::atomic<bool> g_reset{false};          // set on disable: the next camera build starts from a clean state
+std::atomic<bool> g_enabled{false};        // hooks enabled (twist on, or a developer head hold)
+std::atomic<bool> g_twist{false};          // the twist and lean apply (the setting, or the developer override)
+std::atomic<bool> g_reset{false};          // set when the twist goes off: the next camera build starts from a clean state
+// Developer (probe hotkeys): -1 follow the setting, else 0/1 overrides it for this session; the head hold step.
+std::atomic<int> g_dev_twist{-1};
+std::atomic<int> g_hold{0};
 
 // View state. The three detours run on the one thread that updates the views (the game thread); nothing else
 // touches these while the hooks are enabled, so they are plain variables.
@@ -116,15 +121,35 @@ void __fastcall h_Update(void* view, void* edx, float dt) {
 
 // Twist without feedback: the extra yaw is in the view's yaw only while the original builds this frame's camera
 // matrix; then the head yaw is put back, so the game's smoothing and limits never see it.
+// A developer head hold puts its yaw (and pitch 0) in the same place for the camera build only, as if the head were
+// there, and puts the game's own angles back afterwards; the twist then applies on top when it is on.
 void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
     if (!view || view != g_updating) {
         o_Camera(view, edx, aircraft);
         return;
     }
+    float& yaw = at<float>(view, kYaw);
+    float& pitch = at<float>(view, kYaw - 4);
+    const float game_yaw = yaw, game_pitch = pitch;
+    const int hold = g_hold.load(std::memory_order_relaxed);
+    const bool held = pt::hold_active(hold);
+    if (held) {
+        yaw = pt::hold_yaw(hold);
+        pitch = 0.0f;
+    }
+    const auto put_back = [&](float written_yaw) {
+        yaw = pt::restore_yaw(yaw, written_yaw, game_yaw);
+        if (held) pitch = pt::restore_yaw(pitch, 0.0f, game_pitch);
+    };
+    if (!g_twist.load(std::memory_order_relaxed)) {
+        const float written = yaw;
+        o_Camera(view, edx, aircraft);
+        put_back(written);
+        return;
+    }
     if (g_reset.exchange(false)) g_last_view = nullptr;  // turned off and on again: forget the old filter and side
     if (view != g_last_view) g_state = {};  // another view: start at the target
     g_last_view = view;
-    float& yaw = at<float>(view, kYaw);
     const float head = yaw;
     const float dt = seconds_since_last();
     BYTE* def = at<BYTE*>(view, kViewDef);
@@ -132,7 +157,7 @@ void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
     const float written = pt::camera_yaw(g_state, head, dt, at<float>(view, kMinYaw), at<float>(view, kMaxYaw), limited);
     yaw = written;
     o_Camera(view, edx, aircraft);
-    yaw = pt::restore_yaw(yaw, written, head);
+    put_back(written);
     g_diag.camera = true;
     g_diag.head = head;
     g_diag.yaw = g_state.yaw;
@@ -192,7 +217,7 @@ void diag_log(void* view) {
 
 void __fastcall h_Eye(void* view, void* edx, const float* aircraft, void* iface) {
     o_Eye(view, edx, aircraft, iface);
-    if (!view || view != g_updating || view != g_last_view || !aircraft || !g_state.have || g_state.weight == 0.0f) return;
+    if (!g_twist.load(std::memory_order_relaxed) || !view || view != g_updating || view != g_last_view || !aircraft || !g_state.have || g_state.weight == 0.0f) return;
     int axis[5] = {};
     pt::Vec3 native_world{};
     if (!native_offset_world(view, &native_world, axis)) return;  // tracker offset unknown: no lean rather than a guess
@@ -245,7 +270,7 @@ bool create_view_hooks(HMODULE vm) {
 // Enables or disables the three hooks together. MinHook's queued apply suspends the other threads once, patches the
 // three entries in one go and moves any thread stopped inside a patched prologue, so no frame sees only some of
 // them; a detour that is already running keeps its trampoline and finishes normally. Caller holds g_install_lock.
-void set_enabled_locked(bool on) {
+void set_hooks_locked(bool on) {
     HMODULE vm = g_view_dll.load();
     if (!vm || on == g_enabled.load()) return;
     if (!still_loaded(vm)) {  // freed since: never patch whatever is mapped there now
@@ -260,8 +285,24 @@ void set_enabled_locked(bool on) {
     }
     const MH_STATUS s = MH_ApplyQueued();
     if (s == MH_OK) g_enabled = on;
-    if (s == MH_OK && !on) g_reset = true;
-    LOG("pilot twist: %s (view hooks %s: %s)", on ? "on" : "off", on ? "enabled" : "disabled", MH_StatusToString(s));
+    LOG("pilot twist: view hooks %s: %s", on ? "enabled" : "disabled", MH_StatusToString(s));
+}
+
+/// <summary>The twist wanted: the developer override when one was set this session, else the setting.</summary>
+bool effective_twist(bool setting) {
+    const int d = g_dev_twist.load();
+    return d >= 0 ? d == 1 : setting;
+}
+
+// The twist on or off, and the hooks enabled while the twist or a developer head hold needs them. Caller holds
+// g_install_lock.
+void set_enabled_locked(bool twist) {
+    if (twist != g_twist.load()) {
+        g_twist = twist;
+        g_reset = true;
+        LOG("pilot twist: %s", twist ? "on" : "off");
+    }
+    set_hooks_locked(twist || pt::hold_active(g_hold.load()));
 }
 
 }  // namespace
@@ -271,9 +312,12 @@ void pilot_twist_on_modules_loaded() {
     HMODULE vm = GetModuleHandleW(L"ViewManager.dll");
     if (!vm) return;
     const auto* entry = static_cast<const BYTE*>(at_rva(vm, kUpdateRva));
-    const bool want = config::pilot_twist_peek() == 1;
+    const bool want = effective_twist(config::pilot_twist_peek() == 1);
+    const bool want_hooks = want || pt::hold_active(g_hold.load());
     // Fast path: our hooks belong to this image (an enabled one shows its JMP) and match the setting.
-    if (vm == g_view_dll.load() && (!g_enabled.load() || *entry == 0xE9) && want == g_enabled.load()) return;
+    if (vm == g_view_dll.load() && (!g_enabled.load() || *entry == 0xE9) && want_hooks == g_enabled.load() &&
+        want == g_twist.load())
+        return;
 
     AcquireSRWLockExclusive(&g_install_lock);
     do {
@@ -305,7 +349,33 @@ void pilot_twist_on_modules_loaded() {
 // Options page is left (in the menus, so no view update is running). Idempotent.
 void pilot_twist_apply_setting() {
     AcquireSRWLockExclusive(&g_install_lock);
-    set_enabled_locked(config::pilot_twist());
+    set_enabled_locked(effective_twist(config::pilot_twist()));
+    ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+void pilot_twist_dev_toggle() {
+    AcquireSRWLockExclusive(&g_install_lock);
+    if (!g_view_dll.load()) {
+        LOG("pilot twist (dev): Ctrl+Shift+W ignored: the view hooks are not installed (no flight yet, or unavailable)");
+    } else {
+        const bool on = !g_twist.load();
+        g_dev_twist = on ? 1 : 0;
+        LOG("pilot twist (dev): Ctrl+Shift+W turns the twist %s for this session (the setting is unchanged)", on ? "on" : "off");
+        set_enabled_locked(on);
+    }
+    ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+void pilot_twist_dev_cycle_hold() {
+    AcquireSRWLockExclusive(&g_install_lock);
+    if (!g_view_dll.load()) {
+        LOG("pilot twist (dev): Ctrl+Shift+H ignored: the view hooks are not installed (no flight yet, or unavailable)");
+    } else {
+        const int step = pt::next_hold(g_hold.load());
+        g_hold = step;
+        LOG("pilot twist (dev): Ctrl+Shift+H head hold %s (pitch 0; twist %s)", pt::hold_name(step), g_twist.load() ? "on" : "off");
+        set_enabled_locked(g_twist.load());
+    }
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 

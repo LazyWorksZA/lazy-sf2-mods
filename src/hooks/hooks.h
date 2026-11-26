@@ -59,6 +59,16 @@ void pilot_twist_on_modules_loaded();
 /// game window creation and when an Options page is left. Idempotent.
 /// </summary>
 void pilot_twist_apply_setting();
+/// <summary>
+/// Developer (probe hotkey thread, Ctrl+Shift+W): turns the twist on or off for this session without touching the
+/// setting; the view hooks follow at once.
+/// </summary>
+void pilot_twist_dev_toggle();
+/// <summary>
+/// Developer (probe hotkey thread, Ctrl+Shift+H): steps the head hold off, 120 left, 160 left, 120 right, 160 right,
+/// off. The held yaw (pitch 0) replaces the head angles for the camera build only.
+/// </summary>
+void pilot_twist_dev_cycle_hold();
 
 /// <summary>
 /// Hooks the exe's file service so the Options menu can offer Display Mode (Options.ini [GraphicsOptions]

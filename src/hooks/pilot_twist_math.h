@@ -147,4 +147,26 @@ constexpr Vec3 native_camera_offset(int axis_x, int axis_z, const float lo[3], c
     return {kx * (kx < 0 ? lo[0] : hi[0]), 0.0, kz * (kz < 0 ? lo[2] : hi[2])};
 }
 
+// Developer head hold (probe hotkey): a fixed head yaw instead of the hat or tracker, for screenshots. Steps: 0 off,
+// then 120 and 160 degrees left, then 120 and 160 degrees right. Positive view yaw is to the right (as the lean
+// assumes), so left is negative.
+constexpr int kHoldSteps = 5;
+
+/// <summary>The step after step; anything out of range goes back to 0 (off).</summary>
+constexpr int next_hold(int step) { return step >= 0 && step < kHoldSteps - 1 ? step + 1 : 0; }
+
+/// <summary>The held head yaw in radians for a step (0 for off or out of range; check hold_active first).</summary>
+constexpr float hold_yaw(int step) {
+    constexpr float yaws[kHoldSteps] = {0.0f, -120.0f * kDeg, -160.0f * kDeg, 120.0f * kDeg, 160.0f * kDeg};
+    return step >= 0 && step < kHoldSteps ? yaws[step] : 0.0f;
+}
+
+constexpr bool hold_active(int step) { return step > 0 && step < kHoldSteps; }
+
+/// <summary>A short name for the log.</summary>
+constexpr const char* hold_name(int step) {
+    constexpr const char* names[kHoldSteps] = {"off", "120 left", "160 left", "120 right", "160 right"};
+    return step >= 0 && step < kHoldSteps ? names[step] : "off";
+}
+
 }  // namespace LazyWorks::SF2Patch::hooks::pilot_twist

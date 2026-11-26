@@ -3707,6 +3707,25 @@ void pilot_twist_tests() {
     expect(close_to(we.x, 0.0, 1e-9) && close_to(we.y, -0.06, 1e-9), "lean: right of an east-heading jet is south");
     const float inverted[9] = {-1, 0, 0, 0, 1, 0, 0, 0, -1};  // rolled 180 degrees
     expect(close_to(pt::body_to_world(inverted, {0.0, 0.0, 0.03}).z, -0.03, 1e-9), "lean: up follows the airframe, not the world");
+    // Developer head hold: off, 120 left, 160 left, 120 right, 160 right, then off again.
+    int step = 0;
+    const int want_steps[] = {1, 2, 3, 4, 0, 1};
+    bool cycle_ok = true;
+    for (int i : want_steps) {
+        step = pt::next_hold(step);
+        if (step != i) cycle_ok = false;
+    }
+    expect(cycle_ok, "head hold: cycles off, 120 L, 160 L, 120 R, 160 R, off");
+    expect(pt::next_hold(-3) == 0 && pt::next_hold(99) == 0 && !pt::hold_active(-1) && !pt::hold_active(5) &&
+               pt::hold_yaw(7) == 0.0f && std::string(pt::hold_name(9)) == "off",
+           "head hold: out of range is off");
+    expect(!pt::hold_active(0) && pt::hold_yaw(0) == 0.0f && std::string(pt::hold_name(0)) == "off", "head hold: step 0 is off");
+    expect(close_to(pt::hold_yaw(1), -120.0f * d, 1e-6) && close_to(pt::hold_yaw(2), -160.0f * d, 1e-6) &&
+               close_to(pt::hold_yaw(3), 120.0f * d, 1e-6) && close_to(pt::hold_yaw(4), 160.0f * d, 1e-6),
+           "head hold: left is negative yaw, right positive, 120 and 160 degrees");
+    expect(pt::target_weight(pt::hold_yaw(2)) < 0 && pt::target_weight(pt::hold_yaw(4)) > 0 &&
+               pt::lean_body(pt::target_weight(pt::hold_yaw(4)), {0, 0, 0}).x > 0,
+           "head hold: the twist and lean follow the held side");
 }
 
 void probe_snapshot_tests() {
