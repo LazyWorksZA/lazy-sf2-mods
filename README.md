@@ -98,6 +98,7 @@ Smaller items:
 - Voice commands to wingmen through a FoxVox plugin.
 - Tougher AI air combat: enemy pilots that are harder to out-turn and out-fly (needs recon on the AI skill settings and manoeuvre logic).
 - Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
+- Tacview: sharp ground everywhere at low level. The add-on streams the game's own ground tiles at native resolution around the camera (prototype works: about 0.16 ms a tile, no extra load time).
 - Tacview: non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
 
 **Developer tools**
