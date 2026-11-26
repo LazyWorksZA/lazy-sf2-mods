@@ -3622,21 +3622,21 @@ void pilot_twist_tests() {
     expect(pt::filter_step(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.01f) == 0.5f, "filter: recovers from NaN");
 
     // Twist: adds up to kMaxTwist, within the widened seat limit and +-180 degrees.
-    const float lo = -152.0f * d, hi = 152.0f * d;
+    const float lo = -145.0f * d, hi = 145.0f * d;
     auto twisted_yaw = [](float yaw, float wt, float mn, float mx, bool lim) { return yaw + pt::twist_delta(yaw, wt, mn, mx, lim); };
     expect(twisted_yaw(30.0f * d, 0.0f, lo, hi, true) == 30.0f * d, "twist: none at zero weight");
     expect(close_to(twisted_yaw(100.0f * d, 0.5f, lo, hi, true), 100.0f * d + 0.5f * pt::kMaxTwist, 1e-5),
            "twist: weight times the maximum");
-    expect(close_to(pt::kMaxTwist, 20.0f * d, 1e-6), "twist: at most 20 degrees extra");
-    expect(close_to(twisted_yaw(152.0f * d, 1.0f, lo, hi, true), 172.0f * d, 1e-4), "twist: the seat MaxYaw plus 20 at most");
-    expect(close_to(twisted_yaw(-152.0f * d, -1.0f, lo, hi, true), -172.0f * d, 1e-4), "twist: the seat MinYaw minus 20 at most");
-    expect(close_to(twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 140.0f * d, 1e-4),
+    expect(close_to(pt::kMaxTwist, 30.0f * d, 1e-6), "twist: at most 30 degrees extra");
+    expect(close_to(twisted_yaw(145.0f * d, 1.0f, lo, hi, true), 175.0f * d, 1e-4), "twist: the seat MaxYaw plus 30 at most");
+    expect(close_to(twisted_yaw(-145.0f * d, -1.0f, lo, hi, true), -175.0f * d, 1e-4), "twist: the seat MinYaw minus 30 at most");
+    expect(close_to(twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 150.0f * d, 1e-4),
            "twist: within the seat limit plus the twist");
-    expect(close_to(twisted_yaw(110.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 120.0f * d, 1e-4),
+    expect(close_to(twisted_yaw(110.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 130.0f * d, 1e-4),
            "twist: stops at the narrow seat limit plus the twist");
     expect(close_to(twisted_yaw(140.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 140.0f * d, 1e-4),
            "twist: never pulls back a yaw already past the widened limit");
-    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 160.0f * d, 1e-4), "twist: unlimited view, full twist");
+    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 170.0f * d, 1e-4), "twist: unlimited view, full twist");
     expect(close_to(twisted_yaw(175.0f * d, 1.0f, 0.0f, 0.0f, false), 180.0f * d, 1e-4), "twist: unlimited view, +-180 only");
     // No compounding: the game smooths its stored yaw (+0xdc) toward the head target every frame; the hook writes the
     // twisted yaw only around the camera build and restores it. The stored yaw must settle on the target and the

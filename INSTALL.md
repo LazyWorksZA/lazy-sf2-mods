@@ -19,7 +19,7 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 | Options → Graphics (below Aspect Ratio) | **Display Mode** | **Fullscreen**: stock exclusive fullscreen. **Borderless**: a window covering the screen, so Alt-Tab is instant and other monitors stay usable. | Fullscreen |
 | Options → Graphics | **Screen** | "Screen N (W×H)", numbered as in Windows' Settings → Display. Choosing another screen also sets the game resolution to its native size, which applies at the next start. | the stock choice (primary) |
 | Options → Controls (below Keyboard Map) | **Mouse Pointer** | **Match Windows cursor**: the game's pointer sits exactly on the Windows cursor, at Windows' speed and acceleration. **Stock game pointer**: the game builds its own pointer from raw mouse movement, as without the mod. | Match Windows cursor |
-| Options → Controls (below Mouse Pointer) | **Pilot Twist** | **On**: in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 20 degrees further and leans you a little toward that side. **Off**: stock view. | Off |
+| Options → Controls (below Mouse Pointer) | **Pilot Twist** | **On**: in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 30 degrees further and leans you a little toward that side. **Off**: stock view. | Off |
 | Options → Gameplay (bottom row) | **Tacview Recording** | **On**: every flight is recorded to a Tacview file (`SF2 <date>.zip.acmi`) in `Saved Games\ThirdWire\StrikeFighters2\Tacview`. **Off**: no recording. | Off |
 
 Changes take effect when you leave the Options screen, like the game's own settings.

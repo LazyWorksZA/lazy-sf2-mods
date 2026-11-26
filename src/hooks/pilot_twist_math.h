@@ -15,7 +15,7 @@ constexpr float kDeg = kPi / 180.0f;
 // Tunables: one place, one line each.
 constexpr float kStartYaw = 60.0f * kDeg;   // head yaw where the effect starts
 constexpr float kFullYaw = 150.0f * kDeg;   // head yaw where it is at full strength
-constexpr float kMaxTwist = 20.0f * kDeg;   // extra view yaw at full strength (also how far past the seat limit)
+constexpr float kMaxTwist = 30.0f * kDeg;   // extra view yaw at full strength (also how far past the seat limit)
 constexpr float kYawCap = 180.0f * kDeg;    // the twisted view never turns past this
 constexpr float kLeanSide = 0.04f;          // metres toward the side the pilot looks, at full strength
 constexpr float kLeanUp = 0.015f;           // metres up, at full strength
