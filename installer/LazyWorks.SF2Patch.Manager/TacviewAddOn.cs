@@ -14,8 +14,6 @@ public interface IUserRegistry
     void SetDword(string key, string name, int value);
     /// <summary>Deletes the key and everything under it; nothing when it is missing.</summary>
     void DeleteTree(string key);
-    /// <summary>Deletes the key only when it has no values and no subkeys.</summary>
-    void DeleteIfEmpty(string key);
 }
 
 /// <summary>The real HKEY_CURRENT_USER of the user running the helper.</summary>
@@ -41,21 +39,15 @@ public sealed class CurrentUserRegistry : IUserRegistry
     }
 
     public void DeleteTree(string key) => Registry.CurrentUser.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
-
-    public void DeleteIfEmpty(string key)
-    {
-        using (var k = Registry.CurrentUser.OpenSubKey(key))
-        {
-            if (k == null || k.ValueCount > 0 || k.SubKeyCount > 0) return;
-        }
-        Registry.CurrentUser.DeleteSubKey(key, throwOnMissingSubKey: false);
-    }
 }
 
 /// <summary>
 /// Puts the mod's Tacview add-on in place for the installing user and enables it once: Tacview keeps a per-user
-/// switch for every add-on folder (AddOns\[folder]\Enabled, a DWORD) and gives a new add-on 0. Also moves the
-/// settings of the add-on's pre-rename folder (LazySF2) over. Never throws: every step is best-effort and logged.
+/// switch for every add-on folder (AddOns\[folder]\Enabled, a DWORD) and writes 0 for a new add-on itself, so an
+/// existing 0 is not the player's choice. The installer sets Enabled=1 once, with the EnabledByInstaller marker, and
+/// never again while the marker exists. The key is Tacview's: uninstall leaves it, so an MSI upgrade (which runs the
+/// old uninstall first) keeps the player's choice. Also moves the settings of the add-on's pre-rename folder (LazySF2)
+/// over. Never throws: every step is best-effort and logged.
 /// </summary>
 public static class TacviewAddOn
 {
@@ -64,11 +56,8 @@ public static class TacviewAddOn
     public const string AddOnsKey = @"Software\Raia Software Inc.\Tacview\Local\AddOns";
     public const string EnabledValue = "Enabled";
     public const string TheatreSwitchValue = "TheatreSwitch";
+    public const string MarkerValue = "EnabledByInstaller";
     const string ResourceName = "LazySF2Patch.main.lua";
-
-    // Parents of our key, innermost first: removed on uninstall only when empty (Tacview may never have been installed).
-    static readonly string[] Parents =
-        [AddOnsKey, @"Software\Raia Software Inc.\Tacview\Local", @"Software\Raia Software Inc.\Tacview", @"Software\Raia Software Inc."];
 
     /// <summary>The add-on as the mod embeds it: tacview/addon/LazySF2Patch/main.lua, built into this assembly.</summary>
     public static byte[] Content
@@ -87,10 +76,10 @@ public static class TacviewAddOn
 
     /// <summary>
     /// Install and update hook. Writes the add-on (when it differs), carries the old LazySF2 settings over and removes
-    /// them, then, on a first install only, enables the add-on unless the player already has a value for it.
+    /// them, then enables the add-on once: only while the EnabledByInstaller marker is missing.
     /// </summary>
     /// <returns>Log lines.</returns>
-    public static List<string> Install(IUserRegistry reg, string appData, byte[] content, bool firstInstall)
+    public static List<string> Install(IUserRegistry reg, string appData, byte[] content)
     {
         var log = new List<string>();
         Step(log, "write add-on", () => log.Add(WriteFile(appData, content)));
@@ -115,31 +104,29 @@ public static class TacviewAddOn
         Step(log, "enable add-on", () =>
         {
             int? enabled = reg.GetDword(key, EnabledValue);
-            if (firstInstall && enabled == null)
+            if (reg.GetDword(key, MarkerValue) == null)
             {
                 reg.SetDword(key, EnabledValue, 1);
-                log.Add("tacview: enabled the Lazy SF2 Patch add-on");
+                reg.SetDword(key, MarkerValue, 1);  // after Enabled: a failed write is retried by the next hook
+                log.Add($"tacview: enabled the Lazy SF2 Patch add-on (was {(enabled == null ? "not set" : enabled.Value.ToString())})");
             }
             else
             {
-                log.Add($"tacview: add-on switch left as it is ({(enabled == null ? "not set" : enabled.Value.ToString())})");
+                log.Add($"tacview: add-on switch left as the player set it ({(enabled == null ? "not set" : enabled.Value.ToString())})");
             }
         });
         return log;
     }
 
-    /// <summary>Uninstall hook: removes the add-on's files, its folder if empty, and its registry key.</summary>
+    /// <summary>
+    /// Uninstall hook: removes the add-on's files and its folder if empty. Tacview's key for it (with the switch and
+    /// the marker) stays, so an upgrade keeps the player's choice.
+    /// </summary>
     /// <returns>Log lines.</returns>
-    public static List<string> Uninstall(IUserRegistry reg, string appData)
+    public static List<string> Uninstall(string appData)
     {
         var log = new List<string>();
         Step(log, "remove add-on", () => log.Add($"tacview: removed {RemoveFiles(AddOnDir(appData))} add-on file(s)"));
-        Step(log, "remove add-on settings", () =>
-        {
-            reg.DeleteTree(AddOnsKey + "\\" + Folder);
-            foreach (string p in Parents) reg.DeleteIfEmpty(p);
-            log.Add("tacview: removed the add-on settings");
-        });
         return log;
     }
 

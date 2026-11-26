@@ -26,13 +26,6 @@ sealed class FakeRegistry : IUserRegistry
                                                   k.StartsWith(key + "\\", StringComparison.OrdinalIgnoreCase)).ToList())
             Keys.Remove(k);
     }
-
-    public void DeleteIfEmpty(string key)
-    {
-        if (!Keys.TryGetValue(key, out var v) || v.Count > 0) return;
-        if (Keys.Keys.Any(k => k.StartsWith(key + "\\", StringComparison.OrdinalIgnoreCase))) return;
-        Keys.Remove(key);
-    }
 }
 
 public sealed class TacviewAddOnTests : IDisposable
@@ -64,30 +57,53 @@ public sealed class TacviewAddOnTests : IDisposable
     }
 
     [Fact]
-    public void Fresh_install_without_Tacview_writes_the_file_and_enables_it()
+    public void Fresh_install_without_Tacview_writes_the_file_and_enables_it_with_the_marker()
     {
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
+        TacviewAddOn.Install(_reg, _appData, _content);
         Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
         Assert.False(File.Exists(AddOnFile + ".tmp"));
         Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
+        Assert.Equal(1, _reg.GetDword(Key, "EnabledByInstaller"));
     }
 
     [Fact]
-    public void Install_keeps_a_value_the_player_already_has()
+    public void Tacviews_own_0_without_the_marker_is_turned_on_once()
+    {
+        _reg.SetDword(Key, "Enabled", 0);  // Tacview writes this itself for a new add-on (and 1.0 players have it)
+        TacviewAddOn.Install(_reg, _appData, _content);
+        Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
+        Assert.Equal(1, _reg.GetDword(Key, "EnabledByInstaller"));
+    }
+
+    [Fact]
+    public void With_the_marker_a_players_0_stays()
     {
         _reg.SetDword(Key, "Enabled", 0);
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
+        _reg.SetDword(Key, "EnabledByInstaller", 1);
+        TacviewAddOn.Install(_reg, _appData, _content);
         Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
     }
 
     [Fact]
-    public void Update_never_enables()
+    public void Turned_off_after_install_stays_off_on_the_next_hook()
     {
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: false);
-        Assert.Null(_reg.GetDword(Key, "Enabled"));
-        _reg.SetDword(Key, "Enabled", 0);
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: false);
+        TacviewAddOn.Install(_reg, _appData, _content);
+        _reg.SetDword(Key, "Enabled", 0);  // the player turns it off in Tacview
+        TacviewAddOn.Install(_reg, _appData, _content);
         Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
+    }
+
+    [Fact]
+    public void An_MSI_upgrade_keeps_the_players_choice()
+    {
+        // The MSI runs the old version's uninstall hook, then the new version's install hook.
+        TacviewAddOn.Install(_reg, _appData, _content);
+        _reg.SetDword(Key, "Enabled", 0);
+        _reg.SetDword(Key, "TheatreSwitch", 0);
+        TacviewAddOn.Uninstall(_appData);
+        TacviewAddOn.Install(_reg, _appData, _content);
+        Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
+        Assert.Equal(0, _reg.GetDword(Key, "TheatreSwitch"));
         Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
     }
 
@@ -96,7 +112,7 @@ public sealed class TacviewAddOnTests : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(AddOnFile)!);
         File.WriteAllText(AddOnFile, "old");
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: false);
+        TacviewAddOn.Install(_reg, _appData, _content);
         Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
     }
 
@@ -109,7 +125,7 @@ public sealed class TacviewAddOnTests : IDisposable
         File.WriteAllText(Path.Combine(OldDir, "main.lua"), "old");
         File.WriteAllText(Path.Combine(OldDir, "main.lua.tmp"), "old");
 
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
+        TacviewAddOn.Install(_reg, _appData, _content);
 
         Assert.False(_reg.KeyExists(OldKey));
         Assert.Equal(0, _reg.GetDword(Key, "TheatreSwitch"));
@@ -122,7 +138,7 @@ public sealed class TacviewAddOnTests : IDisposable
     {
         _reg.SetDword(OldKey, "TheatreSwitch", 0);
         _reg.SetDword(Key, "TheatreSwitch", 1);
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: false);
+        TacviewAddOn.Install(_reg, _appData, _content);
         Assert.Equal(1, _reg.GetDword(Key, "TheatreSwitch"));
         Assert.False(_reg.KeyExists(OldKey));
     }
@@ -133,38 +149,43 @@ public sealed class TacviewAddOnTests : IDisposable
         Directory.CreateDirectory(OldDir);
         File.WriteAllText(Path.Combine(OldDir, "main.lua"), "old");
         File.WriteAllText(Path.Combine(OldDir, "notes.txt"), "player's");
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
+        TacviewAddOn.Install(_reg, _appData, _content);
         Assert.False(File.Exists(Path.Combine(OldDir, "main.lua")));
         Assert.True(File.Exists(Path.Combine(OldDir, "notes.txt")));
     }
 
     [Fact]
-    public void Uninstall_removes_the_file_folder_and_key_only()
+    public void Uninstall_removes_the_file_and_folder_and_leaves_Tacviews_key()
     {
-        _reg.SetDword(TacviewAddOn.AddOnsKey + @"\other", "Enabled", 1);
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
+        TacviewAddOn.Install(_reg, _appData, _content);
         _reg.SetDword(Key, "TheatreSwitch", 0);
 
-        TacviewAddOn.Uninstall(_reg, _appData);
+        TacviewAddOn.Uninstall(_appData);
 
         Assert.False(File.Exists(AddOnFile));
         Assert.False(Directory.Exists(Path.GetDirectoryName(AddOnFile)));
-        Assert.False(_reg.KeyExists(Key));
-        Assert.Equal(1, _reg.GetDword(TacviewAddOn.AddOnsKey + @"\other", "Enabled"));
+        Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
+        Assert.Equal(1, _reg.GetDword(Key, "EnabledByInstaller"));
+        Assert.Equal(0, _reg.GetDword(Key, "TheatreSwitch"));
     }
 
     [Fact]
-    public void Uninstall_without_Tacview_leaves_no_empty_keys()
+    public void Uninstall_keeps_a_folder_with_other_files()
     {
-        TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
-        TacviewAddOn.Uninstall(_reg, _appData);
-        Assert.Equal(["Software"], _reg.Keys.Keys);  // HKCU\Software itself always stays
+        TacviewAddOn.Install(_reg, _appData, _content);
+        File.WriteAllText(AddOnFile + ".tmp", "partial");
+        string other = Path.Combine(Path.GetDirectoryName(AddOnFile)!, "notes.txt");
+        File.WriteAllText(other, "player's");
+        TacviewAddOn.Uninstall(_appData);
+        Assert.False(File.Exists(AddOnFile));
+        Assert.False(File.Exists(AddOnFile + ".tmp"));
+        Assert.True(File.Exists(other));
     }
 
     [Fact]
     public void Uninstall_with_nothing_there_is_fine()
     {
-        var log = TacviewAddOn.Uninstall(_reg, _appData);
+        var log = TacviewAddOn.Uninstall(_appData);
         Assert.DoesNotContain(log, l => l.Contains("failed"));
     }
 
@@ -175,7 +196,7 @@ public sealed class TacviewAddOnTests : IDisposable
         File.WriteAllText(AddOnFile, "old");
         List<string> log;
         using (new FileStream(AddOnFile, FileMode.Open, FileAccess.Read, FileShare.None))
-            log = TacviewAddOn.Install(_reg, _appData, _content, firstInstall: true);
+            log = TacviewAddOn.Install(_reg, _appData, _content);
         Assert.Contains(log, l => l.Contains("write add-on failed"));
         Assert.False(File.Exists(AddOnFile + ".tmp"));
         Assert.Equal(1, _reg.GetDword(Key, "Enabled"));

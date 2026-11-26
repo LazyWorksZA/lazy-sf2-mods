@@ -104,7 +104,7 @@ static class Program
         // Per-user installs can't write a game folder under Program Files: finish on the next normal
         // start (Setup starts us right after installing), with a UAC prompt. The MSI runs elevated.
         if (r == ModInstaller.Result.AccessDenied) File.WriteAllText(PendingInstallMarker, game);
-        TacviewHook(() => TacviewAddOn.Install(new CurrentUserRegistry(), AppData, TacviewAddOn.Content, firstInstall: what == "install"));
+        TacviewHook(() => TacviewAddOn.Install(new CurrentUserRegistry(), AppData, TacviewAddOn.Content));
     }
 
     static string AppData => Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -125,7 +125,7 @@ static class Program
 
     static void HookUninstall()
     {
-        TacviewHook(() => TacviewAddOn.Uninstall(new CurrentUserRegistry(), AppData));
+        TacviewHook(() => TacviewAddOn.Uninstall(AppData));
         string? game = ModInstaller.FindGameDir();
         if (game != null && ModInstaller.HasReparsePoint(game)) Log("uninstall hook: refused, reparse point in game path");
         var r = ModInstaller.Uninstall(game);
