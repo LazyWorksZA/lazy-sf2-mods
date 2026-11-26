@@ -7,13 +7,12 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Tacview
 
+- **Tacview: radar and weapon locks are recorded; Tacview draws lock lines.** When an aircraft (yours or the AI's) tracks or locks another aircraft with its radar, the recording names the target, and clears it when the lock is lost. A guided missile names the aircraft it is guiding to.
 - **Tacview: better shapes for ground vehicles, buildings, fuel tanks and bridges.** Ground objects and structures now get more specific Tacview types (truck, jeep, tank, armored vehicle, anti-aircraft, infantry, ship classes, storage and fuel tanks), chosen from the game's category with the name's generic words as a hint. Bridges are written as buildings, because Tacview has no bridge type.
 
 ### Fixed
 
 - Airfield names with accented letters (such as ü or ö) show correctly in Tacview.
-
-- **Tacview: radar and weapon locks are recorded; Tacview draws lock lines.** When an aircraft (yours or the AI's) tracks or locks another aircraft with its radar, the recording names the target, and clears it when the lock is lost. A guided missile names the aircraft it is guiding to.
 
 ### Developer tools (off unless enabled)
 
