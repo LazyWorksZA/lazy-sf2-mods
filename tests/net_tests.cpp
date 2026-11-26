@@ -27,6 +27,7 @@
 #include "acmi/terrain_texture.h"
 #include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
+#include "hooks/probe_snap_logic.h"
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
@@ -3644,6 +3645,33 @@ void pilot_twist_tests() {
     expect(close_to(pt::body_to_world(inverted, {0.0, 0.0, 0.03}).z, -0.03, 1e-9), "lean: up follows the airframe, not the world");
 }
 
+void probe_snapshot_tests() {
+    using namespace LazyWorks::SF2Patch::hooks;
+    bool a = true;
+    expect(probe_snapshot_number(L"snap012_auto.txt", &a) == 12 && a, "probe snap: auto index file");
+    expect(probe_snapshot_number(L"snap012_auto_world.txt", &a) == 12 && a, "probe snap: auto world file");
+    expect(probe_snapshot_number(L"snap1000_auto_0a1b2c3d_f0010.bin", &a) == 1000 && a, "probe snap: auto dump");
+    expect(probe_snapshot_number(L"snap012_0a1b2c3d.bin", &a) == 12 && !a, "probe snap: manual dump is not auto");
+    expect(probe_snapshot_number(L"snap012.txt", &a) == 12 && !a, "probe snap: manual index is not auto");
+    expect(probe_snapshot_number(L"snap012_automatic.txt", &a) == 12 && !a, "probe snap: _automatic is not auto");
+    const wchar_t* const kNotOurs[] = {L"snap012_auto.bak",       L"snap012_auto_keep.txt",       L"snap012_auto.txt.old",
+                                       L"snap012_auto_world.txt.bak", L"snap012_auto_0a1b2c3.bin",  L"snap012_auto_0a1b2c3d.bin.old",
+                                       L"snap012_auto_0A1B2C3D.bin",  L"snap012_auto_0a1b2c3d_f001.bin", L"snap012_auto_0a1b2c3d_f00100.bin",
+                                       L"snap012_auto_0a1b2c3d_g0010.bin", L"snap012_auto_.bin", L"snap012_auto"};
+    for (const wchar_t* nm : kNotOurs) {
+        a = true;
+        expect(probe_snapshot_number(nm, &a) == 12 && !a, "probe snap: only the exact shapes we write are auto");
+    }
+    expect(probe_snapshot_number(L"snap012_auto_0a1b2c3d.bin", &a) == 12 && a, "probe snap: auto aircraft dump");
+    expect(probe_snapshot_number(L"snap12_auto.txt", &a) == -1 && !a, "probe snap: too few digits");
+    expect(probe_snapshot_number(L"rec_001.bin", &a) == -1 && !a, "probe snap: other files are not ours");
+    expect(probe_snapshot_number(L"xsnap012_auto.txt", &a) == -1, "probe snap: prefix must start the name");
+    const std::vector<long> del = probe_auto_numbers_to_delete({3, 9, 3, 1, 7, 5, 8, 2, 9}, 5);
+    expect(del.size() == 2 && del[0] == 2 && del[1] == 1, "probe snap: keeps the newest 5 flights");
+    expect(probe_auto_numbers_to_delete({4, 5}, 5).empty(), "probe snap: fewer than 5 deletes nothing");
+    expect(probe_auto_numbers_to_delete({}, 5).empty(), "probe snap: empty");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -3673,6 +3701,7 @@ int main() {
     placement_tests();
     gameplay_row_splice_tests();
     pilot_twist_tests();
+    probe_snapshot_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

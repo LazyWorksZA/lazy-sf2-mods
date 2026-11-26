@@ -50,6 +50,12 @@ struct TerrainInfo {
 bool terrain_capture(TerrainInfo& out);
 
 /// <summary>
+/// Game thread. As terrain_capture, but fills only id, full_name, w, h, spacing and the geo point: no sample or tile
+/// copy, no export state touched and no log lines.
+/// </summary>
+bool terrain_basics(TerrainInfo& out);
+
+/// <summary>
 /// Game thread. Hands info.samples to the background export thread, if there are any. The export uses the recorder's
 /// placement, so the files and the recording agree.
 /// </summary>

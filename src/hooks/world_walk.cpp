@@ -536,6 +536,112 @@ size_t world_walk_run(double t, TacviewRec* out, size_t cap, uint8_t* series_mas
     return n;
 }
 
+namespace {
+
+constexpr uint32_t kSummaryMaxObjects = 2000;  // lines of live objects: bounds the frame the walk runs in
+
+// Header of the manager: group count and table. False if the vtable is not the expected one.
+bool read_manager(uintptr_t base, uint32_t* n, uintptr_t* arr) {
+    __try {
+        const uintptr_t mgr = base + kManagerRva;
+        if (*reinterpret_cast<const uintptr_t*>(mgr) != base + kManagerVtableRva) return false;
+        *n = *reinterpret_cast<const uint32_t*>(mgr + kMgrGroupCount);
+        *arr = *reinterpret_cast<const uintptr_t*>(mgr + kMgrGroups);
+        return *arr != 0 && *n <= kMaxGroups;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+struct GroupHead {
+    char name[48];
+    uint32_t count, capacity;
+};
+bool read_group_head(uintptr_t grp, GroupHead* h) {
+    __try {
+        const wchar_t* w = *reinterpret_cast<const wchar_t* const*>(grp);
+        size_t k = 0;
+        if (w)
+            for (; k + 1 < sizeof(h->name) && w[k]; ++k) h->name[k] = (w[k] >= 0x20 && w[k] < 0x7f) ? static_cast<char>(w[k]) : '?';
+        h->name[k] = '\0';
+        h->count = *reinterpret_cast<const uint32_t*>(grp + kGrpCount);
+        h->capacity = *reinterpret_cast<const uint32_t*>(grp + kGrpCapacity);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+}  // namespace
+
+void world_walk_summary(std::string& out) {
+    char line[256];
+    Modules mods;
+    mods.manager = resolve(kObjectManager);
+    mods.ground = resolve(kGroundObject);
+    mods.mobile = resolve(kGroundMobile);
+    mods.naval = resolve(kNaval);
+    if (!mods.manager) {
+        out += "objects: ObjectManager.dll is missing or not the expected build\n";
+        return;
+    }
+    uint32_t ngroups = 0;
+    uintptr_t arr = 0;
+    if (!read_manager(mods.manager, &ngroups, &arr)) {
+        out += "objects: the object manager is not as expected\n";
+        return;
+    }
+    sprintf_s(line, "objects: %u groups\n", ngroups);
+    out += line;
+    uint32_t listed = 0, omitted = 0;
+    for (uint32_t gi = 0; gi < ngroups; ++gi) {
+        const uintptr_t grp = arr + gi * kGroupStride;
+        GroupHead head;
+        GroupView v;
+        if (!read_group_head(grp, &head) || !read_group(grp, &v)) {
+            sprintf_s(line, "group %u: unreadable\n", gi);
+            out += line;
+            continue;
+        }
+        uint32_t in_use = 0, active = 0;
+        std::string objects;
+        for (uint32_t i = 0; i < v.count; ++i) {
+            Head h;
+            if (!read_head(v, i, &h) || !h.obj || h.state != kSlotInUse) continue;
+            ++in_use;
+            if (!h.active) continue;
+            ++active;
+            if (listed >= kSummaryMaxObjects) {
+                ++omitted;
+                continue;
+            }
+            ++listed;
+            const char* cls = "?";
+            bool ground = true;
+            if (h.vtable == mods.ground + kGroundVtable) cls = "static";
+            else if (h.vtable == mods.mobile + kMobileVtable) cls = "vehicle";
+            else if (h.vtable == mods.naval + kNavalVtable) cls = "ship";
+            else ground = false;
+            TacviewRec r;
+            if (ground && read_ground(h.obj, &r)) {
+                sprintf_s(line, "  obj %u %u %s vtable=%08x pos=%.1f,%.1f,%.1f name=%s\n", gi, i, cls,
+                          static_cast<unsigned>(h.vtable), r.pos[0], r.pos[1], r.pos[2], r.name);
+            } else {
+                sprintf_s(line, "  obj %u %u %s vtable=%08x\n", gi, i, cls, static_cast<unsigned>(h.vtable));
+            }
+            objects += line;
+        }
+        sprintf_s(line, "group %u %s count=%u capacity=%u in_use=%u active=%u\n", gi, head.name, head.count,
+                  head.capacity, in_use, active);
+        out += line;
+        out += objects;
+    }
+    if (omitted) {
+        sprintf_s(line, "objects: %u more live objects not listed (cap %u)\n", omitted, kSummaryMaxObjects);
+        out += line;
+    }
+}
+
 void world_walk_frame_dropped(const TacviewRec* recs, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         if (!recs[i].destroyed) continue;

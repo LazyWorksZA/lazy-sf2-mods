@@ -4,6 +4,7 @@
 // See lazy-sf2-recon: recon-notes §20.
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "acmi/tacview_core.h"
 
@@ -28,6 +29,12 @@ size_t world_walk_run(double t, acmi::TacviewRec* out, size_t cap, uint8_t* seri
 /// frame that lists the ground series. Beyond a small fixed number they are dropped and counted.
 /// </summary>
 void world_walk_frame_dropped(const acmi::TacviewRec* recs, size_t n);
+/// <summary>
+/// Developer snapshot, game thread only: appends a text summary of the ObjectManager group table (per group: name,
+/// count, capacity, slots in use, active) and each live object (group, slot, class, vtable, position and type name for
+/// the ground, vehicle and ship classes) to out. Independent of a recording; checks the module builds itself.
+/// </summary>
+void world_walk_summary(std::string& out);
 /// <summary>The recording ended: logs the summary once.</summary>
 void world_walk_stop();
 
