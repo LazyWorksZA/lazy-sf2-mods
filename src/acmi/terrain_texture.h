@@ -109,6 +109,15 @@ struct PatchEntry {
     double x0 = 0, y0 = 0, w_m = 0, h_m = 0;
 };
 
+/// <summary>The width and height of a JPEG from its first bytes. False when no frame header is found in them.</summary>
+bool jpeg_size(const uint8_t* data, size_t n, int& w, int& h);
+
+/// <summary>
+/// True for a file name the export wrote before the rename: "LazySF2-" (any case) then something, ending in ext (with
+/// its dot, any case). "LazySF2Patch-" names are never matched.
+/// </summary>
+bool is_pre_rename_file(const std::string& name, const char* ext);
+
 /// <summary>
 /// A Tacview CustomTextureList with the base texture, whose corners are the outer edges of the extent, then one entry
 /// per patch.

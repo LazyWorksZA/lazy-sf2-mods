@@ -21,6 +21,10 @@
     <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
   <ItemGroup>
+    <!-- The same add-on the mod embeds; the install hook writes it and enables it in Tacview. -->
+    <EmbeddedResource Include="..\..\tacview\addon\LazySF2Patch\main.lua" LogicalName="LazySF2Patch.main.lua" Link="tacview\main.lua" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="LazyWorks.SF2Patch.Manager.Tests" />
   </ItemGroup>
 

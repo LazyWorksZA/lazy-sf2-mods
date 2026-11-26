@@ -6,8 +6,10 @@
 #include <shlobj.h>
 
 #include <atomic>
+#include <iterator>
 #include <string>
 
+#include "config_parse.h"
 #include "log.h"
 
 namespace LazyWorks::SF2Patch::config {
@@ -18,6 +20,9 @@ std::atomic<DisplayMode> g_display{DisplayMode::Fullscreen};
 std::atomic<int> g_monitor{0};
 std::atomic<MouseMode> g_mouse{MouseMode::Cursor};
 std::atomic<int> g_tacview{-1};  // -1 = not loaded yet
+std::atomic<int> g_pilot_twist{-1};  // -1 = not loaded yet
+std::atomic<double> g_twist_angle{kPilotTwistAngleDefault};
+std::atomic<double> g_twist_lean{kPilotTwistLeanDefault};
 
 // Saved Games\ThirdWire\<exe name>, e.g. ...\StrikeFighters2 (the game's own per-user folder), or empty.
 std::wstring game_data_path() {
@@ -45,6 +50,22 @@ int read_int(const std::wstring& path, const wchar_t* section, const wchar_t* ke
     return path.empty() ? def : static_cast<int>(GetPrivateProfileIntW(section, key, def, path.c_str()));
 }
 
+// A numeric key, parsed and clamped (see parse_number_setting), logged once with the value used.
+double read_number(const std::wstring& path, const wchar_t* section, const wchar_t* key, double def, double lo, double hi,
+                   const char* unit) {
+    wchar_t text[64] = {};
+    const bool present = !path.empty() &&
+                         GetPrivateProfileStringW(section, key, L"", text, static_cast<DWORD>(std::size(text)), path.c_str()) > 0;
+    const NumberSetting s = parse_number_setting(present ? text : nullptr, def, lo, hi);
+    if (!present)
+        LOG("config: [%ls] %ls not set -> %.1f %s (default)", section, key, s.value, unit);
+    else if (s.defaulted)
+        LOG("config: [%ls] %ls=%ls is not a number -> %.1f %s (default)", section, key, text, s.value, unit);
+    else
+        LOG("config: [%ls] %ls=%ls -> %.1f %s%s", section, key, text, s.value, unit, s.clamped ? " (clamped)" : "");
+    return s.value;
+}
+
 BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
     const std::wstring path = options_ini_path();
 
@@ -63,6 +84,14 @@ BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
         g_mouse.load() == MouseMode::Cursor ? "match the Windows cursor" : "stock");
 
     g_tacview = read_int(path, L"OtherOptions", L"TacviewRecording", 0) == 1 ? 1 : 0;
+
+    const int twist = read_int(path, L"ControlOptions", L"PilotTwist", 0);
+    g_pilot_twist = twist == 1 ? 1 : 0;
+    LOG("config: [ControlOptions] PilotTwist=%d -> %s", twist, twist == 1 ? "on" : "off (stock)");
+    g_twist_angle = read_number(path, L"ControlOptions", L"PilotTwistAngle", kPilotTwistAngleDefault, 0.0,
+                                kPilotTwistAngleMax, "degrees");
+    g_twist_lean = read_number(path, L"ControlOptions", L"PilotTwistLean", kPilotTwistLeanDefault, 0.0,
+                               kPilotTwistLeanMax, "cm");
     return TRUE;
 }
 
@@ -97,6 +126,12 @@ void set_tacview_recording(bool on) {
 
 int tacview_recording_peek() { return g_tacview.load(); }
 
+int pilot_twist_peek() { return g_pilot_twist.load(); }
+
+double pilot_twist_angle_peek() { return g_twist_angle.load(); }
+
+double pilot_twist_lean_peek() { return g_twist_lean.load(); }
+
 std::wstring game_data_dir() { return game_data_path(); }
 
 MouseMode mouse_mode() {
@@ -107,6 +142,16 @@ MouseMode mouse_mode() {
 void set_mouse_mode(MouseMode mode) {
     ensure_loaded();
     g_mouse = mode;
+}
+
+bool pilot_twist() {
+    ensure_loaded();
+    return g_pilot_twist.load() == 1;
+}
+
+void set_pilot_twist(bool on) {
+    ensure_loaded();
+    if (g_pilot_twist.exchange(on ? 1 : 0) != (on ? 1 : 0)) LOG("config: Pilot Twist -> %s", on ? "on" : "off");
 }
 
 }  // namespace LazyWorks::SF2Patch::config
