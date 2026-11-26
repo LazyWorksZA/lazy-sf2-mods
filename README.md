@@ -92,6 +92,7 @@ Smaller items:
 - Esc in flight pauses first instead of ending the flight.
 - Rebind controls while flying (needs our own in-flight pause screen, like the Esc item).
 - Voice commands to wingmen through a FoxVox plugin.
+- Tougher AI air combat: enemy pilots that are harder to out-turn and out-fly (needs recon on the AI skill settings and manoeuvre logic).
 - Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
 - Tacview: buildings and bridges in recordings, with destruction (in testing); non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
 
