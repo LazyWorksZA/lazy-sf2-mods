@@ -3835,7 +3835,11 @@ static void object_type_tests() {
                tags(TacviewRec::kStructure, "Zork Storage Tank") == "Ground+Static+Container" &&
                tags(TacviewRec::kStructure, "Zork Bunker") == "Ground+Static+Building",
            "types: structures: the class decides, the name refines");
-    expect(is_storage_category("FUEL_STORAGE") && is_storage_category("Oil") && !is_storage_category("BRIDGE") && !is_storage_category("BUILDING"),
+    expect(tags(V, "Zork Personnel Carrier") == "Ground+Heavy+Armor+Vehicle" && tags(V, "Zork Caravan") == "Ground+Vehicle" &&
+               tags(V, "Bush Wagon") == "Ground+Vehicle" && tags(V, "Samson Mk2") == "Ground+Vehicle" &&
+               tags(S, "Zork Police Pole") == "Ground+Static+Building" && tags(V, "Zork Trucks") == "Ground+Medium+Vehicle",
+           "types: whole words only, armor before car");
+    expect(is_storage_category("FUEL_STORAGE") && is_storage_category("Oil") && !is_storage_category("POLE") && !is_storage_category("POLICE") && !is_storage_category("BRIDGE") && !is_storage_category("BUILDING"),
            "types: storage category");
 }
 
