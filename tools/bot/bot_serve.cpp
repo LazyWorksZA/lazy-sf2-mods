@@ -27,7 +27,12 @@ double wall_now() {
 
 constexpr double kServeStep = 1.0 / 60.0;          // the game-thread step, wall seconds
 constexpr double kStartAhead = 2000.0;        // metres ahead of the client's first State
-constexpr double kReWelcomeAfter = 1.5;       // after the first Welcome (ClientCore drops a re-Welcome within 1 s)
+// The join Welcome goes out this long after the client's first State (which it sends only after receiving the first
+// Welcome), and is re-sent this often until the client is on the wing: ClientCore drops one within kReWelcomeMinGap.
+constexpr double kReWelcomeAfter = kReWelcomeMinGap + 0.5;
+constexpr double kReWelcomeEvery = kReWelcomeMinGap + 0.25;
+constexpr double kJoinNear = 300.0;     // metres from the join point: the client has moved there
+constexpr double kJoinGiveUp = 10.0;    // seconds of re-sending before giving up
 constexpr double kShownEvery = 0.1;           // RemoteShown records, host seconds
 constexpr double kHostTime0 = 100.0;          // host time at the start
 constexpr uint8_t kByeBusy = 1, kByeSessionEnded = 3;  // as host.cpp
@@ -54,8 +59,11 @@ struct Client {
     char aircraft[32] = {};
     RemoteJet jet;
     bool got_state = false, coasting = false;
-    bool joined = false;  // a Welcome with a join position went out
-    double welcomed_wall = 0, last_game_time = 0, next_shown = 0;
+    // The two-step join (protocol.h, welcome_has_join): only when the first Welcome had no join position.
+    bool join_pending = false;  // a join Welcome is still to be sent, or to be confirmed by the client's States
+    double first_state_wall = -1, join_first_wall = -1, join_last_wall = -1;
+    double last_pos[3] = {}, last_state_wall = 0;  // the newest accepted State's position, and when
+    double last_game_time = 0, next_shown = 0;
     uint32_t rx = 0;
     double shown[3] = {}, shown_a[3] = {};  // the last position and angles written (Coast keeps them)
     bool have_shown = false;
@@ -119,8 +127,9 @@ struct Serve {
             say("bot serve: client %u: the Welcome could not be queued", static_cast<unsigned>(c.slot + 1));
             return;
         }
+        // (A failed re-Welcome would also block the client's States in HostPeers until the next try succeeds.)
         ++res.welcomes;
-        if (welcome_has_join(w)) c.joined = true;
+        if (!welcome_has_join(w)) c.join_pending = true;
         record(StreamKind::WelcomeSent, w);
         if (welcome_has_join(w))
             say("bot serve: Welcome to client %u: join (%.0f, %.0f, %.0f) heading %.1f deg, host time %.3f",
@@ -129,6 +138,38 @@ struct Serve {
         else
             say("bot serve: Welcome to client %u without a join position (waiting for its first State), host time %.3f",
                 static_cast<unsigned>(c.slot + 1), w.host_game_time);
+    }
+
+    /// <summary>
+    /// The second step of the join: the Welcome with the join position, timed from the client's first State, re-sent
+    /// until its States show it near the join point, for at most kJoinGiveUp.
+    /// </summary>
+    void join_step(double wall) {
+        if (c.join_first_wall < 0) {
+            if (wall - c.first_state_wall < kReWelcomeAfter) return;
+            c.join_first_wall = c.join_last_wall = wall;
+            send_welcome();
+            return;
+        }
+        const Flight::Sample s = flight.sample();
+        double want[3];
+        join_position(s.pos, s.ang[1], c.slot, want);
+        const double d = dist3(c.last_pos, want);
+        if (d < kJoinNear && c.last_state_wall > c.join_first_wall) {  // a State sent after the move
+            c.join_pending = false;
+            res.join_confirmed = true;
+            say("bot serve: client %u is on the wing (%.0f m from the join point)", static_cast<unsigned>(c.slot + 1), d);
+        } else if (wall - c.join_first_wall > kJoinGiveUp) {
+            c.join_pending = false;
+            res.join_gave_up = true;
+            say("bot serve: client %u is still %.0f m from the join point %.0f s after the join Welcome; not sending it again",
+                static_cast<unsigned>(c.slot + 1), d, kJoinGiveUp);
+        } else if (wall - c.join_last_wall >= kReWelcomeEvery) {
+            c.join_last_wall = wall;
+            say("bot serve: client %u is %.0f m from the join point; sending the join Welcome again",
+                static_cast<unsigned>(c.slot + 1), d);
+            send_welcome();
+        }
     }
 
     void start_jet(const double pos[3], double heading) {
@@ -188,7 +229,6 @@ struct Serve {
             c.gen = e.gen;
             set_str(c.callsign, h.callsign);
             set_str(c.aircraft, h.aircraft);
-            c.welcomed_wall = wall;
             ++res.clients;
             if (rec.is_open()) {
                 ClientJoinedPayload p{};
@@ -203,13 +243,16 @@ struct Serve {
         } else if (t == MsgType::State) {
             StateMsg s{};
             if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, s) != Status::Ok) return;
+            if (!c.jet.push(s, host_t)) return;  // old or repeated: not recorded either
             if (rec.is_open()) rec.record(StreamKind::StateReceived, host_t, e.data, e.len);
-            if (!c.jet.push(s, host_t)) return;
+            for (int i = 0; i < 3; ++i) c.last_pos[i] = s.pos[i];
+            c.last_state_wall = wall;
             ++c.rx;
             ++res.client_states;
             c.last_game_time = s.game_time;
             if (!c.got_state) {
                 c.got_state = true;
+                c.first_state_wall = wall;
                 say("bot serve: client %u first State at (%.0f, %.0f, %.0f) heading %.1f deg", static_cast<unsigned>(c.slot + 1),
                     s.pos[0], s.pos[1], s.pos[2], static_cast<double>(s.ang[1]) * 180.0 / kPi);
                 if (!res.jet_started) {
@@ -220,7 +263,7 @@ struct Serve {
             }
         } else if (t == MsgType::Bye) {
             ByeMsg b{};
-            if (c.on && e.slot == c.slot && decode(e.data, e.len, b) == Status::Ok) {
+            if (c.on && e.slot == c.slot && e.gen == c.gen && decode(e.data, e.len, b) == Status::Ok) {
                 say("bot serve: client %u said Bye (reason %u)", static_cast<unsigned>(c.slot + 1), static_cast<unsigned>(b.reason));
                 leave("Bye", kPeerLeftLeft);
             }
@@ -259,11 +302,7 @@ struct Serve {
                 ++res.jet_states;
             }
         }
-        // The second Welcome, once the jet is flying, if the first one had no join position.
-        if (c.on && res.jet_started && !c.joined && wall - c.welcomed_wall >= kReWelcomeAfter) {
-            c.welcomed_wall = wall;
-            send_welcome();
-        }
+        if (c.on && res.jet_started && c.join_pending && c.first_state_wall >= 0) join_step(wall);
         if (c.on && c.got_state) {
             RemoteJet::Kin k{};
             const RemoteJet::Out o = c.jet.shown(host_t, &k);
@@ -441,6 +480,8 @@ ServeResult run_serve(const ServeConfig& cfg) {
         }
     }
     sv.core.stop(false);
+    // Waits at most 1 s for the writer, then detaches it (StreamWriter has no joining close): a final flush slower than
+    // that would outlive the Serve that owns its ring. Accepted for a developer tool.
     sv.rec.close(true);
     sv.res.host_time_end = sv.host_t;
     sv.say("bot serve: done: %u client(s), %u Welcome(s), %u refused, %u jet States sent, %u client States, %u paused steps",

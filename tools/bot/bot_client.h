@@ -24,7 +24,8 @@ struct BotConfig {
     /// before it is handled: a fixed delay each way (the Pings' round trip grows by twice this).
     /// </summary>
     double lag_ms = 0.0;
-    double offset[3] = {150.0, 50.0, 0.0};  // formation: metres right, back and up in the host's heading frame
+    double offset[3] = {150.0, 50.0, 0.0};  // formation: metres right, back and up in the host's heading frame ...
+    bool offset_set = false;  // ... if set; otherwise the Welcome's slot: 150 m right per client id, 50 m back
     bool log_remote = false;                // one line per second per remote id
     bool drop = false;                      // exit without Bye
     uint32_t rng_seed = 12345;
@@ -52,8 +53,11 @@ struct BotResult {
     double host_age_p90 = 0;  // seconds: host time at handling minus the stamp, of the host's States
     // --script formation: each sent State against where the host really was at its time (from the host's States
     // received later) plus the offset.
-    uint32_t formation_n = 0;
+    // The percentiles come from a uniform sample of at most 65536 values. States sent across a gap in the host's
+    // States, or while it was silent, cannot be scored: they are counted in formation_unscored.
+    uint32_t formation_n = 0, formation_unscored = 0;
     double formation_p50 = 0, formation_p95 = 0, formation_max = 0;
+    double formation_offset[3] = {};  // the offset flown
 };
 
 BotResult run_bot(const BotConfig& cfg);

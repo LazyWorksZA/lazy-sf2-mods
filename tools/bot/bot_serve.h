@@ -41,6 +41,8 @@ struct ServeResult {
     uint32_t jet_states = 0;     // States of its own jet (id 0) handed to the core
     uint32_t client_states = 0;  // client States handled
     uint32_t paused_steps = 0;
+    bool join_confirmed = false;  // the client's States showed it at the join point after the join Welcome
+    bool join_gave_up = false;    // ... or not within 10 s of re-sending it
     bool jet_started = false;
     double jet_start[3] = {};
     double jet_start_heading = 0, jet_start_time = 0;  // host time

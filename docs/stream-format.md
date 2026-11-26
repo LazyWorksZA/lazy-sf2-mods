@@ -2,7 +2,7 @@
 
 Developer tool. With host mode on (`LAZYSF2_HOST`, see `lazy-sf2-recon`, `network-recon.md`), the mod records what the host sees to `LAZYSF2_PROBE_DIR\stream_NNN.lzst`. `NNN` is the first free number from 001, and the file is created with `CREATE_NEW`. The code is `src/net/stream_format.*` (format and reader) and `src/net/stream_record.*` (writer).
 
-The bot's synthetic host (`lazysf2-bot --serve PORT --record DIR`) writes the same format to `DIR\botserve_NNN.lzst`. There the "host" is the bot: kind 2 is its scripted jet, kind 1 the client's States, and kind 9 what the bot showed of the client.
+The bot's synthetic host (`lazysf2-bot --serve PORT --record DIR`) writes the same format to `DIR\botserve_NNN.lzst`. There the "host" is the bot: kind 2 is its scripted jet, kind 1 the client's States, and kind 9 what the bot showed of the client. Unlike the mod host's file, it is opened when the bot starts serving (so HostState records come before any client), and kind 1 holds only the States the bot's receiver accepted (not old or repeated ones). Without `--start` the file has two `WelcomeSent` records per client: the first with an all-zero join position (`net::welcome_has_join` is false), the second, after the client's first State, with the join position on the bot's jet; it is re-sent once a second until the client's States show it there (at most 10 s).
 
 All numbers are little-endian. Structures are packed. A reader is in `src/net/stream_format.h` (`StreamReader`): it works on bytes in memory and never reads past the end.
 

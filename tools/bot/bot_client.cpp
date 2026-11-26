@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "net/host_core.h"
+#include "net/host_session.h"
 #include "net/receiver_math.h"
 #include "net/remote_jet.h"
 
@@ -37,6 +38,7 @@ constexpr double kHostByeGrace = 1.0;
 constexpr int kSources = kMaxClients + 1;  // State sources: the host (0) and clients 1..kMaxClients
 constexpr size_t kMaxQueued = 4096;        // packets --lag may hold in each direction
 constexpr size_t kHostHistory = 64;        // the host's States kept for the formation error (3 s at 20 Hz)
+constexpr size_t kReservoir = 65536;       // values kept for a run's percentiles (an hour at 20 Hz fits)
 
 /// <summary>Nearest-rank percentile (q in [0,1]); 0 for no values.</summary>
 double percentile(std::vector<double> v, double q) {
@@ -63,6 +65,22 @@ replay_math::Samp to_samp(const StateMsg& s) {
     }
     return o;
 }
+
+/// <summary>Keeps at most kReservoir values, a uniform sample of all added, so a long run's percentiles stay fair.</summary>
+struct Reservoir {
+    std::vector<double> v;
+    uint64_t n = 0;
+    std::mt19937_64 rng{7};  // its own: --loss and --jitter keep their sequence
+    void add(double x) {
+        ++n;
+        if (v.size() < kReservoir) {
+            v.push_back(x);
+        } else {
+            const uint64_t j = std::uniform_int_distribution<uint64_t>(0, n - 1)(rng);
+            if (j < kReservoir) v[static_cast<size_t>(j)] = x;
+        }
+    }
+};
 
 bool delivered(const ENetPeer* p) {
     return p->reliableDataInTransit == 0 && enet_list_empty(&p->sentReliableCommands) &&
@@ -96,8 +114,9 @@ struct Runner {
     ENetPeer* peer = nullptr;
     bool connected = false, disconnected = false, welcomed = false;
     bool host_bye = false;
-    double host_bye_at = 0;
+    double host_bye_at = 0, welcomed_at = 0;
     WelcomeMsg welcome{};
+    double offset[3] = {};  // formation: --offset, or the Welcome's slot (150 m right per client id, 50 m back)
     double last_rx = 0;  // wall time of the last packet from the host (as it arrived, before --lag)
     double lag = 0;      // seconds
     ClockSync clock;
@@ -107,7 +126,7 @@ struct Runner {
     std::multimap<double, std::vector<uint8_t>> delayed;  // --jitter: release wall time -> encoded State
     std::deque<Pkt> out_q, in_q;                          // --lag, each in release order
     Remote remotes[kSources];
-    std::vector<double> host_ages;
+    Reservoir host_ages;
     std::deque<replay_math::Samp> host_hist;  // the host's accepted States, oldest first
 
     // --script formation
@@ -119,8 +138,9 @@ struct Runner {
     Sent form_last{};
     double form_last_v[3] = {}, form_last_a[3] = {};
     std::deque<Sent> form_pending;  // sent, waiting for the host's States around their time
-    std::vector<double> form_err;
-    size_t form_err_logged = 0;
+    Reservoir form_err;
+    std::vector<double> form_err_second;  // since the last --log-remote line
+    uint32_t form_unscored = 0;
 
     explicit Runner(const BotConfig& c) : cfg(c), lag(c.lag_ms * 0.001), rng(c.rng_seed) {}
     ~Runner() {
@@ -186,13 +206,29 @@ struct Runner {
         switch (type) {
             case MsgType::Welcome: {
                 WelcomeMsg w{};
-                if (channel != kChannelReliable || welcomed || decode(data, len, w) != Status::Ok) return refuse();
+                if (channel != kChannelReliable || decode(data, len, w) != Status::Ok || w.client_id == 0 ||
+                    w.client_id > kMaxClients || (welcomed && w.client_id != res.client_id))
+                    return refuse();
+                if (host_bye || (welcomed && rx - welcomed_at < kReWelcomeMinGap)) return refuse();
+                bool ok = finite(w.host_game_time) && within(w.spawn_heading, kMaxAngle);
+                for (int i = 0; i < 3; ++i)
+                    ok = ok && within(w.spawn_pos[i], kMaxPosition) && within(w.spawn_vel[i], kMaxVelocity);
+                if (!ok) return refuse();
+                if (welcomed) {  // a re-Welcome: the host announces its peers again, and the clock is re-seeded
+                    for (Remote& rm : remotes) rm = Remote{};
+                    say("bot: Welcome again%s", welcome_has_join(w) ? ", with a join position" : "");
+                }
                 welcome = w;
                 welcomed = true;
+                welcomed_at = rx;
                 res.client_id = w.client_id;
+                if (!cfg.offset_set) {
+                    offset[0] = kJoinRight * w.client_id;
+                    offset[1] = kJoinBack;
+                    offset[2] = 0.0;
+                }
                 // The Welcome took half of ENet's smoothed round trip (ms) to arrive, plus --lag.
                 clock.on_welcome(rx, w.host_game_time, 0.0005 * static_cast<double>(peer->roundTripTime) + lag);
-                resets_seen = clock.resets();
                 return;
             }
             case MsgType::Pong: {
@@ -204,7 +240,7 @@ struct Runner {
             case MsgType::PeerInfo: {
                 PeerInfoMsg m{};
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.id > kMaxClients || !welcomed ||
-                    m.id == res.client_id)
+                    host_bye || m.id == res.client_id)
                     return refuse();
                 Remote& r = remotes[m.id];
                 if (r.known) return refuse();
@@ -221,7 +257,7 @@ struct Runner {
             case MsgType::PeerLeft: {
                 PeerLeftMsg m{};
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.id == 0 || m.id > kMaxClients ||
-                    !welcomed || m.id == res.client_id || !remotes[m.id].known)
+                    !welcomed || host_bye || m.id == res.client_id || !remotes[m.id].known)
                     return refuse();
                 Remote& r = remotes[m.id];
                 say("bot: peer %u \"%s\" left (reason %u) after %u States", static_cast<unsigned>(m.id), r.callsign,
@@ -244,7 +280,7 @@ struct Runner {
                 ++r.rx;
                 if (m.client_id == 0) {
                     ++res.host_states;
-                    host_ages.push_back(now - m.game_time);
+                    host_ages.add(now - m.game_time);
                     if (!host_hist.empty() && !(m.game_time > host_hist.back().t)) host_hist.clear();  // a restart
                     host_hist.push_back(to_samp(m));
                     if (host_hist.size() > kHostHistory) host_hist.pop_front();
@@ -336,17 +372,31 @@ struct Runner {
         if (o != RemoteJet::Out::None && o != RemoteJet::Out::Coast) {
             if (!form_on) {
                 form_on = true;
-                say("bot: formation: on the host's jet, %.0f m right, %.0f m back, %.0f m up", cfg.offset[0], cfg.offset[1],
-                    cfg.offset[2]);
+                say("bot: formation: on the host's jet, %.0f m right, %.0f m back, %.0f m up", offset[0], offset[1],
+                    offset[2]);
             }
             form_coast_logged = false;
-            formation_point(k.p, k.a[1], cfg.offset, p);
-            formation_velocity(k.v, k.a[1], k.w[1], cfg.offset, v);
+            // The turn from the host's headings: the rates in a State are the game's own (body axes), not Euler rates.
+            double hr = 0.0;
+            if (host_hist.size() >= 2) {
+                const replay_math::Samp& h0 = host_hist[host_hist.size() - 2];
+                const replay_math::Samp& h1 = host_hist.back();
+                hr = heading_rate(h0.k.a[1], h0.t, h1.k.a[1], h1.t);
+            }
+            formation_point(k.p, k.a[1], offset, p);
+            formation_velocity(k.v, k.a[1], hr, offset, v);
             for (int i = 0; i < 3; ++i) {
                 a[i] = k.a[i];
                 w[i] = k.w[i];
             }
-        } else if (!form_on) {  // before the first host State: straight on from the Welcome's join position
+        } else if (!form_on && welcome_has_join(welcome)) {  // before the first host State: on from the join position
+            for (int i = 0; i < 3; ++i) {
+                p[i] = welcome.spawn_pos[i] + welcome.spawn_vel[i] * (t - welcome.host_game_time);
+                v[i] = welcome.spawn_vel[i];
+                a[i] = 0.0;
+            }
+            a[1] = welcome.spawn_heading;
+        } else if (!form_on) {  // a Welcome without a join position: straight on from wherever it says
             flight.advance_to(t);
             const Flight::Sample s = flight.sample();
             for (int i = 0; i < 3; ++i) {
@@ -379,7 +429,10 @@ struct Runner {
         form_last.t = t;
         if (form_on) {
             form_pending.push_back(form_last);
-            if (form_pending.size() > 1024) form_pending.pop_front();
+            if (form_pending.size() > 1024) {
+                form_pending.pop_front();
+                ++form_unscored;
+            }
         }
     }
 
@@ -397,9 +450,15 @@ struct Runner {
                     replay_math::Kin k{};
                     replay_math::interpolate(a, b, s.t, &k);
                     double want[3];
-                    formation_point(k.p, k.a[1], cfg.offset, want);
-                    form_err.push_back(dist3(s.p, want));
+                    formation_point(k.p, k.a[1], offset, want);
+                    const double e = dist3(s.p, want);
+                    form_err.add(e);
+                    form_err_second.push_back(e);
+                } else {
+                    ++form_unscored;
                 }
+            } else {
+                ++form_unscored;
             }
             form_pending.pop_front();
         }
@@ -411,10 +470,10 @@ struct Runner {
             if (!r.known) continue;
             const JetStats st = r.jet.take_stats();
             char extra[96] = "";
-            if (id == 0 && cfg.script == Script::Formation && form_err.size() > form_err_logged) {
-                std::vector<double> last(form_err.begin() + static_cast<std::ptrdiff_t>(form_err_logged), form_err.end());
+            if (id == 0 && cfg.script == Script::Formation && !form_err_second.empty()) {
                 std::snprintf(extra, sizeof(extra), " formation err p50 %.1f p95 %.1f max %.1f m",
-                              percentile(last, 0.5), percentile(last, 0.95), percentile(last, 1.0));
+                              percentile(form_err_second, 0.5), percentile(form_err_second, 0.95),
+                              percentile(form_err_second, 1.0));
             }
             say("bot: remote %d \"%s\" rx %u (%.1f Hz) age %.0f/%.0f ms horizon %.0f ms err %.2f m snaps %u coast %u "
                 "accel %.1f g%s",
@@ -422,7 +481,7 @@ struct Runner {
                 st.horizon_max * 1000.0, st.offset_max, st.snaps + st.resync_snaps, st.coasting_steps, st.accel_g_max, extra);
             r.rx_logged = r.rx;
         }
-        form_err_logged = form_err.size();
+        form_err_second.clear();
     }
 };
 
@@ -433,6 +492,8 @@ BotResult run_bot(const BotConfig& cfg) {
     BotResult& res = r.res;
     bool offset_ok = true;
     for (double o : cfg.offset) offset_ok = offset_ok && std::isfinite(o) && std::fabs(o) <= 10000.0;
+    if (cfg.offset_set)
+        for (int i = 0; i < 3; ++i) r.offset[i] = cfg.offset[i];
     if (!std::isfinite(cfg.rate) || !std::isfinite(cfg.duration) || !std::isfinite(cfg.loss_pct) ||
         !std::isfinite(cfg.jitter_ms) || !std::isfinite(cfg.lag_ms) || !(cfg.rate > 0.0 && cfg.rate <= 240.0) ||
         !(cfg.duration >= 0.0) || cfg.loss_pct < 0 || cfg.loss_pct > 100 || cfg.jitter_ms < 0 || cfg.lag_ms < 0 ||
@@ -516,7 +577,8 @@ BotResult run_bot(const BotConfig& cfg) {
     for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < kWelcomeWait && !r.cancelled();)
         r.service(1);
     if (!r.welcomed) {
-        r.say("bot: no Welcome from the host (%s)", r.disconnected ? "it closed the connection" : "timed out");
+        r.say("bot: no Welcome from the host (%s)",
+              r.disconnected ? "it closed the connection" : r.cancelled() ? "cancelled while waiting" : "timed out");
         res.code = r.disconnected ? 4 : 3;
         enet_peer_disconnect_now(r.peer, 0);
         enet_host_flush(r.host);
@@ -692,11 +754,13 @@ BotResult run_bot(const BotConfig& cfg) {
         for (const double t0 = wall_now(); !r.disconnected && wall_now() - t0 < 0.5;) r.service(10);
     }
     if (formation) r.resolve_formation();
-    res.host_age_p90 = percentile(r.host_ages, 0.9);
-    res.formation_n = static_cast<uint32_t>(r.form_err.size());
-    res.formation_p50 = percentile(r.form_err, 0.5);
-    res.formation_p95 = percentile(r.form_err, 0.95);
-    res.formation_max = percentile(r.form_err, 1.0);
+    res.host_age_p90 = percentile(r.host_ages.v, 0.9);
+    res.formation_n = static_cast<uint32_t>(r.form_err.n);
+    res.formation_unscored = r.form_unscored;
+    res.formation_p50 = percentile(r.form_err.v, 0.5);
+    res.formation_p95 = percentile(r.form_err.v, 0.95);
+    res.formation_max = percentile(r.form_err.v, 1.0);
+    for (int i = 0; i < 3; ++i) res.formation_offset[i] = r.offset[i];
     r.say("bot: done: %u States made, %u sent, %u lost to --loss, %u slots held, %u Pings, %u Pongs, %d clock resets, "
           "offset %.4f s, best rtt %.1f ms",
           res.generated, res.sent, res.lost, res.held_ticks, res.pings, res.pongs, res.clock_resets, res.offset,
@@ -705,8 +769,9 @@ BotResult run_bot(const BotConfig& cfg) {
           res.host_states, res.host_age_p90 * 1000.0, res.relayed_states, res.peer_infos, res.peer_lefts, res.dropped_rx,
           res.host_bye >= 0 ? ", host Bye" : "");
     if (formation)
-        r.say("bot: formation error against the host's own States: %u samples, p50 %.1f m, p95 %.1f m, max %.1f m",
-              res.formation_n, res.formation_p50, res.formation_p95, res.formation_max);
+        r.say("bot: formation error against the host's own States: %u samples, p50 %.1f m, p95 %.1f m, max %.1f m; "
+              "%u not scored (sent across a gap in the host's States, or while it was silent)",
+              res.formation_n, res.formation_p50, res.formation_p95, res.formation_max, res.formation_unscored);
     return res;
 }
 

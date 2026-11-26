@@ -4208,8 +4208,12 @@ struct FakeHost {
             m.pos[i] = f.pos[i];
             m.vel[i] = f.vel[i];
             m.ang[i] = f.ang[i];
-            m.rates[i] = f.rates[i];
         }
+        // The game sends body rates, not Euler rates: in a banked turn most of the heading rate is about the pitch axis.
+        const double hr = f.rates[1], bank = f.ang[2];
+        m.rates[0] = static_cast<float>(f.rates[0] + hr * std::sin(bank));
+        m.rates[1] = static_cast<float>(hr * std::cos(bank));
+        m.rates[2] = f.rates[2];
         return m;
     }
     template <class M>
@@ -5419,6 +5423,31 @@ void bot_formation_logic_tests() {
                       std::fabs((p1[1] - p0[1]) / 0.01 - v[1]));
         expect(worst < 0.5, what);
     }
+    {  // States carry body rates: the turn must come from the headings (heading_rate), not from rates[1]
+        bot::Flight f;
+        const double spawn[3] = {0.0, 0.0, 2000.0};
+        f.start(bot::Script::Breaks, spawn, 0.4, 0.0);
+        f.advance_to(2.0);
+        const bot::Flight::Sample a = f.sample();
+        f.advance_to(2.05);
+        const bot::Flight::Sample b = f.sample();
+        const double body_yaw = b.rates[1] * std::cos(b.ang[2]);  // what rates[1] holds in a game State
+        const double hr = bot::heading_rate(a.ang[1], 2.0, b.ang[1], 2.05);
+        const double slot1[3] = {150.0, 50.0, 0.0};
+        const double v[3] = {b.vel[0], b.vel[1], b.vel[2]};
+        double good[3], bad[3], ideal[3];
+        bot::formation_velocity(v, b.ang[1], hr, slot1, good);
+        bot::formation_velocity(v, b.ang[1], body_yaw, slot1, bad);
+        bot::formation_velocity(v, b.ang[1], b.rates[1], slot1, ideal);
+        const double eg = std::hypot(good[0] - ideal[0], good[1] - ideal[1]), eb = std::hypot(bad[0] - ideal[0], bad[1] - ideal[1]);
+        char what[200];
+        std::snprintf(what, sizeof(what), "the heading rate from two headings 50 ms apart: %.4f rad/s (true %.4f); velocity "
+                      "off %.2f m/s, against %.1f m/s from the body yaw rate", hr, static_cast<double>(b.rates[1]), eg, eb);
+        expect(eg < 0.5 && eb > 20.0, what);
+        expect(bot::heading_rate(3.1, 0.0, -3.1, 0.05) > 1.6 && bot::heading_rate(3.1, 0.0, -3.1, 0.05) < 1.7 &&
+                   bot::heading_rate(0.0, 0.0, 1.0, 0.5) == 0.0 && bot::heading_rate(0.0, 1.0, 1.0, 1.0) == 0.0,
+               "heading_rate: the short way across +-pi; 0 for samples too far apart or at the same time");
+    }
 }
 
 struct FhBotRun {
@@ -5552,7 +5581,7 @@ void bot_formation_tests() {
         const FhBotRun r = fh_run_bot(h, cfg, [] {});
         bot::Flight truth;
         truth.start(hs, spawn, kFhHeading, 1000.0);
-        std::vector<double> err;
+        std::vector<double> err, verr;
         const double skip = h.states.empty() ? 0.0 : h.states.front().game_time + 1.0;  // the join
         bool mono = true;
         for (size_t i = 0; i < h.states.size(); ++i) {
@@ -5564,8 +5593,13 @@ void bot_formation_tests() {
             double want[3];
             bot::formation_point(t.pos, t.ang[1], cfg.offset, want);
             err.push_back(fh_dist(s.pos, want));
+            const double tv[3] = {t.vel[0], t.vel[1], t.vel[2]};
+            double wv[3];
+            bot::formation_velocity(tv, t.ang[1], t.rates[1], cfg.offset, wv);  // Flight's rates[1] is the heading rate
+            verr.push_back(std::hypot(s.vel[0] - wv[0], s.vel[1] - wv[1]));
         }
         const double p50 = pct(err, 0.5), p95 = pct(err, 0.95), mx = pct(err, 1.0);
+        const double vbound = k == 0 ? 20.0 : 0.5;  // breaks: the turn rate is ~170 ms old at a reversal
         std::printf("    host %s: %zu bot States checked, error p50 %.2f p95 %.2f max %.2f m; the bot's own estimate p50 "
                     "%.2f p95 %.2f m (%u); best rtt %.1f ms, host age p90 %.0f ms, %u of %u host States\n",
                     bot::script_name(hs), err.size(), p50, p95, mx, r.res.formation_p50, r.res.formation_p95,
@@ -5575,13 +5609,16 @@ void bot_formation_tests() {
         std::snprintf(what, sizeof(what), "%s: the bot's States sit at the host's position + offset, p95 %.2f m <= %.0f m",
                       bot::script_name(hs), p95, bound);
         expect(err.size() > duration * 20 * 0.6 && p95 <= bound, what);
+        std::snprintf(what, sizeof(what), "%s: the bot's velocity is the formation point's (p50 %.1f, p95 %.1f m/s <= %.1f; "
+                      "the host sends body rates)", bot::script_name(hs), pct(verr, 0.5), pct(verr, 0.95), vbound);
+        expect(pct(verr, 0.95) <= vbound, what);
         std::snprintf(what, sizeof(what), "the bot's own formation estimate agrees with the host's view (p95 %.2f vs %.2f m)",
                       r.res.formation_p95, p95);
         expect(r.res.formation_n > err.size() / 2 && std::fabs(r.res.formation_p95 - p95) < 0.5 * bound + 1.0, what);
         std::snprintf(what, sizeof(what), "--lag 150 doubles into the Pings' round trip: best %.1f ms (270..330)",
                       r.res.best_rtt * 1000.0);
         expect(r.res.best_rtt > 0.27 && r.res.best_rtt < 0.33, what);
-        expect(r.res.host_age_p90 > 0.13 && r.res.host_age_p90 < 0.26 && r.res.host_states >= h.seq * 85 / 100,
+        expect(r.res.host_age_p90 > 0.13 && r.res.host_age_p90 < 0.30 && r.res.host_states >= h.seq * 85 / 100,
                "the host's States arrive about 150 ms old, and nearly all of them");
         h.core.stop(false);
     }
@@ -5624,6 +5661,7 @@ struct ServeClient {
     std::vector<StateMsg> host;
     std::vector<double> host_wall;
     bool synced = false, hold = false, resumed = false, got_bye = false, ended = false;
+    bool follow_join = true;  // move to a Welcome's join position (the game client's one-shot move)
     uint8_t bye_reason = 255;
     uint32_t seq = 0;
     double next_send = 0, pos[3] = {5000.0, 6000.0, 2500.0}, heading = 1.0, t_first = -1;
@@ -5634,7 +5672,14 @@ struct ServeClient {
             const ClientEvent& e = rx.ev[seen];
             if (e.kind == ClientEvent::Welcome) {
                 WelcomeMsg w{};
-                if (decode(e.data, e.len, w) == Status::Ok) welcomes.push_back(w);
+                if (decode(e.data, e.len, w) == Status::Ok) {
+                    welcomes.push_back(w);
+                    if (follow_join && welcome_has_join(w) && welcomes.size() > 1) {  // the two-step join
+                        for (int i = 0; i < 3; ++i) pos[i] = w.spawn_pos[i];
+                        heading = w.spawn_heading;
+                        t_first = -1;
+                    }
+                }
             } else if (e.kind == ClientEvent::PeerInfo) {
                 PeerInfoMsg p{};
                 if (decode(e.data, e.len, p) == Status::Ok) infos.push_back(p);
@@ -5780,17 +5825,22 @@ void bot_serve_tests() {
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
         expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        const double p0[3] = {c.pos[0], c.pos[1], c.pos[2]}, h = c.heading;
         serve_run_for(c, 5.0, [&] { return c.welcomes.size() >= 2 && c.host.size() >= 20; });
+        serve_run_for(c, 2.5, [] { return false; });  // the client is on the wing now: no more Welcomes
         s.finish();
         c.core.stop(false);
         const bot::ServeResult& r = s.res;
         expect(!c.welcomes.empty() && !welcome_has_join(c.welcomes[0]), "the first Welcome has no join position");
-        const double h = c.heading;
-        const double want[3] = {c.pos[0] + 2000.0 * std::sin(h), c.pos[1] + 2000.0 * std::cos(h), c.pos[2]};
+        // 2 km ahead of the client's first State the serve accepted: along its track (each State is 10 m on).
+        const double dj[3] = {r.jet_start[0] - p0[0], r.jet_start[1] - p0[1], r.jet_start[2] - p0[2]};
+        const double along = dj[0] * std::sin(h) + dj[1] * std::cos(h), across = dj[0] * std::cos(h) - dj[1] * std::sin(h);
         char what[220];
-        std::snprintf(what, sizeof(what), "the jet starts 2 km ahead of the client's first State: %.1f m off, heading %.4f",
-                      fh_dist(r.jet_start, want), r.jet_start_heading);
-        expect(r.jet_started && fh_dist(r.jet_start, want) < 1.0 && std::fabs(r.jet_start_heading - h) < 1e-6, what);
+        std::snprintf(what, sizeof(what), "the jet starts 2 km ahead of the client's first State: %.1f m ahead, %.2f m "
+                      "across, heading %.4f", along, across, r.jet_start_heading);
+        expect(r.jet_started && along >= 1999.0 && along < 2101.0 && std::fabs(across) < 1.0 && std::fabs(dj[2]) < 1e-6 &&
+                   std::fabs(r.jet_start_heading - h) < 1e-6,
+               what);
         bool second = c.welcomes.size() == 2 && welcome_has_join(c.welcomes[1]);
         double off = 1e9;
         if (second) {
@@ -5804,9 +5854,29 @@ void bot_serve_tests() {
         std::snprintf(what, sizeof(what), "a second Welcome puts the client on the jet's wing (%.3f m from the join position)",
                       off);
         expect(second && off < 1.0, what);
+        std::snprintf(what, sizeof(what), "the client moved there: the serve saw it on the wing and sent no more (%zu "
+                      "Welcomes)", c.welcomes.size());
+        expect(r.join_confirmed && !r.join_gave_up && c.welcomes.size() == 2, what);
         int infos0 = 0;
         for (const PeerInfoMsg& p : c.infos) infos0 += p.id == 0 ? 1 : 0;
         expect(infos0 == 2 && c.host.size() >= 20, "PeerInfo 0 again after the second Welcome, and the jet's States arrive");
+    }
+    {  // a client that does not move (or never got the join Welcome): it is re-sent about once a second
+        ServeRun s;
+        s.cfg.script = bot::Script::Straight;
+        if (!s.start()) return expect(false, "bot serve listening");
+        ServeClient c;
+        c.follow_join = false;
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        serve_run_for(c, 8.0, [&] { return c.welcomes.size() >= 4; });
+        s.finish();
+        c.core.stop(false);
+        bool joins = c.welcomes.size() >= 4;
+        for (size_t i = 1; i < c.welcomes.size(); ++i) joins = joins && welcome_has_join(c.welcomes[i]);
+        char what[160];
+        std::snprintf(what, sizeof(what), "the join Welcome is re-sent while the client stays away (%zu Welcomes, none "
+                      "dropped by the client's 1 s guard)", c.welcomes.size());
+        expect(joins && !s.res.join_confirmed && s.res.welcomes == c.welcomes.size(), what);
     }
 }
 

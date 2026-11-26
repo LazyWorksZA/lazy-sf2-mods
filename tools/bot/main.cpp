@@ -59,6 +59,7 @@ bool to_doubles(const char* s, double* out, int n) {
 
 FILE* g_logfile = nullptr;
 std::atomic<bool> g_cancel{false};
+std::atomic<bool> g_done{false};  // the run has returned (its Bye is out)
 
 void log_line(const char* line) {
     std::printf("%s\n", line);
@@ -72,6 +73,10 @@ void log_line(const char* line) {
 BOOL WINAPI on_ctrl(DWORD type) {
     if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT && type != CTRL_CLOSE_EVENT) return FALSE;
     g_cancel.store(true);  // the run ends with a Bye
+    // Closing the console window ends the process as soon as this returns: wait (on this handler thread) for the run
+    // to send its Bye, within the system's 5 s limit.
+    if (type == CTRL_CLOSE_EVENT)
+        for (int i = 0; i < 450 && !g_done.load(); ++i) Sleep(10);
     return TRUE;
 }
 
@@ -150,6 +155,7 @@ int main(int argc, char** argv) {
             scfg.lag_ms = cfg.lag_ms;
         } else if (a == "--offset" && (v = val())) {
             ok = to_doubles(v, cfg.offset, 3);
+            cfg.offset_set = true;
             client_only = true;
         } else if (a == "--start" && (v = val())) {
             double s[4];
@@ -214,5 +220,7 @@ int main(int argc, char** argv) {
         code = bot::run_bot(cfg).code;
     }
     if (g_logfile) std::fclose(g_logfile);
+    g_logfile = nullptr;
+    g_done.store(true);
     return code;
 }

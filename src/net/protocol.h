@@ -105,12 +105,26 @@ static_assert(sizeof(PeerInfoMsg) == 54); // 4:2 id, 6:16 callsign, 22:32 aircra
 static_assert(sizeof(PeerLeftMsg) == 7);  // 4:2 id, 6:1 reason
 
 /// <summary>
-/// False for a Welcome with no join position (spawn_vel all zero): the bot's --serve sends one until it knows where
-/// the client is, then a second Welcome with it. A client must not move its jet for such a Welcome.
+/// The two-step join (a Phase 4 protocol rule). A host that does not yet know where its own jet should be relative to
+/// the client (the bot's --serve without --start places its jet from the client's first State) sends a first Welcome
+/// with no join position: spawn_pos, spawn_heading and spawn_vel all zero. Once the client's States arrive, the host
+/// sends the same client a second Welcome (same id) that carries the join position, no sooner than kReWelcomeMinGap
+/// after the client could have received the first. The client:
+///  - must not move its jet on a Welcome for which welcome_has_join() is false;
+///  - moves on a later Welcome that has one (once per join position);
+///  - treats every Welcome as re-seeding the shared clock (a ClockSync reset), so its remote jets are reset.
+/// A real host whose own jet is stationary would also send a zero velocity: Phase 4 joins are air starts only (the
+/// client moves only while airborne, plan 2.7). Use an explicit marker when the protocol next changes.
 /// </summary>
 inline bool welcome_has_join(const WelcomeMsg& w) {
     return w.spawn_vel[0] != 0.0f || w.spawn_vel[1] != 0.0f || w.spawn_vel[2] != 0.0f;
 }
+
+/// <summary>
+/// A client drops a re-Welcome that arrives sooner than this after the previous one (seconds; ClientCore). A host that
+/// re-Welcomes leaves at least this, plus a margin for delivery, between them.
+/// </summary>
+inline constexpr double kReWelcomeMinGap = 1.0;
 
 /// <summary>PeerLeft reasons (the same codes as the recording's LeaveReason).</summary>
 inline constexpr uint8_t kPeerLeftLeft = 0;     // Bye or disconnect

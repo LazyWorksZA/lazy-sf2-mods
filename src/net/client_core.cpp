@@ -22,7 +22,6 @@ constexpr size_t kMaxPacket = sizeof(ClientEvent::data);
 constexpr size_t kMaxServiceLoop = 512;  // events handled per pass, so a flood cannot starve the queues
 
 constexpr double kHostByeGrace = 1.0;     // after the host's Bye, seconds before we disconnect if it has not
-constexpr double kReWelcomeGap = 1.0;     // a re-Welcome sooner than this after the last one is dropped
 
 /// <summary>
 /// A name lookup on its own short-lived thread, which getaddrinfo can block for many seconds: the network thread
@@ -398,7 +397,7 @@ void ClientCore::run() {
                     m.client_id > kMaxClients || (welcomed && m.client_id != my_id))
                     return drop(n_format_);
                 if (!connected || bye_seen || bye_started || refused) return drop(n_state_);
-                if (welcomed && rx - welcomed_at < kReWelcomeGap) return drop(n_state_);
+                if (welcomed && rx - welcomed_at < kReWelcomeMinGap) return drop(n_state_);
                 bool ok = finite(m.host_game_time) && within(m.spawn_heading, kMaxAngle);
                 for (int i = 0; i < 3; ++i)
                     ok = ok && within(m.spawn_pos[i], kMaxPosition) && within(m.spawn_vel[i], kMaxVelocity);

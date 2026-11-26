@@ -71,6 +71,17 @@ inline void formation_velocity(const double v[3], double h, double heading_rate,
     out[2] = v[2];
 }
 
+/// <summary>
+/// The lead's heading rate from two of its headings (h0 at t0, h1 at t1), the shorter way round. A State's rates are
+/// the game's own (body axes, not Euler rates), so formation_velocity takes this, never rates[1]. 0 if the samples are
+/// not 0 &lt; dt &lt;= max_dt apart.
+/// </summary>
+inline double heading_rate(double h0, double t0, double h1, double t1, double max_dt = 0.25) {
+    const double dt = t1 - t0;
+    if (!(dt > 0.0) || dt > max_dt) return 0.0;
+    return std::remainder(h1 - h0, 2.0 * kPi) / dt;  // the shorter way round
+}
+
 inline double wrap_pi(double a) {  // into (-pi, pi]
     a = std::fmod(a, 2.0 * kPi);
     if (a > kPi) a -= 2.0 * kPi;
