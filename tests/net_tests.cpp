@@ -4183,6 +4183,7 @@ struct FakeHost {
     uint32_t gens[kMaxClients] = {};
     std::vector<StateMsg> states;  // every client's
     std::vector<ByeMsg> byes;
+    unsigned send_fail = 0;  // HostPeers sends the core refused
 
     bool start() {
         peers.set_host("HOST", "F-4E");
@@ -4207,62 +4208,67 @@ struct FakeHost {
         peers.leave(slot, gen, kPeerLeftRemoved);
         welcomed = false;
     }
-    void pump() {
+    void pump() {  // one host step: drains at most 8 x 32 events, as host.cpp does
         core.set_host_time(time());
-        HostEvent ev[16];
-        const size_t n = core.poll(ev, 16);
-        for (size_t i = 0; i < n; ++i) {
-            const HostEvent& e = ev[i];
-            if (e.kind == HostEvent::Connect) {
-                slot = e.slot;
-                gen = e.gen;
-                gens[e.slot] = e.gen;
-            } else if (e.kind == HostEvent::Disconnect) {
-                got_disconnect = true;
-                peers.leave(e.slot, e.gen, e.reason == 1 ? kPeerLeftTimeout : kPeerLeftLeft);
-                if (e.slot == slot) welcomed = false;
-            } else {
-                MsgType t{};
-                if (peek_type(e.data, e.len, t) != Status::Ok) continue;
-                if (t == MsgType::Hello) {
-                    got_hello = true;
-                    HelloMsg h{};
-                    if (!answer_hello || decode(e.data, e.len, h) != Status::Ok) continue;
-                    if (theatre_mismatch(theatre, h.theatre_hash)) {
-                        ByeMsg b{};
-                        b.reason = kByeWrongTheatre;
-                        uint8_t buf[16];
-                        core.send(e.slot, e.gen, buf, encode(b, buf, sizeof(buf)), kChannelReliable, true);
-                        core.disconnect(e.slot, e.gen);
-                        continue;
-                    }
-                    const double now = time();
-                    const StateMsg jet = fh_jet(0, now);
-                    WelcomeMsg w{};
-                    w.client_id = static_cast<uint16_t>(e.slot + 1);
-                    join_position(jet.pos, jet.ang[1], e.slot, w.spawn_pos);
-                    w.spawn_heading = jet.ang[1];
-                    std::memcpy(w.spawn_vel, jet.vel, sizeof(w.spawn_vel));
-                    w.host_game_time = now;
-                    w.theatre_hash = theatre;
-                    if (peers.welcome(e.slot, e.gen, w, h.callsign, h.aircraft) && e.slot == slot) welcomed = true;
-                } else if (t == MsgType::State) {
-                    StateMsg s{};
-                    if (decode(e.data, e.len, s) != Status::Ok || !peers.welcomed(e.slot)) continue;
-                    states.push_back(s);
-                    peers.send_state(e.data, e.len, e.slot);
-                } else if (t == MsgType::Bye) {
-                    ByeMsg b{};
-                    if (decode(e.data, e.len, b) == Status::Ok) byes.push_back(b);
-                    peers.leave(e.slot, e.gen, kPeerLeftLeft);
-                }
-            }
+        HostEvent ev[32];
+        for (int round = 0; round < 8; ++round) {
+            const size_t n = core.poll(ev, 32);
+            if (n == 0) break;
+            for (size_t i = 0; i < n; ++i) handle(ev[i]);
         }
+        peers.flush_relay();
         const double now = time();
         if (send_jet && peers.count() > 0 && tick.due(now)) {
             const StateMsg s = fh_jet(++seq, now);
             uint8_t b[128];
             peers.send_state(b, encode(s, b, sizeof(b)), -1);
+        }
+        send_fail += peers.take_send_fail();
+    }
+    void handle(const HostEvent& e) {
+        if (e.kind == HostEvent::Connect) {
+            slot = e.slot;
+            gen = e.gen;
+            gens[e.slot] = e.gen;
+        } else if (e.kind == HostEvent::Disconnect) {
+            got_disconnect = true;
+            peers.leave(e.slot, e.gen, e.reason == 1 ? kPeerLeftTimeout : kPeerLeftLeft);
+            if (e.slot == slot) welcomed = false;
+        } else {
+            MsgType t{};
+            if (peek_type(e.data, e.len, t) != Status::Ok) return;
+            if (t == MsgType::Hello) {
+                got_hello = true;
+                HelloMsg h{};
+                if (!answer_hello || decode(e.data, e.len, h) != Status::Ok) return;
+                if (theatre_mismatch(theatre, h.theatre_hash)) {
+                    ByeMsg b{};
+                    b.reason = kByeWrongTheatre;
+                    uint8_t buf[16];
+                    core.send(e.slot, e.gen, buf, encode(b, buf, sizeof(buf)), kChannelReliable, true);
+                    core.disconnect(e.slot, e.gen);
+                    return;
+                }
+                const double now = time();
+                const StateMsg jet = fh_jet(0, now);
+                WelcomeMsg w{};
+                w.client_id = static_cast<uint16_t>(e.slot + 1);
+                join_position(jet.pos, jet.ang[1], e.slot, w.spawn_pos);
+                w.spawn_heading = jet.ang[1];
+                std::memcpy(w.spawn_vel, jet.vel, sizeof(w.spawn_vel));
+                w.host_game_time = now;
+                w.theatre_hash = theatre;
+                if (peers.welcome(e.slot, e.gen, w, h.callsign, h.aircraft) && e.slot == slot) welcomed = true;
+            } else if (t == MsgType::State) {
+                StateMsg s{};
+                if (decode(e.data, e.len, s) != Status::Ok || !peers.welcomed(e.slot)) return;
+                states.push_back(s);
+                peers.relay(e.slot, e.data, e.len);
+            } else if (t == MsgType::Bye) {
+                ByeMsg b{};
+                if (decode(e.data, e.len, b) == Status::Ok) byes.push_back(b);
+                peers.leave(e.slot, e.gen, kPeerLeftLeft);
+            }
         }
     }
 };
@@ -4305,6 +4311,12 @@ struct RawHost {
     void send(const M& m, uint8_t channel) {
         uint8_t b[128];
         send_raw(b, encode(m, b, sizeof(b)), channel);
+    }
+    void announce(uint16_t id) {  // a PeerInfo: the client passes States from id only after it
+        PeerInfoMsg p{};
+        p.id = id;
+        set_str(p.aircraft, "F-4E");
+        send(p, kChannelReliable);
     }
     void welcome(double host_time) {
         WelcomeMsg w{};
@@ -4414,6 +4426,19 @@ void host_session_logic_tests() {
         t.reset();
         expect(t.due(2.051), "reset: the next step sends");
     }
+    {  // Without a network thread nothing drains: unreliable sends stop short of the reserve, reliable ones fill it.
+        auto core = std::make_unique<HostCore>();
+        const uint8_t msg[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        size_t unrel = 0, rel = 0;
+        while (unrel < 1000 && core->send(0, 1, msg, sizeof(msg), kChannelUnreliable, false)) ++unrel;
+        while (rel < 1000 && core->send(0, 1, msg, sizeof(msg), kChannelReliable, true)) ++rel;
+        char what[160];
+        std::snprintf(what, sizeof(what), "out ring: %zu unreliable sends, then %zu reliable ones in the reserve (%zu + %zu)",
+                      unrel, rel, HostCore::kOutCap - HostCore::kOutReserve, HostCore::kOutReserve);
+        expect(unrel == HostCore::kOutCap - HostCore::kOutReserve && rel == HostCore::kOutReserve &&
+                   !core->send(0, 1, msg, sizeof(msg), kChannelUnreliable, false),
+               what);
+    }
 }
 
 // Two clients on one host: each gets the host's jet (id 0) at about 20 Hz and the other's States relayed with the
@@ -4479,9 +4504,12 @@ void client_core_relay_tests() {
         }
     });
     const double t_end = ClientCore::wall_now();
+    h.send_jet = false;
+    run(0.2, [] { return false; }, nothing);  // what is in flight arrives
+    const uint32_t jet_sent = h.seq;
     for (int i = 0; i < 2; ++i) {
         const int other = 2 - i;  // the other client's id
-        std::vector<double> host_rx;
+        uint32_t host_n = 0;
         uint32_t from_other = 0, foreign = 0, last_other = 0;
         bool host_ok = true, other_ordered = true;
         for (const ClientEvent& e : rx[i].ev) {
@@ -4490,7 +4518,7 @@ void client_core_relay_tests() {
             if (s.client_id == 0) {
                 const StateMsg want = fh_jet(s.seq, s.game_time);
                 host_ok = host_ok && std::fabs(s.pos[0] - want.pos[0]) < 1e-6 && std::fabs(s.pos[1] - want.pos[1]) < 1e-6;
-                if (e.wall_rx >= t_start + 0.5 && e.wall_rx < t_end - 0.5) host_rx.push_back(e.wall_rx);
+                ++host_n;
             } else if (s.client_id == other) {
                 ++from_other;
                 other_ordered = other_ordered && s.seq > last_other;
@@ -4499,14 +4527,18 @@ void client_core_relay_tests() {
                 ++foreign;
             }
         }
-        const double span = (t_end - 0.5) - (t_start + 0.5);
-        const double rate = static_cast<double>(host_rx.size()) / span;
-        char what[200];
-        std::snprintf(what, sizeof(what), "client %d: the host's jet (id 0) at %.1f Hz (15..25), as scripted", i + 1, rate);
-        expect(rate >= 15.0 && rate <= 25.0 && host_ok, what);
-        std::snprintf(what, sizeof(what), "client %d: %u of client %d's %u States relayed, in order, with its id; %u others",
-                      i + 1, from_other, other, sent[other - 1], foreign);
-        expect(from_other >= sent[other - 1] / 2 && from_other <= sent[other - 1] && other_ordered && foreign == 0, what);
+        // The 20 Hz schedule itself is the ticker test's (L1); here: the host sent at most 20 Hz of its clock (at
+        // least 8 Hz even with a starved test thread), and the client got nearly all of it, as scripted.
+        const double sent_rate = static_cast<double>(jet_sent) / (t_end - t_start);
+        char what[220];
+        std::snprintf(what, sizeof(what), "client %d: the host's jet (id 0): %u of %u received, sent at %.1f Hz (8..21), as scripted",
+                      i + 1, host_n, jet_sent, sent_rate);
+        expect(host_n >= jet_sent * 8 / 10 && host_n <= h.seq && sent_rate >= 8.0 && sent_rate <= 21.0 && host_ok, what);
+        const uint32_t relayed = h.peers.relayed_from(static_cast<uint8_t>(other - 1));
+        std::snprintf(what, sizeof(what), "client %d: %u of client %d's %u relayed States (of %u sent), in order, with its id; %u others",
+                      i + 1, from_other, other, relayed, sent[other - 1], foreign);
+        expect(from_other >= relayed * 8 / 10 && from_other >= 10 && relayed <= sent[other - 1] && other_ordered && foreign == 0,
+               what);
         const ClientCounters cn = c[i]->counters();
         expect(cn.dropped_format == 0 && cn.dropped_range == 0 && cn.dropped_queue == 0,
                "the client dropped nothing (its own States never come back)");
@@ -4524,7 +4556,8 @@ void client_core_relay_tests() {
         std::snprintf(what, sizeof(what), "client %d: PeerInfo for the host (HOST, F-4E), then for client %d", i + 1, other);
         expect(host_info && other_info && rx[i].find(ClientEvent::PeerInfo) > rx[i].find(ClientEvent::Welcome), what);
     }
-    expect(refused == 0 && h.states.size() >= sent[0] / 2 + sent[1] / 2, "the host got both clients' States");
+    expect(refused == 0 && h.states.size() >= sent[0] / 2 + sent[1] / 2 && h.send_fail == 0,
+           "the host got both clients' States and refused none of its own sends");
 
     // TWO leaves: ONE hears PeerLeft for client 2 (reason: left), and no more of its States.
     c[1]->bye(0);
@@ -4558,6 +4591,111 @@ void client_core_relay_tests() {
     expect(b >= 0 && decode(rx[0].ev[b].data, rx[0].ev[b].len, bm) == Status::Ok && bm.client_id == 0 && bm.reason == 3,
            "the host's Bye carries id 0 and its reason");
     for (auto& cc : c) cc->stop(false);
+    h.core.stop(false);
+}
+
+// A host hitch with three clients sending fast: their backlog is relayed newest-only, and the control messages of the
+// same step (a Welcome with its PeerInfos, a PeerLeft, a Bye) all still go out.
+void client_core_hitch_tests() {
+    std::printf("client core: a host hitch with three clients flooding States\n");
+    FakeHost h;
+    if (!h.start()) return expect(false, "host core running");
+    std::unique_ptr<ClientCore> c[4];
+    CcRx rx[4];
+    auto run = [&](double seconds, bool pump, auto done, auto each) {
+        const double until = ClientCore::wall_now() + seconds;
+        for (;;) {
+            if (pump) h.pump();
+            for (int i = 0; i < 4; ++i)
+                if (c[i]) rx[i].pull(*c[i]);
+            each();
+            if (done()) return true;
+            if (ClientCore::wall_now() >= until) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    auto nothing = [] {};
+    for (int i = 0; i < 3; ++i) {
+        c[i] = std::make_unique<ClientCore>();
+        HelloMsg hello = cc_hello(0);
+        char cs[8];
+        std::snprintf(cs, sizeof(cs), "C%d", i + 1);
+        set_str(hello.callsign, cs);
+        c[i]->start("127.0.0.1", h.core.port(), hello, cc_client_log);
+        run(5.0, true, [&] { return rx[i].has(ClientEvent::Welcome); }, nothing);
+    }
+    if (c[0]->client_id() != 1 || c[1]->client_id() != 2 || c[2]->client_id() != 3) {
+        expect(false, "three clients welcomed as 1, 2 and 3");
+        for (auto& cc : c)
+            if (cc) cc->stop(false);
+        h.core.stop(false);
+        return;
+    }
+    // Let the PeerInfos settle, then stall the host's game thread for 0.6 s while each client sends in bursts
+    // (stamped with the host's own clock: the clients' estimate freezes with the stalled host). Meanwhile a fourth
+    // client connects and client 3 says Bye.
+    run(0.5, true, [] { return false; }, nothing);
+    for (auto& r : rx) r.ev.clear();
+    uint32_t sent = 0;
+    bool fourth = false, bye3 = false;
+    const double stall_from = ClientCore::wall_now();
+    run(0.6, false, [] { return false; }, [&] {
+        const double el = ClientCore::wall_now() - stall_from;
+        // Bursts of 10, so a starved test thread still builds a backlog of many States per client.
+        for (int i = 0; i < 3; ++i)
+            for (int k = 0; k < 10 && !(bye3 && i == 2) && c[i]->send_state(cc_jet(0, sent + 1, h.time())); ++k) ++sent;
+        if (!fourth && el > 0.1) {
+            fourth = true;
+            c[3] = std::make_unique<ClientCore>();
+            HelloMsg hello = cc_hello(0);
+            set_str(hello.callsign, "C4");
+            c[3]->start("127.0.0.1", h.core.port(), hello, cc_client_log);
+        }
+        if (!bye3 && el > 0.3) {
+            bye3 = true;
+            c[2]->bye(0);
+        }
+    });
+    const uint32_t backlog = h.core.counters().received;
+    h.pump();  // one host step: up to 256 events of the backlog
+    h.slot = 0;
+    h.gen = h.gens[0];
+    h.bye_and_disconnect(2);  // and the same step ends client 1
+    const unsigned fail_step = h.send_fail;
+    const unsigned superseded = h.peers.take_superseded();
+    run(4.0, true, [&] {
+        return rx[3].has(ClientEvent::Welcome) && rx[0].has(ClientEvent::Bye) && rx[1].find(ClientEvent::PeerLeft) >= 0 &&
+               rx[1].count(ClientEvent::PeerInfo) >= 1;
+    }, nothing);
+    char what[220];
+    std::snprintf(what, sizeof(what), "%u States sent in the stall (%u packets at the host), %u older ones not relayed, "
+                  "%u host sends refused (%u in the step after the hitch)", sent, backlog, superseded, h.send_fail, fail_step);
+    expect(sent >= 150 && superseded >= 50 && h.send_fail == 0, what);
+    const bool welcomed4 = rx[3].has(ClientEvent::Welcome) && c[3]->client_id() == 4;
+    expect(welcomed4, "the client that connected during the hitch is welcomed as 4");
+    // Client 2 hears that 3 left and that 4 joined; client 4 hears of the host and of client 2 (client 1 was ended
+    // in the same step, after the Welcome: its PeerInfo and PeerLeft may both arrive).
+    bool left3 = false, info4 = false;
+    for (const ClientEvent& e : rx[1].ev) {
+        PeerLeftMsg l{};
+        PeerInfoMsg p{};
+        if (e.kind == ClientEvent::PeerLeft && decode(e.data, e.len, l) == Status::Ok && l.id == 3) left3 = true;
+        if (e.kind == ClientEvent::PeerInfo && decode(e.data, e.len, p) == Status::Ok && p.id == 4) info4 = true;
+    }
+    expect(left3 && info4, "after the hitch: PeerLeft for client 3 and PeerInfo for client 4 reach client 2");
+    bool host4 = false, two4 = false;
+    for (const ClientEvent& e : rx[3].ev) {
+        PeerInfoMsg p{};
+        if (e.kind == ClientEvent::PeerInfo && decode(e.data, e.len, p) == Status::Ok) {
+            host4 = host4 || p.id == 0;
+            two4 = two4 || p.id == 2;
+        }
+    }
+    expect(host4 && two4, "client 4 gets the host's PeerInfo and client 2's");
+    const int b = rx[0].find(ClientEvent::Bye);
+    expect(b >= 0 && cc_bye_reason(rx[0].ev[b]) == 2, "the host's Bye of the same step reaches client 1");
+    for (auto& cc : c)
+        if (cc) cc->stop(false);
     h.core.stop(false);
 }
 
@@ -4641,22 +4779,30 @@ void client_core_session_tests() {
     PeerInfoMsg p2{};
     p2.id = 2;
     set_str(p2.callsign, "THIRD");
+    const size_t mark = rx.ev.size();
+    h.send(cc_jet(2, 1, h.time()), false);  // before its PeerInfo: dropped
+    cc_run(&h, nullptr, *c, rx, 0.2, [] { return false; });
     h.send(p2, true);
-    h.send(cc_jet(2, 1, h.time()), false);
+    cc_run(&h, nullptr, *c, rx, 3.0, [&] { return rx.find(ClientEvent::PeerInfo, mark) >= 0; });
+    h.send(cc_jet(2, 2, h.time()), false);
+    cc_run(&h, nullptr, *c, rx, 3.0, [&] { return rx.find(ClientEvent::State, mark) >= 0; });
     PeerLeftMsg l2{};
     l2.id = 2;
     l2.reason = 1;
     h.send(l2, true);
-    const size_t mark = rx.ev.size();
     cc_run(&h, nullptr, *c, rx, 3.0, [&] { return rx.find(ClientEvent::PeerLeft, mark) >= 0; });
+    h.send(cc_jet(2, 3, h.time()), false);  // after its PeerLeft: dropped
+    cc_run(&h, nullptr, *c, rx, 0.3, [] { return false; });
     const int pi = rx.find(ClientEvent::PeerInfo, mark), pl = rx.find(ClientEvent::PeerLeft, mark);
-    bool relayed = false;
+    std::vector<uint32_t> seq2;
     for (size_t i = mark; i < rx.ev.size(); ++i) {
         StateMsg s{};
         if (rx.ev[i].kind == ClientEvent::State && decode(rx.ev[i].data, rx.ev[i].len, s) == Status::Ok && s.client_id == 2)
-            relayed = true;
+            seq2.push_back(s.seq);
     }
-    expect(pi >= 0 && pl > pi && relayed, "PeerInfo, a relayed State (id 2) and PeerLeft for another peer arrive");
+    expect(pi >= 0 && pl > pi && seq2.size() == 1 && seq2[0] == 2,
+           "PeerInfo, a relayed State (id 2) and PeerLeft for another peer arrive; its States before the PeerInfo and "
+           "after the PeerLeft are dropped");
     const ClientCounters cn = c->counters();
     std::printf("    client counters: %u received, %u Pings, %u Pongs, drops %u/%u/%u/%u/%u\n", cn.received, cn.pings, cn.pongs,
                 cn.dropped_format, cn.dropped_range, cn.dropped_state, cn.dropped_queue, cn.dropped_control);
@@ -4781,6 +4927,9 @@ void client_core_refusal_tests() {
         raw.send(cc_jet(0, 1, 50.0), kChannelUnreliable);  // before the Welcome: wrong phase
         raw.welcome(50.0);
         cc_run(nullptr, &raw, *c, rx, 3.0, [&] { return rx.has(ClientEvent::Welcome); });
+        raw.announce(0);
+        cc_run(nullptr, &raw, *c, rx, 3.0, [&] { return rx.has(ClientEvent::PeerInfo); });
+        raw.send(cc_jet(3, 1, 50.0), kChannelUnreliable);  // a peer never announced: wrong phase
         raw.send(cc_jet(0, 2, 50.0), kChannelReliable);  // wrong channel
         const uint8_t junk[5] = {1, 2, 3, 4, 5};
         raw.send_raw(junk, sizeof(junk), kChannelUnreliable);  // garbage
@@ -4801,7 +4950,7 @@ void client_core_refusal_tests() {
         const int si = rx.find(ClientEvent::State);
         expect(rx.count(ClientEvent::State) == 1 && si >= 0 && decode(rx.ev[si].data, rx.ev[si].len, s) == Status::Ok && s.seq == 6,
                "only the good State reaches the game thread");
-        expect(cn.dropped_format == 4 && cn.dropped_range == 2 && cn.dropped_state == 1, "each bad packet is counted once");
+        expect(cn.dropped_format == 4 && cn.dropped_range == 2 && cn.dropped_state == 2, "each bad packet is counted once");
     }
 }
 
@@ -4955,6 +5104,9 @@ void client_core_flood_tests() {
         auto c = std::make_unique<ClientCore>();
         CcRx rx;
         if (!cc_welcomed_raw(raw, *c, rx)) return expect(false, "welcomed by the raw host");
+        raw.announce(0);
+        raw.announce(2);
+        cc_run(nullptr, &raw, *c, rx, 3.0, [&] { return rx.count(ClientEvent::PeerInfo) == 2; });
         const int per = 150;
         uint32_t seq = 0;
         for (int i = 0; i < per; ++i) {
@@ -5192,6 +5344,7 @@ void client_core_tests() {
     client_core_connect_tests();
     client_core_session_tests();
     client_core_relay_tests();
+    client_core_hitch_tests();
     client_core_host_bye_tests();
     client_core_refusal_tests();
     client_core_id_tests();

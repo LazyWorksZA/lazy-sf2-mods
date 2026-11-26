@@ -82,11 +82,20 @@ public:
     State state() const { return state_.load(std::memory_order_acquire); }
     uint16_t port() const { return port_.load(std::memory_order_acquire); }  // the bound port, once Running
 
+    static constexpr size_t kOutCap = 256;
+    /// <summary>
+    /// Entries of the out ring that only reliable messages (Welcome, PeerInfo, PeerLeft, Bye) and disconnects may use:
+    /// unreliable sends (States) are refused once the ring is this close to full, so a burst of States can never
+    /// refuse a control message.
+    /// </summary>
+    static constexpr size_t kOutReserve = 64;
+
     // --- Game thread ---
     /// <summary>Moves up to max queued events into out. One atomic load when the queue is empty.</summary>
     size_t poll(HostEvent* out, size_t max);
     /// <summary>
-    /// Queues a message (at most 96 bytes) for a slot. False if the queue is full or the message too large.
+    /// Queues a message (at most 96 bytes) for a slot. False if the queue is full (for an unreliable message: all but
+    /// kOutReserve entries are used) or the message too large.
     /// gen is the connection generation from the HostEvent that introduced the client: a message for a slot
     /// reassigned since is dropped, never delivered to the new client.
     /// </summary>
@@ -121,7 +130,7 @@ private:
     };
     static_assert(sizeof(HostEvent::data) >= kMaxMessage && sizeof(OutMsg::data) >= kMaxMessage,
                   "every protocol message must fit the queues");
-    static constexpr size_t kInCap = 512, kOutCap = 256;
+    static constexpr size_t kInCap = 512;
     /// <summary>
     /// Entries of the in ring that only control events may use: States are refused once the ring is this close to
     /// full, so a client that floods States while the game is paused or in a menu cannot hide a Disconnect.

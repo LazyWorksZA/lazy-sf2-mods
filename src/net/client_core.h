@@ -14,6 +14,8 @@
 /// quota (kStateQuota), so a flood of States cannot hide a Bye. The end of the connection (Disconnected) is not in the
 /// ring at all: poll() always delivers it, after everything else.
 /// Every packet is decoded and checked before it is queued; bad ones are dropped with a counted log line once a second.
+/// A State is passed only from a source the host has announced with a PeerInfo and not yet with a PeerLeft (the host
+/// itself included), so the game side can create a remote jet on the first State and drop it on PeerLeft for good.
 /// There is no reconnect in here: after Disconnected the thread has ended, and the game side decides what to do.
 /// </remarks>
 #include <atomic>

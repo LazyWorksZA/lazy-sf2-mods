@@ -435,7 +435,10 @@ void ClientCore::run() {
                 if (channel != kChannelUnreliable || decode(data, len, m) != Status::Ok || m.client_id > kMaxClients ||
                     (welcomed && m.client_id == my_id))
                     return drop(n_format_);
-                if (!welcomed || bye_seen) return drop(n_state_);
+                // Only from a peer the host announced (PeerInfo) and that has not left (PeerLeft): the channels are
+                // not ordered against each other, so a State may overtake the PeerInfo (that sample is lost) or arrive
+                // after the PeerLeft (it must not bring the peer back).
+                if (!welcomed || bye_seen || !peer_known[m.client_id]) return drop(n_state_);
                 if (!state_in_range(m, clock_.now(rx))) return drop(n_range_);
                 e.kind = ClientEvent::State;
                 source = m.client_id;

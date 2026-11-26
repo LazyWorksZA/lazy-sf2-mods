@@ -175,7 +175,8 @@ void check_live(bool live[net::kMaxClients]) {
 }
 
 // Frees a slot's avatar. If the aircraft is still live its flags are restored (the AI takes it back).
-void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, net::LeaveReason leave) {
+// announce false: no PeerLeft to the others (the host's session end, when every client gets a Bye of its own).
+void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, net::LeaveReason leave, bool announce = true) {
     Avatar& a = g_av[slot];
     if (!a.active) return;
     void* const obj = a.h.obj;
@@ -188,7 +189,8 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
     g_peers->leave(static_cast<uint8_t>(slot), a.gen,
                    leave == net::LeaveReason::Left      ? net::kPeerLeftLeft
                    : leave == net::LeaveReason::Timeout ? net::kPeerLeftTimeout
-                                                        : net::kPeerLeftRemoved);
+                                                        : net::kPeerLeftRemoved,
+                   announce);
     g_core->set_welcomed(static_cast<uint8_t>(slot), a.gen, false);  // also when it was never welcomed
     {
         net::ClientLeftPayload p{};
@@ -246,8 +248,9 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     std::string theatre;
     const uint32_t theatre_hash = terrain_theatre_id(theatre) ? net::fnv1a(theatre.c_str()) : 0;  // 0: unknown
     if (net::theatre_mismatch(theatre_hash, h.theatre_hash)) {
-        char why[96];
-        std::snprintf(why, sizeof(why), "it flies in another theatre (the host is in %s)", theatre.c_str());
+        char why[192];
+        std::snprintf(why, sizeof(why), "it flies in another theatre (its hash %08x; the host is in %s, hash %08x)",
+                      static_cast<unsigned>(h.theatre_hash), theatre.c_str(), static_cast<unsigned>(theatre_hash));
         reject(slot, gen, net::kByeWrongTheatre, why);
         return;
     }
@@ -280,6 +283,7 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         g_host_seq = 0;
         g_tick.reset();
         g_tx_states = g_relayed = 0;
+        g_peers->take_superseded();
         g_now = now;
         // Theatre name: not read; the header field stays empty (see docs/stream-format.md).
         // open() does one CreateFileW and may wait in join_previous() for an earlier writer that is still flushing:
@@ -451,8 +455,8 @@ void handle_message(const HostEvent& e, void* player, double now) {
             net::StateMsg s;
             if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok) {
                 rec(net::StreamKind::StateReceived, now, e.data, e.len);
-                // Relayed as it came (D10): the other clients run their own receiver on it.
-                g_relayed += static_cast<unsigned>(g_peers->send_state(e.data, e.len, slot));
+                // Relayed as it came (D10), but only the newest per slot and step: see the end of pump().
+                g_peers->relay(static_cast<uint8_t>(slot), e.data, e.len);
                 if (g_av[slot].parked && !retake(slot, s, now)) break;
                 // now is the drain time (this player step), which stands for the arrival time: up to a frame later,
                 // so the ages in the 1 Hz line include up to a frame of queue wait. Predict shows at the step's now.
@@ -515,12 +519,15 @@ void pump(void* player, double now) {
             }
         }
     }
+    // One State per source and step at most, whatever backlog a hitch left: the receivers only want the newest.
+    g_relayed += static_cast<unsigned>(g_peers->flush_relay());
 }
 
 void report(void* player, double /*now*/) {
     double pp[3];
     obj_read(player, kOffPos, pp, 3);
-    LOG("net: host jet: %u State(s) sent to %d client(s), %u relayed", g_tx_states, g_peers->count(), g_relayed);
+    LOG("net: host jet: %u State(s) sent to %d client(s), %u relayed (%u older ones not relayed)", g_tx_states,
+        g_peers->count(), g_relayed, g_peers->take_superseded());
     g_tx_states = g_relayed = 0;
     for (int s = 0; s < net::kMaxClients; ++s) {
         Avatar& a = g_av[s];
@@ -576,7 +583,7 @@ void on_step(void* aircraft, float dt, bool is_player) {
             bool live[net::kMaxClients];
             check_live(live);
             for (int s = 0; s < net::kMaxClients; ++s)
-                if (g_av[s].active) release(s, "the player changed", live[s], kByeSessionEnded, net::LeaveReason::HostEnded);
+                if (g_av[s].active) release(s, "the player changed", live[s], kByeSessionEnded, net::LeaveReason::HostEnded, false);
         }
         g_core->reset_host_time();  // no Pongs, and no States passed, until the new player's first step
         g_order.reset();  // check the order again for the new player
@@ -668,7 +675,7 @@ void host_shutdown() {
     bool live[net::kMaxClients] = {};
     if (g_nclients > 0) check_live(live);
     for (int s = 0; s < net::kMaxClients; ++s)
-        if (g_av[s].active) release(s, "host shut down", live[s], kByeNone, net::LeaveReason::HostEnded);
+        if (g_av[s].active) release(s, "host shut down", live[s], kByeNone, net::LeaveReason::HostEnded, false);
     // release() above ran on the DllMain thread, not the game thread: that breaks the writer's single-producer rule,
     // but only here, at FreeLibrary, when the game has stopped stepping.
     g_stream->close(true);  // waits at most 1 s for the writer to flush, then detaches it

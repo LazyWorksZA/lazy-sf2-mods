@@ -60,10 +60,28 @@ public:
     /// not added, its States are blocked again, and nothing else was sent.
     /// </summary>
     bool welcome(uint8_t slot, uint32_t gen, const WelcomeMsg& w, const char* callsign, const char* aircraft);
-    /// <summary>Removes the slot (if it holds that connection), blocks its States, and sends a PeerLeft to the rest.</summary>
-    void leave(uint8_t slot, uint32_t gen, uint8_t reason);
+    /// <summary>
+    /// Removes the slot (if it holds that connection), blocks its States, drops its pending relay, and (with announce)
+    /// sends a PeerLeft to the rest. The host's session end passes false: every client gets a Bye anyway.
+    /// </summary>
+    void leave(uint8_t slot, uint32_t gen, uint8_t reason, bool announce = true);
     /// <summary>Sends an encoded State to every welcomed slot except the one at except (-1: to all). Returns the count.</summary>
     int send_state(const uint8_t* data, size_t len, int except);
+    /// <summary>
+    /// Keeps a client's State for the next flush_relay(), replacing (and counting) an older one from the same slot. A
+    /// receiver only wants the newest, and relaying a backlog after a host hitch would multiply it by the client count.
+    /// </summary>
+    void relay(uint8_t slot, const uint8_t* data, size_t len);
+    /// <summary>Sends each slot's pending State to the other welcomed slots, once. Returns the sends queued.</summary>
+    int flush_relay();
+    /// <summary>States of the slot that flush_relay() has fanned out since the start (one per flush, whatever the recipients).</summary>
+    uint32_t relayed_from(uint8_t slot) const { return slot < kMaxClients ? relayed_from_[slot] : 0; }
+    /// <summary>States replaced before they were relayed, since the last call.</summary>
+    unsigned take_superseded() {
+        const unsigned n = superseded_;
+        superseded_ = 0;
+        return n;
+    }
 
     bool welcomed(uint8_t slot) const { return slot < kMaxClients && peers_[slot].on; }
     int count() const;
@@ -79,6 +97,8 @@ private:
         bool on = false;
         uint32_t gen = 0;
         PeerInfoMsg info{};
+        uint8_t pending_len = 0;  // a State waiting for flush_relay(), 0 = none
+        uint8_t pending[kMaxMessage] = {};
     };
     template <class M>
     void send(uint8_t slot, uint32_t gen, const M& m, bool reliable);
@@ -87,6 +107,8 @@ private:
     Peer peers_[kMaxClients];
     PeerInfoMsg host_{};
     unsigned send_fail_ = 0;
+    unsigned superseded_ = 0;
+    uint32_t relayed_from_[kMaxClients] = {};
 };
 
 }  // namespace LazyWorks::SF2Patch::net

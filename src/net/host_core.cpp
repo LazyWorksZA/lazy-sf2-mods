@@ -129,7 +129,7 @@ size_t HostCore::poll(HostEvent* out, size_t max) {
 bool HostCore::send(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, uint8_t channel, bool reliable) {
     if (slot >= kMaxClients || !data || len == 0 || len > sizeof(OutMsg::data) || channel >= kChannelCount) return false;
     std::lock_guard<std::mutex> lock(out_mx_);
-    if (out_n_ >= kOutCap) return false;
+    if (out_n_ >= (reliable ? kOutCap : kOutCap - kOutReserve)) return false;
     OutMsg& m = out_[(out_head_ + out_n_) % kOutCap];
     m.op = OutMsg::Send;
     m.slot = slot;
