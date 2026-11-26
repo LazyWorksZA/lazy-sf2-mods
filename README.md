@@ -70,7 +70,7 @@ The release notes also list each file's SHA-256.
 
 Multiplayer comes in this order:
 
-1. **Co-op single missions** (in progress). Two players are flying together in development builds. Next: both games running the same mission world, then weapons and damage, then sessions with our own multiplayer screens (encrypted, compressed traffic), then a public release.
+1. **Co-op single missions** (in progress). Now: two players flying together. Then: both games running the same mission world, then weapons and damage, then sessions with our own multiplayer screens (encrypted, compressed traffic), then a public release.
 2. Co-op campaigns.
 3. PvP dogfights.
 
