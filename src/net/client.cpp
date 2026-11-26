@@ -37,7 +37,7 @@ using net::ClientCore;
 using net::ClientEvent;
 
 constexpr size_t kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffMatrix = 0xdc, kOffAngles = 0x100,
-                 kOffHeading2 = 0x150;
+                 kOffHeading2 = 0x150, kOffBodyVel = 0xb8, kOffSpeed = 0x624;
 constexpr uint8_t kByeSessionEnded = 3;
 constexpr int kSources = ClientCore::kSources;  // remote ids: the host (0) and clients 1..kMaxClients
 constexpr double kParkAfter = 10.0;   // wall seconds without a State before a remote's aircraft goes back to the AI
@@ -81,6 +81,8 @@ char g_theatre[33] = {};
 bool g_session = false;
 uint16_t g_id = 0;
 net::WelcomeMsg g_welcome{};
+net::StateMsg g_host_state{};  // the host's newest State, for the join move
+bool g_have_host_state = false;
 int g_welcomes = 0;           // Welcomes in this session; a re-Welcome re-seeds the clock
 double g_welcome_wall = 0;    // the first Welcome's arrival
 double g_reannounce_at = 0;   // wall: after a re-Welcome, remotes not announced again by then are dropped
@@ -260,30 +262,43 @@ void refresh_clock(double wall) {
 }
 
 /// <summary>
-/// Moves the player's jet to pos and turns it to heading: position, the heading angle (and its copy at +0x150), the
-/// matrix rows and the world velocity turned about the vertical. Pitch, roll, speed, body velocity and rates stay, so
-/// the flight model's body-frame state stays valid (the R3 result: lazy-sf2-recon, network-recon §8.7).
+/// Puts the player's jet on the host's wing: position, pitch/heading/roll (angles, the copy of the heading at +0x150 and
+/// the matrix), the host's world velocity, the scalar speed at +0x624 (the host's), the body velocity (the jet's own,
+/// scaled to the host's speed, so its axes and angle of attack stay valid) and zero rates. Same speed, heading and
+/// climb rate as the host, so the two jets do not drift apart. See lazy-sf2-recon: network-recon §8.7 (R3).
 /// </summary>
-void move_player(void* player, const double pos[3], float heading, double* turned) {
-    double p[3];
-    float vel[3], m[9], ang[3], h2;
-    obj_read(player, kOffPos, p, 3);
-    obj_read(player, kOffVel, vel, 3);
-    obj_read(player, kOffMatrix, m, 9);
+void move_player(void* player, const cl::JoinPose& t, double* turned, float* old_speed) {
+    float ang[3], h2, bv[3], vel0[3];
     obj_read(player, kOffAngles, ang, 3);
     obj_read(player, kOffHeading2, &h2, 1);
-    const double delta = wrap_pi(static_cast<double>(heading) - static_cast<double>(ang[1]));
-    *turned = delta;
-    cl::turn_heading(vel, delta);
-    for (int row = 0; row < 3; ++row) cl::turn_heading(m + 3 * row, delta);  // rows right, forward, up: world vectors
+    obj_read(player, kOffBodyVel, bv, 3);
+    obj_read(player, kOffVel, vel0, 3);
+    *old_speed = static_cast<float>(cl::norm3(vel0));
+    const double host_speed = cl::norm3(t.vel);
+    *turned = wrap_pi(static_cast<double>(t.ang[1]) - static_cast<double>(ang[1]));
     const bool h2_is_copy = std::fabs(wrap_pi(static_cast<double>(h2) - static_cast<double>(ang[1]))) < 1e-3;
-    ang[1] = cl::heading_like(ang[1], heading);
-    if (h2_is_copy) h2 = cl::heading_like(h2, heading);
-    obj_write(player, kOffPos, pos, 3);
-    obj_write(player, kOffVel, vel, 3);
+    ang[0] = t.ang[0];
+    ang[2] = t.ang[2];
+    ang[1] = cl::heading_like(ang[1], t.ang[1]);
+    if (h2_is_copy) h2 = cl::heading_like(h2, t.ang[1]);
+    const double a[3] = {ang[0], ang[1], ang[2]};
+    float m[9];
+    build_matrix(a, m);
+    const double bn = cl::norm3(bv);
+    if (bn > 1.0) {
+        const float k = static_cast<float>(host_speed / bn);
+        for (float& c : bv) c *= k;
+        obj_write(player, kOffBodyVel, bv, 3);
+    }
+    const float zero[3] = {0, 0, 0};
+    const float speed = static_cast<float>(host_speed);
+    obj_write(player, kOffPos, t.pos, 3);
+    obj_write(player, kOffVel, t.vel, 3);
     obj_write(player, kOffMatrix, m, 9);
     obj_write(player, kOffAngles, ang, 3);
     if (h2_is_copy) obj_write(player, kOffHeading2, &h2, 1);
+    obj_write(player, kOffRates, zero, 3);
+    obj_write(player, kOffSpeed, &speed, 1);
 }
 
 void join(void* player, const net::WelcomeMsg& w, double wall) {
@@ -293,20 +308,23 @@ void join(void* player, const net::WelcomeMsg& w, double wall) {
     obj_read(player, kOffVel, vel, 3);
     net::ClockSync c;
     const double now = g_core->clock_snapshot(&c) ? c.now(wall) : w.host_game_time;
-    double target[3];
-    cl::join_target(w, now, target);
-    const double dist = cl::dist3(pos, target);
+    // The host's latest State when it is newer than the Welcome, so a deferred move is not stale.
+    const cl::JoinPose target = cl::join_pose(w, g_have_host_state ? &g_host_state : nullptr, now);
+    const double dist = cl::dist3(pos, target.pos);
     const cl::JoinAction a =
         cl::join_action(net::welcome_has_join(w), g_join_move, cl::airborne(pos, vel), g_moved, dist);
     if (a == cl::JoinAction::Move) {
         g_join_deferred = false;
         double turned = 0;
-        move_player(player, target, w.spawn_heading, &turned);
+        float old_speed = 0;
+        move_player(player, target, &turned, &old_speed);
         g_moved = true;
-        LOG("net: client: joined the host's wing: moved %.0f m to (%.0f, %.0f, %.0f), turned %.1f deg to heading %.1f "
-            "deg (speed kept, %.0f m/s; the host's %.0f m/s)",
-            dist, target[0], target[1], target[2], deg(turned), deg(static_cast<double>(w.spawn_heading)),
-            cl::norm3(vel), cl::norm3(w.spawn_vel));
+        LOG("net: client: joined the host's wing (from the host's %s): moved %.0f m to (%.0f, %.0f, %.0f), turned "
+            "%.1f deg to heading %.1f deg, pitch %.1f deg; speed %.0f -> %.0f m/s (the host's velocity, climb %.1f "
+            "m/s)",
+            target.from_state ? "latest State" : "Welcome", dist, target.pos[0], target.pos[1], target.pos[2],
+            deg(turned), deg(static_cast<double>(target.ang[1])), deg(static_cast<double>(target.ang[0])),
+            static_cast<double>(old_speed), cl::norm3(target.vel), static_cast<double>(target.vel[2]));
         return;
     }
     g_join_deferred = a == cl::JoinAction::NotAirborne;
@@ -355,6 +373,7 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
         g_peer0_logged = false;
         g_join_logged = 0;
         g_join_deferred = false;
+        g_have_host_state = false;
         g_watch.clear();
         g_hclock = net::HostClock{};
         g_tx = g_tx_fail = g_tx_held = 0;
@@ -460,6 +479,10 @@ void handle_state(const ClientEvent& e, double wall) {
     // Heard from, with or without an aircraft: the 1 Hz line and the park rule go by this.
     r.last_state_wall = wall;
     r.last_game_time = s.game_time;
+    if (id == 0 && (!g_have_host_state || s.game_time >= g_host_state.game_time)) {
+        g_host_state = s;
+        g_have_host_state = true;
+    }
     if (!r.h.obj && !take(id, s)) return;
     if (!r.jet.push(s, t_rx)) return;
     if (!r.got_state)

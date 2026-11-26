@@ -6782,6 +6782,32 @@ void client_logic_tests() {
                "join target: carried on with the join velocity, never backwards, at most 2 s");
     }
     {
+        WelcomeMsg w{};
+        w.spawn_pos[1] = 2000;
+        w.spawn_vel[1] = 200;
+        w.spawn_vel[2] = 20;
+        w.spawn_heading = 0.5f;
+        w.host_game_time = 50;
+        const cl::JoinPose a = cl::join_pose(w, nullptr, 50.5);
+        const bool wel = !a.from_state && a.vel[1] == 200 && a.vel[2] == 20 && std::fabs(a.pos[1] - 2100) < 1e-6 &&
+                         a.ang[1] == 0.5f && a.ang[2] == 0 && std::fabs(a.ang[0] - std::atan2(20.0, 200.0)) < 1e-6;
+        StateMsg st{};
+        st.game_time = 51;
+        st.pos[0] = 10;
+        st.vel[0] = 100;
+        st.vel[2] = -5;
+        st.ang[0] = 0.1f;
+        st.ang[1] = 1.0f;
+        st.ang[2] = 0.3f;
+        const cl::JoinPose b = cl::join_pose(w, &st, 51.5);
+        const bool sta = b.from_state && std::fabs(b.pos[0] - 60) < 1e-6 && b.vel[0] == 100 && b.vel[2] == -5 &&
+                         b.ang[0] == 0.1f && b.ang[1] == 1.0f && b.ang[2] == 0.3f;
+        st.game_time = 49;  // older than the Welcome: the Welcome wins
+        const cl::JoinPose c = cl::join_pose(w, &st, 50.5);
+        expect(wel && sta && !c.from_state && c.vel[1] == 200,
+               "join pose: the Welcome's velocity and climb, or a newer State's velocity, angles and carried position");
+    }
+    {
         float v[3] = {0, 100, 7};
         cl::turn_heading(v, rm::kPi / 2);
         const bool east = std::fabs(v[0] - 100) < 1e-3 && std::fabs(v[1]) < 1e-3 && v[2] == 7;

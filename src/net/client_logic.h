@@ -94,6 +94,42 @@ inline void join_target(const WelcomeMsg& w, double now, double out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = w.spawn_pos[i] + static_cast<double>(w.spawn_vel[i]) * dt;
 }
 
+/// <summary>Where and how the player's jet is put on the host's wing: position, world velocity, pitch/heading/roll.</summary>
+struct JoinPose {
+    double pos[3];
+    float vel[3];
+    float ang[3];
+    bool from_state;  // the host's latest State was newer than the Welcome and was used
+};
+
+/// <summary>
+/// The join pose at host time now. From the host's latest State when it is newer than the Welcome (position carried on
+/// with its velocity, its pitch, heading and roll); otherwise from the Welcome (heading and velocity; pitch from the
+/// climb angle of the velocity, roll 0). The carry-on is at most kJoinExtrapolateMax, never backwards.
+/// </summary>
+inline JoinPose join_pose(const WelcomeMsg& w, const StateMsg* latest, double now) {
+    JoinPose p{};
+    if (latest && latest->game_time > w.host_game_time) {
+        double dt = now - latest->game_time;
+        if (!(dt > 0.0)) dt = 0.0;
+        if (dt > kJoinExtrapolateMax) dt = kJoinExtrapolateMax;
+        for (int i = 0; i < 3; ++i) {
+            p.pos[i] = latest->pos[i] + static_cast<double>(latest->vel[i]) * dt;
+            p.vel[i] = latest->vel[i];
+            p.ang[i] = latest->ang[i];
+        }
+        p.from_state = true;
+        return p;
+    }
+    join_target(w, now, p.pos);
+    for (int i = 0; i < 3; ++i) p.vel[i] = w.spawn_vel[i];
+    const double horiz = std::sqrt(double(w.spawn_vel[0]) * w.spawn_vel[0] + double(w.spawn_vel[1]) * w.spawn_vel[1]);
+    p.ang[0] = static_cast<float>(std::atan2(static_cast<double>(w.spawn_vel[2]), horiz));
+    p.ang[1] = w.spawn_heading;
+    p.ang[2] = 0.0f;
+    return p;
+}
+
 /// <summary>Turns a world vector about the vertical so its heading (from +y towards +x) grows by delta radians.</summary>
 inline void turn_heading(float v[3], double delta) {
     const double c = std::cos(delta), s = std::sin(delta);
