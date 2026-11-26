@@ -1,0 +1,92 @@
+#pragma once
+/// <summary>
+/// The host's side of the v2 session protocol, without the game: the join position, the 20 Hz send schedule, and the
+/// peer table that sends the Welcome, the PeerInfos and PeerLefts, and fans States out over a HostCore. host.cpp uses
+/// it on the game thread; the loopback tests drive it against ClientCore.
+/// </summary>
+#include <cstddef>
+#include <cstdint>
+
+#include "net/host_core.h"
+#include "net/protocol.h"
+
+namespace LazyWorks::SF2Patch::net {
+
+/// <summary>How often the host sends its own jet, in host game time (plan D9: fixed).</summary>
+inline constexpr double kSendHz = 20.0;
+/// <summary>Join position of client 1 in the host's heading frame; each further client is another kJoinRight out.</summary>
+inline constexpr double kJoinRight = 150.0, kJoinBack = 50.0;
+
+/// <summary>
+/// The join position of the client in slot (0-based): the host's position plus, in the host's heading frame,
+/// kJoinRight * (slot + 1) to the right and kJoinBack back, at the host's altitude. heading is the angle from +y
+/// towards +x (the game's yaw, ang[1]): ahead is (sin, cos), right is (cos, -sin).
+/// </summary>
+void join_position(const double host_pos[3], double heading, int slot, double out[3]);
+
+/// <summary>True when both theatre hashes are known and differ (the client is then refused with Bye 5).</summary>
+constexpr bool theatre_mismatch(uint32_t host, uint32_t client) { return host != 0 && client != 0 && host != client; }
+
+/// <summary>
+/// A fixed-rate schedule in host time. due() is true at most once per period and keeps the average rate when steps
+/// do not divide the period. After a gap of more than a period (a pause, a long frame) or a step back in time it
+/// starts again from now, so it never sends a burst.
+/// </summary>
+class SendTicker {
+public:
+    explicit SendTicker(double hz = kSendHz) : period_(1.0 / hz) {}
+    bool due(double now);
+    void reset() { started_ = false; }
+
+private:
+    double period_;
+    double next_ = 0;
+    bool started_ = false;
+};
+
+/// <summary>
+/// The welcomed clients and what the others must hear about them. Game thread only (any single caller in the tests).
+/// Every message goes through HostCore::send; refusals (the out queue is full) are counted for the caller's 1 Hz report.
+/// </summary>
+class HostPeers {
+public:
+    explicit HostPeers(HostCore& core) : core_(core) {}
+
+    /// <summary>The host's own PeerInfo: callsign and aircraft type (ASCII, truncated to the wire fields).</summary>
+    void set_host(const char* callsign, const char* aircraft);
+    /// <summary>
+    /// Lets the slot's States through, sends the Welcome, then a PeerInfo for the host and for each other welcomed
+    /// client, and announces the new client to the others. False if the Welcome could not be queued: the slot is then
+    /// not added, its States are blocked again, and nothing else was sent.
+    /// </summary>
+    bool welcome(uint8_t slot, uint32_t gen, const WelcomeMsg& w, const char* callsign, const char* aircraft);
+    /// <summary>Removes the slot (if it holds that connection), blocks its States, and sends a PeerLeft to the rest.</summary>
+    void leave(uint8_t slot, uint32_t gen, uint8_t reason);
+    /// <summary>Sends an encoded State to every welcomed slot except the one at except (-1: to all). Returns the count.</summary>
+    int send_state(const uint8_t* data, size_t len, int except);
+
+    bool welcomed(uint8_t slot) const { return slot < kMaxClients && peers_[slot].on; }
+    int count() const;
+    /// <summary>Messages the core refused since the last call.</summary>
+    unsigned take_send_fail() {
+        const unsigned n = send_fail_;
+        send_fail_ = 0;
+        return n;
+    }
+
+private:
+    struct Peer {
+        bool on = false;
+        uint32_t gen = 0;
+        PeerInfoMsg info{};
+    };
+    template <class M>
+    void send(uint8_t slot, uint32_t gen, const M& m, bool reliable);
+
+    HostCore& core_;
+    Peer peers_[kMaxClients];
+    PeerInfoMsg host_{};
+    unsigned send_fail_ = 0;
+};
+
+}  // namespace LazyWorks::SF2Patch::net

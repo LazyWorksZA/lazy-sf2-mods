@@ -755,18 +755,23 @@ void run_job(Job job) {
 
 }  // namespace
 
-static bool capture_impl(TerrainInfo& out) {
+// The stamp check, once per process (it logs a mismatch once).
+static bool terrain_build_ok(HMODULE m) {
     static bool build_known = false, build_ok = false;
+    if (!build_known) {
+        build_known = true;
+        build_ok = is_expected_build(m, kStamp, kImageSize, "TerrainEngine.dll");
+    }
+    return build_ok;
+}
+
+static bool capture_impl(TerrainInfo& out) {
     HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
     if (!m) {
         log_once(8, "tacview terrain: TerrainEngine.dll is not loaded; no Theater= for this recording");
         return false;
     }
-    if (!build_known) {
-        build_known = true;
-        build_ok = is_expected_build(m, kStamp, kImageSize, "TerrainEngine.dll");
-    }
-    if (!build_ok) return false;
+    if (!terrain_build_ok(m)) return false;
 
     Raw raw;
     const int rc = read_raw(m, &raw);
@@ -815,6 +820,20 @@ static bool capture_impl(TerrainInfo& out) {
     out.samples = std::move(buf);
     out.texture = capture_texture(raw);
     return true;
+}
+
+bool terrain_theatre_id(std::string& id) {
+    id.clear();
+    HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
+    if (!m || !terrain_build_ok(m)) return false;
+    Raw raw;
+    if (read_raw(m, &raw) != 0) return false;
+    try {
+        id = acmi::terrain_id(raw.base);
+    } catch (...) {  // std::bad_alloc
+        id.clear();
+    }
+    return !id.empty();
 }
 
 bool terrain_capture(TerrainInfo& out) {

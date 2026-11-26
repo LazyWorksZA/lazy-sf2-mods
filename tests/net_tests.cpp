@@ -40,6 +40,7 @@
 #include "net/clock_sync.h"
 #include "net/client_core.h"
 #include "net/host_core.h"
+#include "net/host_session.h"
 #include "net/protocol.h"
 #include "net/stream_format.h"
 #include "net/stream_record.h"
@@ -4147,22 +4148,44 @@ StateMsg cc_jet(uint16_t id, uint32_t seq, double t) {
     return s;
 }
 
-// The game thread of a host: answers a Hello with a Welcome and a PeerInfo for itself (or refuses a wrong theatre with
-// Bye 5), sends its own jet as id 0 at 20 Hz when asked, and collects what the client sends. Host time runs with the
-// wall clock, from 1000 s.
+// The scripted host jet of FakeHost: straight and level at heading kFhHeading and 200 m/s, at (500, -300, 1200) at host
+// time 1000.
+constexpr double kFhHeading = 0.5;
+StateMsg fh_jet(uint32_t seq, double t) {
+    StateMsg s{};
+    s.client_id = 0;
+    s.seq = seq;
+    s.game_time = t;
+    const double sh = std::sin(kFhHeading), ch = std::cos(kFhHeading);
+    s.pos[0] = 500.0 + 200.0 * sh * (t - 1000.0);
+    s.pos[1] = -300.0 + 200.0 * ch * (t - 1000.0);
+    s.pos[2] = 1200.0;
+    s.vel[0] = static_cast<float>(200.0 * sh);
+    s.vel[1] = static_cast<float>(200.0 * ch);
+    s.ang[1] = static_cast<float>(kFhHeading);
+    return s;
+}
+
+// The game thread of a host, as host.cpp runs it but without the game, on HostPeers: answers a Hello with the Welcome
+// v2 (the join position on the scripted jet's wing), the PeerInfos and the announcement to the others, or refuses a
+// wrong theatre with Bye 5; sends its jet as id 0 at kSendHz of host time when asked; relays every client State to the
+// other clients; sends PeerLeft when a client leaves. Host time runs with the wall clock, from 1000 s.
 struct FakeHost {
     HostCore core;
+    HostPeers peers{core};
+    SendTicker tick;
     double t0 = ClientCore::wall_now();
     uint32_t theatre = 0;
     bool answer_hello = true, send_jet = false;
     bool welcomed = false, got_hello = false, got_disconnect = false;
-    uint8_t slot = 0;
+    uint8_t slot = 0;  // the newest connection
     uint32_t gen = 0, seq = 0;
-    double next_jet = 0;
-    std::vector<StateMsg> states;
+    uint32_t gens[kMaxClients] = {};
+    std::vector<StateMsg> states;  // every client's
     std::vector<ByeMsg> byes;
 
     bool start() {
+        peers.set_host("HOST", "F-4E");
         core.start("127.0.0.1", 0, cc_host_log);
         for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -4171,16 +4194,17 @@ struct FakeHost {
     }
     double time() const { return 1000.0 + (ClientCore::wall_now() - t0); }
     template <class M>
-    void send(const M& m, bool reliable) {
+    void send(const M& m, bool reliable) {  // to the newest connection
         uint8_t b[128];
         core.send(slot, gen, b, encode(m, b, sizeof(b)), reliable ? kChannelReliable : kChannelUnreliable, reliable);
     }
-    void bye_and_disconnect(uint8_t reason) {  // as host.cpp does: the Bye, then the disconnect, in one go
+    void bye_and_disconnect(uint8_t reason) {  // as host.cpp does: the Bye (signed by the host, id 0), then the disconnect
         ByeMsg b{};
-        b.client_id = static_cast<uint16_t>(slot + 1);
+        b.client_id = 0;
         b.reason = reason;
         send(b, true);
         core.disconnect(slot, gen);
+        peers.leave(slot, gen, kPeerLeftRemoved);
         welcomed = false;
     }
     void pump() {
@@ -4192,9 +4216,11 @@ struct FakeHost {
             if (e.kind == HostEvent::Connect) {
                 slot = e.slot;
                 gen = e.gen;
+                gens[e.slot] = e.gen;
             } else if (e.kind == HostEvent::Disconnect) {
                 got_disconnect = true;
-                welcomed = false;
+                peers.leave(e.slot, e.gen, e.reason == 1 ? kPeerLeftTimeout : kPeerLeftLeft);
+                if (e.slot == slot) welcomed = false;
             } else {
                 MsgType t{};
                 if (peek_type(e.data, e.len, t) != Status::Ok) continue;
@@ -4202,42 +4228,41 @@ struct FakeHost {
                     got_hello = true;
                     HelloMsg h{};
                     if (!answer_hello || decode(e.data, e.len, h) != Status::Ok) continue;
-                    if (theatre && h.theatre_hash && h.theatre_hash != theatre) {
-                        bye_and_disconnect(kByeWrongTheatre);
+                    if (theatre_mismatch(theatre, h.theatre_hash)) {
+                        ByeMsg b{};
+                        b.reason = kByeWrongTheatre;
+                        uint8_t buf[16];
+                        core.send(e.slot, e.gen, buf, encode(b, buf, sizeof(buf)), kChannelReliable, true);
+                        core.disconnect(e.slot, e.gen);
                         continue;
                     }
-                    core.set_welcomed(slot, gen, true);
+                    const double now = time();
+                    const StateMsg jet = fh_jet(0, now);
                     WelcomeMsg w{};
-                    w.client_id = static_cast<uint16_t>(slot + 1);
-                    w.spawn_pos[0] = 500.0;
-                    w.spawn_pos[1] = -300.0;
-                    w.spawn_pos[2] = 1200.0;
-                    w.spawn_heading = 0.5f;
-                    w.spawn_vel[0] = 200.0f;
-                    w.host_game_time = time();
+                    w.client_id = static_cast<uint16_t>(e.slot + 1);
+                    join_position(jet.pos, jet.ang[1], e.slot, w.spawn_pos);
+                    w.spawn_heading = jet.ang[1];
+                    std::memcpy(w.spawn_vel, jet.vel, sizeof(w.spawn_vel));
+                    w.host_game_time = now;
                     w.theatre_hash = theatre;
-                    send(w, true);
-                    PeerInfoMsg p{};
-                    p.id = 0;
-                    set_str(p.callsign, "HOST");
-                    set_str(p.aircraft, "F-4E");
-                    send(p, true);
-                    welcomed = true;
-                    next_jet = ClientCore::wall_now();
+                    if (peers.welcome(e.slot, e.gen, w, h.callsign, h.aircraft) && e.slot == slot) welcomed = true;
                 } else if (t == MsgType::State) {
                     StateMsg s{};
-                    if (decode(e.data, e.len, s) == Status::Ok) states.push_back(s);
+                    if (decode(e.data, e.len, s) != Status::Ok || !peers.welcomed(e.slot)) continue;
+                    states.push_back(s);
+                    peers.send_state(e.data, e.len, e.slot);
                 } else if (t == MsgType::Bye) {
                     ByeMsg b{};
                     if (decode(e.data, e.len, b) == Status::Ok) byes.push_back(b);
+                    peers.leave(e.slot, e.gen, kPeerLeftLeft);
                 }
             }
         }
-        const double now = ClientCore::wall_now();
-        if (send_jet && welcomed && now >= next_jet) {
-            send(cc_jet(0, ++seq, time()), false);
-            next_jet += 0.05;
-            if (next_jet < now) next_jet = now + 0.05;
+        const double now = time();
+        if (send_jet && peers.count() > 0 && tick.due(now)) {
+            const StateMsg s = fh_jet(++seq, now);
+            uint8_t b[128];
+            peers.send_state(b, encode(s, b, sizeof(b)), -1);
         }
     }
 };
@@ -4329,6 +4354,213 @@ uint8_t cc_bye_reason(const ClientEvent& e) {
     return decode(e.data, e.len, b) == Status::Ok ? b.reason : 255;
 }
 
+// The Welcome's join position for a slot, worked out here from the geometry rather than with join_position: right is
+// (cos h, -sin h), ahead (sin h, cos h); 150 m right per client, 50 m back, the host's altitude.
+bool fh_join_ok(const WelcomeMsg& w, int slot) {
+    const StateMsg jet = fh_jet(0, w.host_game_time);
+    const double h = jet.ang[1], right = 150.0 * (slot + 1);
+    const double want[3] = {jet.pos[0] + right * std::cos(h) - 50.0 * std::sin(h),
+                            jet.pos[1] - right * std::sin(h) - 50.0 * std::cos(h), jet.pos[2]};
+    bool ok = w.spawn_heading == jet.ang[1];
+    for (int i = 0; i < 3; ++i) ok = ok && std::fabs(w.spawn_pos[i] - want[i]) < 1e-6 && w.spawn_vel[i] == jet.vel[i];
+    return ok;
+}
+
+void host_session_logic_tests() {
+    std::printf("host session: join position, theatre check, send schedule\n");
+    {
+        const double p[3] = {1000.0, 2000.0, 3000.0};
+        double j[3];
+        join_position(p, 0.0, 0, j);  // heading north (+y): right is +x
+        expect(j[0] == 1150.0 && j[1] == 1950.0 && j[2] == 3000.0, "heading 0, client 1: 150 m right (+x), 50 m back (-y)");
+        join_position(p, std::acos(0.0), 1, j);  // heading east (+x): right is -y
+        expect(std::fabs(j[0] - 950.0) < 1e-9 && std::fabs(j[1] - 1700.0) < 1e-9 && j[2] == 3000.0,
+               "heading 90 deg, client 2: 300 m right (-y), 50 m back (-x)");
+        bool frame = true;
+        for (double h = -3.0; h <= 3.0; h += 0.37) {
+            for (int s = 0; s < kMaxClients; ++s) {
+                join_position(p, h, s, j);
+                const double dx = j[0] - p[0], dy = j[1] - p[1];
+                const double along = dx * std::sin(h) + dy * std::cos(h), across = dx * std::cos(h) - dy * std::sin(h);
+                frame = frame && std::fabs(along + 50.0) < 1e-9 && std::fabs(across - 150.0 * (s + 1)) < 1e-9;
+            }
+        }
+        expect(frame, "at any heading: 50 m behind, 150 m right per client, in the host's heading frame");
+    }
+    expect(!theatre_mismatch(0, 0) && !theatre_mismatch(fnv1a("Korea"), 0) && !theatre_mismatch(0, fnv1a("Korea")) &&
+               !theatre_mismatch(fnv1a("Korea"), fnv1a("Korea")) && theatre_mismatch(fnv1a("Korea"), fnv1a("GermanyCE")),
+           "theatre mismatch only when both are known and differ");
+    {
+        auto count = [](double step, double seconds, double start) {
+            SendTicker t;
+            int n = 0;
+            for (double now = start; now < start + seconds - 1e-9; now += step) n += t.due(now) ? 1 : 0;
+            return n;
+        };
+        const int n60 = count(1.0 / 60, 10.0, 0.0), n30 = count(1.0 / 30, 10.0, 7.0), n144 = count(1.0 / 144, 10.0, 3.0);
+        const int n15 = count(1.0 / 15, 10.0, 0.0), n20 = count(0.05, 10.0, 0.0);
+        char what[200];
+        std::snprintf(what, sizeof(what), "20 Hz at 60/30/144/20 fps: %d/%d/%d/%d sends in 10 s (199..201); at 15 fps every step: %d",
+                      n60, n30, n144, n20, n15);
+        expect(n60 >= 199 && n60 <= 201 && n30 >= 199 && n30 <= 201 && n144 >= 199 && n144 <= 201 && n20 >= 199 && n20 <= 201 &&
+                   n15 == 150,
+               what);
+        SendTicker t;
+        int burst = 0;
+        expect(t.due(10.0) && !t.due(10.01), "the first step sends, the next one within 50 ms does not");
+        for (double now = 15.0; now < 15.04; now += 0.01) burst += t.due(now) ? 1 : 0;
+        expect(burst == 1, "after a 5 s pause: one send, no burst to catch up");
+        expect(t.due(2.0) && !t.due(2.02) && t.due(2.05), "a step back in time restarts the schedule");
+        t.reset();
+        expect(t.due(2.051), "reset: the next step sends");
+    }
+}
+
+// Two clients on one host: each gets the host's jet (id 0) at about 20 Hz and the other's States relayed with the
+// other's id, the Welcome v2 for its slot, PeerInfo for the host and the other client, and PeerLeft when the other
+// leaves.
+void client_core_relay_tests() {
+    std::printf("client core: two clients, the host's jet and the relay\n");
+    FakeHost h;
+    h.theatre = fnv1a("Korea");
+    if (!h.start()) return expect(false, "host core running");
+    HelloMsg hello[2] = {cc_hello(fnv1a("Korea")), cc_hello(0)};
+    set_str(hello[0].callsign, "ONE");
+    set_str(hello[1].callsign, "TWO");
+    set_str(hello[1].aircraft, "F-104G");
+    std::unique_ptr<ClientCore> c[2] = {std::make_unique<ClientCore>(), std::make_unique<ClientCore>()};
+    CcRx rx[2];
+    auto run = [&](double seconds, auto done, auto each) {
+        const double until = ClientCore::wall_now() + seconds;
+        for (;;) {
+            h.pump();
+            for (int i = 0; i < 2; ++i) rx[i].pull(*c[i]);
+            each();
+            if (done()) return true;
+            if (ClientCore::wall_now() >= until) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    auto nothing = [] {};
+    // One after the other, so the slots are known: ONE is client 1, TWO client 2.
+    for (int i = 0; i < 2; ++i) {
+        c[i]->start("127.0.0.1", h.core.port(), hello[i], cc_client_log);
+        run(5.0, [&] { return rx[i].has(ClientEvent::Welcome); }, nothing);
+    }
+    expect(c[0]->client_id() == 1 && c[1]->client_id() == 2, "two clients welcomed as 1 and 2");
+    if (c[0]->client_id() != 1 || c[1]->client_id() != 2) {
+        for (auto& cc : c) cc->stop(false);
+        h.core.stop(false);
+        return;
+    }
+    for (int i = 0; i < 2; ++i) {
+        WelcomeMsg w{};
+        const ClientEvent& we = rx[i].ev[rx[i].find(ClientEvent::Welcome)];
+        char what[160];
+        std::snprintf(what, sizeof(what), "client %d: the Welcome v2 puts it %d m right and 50 m back of the host, at its "
+                      "heading, velocity and altitude, with the theatre hash", i + 1, 150 * (i + 1));
+        expect(decode(we.data, we.len, w) == Status::Ok && w.client_id == i + 1 && fh_join_ok(w, i) &&
+                   w.theatre_hash == fnv1a("Korea") && std::fabs(w.host_game_time - 1000.0) < 30.0,
+               what);
+    }
+
+    // Both send their own jet at 20 Hz for 3 s; the host sends its own.
+    h.send_jet = true;
+    uint32_t sent[2] = {}, refused = 0;
+    double next = ClientCore::wall_now();
+    const double t_start = ClientCore::wall_now();
+    run(3.0, [] { return false; }, [&] {
+        const double wall = ClientCore::wall_now();
+        if (wall < next) return;
+        next += 0.05;
+        for (int i = 0; i < 2; ++i) {
+            double t = 0;
+            if (c[i]->clock_now(wall, &t) && !c[i]->send_state(cc_jet(0, ++sent[i], t))) ++refused;
+        }
+    });
+    const double t_end = ClientCore::wall_now();
+    for (int i = 0; i < 2; ++i) {
+        const int other = 2 - i;  // the other client's id
+        std::vector<double> host_rx;
+        uint32_t from_other = 0, foreign = 0, last_other = 0;
+        bool host_ok = true, other_ordered = true;
+        for (const ClientEvent& e : rx[i].ev) {
+            StateMsg s{};
+            if (e.kind != ClientEvent::State || decode(e.data, e.len, s) != Status::Ok) continue;
+            if (s.client_id == 0) {
+                const StateMsg want = fh_jet(s.seq, s.game_time);
+                host_ok = host_ok && std::fabs(s.pos[0] - want.pos[0]) < 1e-6 && std::fabs(s.pos[1] - want.pos[1]) < 1e-6;
+                if (e.wall_rx >= t_start + 0.5 && e.wall_rx < t_end - 0.5) host_rx.push_back(e.wall_rx);
+            } else if (s.client_id == other) {
+                ++from_other;
+                other_ordered = other_ordered && s.seq > last_other;
+                last_other = s.seq;
+            } else {
+                ++foreign;
+            }
+        }
+        const double span = (t_end - 0.5) - (t_start + 0.5);
+        const double rate = static_cast<double>(host_rx.size()) / span;
+        char what[200];
+        std::snprintf(what, sizeof(what), "client %d: the host's jet (id 0) at %.1f Hz (15..25), as scripted", i + 1, rate);
+        expect(rate >= 15.0 && rate <= 25.0 && host_ok, what);
+        std::snprintf(what, sizeof(what), "client %d: %u of client %d's %u States relayed, in order, with its id; %u others",
+                      i + 1, from_other, other, sent[other - 1], foreign);
+        expect(from_other >= sent[other - 1] / 2 && from_other <= sent[other - 1] && other_ordered && foreign == 0, what);
+        const ClientCounters cn = c[i]->counters();
+        expect(cn.dropped_format == 0 && cn.dropped_range == 0 && cn.dropped_queue == 0,
+               "the client dropped nothing (its own States never come back)");
+        // PeerInfo: the host first, then the other client (sent with its own Welcome, or when it joined).
+        std::vector<PeerInfoMsg> infos;
+        for (const ClientEvent& e : rx[i].ev) {
+            PeerInfoMsg p{};
+            if (e.kind == ClientEvent::PeerInfo && decode(e.data, e.len, p) == Status::Ok) infos.push_back(p);
+        }
+        const bool host_info = !infos.empty() && infos[0].id == 0 && std::strcmp(infos[0].callsign, "HOST") == 0 &&
+                               std::strcmp(infos[0].aircraft, "F-4E") == 0;
+        const bool other_info = infos.size() == 2 && infos[1].id == other &&
+                                std::strcmp(infos[1].callsign, other == 1 ? "ONE" : "TWO") == 0 &&
+                                std::strcmp(infos[1].aircraft, other == 1 ? "F-4E" : "F-104G") == 0;
+        std::snprintf(what, sizeof(what), "client %d: PeerInfo for the host (HOST, F-4E), then for client %d", i + 1, other);
+        expect(host_info && other_info && rx[i].find(ClientEvent::PeerInfo) > rx[i].find(ClientEvent::Welcome), what);
+    }
+    expect(refused == 0 && h.states.size() >= sent[0] / 2 + sent[1] / 2, "the host got both clients' States");
+
+    // TWO leaves: ONE hears PeerLeft for client 2 (reason: left), and no more of its States.
+    c[1]->bye(0);
+    const size_t mark = rx[0].ev.size();
+    const bool left = run(4.0, [&] { return rx[0].find(ClientEvent::PeerLeft, mark) >= 0 && rx[1].has(ClientEvent::Disconnected); },
+                          nothing);
+    const int pl = rx[0].find(ClientEvent::PeerLeft, mark);
+    PeerLeftMsg m{};
+    expect(left && pl >= 0 && decode(rx[0].ev[pl].data, rx[0].ev[pl].len, m) == Status::Ok && m.id == 2 &&
+               m.reason == kPeerLeftLeft,
+           "PeerLeft (id 2, reason left) reaches the other client");
+    run(0.3, [] { return false; }, nothing);
+    // The channels are not ordered against each other: a State relayed just before the PeerLeft may arrive just after.
+    bool after = false;
+    const double left_at = pl >= 0 ? rx[0].ev[pl].wall_rx : 0.0;
+    for (size_t k = pl >= 0 ? static_cast<size_t>(pl) : rx[0].ev.size(); k < rx[0].ev.size(); ++k) {
+        StateMsg s{};
+        if (rx[0].ev[k].kind == ClientEvent::State && decode(rx[0].ev[k].data, rx[0].ev[k].len, s) == Status::Ok &&
+            s.client_id == 2 && rx[0].ev[k].wall_rx > left_at + 0.1)
+            after = true;
+    }
+    expect(!after && h.peers.count() == 1, "no State of client 2 later than 100 ms after its PeerLeft; one client left on the host");
+
+    // The host ends the session: its Bye is signed 0, the sender (the only id the client accepts).
+    h.slot = 0;
+    h.gen = h.gens[0];
+    h.bye_and_disconnect(3);
+    run(4.0, [&] { return rx[0].has(ClientEvent::Disconnected); }, nothing);
+    const int b = rx[0].find(ClientEvent::Bye);
+    ByeMsg bm{};
+    expect(b >= 0 && decode(rx[0].ev[b].data, rx[0].ev[b].len, bm) == Status::Ok && bm.client_id == 0 && bm.reason == 3,
+           "the host's Bye carries id 0 and its reason");
+    for (auto& cc : c) cc->stop(false);
+    h.core.stop(false);
+}
+
 void client_core_session_tests() {
     std::printf("client core: a session against HostCore\n");
     FakeHost h;
@@ -4343,9 +4575,8 @@ void client_core_session_tests() {
     if (!welcomed) return;
     const ClientEvent we = rx.ev[rx.find(ClientEvent::Welcome)];
     WelcomeMsg w{};
-    expect(decode(we.data, we.len, w) == Status::Ok && w.client_id == 1 && w.spawn_pos[0] == 500.0 &&
-               w.spawn_vel[0] == 200.0f && w.theatre_hash == fnv1a("Korea"),
-           "the Welcome event carries the host's message");
+    expect(decode(we.data, we.len, w) == Status::Ok && w.client_id == 1 && fh_join_ok(w, 0) && w.theatre_hash == fnv1a("Korea"),
+           "the Welcome event carries the host's message: the join position on its wing, the theatre hash");
 
     // Clock: synced within 1 s of the Welcome, and then on the host's time.
     double synced_at = 0, est = 0;
@@ -4391,7 +4622,7 @@ void client_core_session_tests() {
     }
     bool ordered = true, intact = true;
     for (size_t i = 0; i < got.size(); ++i) {
-        if (got[i].client_id != 0 || got[i].pos[0] != 10.0 * got[i].seq) intact = false;
+        if (got[i].client_id != 0 || got[i].pos[0] != fh_jet(got[i].seq, got[i].game_time).pos[0]) intact = false;
         if (i && got[i].seq <= got[i - 1].seq) ordered = false;
     }
     std::snprintf(what, sizeof(what), "the host's States (id 0) arrive in order and intact: %zu of %u sent", got.size(), h.seq);
@@ -4835,17 +5066,19 @@ void client_core_id_tests() {
     cc_run(nullptr, &raw, *c, rx, 1.2, [] { return false; });
     raw.send(w, kChannelReliable);  // the same id, later: a re-Welcome
     b.client_id = 3;
-    raw.send(b, kChannelReliable);  // addressed to another client: malformed
+    raw.send(b, kChannelReliable);  // not signed by the host: malformed
     b.client_id = 1;
+    raw.send(b, kChannelReliable);  // signed with our id (the old convention): malformed
+    b.client_id = 0;
     b.reason = 1;
-    raw.send(b, kChannelReliable);  // addressed to us: good
+    raw.send(b, kChannelReliable);  // signed by the host: good
     cc_run(nullptr, &raw, *c, rx, 4.0, [&] { return rx.has(ClientEvent::Disconnected); });
     const ClientCounters cn = c->counters();
     std::printf("    drops: %u malformed, %u wrong phase\n", cn.dropped_format, cn.dropped_state);
     const bool kinds = rx.ev.size() == 4 && rx.ev[0].kind == ClientEvent::PeerInfo && rx.ev[1].kind == ClientEvent::Welcome &&
                        rx.ev[2].kind == ClientEvent::Bye && rx.ev[3].kind == ClientEvent::Disconnected;
-    expect(kinds && cn.dropped_format == 5 && cn.dropped_state == 3,
-           "own-id, id-0, unknown and duplicate peer messages, a foreign Welcome or Bye are dropped; a later re-Welcome and our Bye pass");
+    expect(kinds && cn.dropped_format == 6 && cn.dropped_state == 3,
+           "own-id, id-0, unknown and duplicate peer messages, a foreign Welcome, a Bye not signed 0 are dropped; a later re-Welcome and the host's Bye pass");
 }
 
 void client_core_bye_stop_tests() {
@@ -4958,6 +5191,7 @@ void client_core_concurrency_tests() {
 void client_core_tests() {
     client_core_connect_tests();
     client_core_session_tests();
+    client_core_relay_tests();
     client_core_host_bye_tests();
     client_core_refusal_tests();
     client_core_id_tests();
@@ -5210,6 +5444,7 @@ int main() {
 
     loopback();
     parse_tests();
+    host_session_logic_tests();
 
     if (enet_initialize() == 0) {
         host_core_tests();

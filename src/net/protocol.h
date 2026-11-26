@@ -77,7 +77,7 @@ struct StateMsg {
 };
 struct ByeMsg {
     Header h;
-    uint16_t client_id;
+    uint16_t client_id;  // the sender, as in State: 0 from the host (always, also before a Welcome), its own id from a client
     uint8_t reason;
 };
 struct PeerInfoMsg {
@@ -103,6 +103,11 @@ static_assert(sizeof(StateMsg) == 78);    // 4:2 id, 6:4 seq, 10:8 time, 18:24 p
 static_assert(sizeof(ByeMsg) == 7);       // 4:2 id, 6:1 reason
 static_assert(sizeof(PeerInfoMsg) == 54); // 4:2 id, 6:16 callsign, 22:32 aircraft
 static_assert(sizeof(PeerLeftMsg) == 7);  // 4:2 id, 6:1 reason
+
+/// <summary>PeerLeft reasons (the same codes as the recording's LeaveReason).</summary>
+inline constexpr uint8_t kPeerLeftLeft = 0;     // Bye or disconnect
+inline constexpr uint8_t kPeerLeftTimeout = 1;  // no packets for 5 s
+inline constexpr uint8_t kPeerLeftRemoved = 2;  // the host ended it (avatar lost, the host's flight ended)
 
 /// <summary>Bye reasons added in v2.</summary>
 inline constexpr uint8_t kByeWrongTheatre = 5;

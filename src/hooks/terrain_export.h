@@ -48,6 +48,12 @@ struct TerrainInfo {
 bool terrain_capture(TerrainInfo& out);
 
 /// <summary>
+/// Game thread. The loaded theatre's Tacview terrain id (the same as TerrainInfo::id), without copying anything else.
+/// False (id empty) when none is loaded or the build is unexpected. Logs nothing but a stamp mismatch, once.
+/// </summary>
+bool terrain_theatre_id(std::string& id);
+
+/// <summary>
 /// Game thread. Hands info.samples to the background export thread, if there are any. The export uses the recorder's
 /// placement, so the files and the recording agree.
 /// </summary>

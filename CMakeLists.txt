@@ -76,6 +76,7 @@ add_library(lazysf2 SHARED
     src/hooks/remote_avatar.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
+    src/net/host_session.cpp
     src/net/client_core.cpp
     src/net/host.cpp
     src/net/remote_jet.cpp
@@ -100,6 +101,7 @@ add_executable(lazysf2-net-tests
     tests/net_tests.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
+    src/net/host_session.cpp
     src/net/client_core.cpp
     src/net/remote_jet.cpp
     src/net/stream_format.cpp

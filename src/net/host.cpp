@@ -8,12 +8,15 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <string>
 
 #include "hooks/hooks.h"
 #include "hooks/remote_avatar.h"
 #include "hooks/replay_math.h"
+#include "hooks/terrain_export.h"
 #include "log.h"
 #include "net/host_core.h"
+#include "net/host_session.h"
 #include "net/protocol.h"
 #include "net/receiver_math.h"
 #include "net/remote_jet.h"
@@ -28,7 +31,6 @@ using namespace replay_math;
 using net::HostEvent;
 
 constexpr size_t kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffAngles = 0x100;
-constexpr double kSpawnAhead = 300.0, kSpawnRight = 50.0;
 
 // Bye reasons the host sends.
 enum ByeReason : uint8_t { kByeNone = 0, kByeBusy = 1, kByeNoAvatar = 2, kByeSessionEnded = 3, kByeAvatarLost = 4 };
@@ -39,13 +41,18 @@ using avatar_logic::dist3;
 bool g_enabled = false;
 char g_addr[48] = {};
 uint16_t g_port = 0;
+char g_callsign[17] = "HOST";  // LAZYSF2_CALLSIGN, printable ASCII; the wire field keeps 15 characters
 
 // The big objects live on the heap, created in host_on_modules_loaded() only when host mode is on (as globals
 // they would bloat the DLL's .data). Never freed: a destructor at DLL unload could join a thread under the loader lock.
 net::HostCore* g_core = nullptr;
+net::HostPeers* g_peers = nullptr;  // who is welcomed, and the fan-out of States, PeerInfos and PeerLefts
 net::StreamWriter* g_stream = nullptr;  // the recording of the session (stream_record.h): written by its own thread
 double g_now = 0;            // host game time at the latest step, for records made outside a step
-uint32_t g_host_seq = 0;
+uint32_t g_host_seq = 0;  // the recording's host States, one per step
+uint32_t g_send_seq = 0;  // the host States sent to the clients (20 Hz); never reset, so a receiver never sees it restart
+net::SendTicker g_tick;   // when the next host State is due, in host time
+unsigned g_tx_states = 0, g_relayed = 0;  // since the last report: host States queued, client States relayed (per recipient)
 std::atomic<bool> g_running{false};      // the step callback is registered and the thread started
 std::atomic<bool> g_has_clients{false};  // mirrors g_nclients for other threads (puppet runs on the render thread)
 
@@ -97,9 +104,8 @@ void core_log(const char* line) { LOG("%s", line); }
 // Hands a record to the writer thread: a copy into a ring, no I/O. A no-op while no stream is open.
 void rec(net::StreamKind kind, double t, const void* payload, size_t len) { g_stream->record(kind, t, payload, len); }
 
-// The host player's own state, as a State with client_id 0, once per player step.
-void record_host_state(void* player, double now) {
-    if (!g_stream->is_open()) return;
+// The host player's own state, as a State with client_id 0 (the source id of the host's jet).
+net::StateMsg host_state(void* player, double now, uint32_t seq) {
     net::StateMsg s{};
     double pos[3];
     float vel[3], ang[3], rates[3];
@@ -108,7 +114,7 @@ void record_host_state(void* player, double now) {
     obj_read(player, kOffAngles, ang, 3);
     obj_read(player, kOffRates, rates, 3);
     s.client_id = 0;
-    s.seq = ++g_host_seq;
+    s.seq = seq;
     s.game_time = now;
     for (int i = 0; i < 3; ++i) {
         s.pos[i] = pos[i];
@@ -116,12 +122,28 @@ void record_host_state(void* player, double now) {
         s.ang[i] = ang[i];
         s.rates[i] = rates[i];
     }
-    uint8_t buf[96];
+    return s;
+}
+
+// Once per player step, for the recording.
+void record_host_state(void* player, double now) {
+    if (!g_stream->is_open()) return;
+    const net::StateMsg s = host_state(player, now, ++g_host_seq);
+    uint8_t buf[net::kMaxMessage];
     const size_t n = net::encode(s, buf, sizeof(buf));
     if (n) rec(net::StreamKind::HostState, now, buf, n);
 }
 
+// At kSendHz of host time, to every welcomed client.
+void send_host_state(void* player, double now) {
+    const net::StateMsg s = host_state(player, now, ++g_send_seq);
+    uint8_t buf[net::kMaxMessage];
+    const size_t n = net::encode(s, buf, sizeof(buf));
+    if (n) g_tx_states += static_cast<unsigned>(g_peers->send_state(buf, n, -1));
+}
+
 void flush_send_fail() {
+    g_send_fail += g_peers->take_send_fail();
     if (!g_send_fail) return;
     LOG("net: %u message(s) to clients could not be queued for the network thread (out queue full)", g_send_fail);
     g_send_fail = 0;
@@ -130,7 +152,7 @@ void flush_send_fail() {
 // Queue helpers: a refusal (the out queue is full) is counted and reported once a second.
 void send_bye(int slot, uint32_t gen, uint8_t reason) {
     net::ByeMsg b{};
-    b.client_id = static_cast<uint16_t>(slot + 1);
+    b.client_id = 0;  // the sender: the host (protocol.h)
     b.reason = reason;
     uint8_t buf[16];
     const size_t n = net::encode(b, buf, sizeof(buf));
@@ -162,7 +184,12 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
         send_bye(slot, a.gen, bye_reason);
         request_disconnect(slot, a.gen);
     }
-    g_core->set_welcomed(static_cast<uint8_t>(slot), a.gen, false);
+    // The others hear of it (PeerLeft), and the slot's States are blocked.
+    g_peers->leave(static_cast<uint8_t>(slot), a.gen,
+                   leave == net::LeaveReason::Left      ? net::kPeerLeftLeft
+                   : leave == net::LeaveReason::Timeout ? net::kPeerLeftTimeout
+                                                        : net::kPeerLeftRemoved);
+    g_core->set_welcomed(static_cast<uint8_t>(slot), a.gen, false);  // also when it was never welcomed
     {
         net::ClientLeftPayload p{};
         p.client_id = static_cast<uint16_t>(slot + 1);
@@ -201,9 +228,27 @@ void reject(int slot, uint32_t gen, uint8_t reason, const char* why) {
     if (g_nclients == 0) flush_send_fail();
 }
 
+// The player's aircraft type, from the probe's table (copied under its lock; nothing logs there).
+void player_type_cb(const LiveAircraft* list, size_t count, void* ctx) {
+    for (size_t i = 0; i < count; ++i) {
+        if (list[i].is_player && list[i].type_name) {
+            strncpy_s(static_cast<char*>(ctx), 33, list[i].type_name, _TRUNCATE);
+            return;
+        }
+    }
+}
+
 void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, double now) {
     if (g_puppet_state.load() != 0 || replay_active()) {
         reject(slot, gen, kByeBusy, "a puppet or replay run is active");
+        return;
+    }
+    std::string theatre;
+    const uint32_t theatre_hash = terrain_theatre_id(theatre) ? net::fnv1a(theatre.c_str()) : 0;  // 0: unknown
+    if (net::theatre_mismatch(theatre_hash, h.theatre_hash)) {
+        char why[96];
+        std::snprintf(why, sizeof(why), "it flies in another theatre (the host is in %s)", theatre.c_str());
+        reject(slot, gen, net::kByeWrongTheatre, why);
         return;
     }
     char callsign[17], aircraft[33];
@@ -214,12 +259,10 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     obj_read(player, kOffPos, ppos, 3);
     obj_read(player, kOffAngles, pang, 3);
     obj_read(player, kOffVel, pvel, 3);
-    const double hp = pang[1], sh = std::sin(hp), ch = std::cos(hp);
-    const double right = kSpawnRight * slot;
-    const AvatarPick pick{aircraft,
-                          {ppos[0] + kSpawnAhead * sh + right * ch, ppos[1] + kSpawnAhead * ch - right * sh, ppos[2]},
-                          pang[1],
-                          {pvel[0], pvel[1], pvel[2]}};
+    // The join position on the host's wing (plan 2.7): the client moves its jet there, and its avatar holds there.
+    double join[3];
+    net::join_position(ppos, pang[1], slot, join);
+    const AvatarPick pick{aircraft, {join[0], join[1], join[2]}, pang[1], {pvel[0], pvel[1], pvel[2]}};
     AvatarHandle taken[net::kMaxClients];
     handles(taken);
     const uint32_t air_gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
@@ -235,6 +278,8 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         sim_set_run_active(true);
         g_next_report = now + 1.0;
         g_host_seq = 0;
+        g_tick.reset();
+        g_tx_states = g_relayed = 0;
         g_now = now;
         // Theatre name: not read; the header field stays empty (see docs/stream-format.md).
         // open() does one CreateFileW and may wait in join_previous() for an earlier writer that is still flushing:
@@ -261,26 +306,32 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         std::memcpy(p.aircraft, a.aircraft, sizeof(p.aircraft) - 1);
         rec(net::StreamKind::ClientJoined, now, &p, sizeof(p));
     }
-    // The slot may now pass State packets, and only then does the client learn it may send them.
-    g_core->set_welcomed(static_cast<uint8_t>(slot), gen, true);
     net::WelcomeMsg w{};
     w.client_id = static_cast<uint16_t>(slot + 1);
     std::memcpy(w.spawn_pos, a.spawn, sizeof(w.spawn_pos));
     w.spawn_heading = pick.heading;
     w.host_game_time = now;
-    uint8_t buf[net::kMaxMessage];
-    const size_t n = net::encode(w, buf, sizeof(buf));
-    const bool welcomed = n && g_core->send(static_cast<uint8_t>(slot), gen, buf, n, net::kChannelReliable, true);
-    if (!welcomed) {
+    std::memcpy(w.spawn_vel, pick.vel, sizeof(w.spawn_vel));
+    w.theatre_hash = theatre_hash;
+    char host_type[33] = {};
+    probe_with_aircraft(player_type_cb, host_type);
+    g_peers->set_host(g_callsign, host_type);
+    // Lets the slot's States through, then sends the Welcome, the PeerInfos (the host, the other clients) and this
+    // client's PeerInfo to the others.
+    if (!g_peers->welcome(static_cast<uint8_t>(slot), gen, w, a.callsign, a.aircraft)) {
         LOG("net: client %d: the Welcome could not be queued (out queue full); client refused", slot + 1);
         release(slot, "welcome not sent", true, kByeNone, net::LeaveReason::NoWelcome);
         request_disconnect(slot, gen);
         return;
     }
-    rec(net::StreamKind::WelcomeSent, now, buf, n);
-    LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg", slot + 1,
-        a.callsign, a.aircraft, got.obj, why, a.spawn[0], a.spawn[1], a.spawn[2],
-        static_cast<double>(pick.heading) * 180.0 / kPi);
+    uint8_t buf[net::kMaxMessage];
+    const size_t n = net::encode(w, buf, sizeof(buf));
+    if (n) rec(net::StreamKind::WelcomeSent, now, buf, n);
+    LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg, theatre %s; "
+        "host \"%s\" (%s)",
+        slot + 1, a.callsign, a.aircraft, got.obj, why, a.spawn[0], a.spawn[1], a.spawn[2],
+        static_cast<double>(pick.heading) * 180.0 / kPi, theatre_hash ? theatre.c_str() : "unknown", g_callsign,
+        host_type[0] ? host_type : "type unknown");
     if (!avatar_logic::same_type(info.type, a.aircraft)) {
         LOG("net: client %d: warning: the client flies \"%s\" but its avatar is \"%s\"; both players should fly the "
             "same type",
@@ -400,6 +451,8 @@ void handle_message(const HostEvent& e, void* player, double now) {
             net::StateMsg s;
             if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok) {
                 rec(net::StreamKind::StateReceived, now, e.data, e.len);
+                // Relayed as it came (D10): the other clients run their own receiver on it.
+                g_relayed += static_cast<unsigned>(g_peers->send_state(e.data, e.len, slot));
                 if (g_av[slot].parked && !retake(slot, s, now)) break;
                 // now is the drain time (this player step), which stands for the arrival time: up to a frame later,
                 // so the ages in the 1 Hz line include up to a frame of queue wait. Predict shows at the step's now.
@@ -467,6 +520,8 @@ void pump(void* player, double now) {
 void report(void* player, double /*now*/) {
     double pp[3];
     obj_read(player, kOffPos, pp, 3);
+    LOG("net: host jet: %u State(s) sent to %d client(s), %u relayed", g_tx_states, g_peers->count(), g_relayed);
+    g_tx_states = g_relayed = 0;
     for (int s = 0; s < net::kMaxClients; ++s) {
         Avatar& a = g_av[s];
         if (!a.active) continue;
@@ -535,6 +590,7 @@ void on_step(void* aircraft, float dt, bool is_player) {
         g_player_dt = dt;
         pump(aircraft, now);
         if (g_nclients > 0) record_host_state(aircraft, now);
+        if (g_nclients > 0 && g_tick.due(now)) send_host_state(aircraft, now);
         if (g_nclients > 0 && now >= g_next_report) {
             report(aircraft, now);
             g_next_report = std::floor(now) + 1.0;
@@ -570,6 +626,10 @@ void host_install() {
         LOG("net: host off (LAZYSF2_HOST must be a port, or a numeric IPv4 address and a port: 127.0.0.1:7777)");
         return;
     }
+    wchar_t cs[32] = {};
+    const DWORD nc = GetEnvironmentVariableW(L"LAZYSF2_CALLSIGN", cs, 32);
+    if (nc > 0 && nc < 32) avatar_logic::to_ascii(g_callsign, sizeof(g_callsign), cs);
+    if (!g_callsign[0]) std::snprintf(g_callsign, sizeof(g_callsign), "HOST");
     g_enabled = true;
 }
 
@@ -581,9 +641,10 @@ void host_on_modules_loaded() {
         return;
     }
     g_core = new (std::nothrow) net::HostCore;
+    g_peers = g_core ? new (std::nothrow) net::HostPeers(*g_core) : nullptr;
     g_stream = new (std::nothrow) net::StreamWriter;
     g_av = new (std::nothrow) Avatar[net::kMaxClients];
-    if (!g_core || !g_stream || !g_av) {
+    if (!g_core || !g_peers || !g_stream || !g_av) {
         LOG("net: host off (out of memory)");
         return;  // the step callback stays registered but does nothing: g_running is false
     }

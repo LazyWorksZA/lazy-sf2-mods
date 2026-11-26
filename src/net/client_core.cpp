@@ -465,10 +465,8 @@ void ClientCore::run() {
             }
             case MsgType::Bye: {
                 ByeMsg m;
-                // The id is 0 (the host) or the recipient's: host.cpp addresses its Byes to the client, HostCore's
-                // version refusal signs them as the host.
-                if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.client_id > kMaxClients ||
-                    (welcomed && m.client_id != 0 && m.client_id != my_id))
+                // A Bye carries its sender's id (protocol.h): from the host always 0.
+                if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.client_id != 0)
                     return drop(n_format_);
                 if (!connected || bye_seen) return drop(n_state_);
                 bye_seen = true;
