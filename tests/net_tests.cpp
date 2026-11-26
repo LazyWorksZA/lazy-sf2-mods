@@ -3727,6 +3727,12 @@ void pilot_twist_tests() {
            "head hold: left is positive yaw (seen live), right negative, 120 and 160 degrees");
     expect(pt::target_weight(pt::hold_yaw(2)) > 0 && pt::target_weight(pt::hold_yaw(4)) < 0,
            "head hold: the twist follows the held side");
+    expect(pt::tracker_axis_from_angle(0.0f) == 0 && pt::tracker_axis_from_angle(pt::kPi) == 16383 &&
+               pt::tracker_axis_from_angle(-pt::kPi) == -16383 && pt::tracker_axis_from_angle(4.0f) == 16383 &&
+               pt::tracker_axis_from_angle(std::numeric_limits<float>::quiet_NaN()) == 0,
+           "head hold: tracker axis range +-16383 for +-180 degrees, clamped, NaN 0");
+    expect(pt::tracker_axis_from_angle(pt::hold_yaw(1)) == 10922 && pt::tracker_axis_from_angle(pt::hold_yaw(4)) == -14563,
+           "head hold: 120 left and 160 right as tracker axis values");
     // A head yaw the hold could give but the seat never would (past the limit widened by the twist) gets no twist:
     // why the hold must go through the game's own clamp (the head target), as real head tracking does.
     expect(pt::twist_delta(160.0f * d, 1.0f, -100.0f * d, 100.0f * d, true) == 0.0f,

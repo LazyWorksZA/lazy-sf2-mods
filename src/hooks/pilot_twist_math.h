@@ -163,6 +163,16 @@ constexpr float hold_yaw(int step) {
 
 constexpr bool hold_active(int step) { return step > 0 && step < kHoldSteps; }
 
+/// <summary>
+/// A head angle as the head tracker axis value the inside view reads (input-manager axis 3 = yaw, 4 = pitch; +-16383
+/// is +-180 degrees), rounded and clamped to that range. NaN gives 0.
+/// </summary>
+inline int tracker_axis_from_angle(float rad) {
+    if (!(rad == rad)) return 0;
+    const float v = rad * 16383.0f / kPi;
+    return v >= 16383.0f ? 16383 : (v <= -16383.0f ? -16383 : static_cast<int>(std::lround(v)));
+}
+
 /// <summary>A short name for the log.</summary>
 constexpr const char* hold_name(int step) {
     constexpr const char* names[kHoldSteps] = {"off", "120 left", "160 left", "120 right", "160 right"};

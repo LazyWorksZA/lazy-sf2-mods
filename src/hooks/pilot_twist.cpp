@@ -109,9 +109,25 @@ float seconds_since_last() {
 
 void diag_log(void* view);
 
-// Developer head hold: the held yaw (and pitch 0) goes into the view's target angles before the game's update, as
-// the hat would put it there, so the game clamps it to the seat and smooths it like any head movement, and the twist
-// then sees it exactly as it sees real head tracking. (A head tracker sets the targets itself and overrides this.)
+// Developer head hold. The inside view's update takes its head target from one of two inputs: with a head tracker
+// (view +0xe4 set, tracker mode +0xe8 = 1) it sets the yaw/pitch targets from input-manager axes 3 and 4 every frame;
+// otherwise it integrates the hat into them. The hold feeds both: it answers the view's own axis 3/4 reads with the
+// held angles (a detour on the input manager's ReadAxis, only inside the view update on this thread), and writes the
+// targets before the update for the hat path. Either way the game clamps the target to the seat and smooths it, and
+// the twist then sees it exactly as it sees real head tracking.
+using ReadAxis_t = int(__fastcall*)(void* im, void* edx, int axis);
+ReadAxis_t o_ReadAxis = nullptr;
+void* g_read_axis_target = nullptr;  // under g_install_lock: the hooked function, once created
+thread_local bool t_in_view_update = false;
+ULONGLONG g_hold_log_next = 0;
+
+int __fastcall h_ReadAxis(void* im, void* edx, int axis) {
+    const int hold = g_hold.load(std::memory_order_relaxed);
+    if (t_in_view_update && pt::hold_active(hold) && (axis == 3 || axis == 4))
+        return axis == 3 ? pt::tracker_axis_from_angle(pt::hold_yaw(hold)) : 0;
+    return o_ReadAxis(im, edx, axis);
+}
+
 void apply_hold(void* view) {
     const int hold = g_hold.load(std::memory_order_relaxed);
     if (!pt::hold_active(hold)) return;
@@ -119,15 +135,33 @@ void apply_hold(void* view) {
     at<float>(view, kTargetYaw - 4) = 0.0f;
 }
 
+// Once a second while a hold is active: what the game made of it.
+void hold_log(void* view) {
+    const int hold = g_hold.load(std::memory_order_relaxed);
+    const ULONGLONG now = GetTickCount64();
+    if (!pt::hold_active(hold) || now < g_hold_log_next) return;
+    g_hold_log_next = now + 1000;
+    constexpr float r2d = 180.0f / pt::kPi;
+    LOG("pilot twist hold: %s held %.1f | tracker=%d mode=%d axis3 override=%d read hook=%s | target yaw +0xac=%.1f "
+        "smoothed yaw +0xdc=%.1f limits %.1f..%.1f | twist %s, added %.1f, weight %.3f",
+        pt::hold_name(hold), pt::hold_yaw(hold) * r2d, at<int>(view, kTracker), at<short>(view, kTrackerMode),
+        pt::tracker_axis_from_angle(pt::hold_yaw(hold)), o_ReadAxis ? "on" : "none", at<float>(view, kTargetYaw) * r2d,
+        at<float>(view, kYaw) * r2d, at<float>(view, kMinYaw) * r2d, at<float>(view, kMaxYaw) * r2d,
+        g_twist.load() ? "on" : "off", g_diag.delta * r2d, g_diag.weight);
+}
+
 void __fastcall h_Update(void* view, void* edx, float dt) {
     void* const outer = g_updating;  // survives a nested update
+    const bool outer_flag = t_in_view_update;
     g_updating = applies_to(view) ? view : nullptr;
     if (g_updating) apply_hold(view);
-    const bool probe = probe_output_dir() != nullptr;
-    if (probe) g_diag = {};
+    g_diag = {};
+    t_in_view_update = g_updating != nullptr;
     o_Update(view, edx, dt);
+    t_in_view_update = outer_flag;
     g_updating = outer;
-    if (probe) diag_log(view);
+    if (applies_to(view)) hold_log(view);
+    if (probe_output_dir() != nullptr) diag_log(view);
 }
 
 // Twist without feedback: the extra yaw is in the view's yaw only while the original builds this frame's camera
@@ -345,6 +379,38 @@ void pilot_twist_apply_setting() {
     ReleaseSRWLockExclusive(&g_install_lock);
 }
 
+namespace {
+
+// Developer only, first hold: hooks the input manager's ReadAxis (vtable +0x8c), resolved from the live object, so the
+// hold can answer the tracker axis reads. Left in place for the session; it passes everything through unless a hold
+// is active inside a view update. Caller holds g_install_lock.
+void hook_read_axis_locked() {
+    HMODULE vm = g_view_dll.load();
+    void* im = vm ? *static_cast<void**>(at_rva(vm, kInputManagerRva)) : nullptr;
+    if (!im) {
+        LOG("pilot twist (dev): no input manager yet; the hold uses the hat path only");
+        return;
+    }
+    void* fn = vtable_slot(im, kReadAxis);
+    HMODULE owner = nullptr;
+    wchar_t name[MAX_PATH] = L"?";
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(fn), &owner))
+        GetModuleFileNameW(owner, name, MAX_PATH);
+    MH_STATUS s = MH_CreateHook(fn, reinterpret_cast<void*>(&h_ReadAxis), reinterpret_cast<void**>(&o_ReadAxis));
+    if (s == MH_OK) s = MH_EnableHook(fn);
+    if (s == MH_OK) {
+        g_read_axis_target = fn;
+    } else {
+        o_ReadAxis = nullptr;
+        MH_RemoveHook(fn);
+    }
+    LOG("pilot twist (dev): input manager ReadAxis at %ls+0x%lx hooked for the hold: %s", wcsrchr(name, L'\\') ? wcsrchr(name, L'\\') + 1 : name,
+        static_cast<unsigned long>(static_cast<BYTE*>(fn) - reinterpret_cast<BYTE*>(owner)), MH_StatusToString(s));
+}
+
+}  // namespace
+
 void pilot_twist_dev_toggle() {
     AcquireSRWLockExclusive(&g_install_lock);
     if (!g_view_dll.load()) {
@@ -363,10 +429,11 @@ void pilot_twist_dev_cycle_hold() {
     if (!g_view_dll.load()) {
         LOG("pilot twist (dev): Ctrl+Shift+H ignored: the view hooks are not installed (no flight yet, or unavailable)");
     } else {
+        if (!g_read_axis_target) hook_read_axis_locked();
         const int step = pt::next_hold(g_hold.load());
         g_hold = step;
-        LOG("pilot twist (dev): Ctrl+Shift+H head hold %s (pitch 0, set as the head target; twist %s)%s", pt::hold_name(step),
-            g_twist.load() ? "on" : "off", step == 0 ? "; the view stays there until moved (hat or view centre)" : "");
+        LOG("pilot twist (dev): Ctrl+Shift+H head hold %s (pitch 0, as tracker axes 3/4 and the head target; twist %s)",
+            pt::hold_name(step), g_twist.load() ? "on" : "off");
         set_enabled_locked(g_twist.load());
     }
     ReleaseSRWLockExclusive(&g_install_lock);
