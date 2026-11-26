@@ -822,6 +822,8 @@ bool client_world_send(const uint8_t* data, size_t len) { return g_core && g_ses
 
 bool client_world_active() { return g_core && g_session && world_client_tag() != 0; }
 
+double client_host_now() { return g_now; }
+
 void* client_avatar_object(int peer) {
     if (!g_rm || peer < 0 || peer >= kSources) return nullptr;
     return g_rm[peer].h.obj;

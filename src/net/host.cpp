@@ -550,6 +550,16 @@ void handle_message(const HostEvent& e, void* player, double now) {
         }
         return;
     }
+    if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::WeaponLaunch)) {
+        // A client's weapon release: replayed here, and on to the other clients.
+        if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
+            weapons_apply_launch(e.data, e.len, now);
+            for (int s = 0; s < net::kMaxClients; ++s)
+                if (s != slot && g_av[s].active && !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, true))
+                    g_world_behind[s] = true;
+        }
+        return;
+    }
     if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::HitClaim)) {
         if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) hits_host_claim(slot, e.data, e.len);
         return;
@@ -884,6 +894,12 @@ void* host_avatar_object(int slot) {
 bool host_world_send_to(int slot, const uint8_t* data, size_t len, bool reliable) {
     return g_running.load(std::memory_order_relaxed) && world_send_to(slot, data, len, reliable);
 }
+
+bool host_world_send_all(const uint8_t* data, size_t len) {
+    return g_running.load(std::memory_order_relaxed) && world_send(data, len, true);
+}
+
+double net_host_now() { return client_welcomed() ? client_host_now() : sim_game_time(); }
 
 bool host_world_active() { return g_running.load(std::memory_order_relaxed) && g_nclients > 0 && world_host_streaming(); }
 

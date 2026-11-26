@@ -29,7 +29,8 @@ void usage() {
         "            [--start X,Y,Z,HEADING] [--lag MS] [--pause-at S --pause-for S] [--record DIR] [--duration SECONDS]\n"
         "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
         "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--jet none|ab|guns|ab+guns]\n"
-        "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--log FILE]\n"
+        "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S]\n"
+        "            [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
@@ -47,6 +48,8 @@ void usage() {
         "and the jet's States, not the Pongs. --jet ab sends the jet's controls (AvatarState) on a 14 s\n"
         "cycle: idle 4 s, Mil 4 s, full afterburner 4 s, engines off 2 s; guns fires the primary gun 1 s in every 4 s.\n"
         "--hit A,SLOT,MEMBER,EVERY_S sends a scripted 20 kJ gun hit on that jet (the client's seat) every EVERY_S s.\n"
+        "--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S releases WEAPON (a weapon type name, GUIDED 0 or 1) from the\n"
+        "jet's station 0 at that target (N: none) every EVERY_S s; the jet's own key is its seat in the --hit slot.\n"
         "Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
 }
 
@@ -226,7 +229,7 @@ int main(int argc, char** argv) {
                                                  "--duration", "--loss",   "--jitter",   "--log",      "--lag",
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
                                                  "--pause-at", "--pause-for", "--mission", "--fetch",
-                                                 "--out", "--world", "--world-event", "--seats", "--jet", "--hit"};
+                                                 "--out", "--world", "--world-event", "--seats", "--jet", "--hit", "--launch"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -342,6 +345,19 @@ int main(int argc, char** argv) {
             scfg.hit_a = static_cast<uint16_t>(ha);
             scfg.hit_b = static_cast<uint16_t>(hb);
             serve_only = true;
+        } else if (a == "--launch" && (v = val())) {
+            char name[24] = {}, kind = 0;
+            unsigned guided = 0, la = 0, lb = 0;
+            ok = sscanf_s(v, "%23[^,],%u,%c,%u,%u,%lf", name, static_cast<unsigned>(sizeof(name)), &guided, &kind, 1u, &la,
+                          &lb, &scfg.launch_every) == 6 &&
+                 (kind == 'A' || kind == 'G' || kind == 'N') && scfg.launch_every > 0 && la < 0x10000 && lb < 0x10000;
+            scfg.launch = ok;
+            scfg.launch_weapon = name;
+            scfg.launch_guided = guided != 0;
+            scfg.launch_kind = kind == 'A' ? 1 : kind == 'G' ? 2 : 0;
+            scfg.launch_a = static_cast<uint16_t>(la);
+            scfg.launch_b = static_cast<uint16_t>(lb);
+            serve_only = true;
         } else if (a == "--jet" && (v = val())) {
             ok = bot::parse_jet_script(v, &scfg.jet);
             serve_only = true;
@@ -374,6 +390,7 @@ int main(int argc, char** argv) {
         scfg.pause_for = pause_for;
     }
     if (serve && !script_given) scfg.script = bot::Script::Orbit;
+    scfg.launch_shooter_a = scfg.hit ? scfg.hit_a : 0;
     if (serve && scfg.script == bot::Script::Formation) {
         std::printf("--serve cannot fly formation: it is the lead\n");
         return 1;

@@ -1,8 +1,8 @@
-// Gun hits across PCs (Phase 5 T3). The shooter's PC claims each hit of its player's guns on an object it does not
-// own (a REMOTEOBJECT copy, whose damage the remote block drops); the host checks the claim and applies it to its own
-// object, with the claimer's avatar as the attacker, or forwards it to the PC that owns the target when that is a
-// player's jet. On the host, gun hits on a client's avatar (from the host player or its AI) are forwarded the same
-// way. Game thread only: the damage calls come from the objects' updates. See lazy-sf2-recon: network-recon §9.5.
+// Hits across PCs (Phase 5 T3, T4). The shooter's PC claims each hit of its player's guns and unguided stores
+// (bombs, rockets) on an object it does not own (a REMOTEOBJECT copy, whose damage the remote block drops); the host
+// checks the claim and applies it to its own object, with the claimer's avatar as the attacker, or forwards it to the
+// PC that owns the target when that is a player's jet. On the host, hits on a client's avatar go to that client the
+// same way, except a player's guided missile: the target's PC flies the live copy of it (weapon_net.cpp). Game thread only: the damage calls come from the objects' updates. See lazy-sf2-recon: network-recon §9.5.
 #include <windows.h>
 
 #include <cmath>
@@ -25,6 +25,7 @@ Stats g_st;
 uint16_t g_seq = 0;
 net::HitRate g_rate[5];  // per claimer (client 1..4)
 net::HitLimits g_limits;
+const net::HitLimits g_store_limits = net::store_limits();
 
 float as_float(uint32_t bits) {
     float f;
@@ -64,7 +65,7 @@ bool read_f3(uint32_t p, float out[3]) {
 bool hit_of_call(int slot, const uint32_t* args, const double tpos[3], net::HitMsg* m) {
     *m = net::HitMsg{};
     m->slot = static_cast<uint8_t>(slot);
-    m->gun = static_cast<uint16_t>(args[4] - net::kGunWeaponBase);
+    if (!net::hit_weapon_to_wire(args[4], &m->weapon)) return false;
     double p0[3] = {}, p1[3] = {};
     if (!read_d3(args[0], p0)) return false;
     if (slot == 4) {
@@ -99,7 +100,7 @@ int apply_hit(void* target, const double tpos[3], const net::HitMsg& m, uint32_t
         v[i] = static_cast<float>(m.p1[i] / 20.0);
     }
     const uint32_t ap0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p0));
-    const uint32_t weapon = net::kGunWeaponBase + m.gun;
+    const uint32_t weapon = net::hit_weapon_from_wire(m.weapon);
     const uint32_t energy = bits_of(static_cast<float>(m.energy));
     const uint32_t r2 = bits_of(static_cast<float>(m.radius2 / 1.0e4));
     uint32_t args[8] = {};
@@ -130,8 +131,10 @@ bool send_apply_to(int slot, net::HitMsg m) {
 }  // namespace
 
 bool hits_on_damage(void* obj, int slot, const uint32_t* args, bool remote) {
-    if (!net::weapon_is_gun(args[4])) return false;
+    uint16_t wire = 0;
+    if (!net::hit_weapon_to_wire(args[4], &wire)) return false;
     if (remote ? !client_world_active() : !host_world_active()) return false;
+    const bool guided = !net::weapon_is_gun(args[4]) && weapon_guided(args[4]);
     double tpos[3];
     uint32_t tid = 0;
     bool alive = false;
@@ -144,28 +147,36 @@ bool hits_on_damage(void* obj, int slot, const uint32_t* args, bool remote) {
     m.target_a = key.target_a;
     m.target_b = key.target_b;
     if (remote) {
-        // A client: only our own player's rounds are claimed (others' copies fire visual-only rounds anyway).
-        if (args[3] != world_player_id()) return false;
+        // A client: only our own player's rounds and unguided stores are claimed (others' copies are visual-only,
+        // and a guided missile's live copy flies on its target's PC).
+        if (args[3] != world_player_id() || guided) return false;
         m.seq = ++g_seq;
         uint8_t buf[sizeof(net::HitMsg)];
         const size_t n = net::encode_hit(m, net::WorldType::HitClaim, buf, sizeof(buf));
         const bool ok = n && client_world_send(buf, n);
         const uint64_t c = ok ? ++g_st.claims : ++g_st.claim_fail;
         if (log_milestone(c))
-            LOG("hits: %s gun hit %llu on %c %03u.%02u (slot %d, %u J)%s", ok ? "claimed" : "could NOT claim",
-                static_cast<unsigned long long>(c), m.target_kind == 1 ? 'A' : 'G', static_cast<unsigned>(m.target_a),
-                static_cast<unsigned>(m.target_b), slot, static_cast<unsigned>(m.energy),
+            LOG("hits: %s %s hit %llu on %c %03u.%02u (slot %d, %u J)%s", ok ? "claimed" : "could NOT claim",
+                net::hit_is_store(m) ? "store" : "gun", static_cast<unsigned long long>(c), m.target_kind == 1 ? 'A' : 'G',
+                static_cast<unsigned>(m.target_a), static_cast<unsigned>(m.target_b), slot, static_cast<unsigned>(m.energy),
                 ok ? "" : " (the send queue is full)");
         return true;
     }
-    // The host: a gun hit on a client's avatar goes to that client, who owns the jet.
+    // The host: a hit on a client's avatar goes to that client, who owns the jet.
     const int s = host_avatar_slot(obj);
     if (s < 0) return false;
     if (!world_key_of_object(args[3], &m.shooter_kind, &m.shooter_a, &m.shooter_b)) m.shooter_kind = 0;
+    if (guided) {
+        // A player's guided missile is flown live on the target's PC: dropped here. The host's AI missiles are
+        // decided here (their copies do not fly on the client) and forwarded.
+        void* sh = world_object_of_key(m.shooter_kind, m.shooter_a, m.shooter_b, nullptr);
+        if (args[3] == world_player_id() || (sh && host_avatar_slot(sh) >= 0)) return true;
+    }
     const bool ok = send_apply_to(s, m);
     const uint64_t c = ok ? ++g_st.forwarded : ++g_st.forward_fail;
     if (log_milestone(c))
-        LOG("hits: gun hit %llu on client %d's avatar %s to its owner", static_cast<unsigned long long>(c), s + 1,
+        LOG("hits: %s hit %llu on client %d's avatar %s to its owner", net::hit_is_store(m) ? "store" : "gun",
+            static_cast<unsigned long long>(c), s + 1,
             ok ? "forwarded" : "NOT forwarded (queue full)");
     return true;  // dropped here either way: only the owner applies it
 }
@@ -185,10 +196,10 @@ void hits_host_claim(int claimer_slot, const uint8_t* data, size_t len) {
     const bool have_shooter = shooter && world_object_state(shooter, spos, &sid, &salive);
     const double d = have && have_shooter ? dist3(tpos, spos) : 1e9;
     const net::HitVerdict v = net::check_hit_claim(m, d, have && alive && have_shooter, g_rate[claimer_slot + 1],
-                                                   wall_s(), g_limits);
+                                                   wall_s(), net::hit_is_store(m) ? g_store_limits : g_limits);
     if (v != net::HitVerdict::Ok) {
         if (log_milestone(++g_st.refused))
-            LOG("hits: client %d's gun hit on %c %03u.%02u refused: %s (%llu refused so far)", claimer_slot + 1,
+            LOG("hits: client %d's hit on %c %03u.%02u refused: %s (%llu refused so far)", claimer_slot + 1,
                 m.target_kind == 1 ? 'A' : 'G', static_cast<unsigned>(m.target_a), static_cast<unsigned>(m.target_b),
                 net::hit_verdict_name(v), static_cast<unsigned long long>(g_st.refused));
         return;
@@ -198,19 +209,19 @@ void hits_host_claim(int claimer_slot, const uint8_t* data, size_t len) {
         if (!world_key_of_object(sid, &m.shooter_kind, &m.shooter_a, &m.shooter_b)) m.shooter_kind = 0;
         const bool ok = send_apply_to(owner, m);
         if (log_milestone(ok ? ++g_st.forwarded : ++g_st.forward_fail))
-            LOG("hits: client %d's gun hit on client %d %s", claimer_slot + 1, owner + 1,
+            LOG("hits: client %d's hit on client %d %s", claimer_slot + 1, owner + 1,
                 ok ? "forwarded to its owner" : "NOT forwarded (queue full)");
         return;
     }
     const int r = apply_hit(target, tpos, m, sid);
     if (r == 0 && log_milestone(++g_st.applied))
-        LOG("hits: client %d's gun hit applied to %c %03u.%02u (slot %u, %u J, the attacker is its avatar 0x%08lx; "
+        LOG("hits: client %d's hit applied to %c %03u.%02u (slot %u, %u J, the attacker is its avatar 0x%08lx; "
             "%llu so far)",
             claimer_slot + 1, m.target_kind == 1 ? 'A' : 'G', static_cast<unsigned>(m.target_a),
             static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.slot), static_cast<unsigned>(m.energy),
             static_cast<unsigned long>(sid), static_cast<unsigned long long>(g_st.applied));
     else if (r != 0)
-        LOG("hits: client %d's gun hit NOT applied: %s", claimer_slot + 1,
+        LOG("hits: client %d's hit NOT applied: %s", claimer_slot + 1,
             r == 1 ? "the target's damage interface is not the one we read" : "the call faulted");
 }
 
@@ -232,7 +243,7 @@ void hits_client_apply(const uint8_t* data, size_t len) {
     if (!world_object_state(target, tpos, &id2, &alive) || !alive) return;
     const int r = apply_hit(target, tpos, m, sid);
     if (log_milestone(++g_st.applied_here) || r != 0)
-        LOG("hits: gun hit %llu on our jet from %s%03u.%02u: %s", static_cast<unsigned long long>(g_st.applied_here),
+        LOG("hits: hit %llu on our jet from %s%03u.%02u: %s", static_cast<unsigned long long>(g_st.applied_here),
             m.shooter_kind == 1 ? "A " : m.shooter_kind == 2 ? "G " : "unknown ", static_cast<unsigned>(m.shooter_a),
             static_cast<unsigned>(m.shooter_b),
             r == 0 ? "applied" : r == 1 ? "NOT applied (damage interface not the one we read)" : "FAULTED");

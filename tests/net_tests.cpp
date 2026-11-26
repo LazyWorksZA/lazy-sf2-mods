@@ -8144,7 +8144,7 @@ void hit_claim_tests() {
     h.target_a = 4;
     h.target_b = 1;
     h.slot = 4;
-    h.gun = 12;
+    h.weapon = 12;
     h.energy = 150000;
     h.p0[1] = -300;
     h.p1[1] = 100;
@@ -8152,7 +8152,7 @@ void hit_claim_tests() {
     HitMsg r{};
     const size_t n = encode_hit(h, WorldType::HitClaim, b, sizeof(b));
     expect(sizeof(HitMsg) == 43 && n == 43 && peek_world_type(b, n) == 27 &&
-               decode_hit(b, n, WorldType::HitClaim, r) == Status::Ok && r.peer == 3 && r.gun == 12 &&
+               decode_hit(b, n, WorldType::HitClaim, r) == Status::Ok && r.peer == 3 && r.weapon == 12 &&
                r.energy == 150000 && r.p0[1] == -300 && decode_hit(b, n, WorldType::HitApply, r) == Status::BadType &&
                decode_hit(b, n - 1, WorldType::HitClaim, r) == Status::Truncated,
            "hit: 43 bytes, claim and apply are told apart, size checked");
@@ -8236,6 +8236,95 @@ void hit_claim_tests() {
     expect(claims == 3 && s.res.hit_claims_rx == 3, "loopback: the client's hit claims reach the host");
 }
 
+void weapon_launch_tests() {
+    std::printf("weapon launches (Phase 5 T4)\n");
+    WeaponLaunchMsg w{};
+    w.peer = 2;
+    w.seq = 5;
+    w.shooter_kind = 1;
+    w.shooter_a = 3;
+    w.shooter_b = 1;
+    w.target_kind = 1;
+    w.target_a = 7;
+    w.flags = kLaunchGuided;
+    w.pos[0] = -123456789;
+    w.wvel[1] = 6000;
+    std::memset(w.weapon, 'X', sizeof(w.weapon));  // no terminator on the wire: the decoder adds one
+    uint8_t b[96];
+    WeaponLaunchMsg r{};
+    const size_t n = encode(w, b, sizeof(b));
+    expect(sizeof(WeaponLaunchMsg) == 78 && n == 78 && peek_world_type(b, n) == 29 && decode(b, n, r) == Status::Ok &&
+               r.pos[0] == -123456789 && r.wvel[1] == 6000 && r.flags == kLaunchGuided && r.weapon[23] == '\0' &&
+               std::strlen(r.weapon) == 23 && decode(b, n - 1, r) == Status::Truncated,
+           "launch: 78 bytes, the weapon's name always terminated");
+    expect(launch_role(false, true, true, true) == LaunchRole::Visual &&
+               launch_role(true, true, false, false) == LaunchRole::LiveNative &&
+               launch_role(true, false, true, true) == LaunchRole::LiveSpawn &&
+               launch_role(true, false, true, false) == LaunchRole::Visual &&
+               launch_role(true, false, false, false) == LaunchRole::Visual,
+           "launch: a guided missile is live only on its target's PC (our jet, or the host's own object), else visual");
+    expect(!own_launch_stays_live(true, true, true) && own_launch_stays_live(true, true, false) &&
+               own_launch_stays_live(false, true, true) && own_launch_stays_live(true, false, true),
+           "launch: the host's own missile at a client's jet is visual-only (that client flies the live one)");
+    uint16_t wire = 0;
+    expect(hit_weapon_to_wire(0xffff + 7, &wire) && wire == 7 && hit_weapon_from_wire(wire) == 0xffff + 7 &&
+               hit_weapon_to_wire(42, &wire) && wire == (0x8000 | 42) && hit_weapon_from_wire(wire) == 42 &&
+               !hit_weapon_to_wire(0x9000, &wire),
+           "hit: guns and stores told apart on the wire");
+    HitMsg bomb{};
+    bomb.slot = 6;
+    bomb.weapon = static_cast<uint16_t>(0x8000 | 42);
+    bomb.energy = 1700000000u;
+    bomb.p0[0] = 25000;  // the blast 250 m from the target
+    HitRate rate;
+    expect(check_hit_claim(bomb, 20000.0, true, rate, 1.0, store_limits()) == HitVerdict::Ok &&
+               check_hit_claim(bomb, 20000.0, true, rate, 1.0) == HitVerdict::TooMuchEnergy,
+           "check: a 1.7 GJ bomb from a jet 20 km away passes the store limits, not the gun limits");
+    std::printf("    estimate: 78 B a launch (about 120 B on the wire), relayed by the host to each other client; a few\n"
+                "    a minute in combat. Bomb and rocket hits are claims (43 B each, one per object in the blast)\n");
+
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    s.cfg.launch = true;
+    s.cfg.launch_weapon = "AIM-9J";
+    s.cfg.launch_guided = true;
+    s.cfg.launch_kind = 1;
+    s.cfg.launch_a = 3;
+    s.cfg.launch_b = 1;
+    s.cfg.launch_shooter_a = 3;
+    s.cfg.launch_every = 1.0;
+    if (!s.start()) return expect(false, "bot serve listening (--launch)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<WeaponLaunchMsg> got;
+    bool sent = false;
+    WorldPacket wp[8];
+    serve_run_for(c, 3.5, [&] {
+        const size_t k = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k; ++i) {
+            WeaponLaunchMsg m{};
+            if (decode(wp[i].data, wp[i].len, m) == Status::Ok) got.push_back(m);
+        }
+        if (!sent && !c.welcomes.empty()) {
+            WeaponLaunchMsg own{};
+            std::snprintf(own.weapon, sizeof(own.weapon), "Mk82");
+            uint8_t ob[sizeof(own)];
+            sent = c.core.send_world(ob, encode(own, ob, sizeof(ob)));
+        }
+        return false;
+    });
+    s.finish();
+    c.core.stop(false);
+    expect(got.size() >= 2 && !std::strcmp(got[0].weapon, "AIM-9J") && (got[0].flags & kLaunchGuided) &&
+               got[0].target_a == 3 && got[0].target_b == 1 && got[0].shooter_a == 3 && got[0].seq == 1 &&
+               got[0].pos[2] == 300000 - 200,
+           "loopback: --launch releases a guided AIM-9J at the client's seat from the bot's jet, about once a second");
+    expect(sent && s.res.launches_rx == 1 && s.res.last_rx_weapon == "Mk82",
+           "loopback: the client's launch reaches the host with its weapon's name");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -8314,6 +8403,7 @@ int main() {
     jet_controls_tests();
     jet_mirror_tests();
     hit_claim_tests();
+    weapon_launch_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

@@ -224,6 +224,48 @@ struct Serve {
             cfg.hit_kind == 1 ? 'A' : 'G', static_cast<unsigned>(cfg.hit_a), static_cast<unsigned>(cfg.hit_b));
     }
 
+    // --launch: a scripted release from the bot's jet.
+    double launch_t0 = -1, launch_next = 0;
+    uint16_t launch_seq = 0;
+    void launch_tick() {
+        if (!c.on || !res.jet_started) {
+            launch_t0 = -1;
+            return;
+        }
+        if (launch_t0 < 0) {
+            launch_t0 = host_t;
+            launch_next = host_t + cfg.launch_every;
+        }
+        if (host_t < launch_next) return;
+        launch_next += cfg.launch_every;
+        const Flight::Sample f = flight.sample();
+        WeaponLaunchMsg m{};
+        m.seq = ++launch_seq;
+        m.shooter_kind = 1;
+        m.shooter_a = cfg.launch_shooter_a;
+        m.shooter_b = static_cast<uint16_t>(cfg.host_member);
+        m.target_kind = cfg.launch_kind;
+        m.target_a = cfg.launch_a;
+        m.target_b = cfg.launch_b;
+        m.station = 0;
+        m.flags = cfg.launch_guided ? kLaunchGuided : 0;
+        m.host_ms = static_cast<uint32_t>(host_t * 1000.0);
+        for (int i = 0; i < 3; ++i) {
+            m.pos[i] = static_cast<int32_t>(std::lround(f.pos[i] * 100.0));
+            m.wvel[i] = static_cast<int16_t>(std::lround(f.vel[i] * 20.0));
+        }
+        m.pos[2] -= 200;  // 2 m below the jet, as from a pylon
+        m.ang[1] = static_cast<int16_t>(std::lround(std::remainder(f.ang[1], 2.0 * kPi) / (2.0 * kPi) * 65536.0));
+        m.bvel[1] = static_cast<int16_t>(std::lround(bot::kSpeed * 20.0));  // forward at the jet's speed
+        std::snprintf(m.weapon, sizeof(m.weapon), "%s", cfg.launch_weapon.c_str());
+        uint8_t buf[sizeof(WeaponLaunchMsg)];
+        const size_t n = encode(m, buf, sizeof(buf));
+        if (n && core.send_world(c.slot, c.gen, buf, n, true)) ++res.launches_sent;
+        say("bot serve: scripted launch %u: %s%s at %s%u.%u", static_cast<unsigned>(res.launches_sent), m.weapon,
+            cfg.launch_guided ? " (guided)" : "", m.target_kind == 1 ? "A " : m.target_kind == 2 ? "G " : "none ",
+            static_cast<unsigned>(m.target_a), static_cast<unsigned>(m.target_b));
+    }
+
     template <typename... A>
     void say(const char* fmt, A... args) const {
         char line[320];
@@ -352,6 +394,19 @@ struct Serve {
             res.last_rx_guns = m.guns;
             return;
         }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::WeaponLaunch)) {
+            WeaponLaunchMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
+            ++res.launches_rx;
+            res.last_rx_weapon = m.weapon;
+            say("bot serve: client %u launch %u: %s%s at %s%u.%u from station %u, pos (%.0f, %.0f, %.0f)",
+                static_cast<unsigned>(m.peer), static_cast<unsigned>(m.seq), m.weapon,
+                (m.flags & kLaunchGuided) ? " (guided)" : "",
+                m.target_kind == 1 ? "A " : m.target_kind == 2 ? "G " : "none ", static_cast<unsigned>(m.target_a),
+                static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.station), m.pos[0] / 100.0,
+                m.pos[1] / 100.0, m.pos[2] / 100.0);
+            return;
+        }
         if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::HitClaim)) {
             HitMsg m{};
             if (!c.on || e.slot != c.slot || e.gen != c.gen ||
@@ -359,9 +414,9 @@ struct Serve {
                 return;
             ++res.hit_claims_rx;
             if (res.hit_claims_rx == 1 || res.hit_claims_rx % 50 == 0)
-                say("bot serve: client %u gun hit claim %u: %c %u.%u slot %u gun %u, %u J", static_cast<unsigned>(m.peer),
+                say("bot serve: client %u hit claim %u: %c %u.%u slot %u weapon 0x%04x, %u J", static_cast<unsigned>(m.peer),
                     res.hit_claims_rx, m.target_kind == 1 ? 'A' : 'G', static_cast<unsigned>(m.target_a),
-                    static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.slot), static_cast<unsigned>(m.gun),
+                    static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.slot), static_cast<unsigned>(m.weapon),
                     static_cast<unsigned>(m.energy));
             return;
         }
@@ -621,6 +676,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
         if (!cfg.world.empty() || !cfg.world_events.empty()) sv.world_tick();
         if (cfg.jet != JetScript::None) sv.jet_tick();
         if (cfg.hit) sv.hit_tick();
+        if (cfg.launch) sv.launch_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

@@ -22,8 +22,9 @@ enum class WorldType : uint8_t {
     WorldSnapshot = 26,   // host to a client after its Welcome, reliable: the head of a late-join snapshot
     HitClaim = 27,        // a shooter's PC to the host, reliable: one hit of its own gun on another PC's object
     HitApply = 28,        // the host to the PC that owns a player's jet, reliable: damage for that jet
+    WeaponLaunch = 29,    // a player's weapon release, reliable: client to host, host to clients (relayed)
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 28;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 29;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -374,8 +375,8 @@ inline bool avatar_lock_started(const AvatarStateMsg& prev, const AvatarStateMsg
 
 #pragma pack(push, 1)
 /// <summary>
-/// One hit as the game's damage interface took it (network-recon §9.5): slot 4 kinetic (from, to), 5 directed (pos,
-/// velocity), 6 blast (pos). Positions are relative to the target as the sender saw it, in centimetres (about 327 m
+/// One hit of a gun round or an unguided store (bomb, rocket) as the game's damage interface took it (network-recon
+/// §9.5): slot 4 kinetic (from, to), 5 directed (pos, velocity), 6 blast (pos). Positions are relative to the target as the sender saw it, in centimetres (about 327 m
 /// either way); a directed hit's velocity is in 0.05 m/s. HitClaim goes from the shooter's PC to the host (the host
 /// sets peer from the connection); HitApply from the host to the PC that owns the target (a player's jet), which
 /// applies it to that jet with the shooter's copy as the attacker.
@@ -389,7 +390,7 @@ struct HitMsg {
     uint8_t shooter_kind;  // KeyKind, 0 = unknown (HitClaim: the host uses the claimer's own jet)
     uint16_t shooter_a, shooter_b;
     uint8_t slot;     // damage interface slot 4, 5 or 6
-    uint16_t gun;     // the gun's data id (the weapon id minus 0xffff)
+    uint16_t weapon;  // hit_weapon_to_wire: a gun's data id, or 0x8000 | a store's weapon id
     uint32_t energy;  // joules
     uint32_t radius2;  // directed and blast: radius squared in cm^2
     int16_t p0[3];    // kinetic: from; directed and blast: the position
@@ -398,7 +399,7 @@ struct HitMsg {
     uint8_t flag;     // directed: the last argument
 };
 #pragma pack(pop)
-static_assert(sizeof(HitMsg) == 43);  // 4:2 peer, 6:2 seq, 8:5 target key, 13:5 shooter key, 18:1 slot, 19:2 gun,
+static_assert(sizeof(HitMsg) == 43);  // 4:2 peer, 6:2 seq, 8:5 target key, 13:5 shooter key, 18:1 slot, 19:2 weapon,
                                       // 21:4 energy, 25:4 r2, 29:6 p0, 35:6 p1, 41:1 warhead, 42:1 flag
 size_t encode_hit(const HitMsg& m, WorldType t, uint8_t* out, size_t cap);
 /// <summary>t is WorldType::HitClaim or HitApply; checks the slot and the size.</summary>
@@ -406,7 +407,25 @@ Status decode_hit(const uint8_t* data, size_t len, WorldType t, HitMsg& out);
 
 /// <summary>The weapon id a gun round's hit carries (BulletObject: gun data id + 0xffff); lower ids are stores.</summary>
 inline constexpr uint32_t kGunWeaponBase = 0xffff;
-inline bool weapon_is_gun(uint32_t weapon) { return weapon >= kGunWeaponBase && weapon < kGunWeaponBase + 0x10000; }
+inline bool weapon_is_gun(uint32_t weapon) { return weapon >= kGunWeaponBase && weapon < kGunWeaponBase + 0x8000; }
+inline constexpr uint16_t kHitStoreBit = 0x8000;
+/// <summary>A damage call's weapon id on the wire: guns as their data id, stores (ids below 0x8000) with bit 15. False
+/// for an id that fits neither.</summary>
+inline bool hit_weapon_to_wire(uint32_t weapon, uint16_t* out) {
+    if (weapon_is_gun(weapon)) {
+        *out = static_cast<uint16_t>(weapon - kGunWeaponBase);
+        return true;
+    }
+    if (weapon < kHitStoreBit) {
+        *out = static_cast<uint16_t>(kHitStoreBit | weapon);
+        return true;
+    }
+    return false;
+}
+inline uint32_t hit_weapon_from_wire(uint16_t w) {
+    return (w & kHitStoreBit) ? static_cast<uint32_t>(w & ~kHitStoreBit) : kGunWeaponBase + w;
+}
+inline bool hit_is_store(const HitMsg& m) { return (m.weapon & kHitStoreBit) != 0; }
 /// <summary>A relative offset in metres as the wire's centimetres (clamped; not finite gives 0).</summary>
 inline int16_t hit_rel_to_wire(double m) {
     if (!(m == m) || m > 1e6 || m < -1e6) return 0;
@@ -414,6 +433,66 @@ inline int16_t hit_rel_to_wire(double m) {
     return static_cast<int16_t>(c > 32767.0 ? 32767 : c < -32768.0 ? -32768 : (c < 0 ? c - 0.5 : c + 0.5));
 }
 inline double hit_rel_from_wire(int16_t c) { return c / 100.0; }
+
+
+// ---- weapon launches (Phase 5 T4) ----
+
+#pragma pack(push, 1)
+/// <summary>
+/// A player's weapon release (missile, bomb, rocket), as its PC saw it at MissileObject Release. The shooter and the
+/// target are mission keys (target kind 0: none, or a placed target, flag kLaunchPlacedTarget). Position in cm (world),
+/// angles as the missile holds them (2^-16 turns), velocities in 0.05 m/s (body: right, forward, up; and world).
+/// weapon is the weapon type's name (ASCII, NUL padded): every PC finds its own id for it.
+/// </summary>
+struct WeaponLaunchMsg {
+    Header h;
+    uint16_t peer;  // the shooter's owner: 0 the host, k client k (the host sets it from the connection)
+    uint16_t seq;   // per owner, increasing: the launch's id
+    uint8_t shooter_kind;
+    uint16_t shooter_a, shooter_b;
+    uint8_t target_kind;
+    uint16_t target_a, target_b;
+    uint8_t station;  // the shooter's selected station
+    uint8_t flags;    // kLaunch*
+    uint32_t host_ms;  // the release in host game time
+    int32_t pos[3];
+    int16_t ang[3];
+    int16_t bvel[3];
+    int16_t wvel[3];
+    char weapon[24];
+};
+#pragma pack(pop)
+static_assert(sizeof(WeaponLaunchMsg) == 78);  // 4:2 peer, 6:2 seq, 8:5 shooter, 13:5 target, 18:1 station, 19:1 flags,
+                                               // 20:4 ms, 24:12 pos, 36:6 ang, 42:6 bvel, 48:6 wvel, 54:24 weapon
+inline constexpr uint8_t kLaunchGuided = 0x01;         // the weapon has a seeker (GuidanceType != 0)
+inline constexpr uint8_t kLaunchPastBoost = 0x02;      // descriptor +0x06 (the motor is past its boost)
+inline constexpr uint8_t kLaunchPlacedTarget = 0x04;   // aimed at placed scenery: not replicated as a target
+size_t encode(const WeaponLaunchMsg& m, uint8_t* out, size_t cap);
+Status decode(const uint8_t* data, size_t len, WeaponLaunchMsg& out);
+
+/// <summary>Who flies a replicated launch where (the brief's authority model, network-recon §9.4 and §11.7).</summary>
+enum class LaunchRole : uint8_t {
+    Visual,      // a copy that does no damage (the shooter's avatar fires it, REMOTEOBJECT)
+    LiveNative,  // a guided missile at our own jet: the avatar's own fire path launches it live
+    LiveSpawn,   // a guided missile at an object the host owns, on the host: spawned and made live here
+};
+/// <summary>
+/// The role of a launch on this PC. guided: the weapon has a seeker; target_is_us: the target is our own jet;
+/// we_are_host and target_host_owned: the host, and the target is one of its objects (its AI, vehicles, ships, or
+/// its own jet, not a client's avatar).
+/// </summary>
+inline LaunchRole launch_role(bool guided, bool target_is_us, bool we_are_host, bool target_host_owned) {
+    if (!guided) return LaunchRole::Visual;
+    if (target_is_us) return LaunchRole::LiveNative;
+    if (we_are_host && target_host_owned) return LaunchRole::LiveSpawn;
+    return LaunchRole::Visual;
+}
+/// <summary>The shooter's own missile does damage only on the PC that owns its target: false on the host for a
+/// guided missile at a client's jet (that client flies the live one). A client's own weapons are already blocked
+/// from damaging remote copies.</summary>
+inline bool own_launch_stays_live(bool guided, bool we_are_host, bool target_is_client_jet) {
+    return !(guided && we_are_host && target_is_client_jet);
+}
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>
 class MissionAssembly {

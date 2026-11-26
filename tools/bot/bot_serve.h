@@ -60,6 +60,14 @@ struct ServeConfig {
     uint8_t hit_kind = 1;
     uint16_t hit_a = 0, hit_b = 0;
     double hit_every = 0;
+    /// <summary>--launch: a scripted weapon release (WeaponLaunch from the bot's jet, its seat in the --hit slot or
+    /// slot 0) every `every` seconds: the weapon's name, guided or not, and a target key (kind 0: none).</summary>
+    bool launch = false;
+    std::string launch_weapon;
+    bool launch_guided = false;
+    uint8_t launch_kind = 0;
+    uint16_t launch_a = 0, launch_b = 0, launch_shooter_a = 0;
+    double launch_every = 0;
 };
 
 struct ServeResult {
@@ -83,6 +91,9 @@ struct ServeResult {
     uint8_t last_rx_throttle = 0, last_rx_engines = 0, last_rx_guns = 0;
     uint32_t hit_claims_rx = 0;  // the client's HitClaims received
     uint32_t hits_sent = 0;      // --hit HitApplies queued
+    uint32_t launches_sent = 0;  // --launch WeaponLaunches queued
+    uint32_t launches_rx = 0;    // the client's WeaponLaunches received
+    std::string last_rx_weapon;
 };
 
 /// <summary>

@@ -95,6 +95,7 @@ void __fastcall h_Release(void* self, void* edx, int* attached) {
     o_Release(self, edx, attached);
     if (attached) return;  // attached to a station: carried, not in flight
     void* obj = static_cast<char*>(self) - kInterfaceDelta;
+    weapons_on_release(obj);  // the network layer (weapon_net.cpp); inert outside a shared-world session
     WeaponInfo info;
     if (!read_weapon_info(obj, &info)) return;
     // Before taking our lock: the aircraft table has its own, and nothing may hold both in the other order.

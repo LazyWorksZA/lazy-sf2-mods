@@ -1797,6 +1797,10 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         hits_client_apply(data, len);
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::WeaponLaunch)) {
+        weapons_apply_launch(data, len, host_now);
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
         net::AvatarStateMsg am;
         if (net::decode(data, len, am) == net::Status::Ok) world_avatar_apply(data, len, client_avatar_object(am.peer));

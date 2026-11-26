@@ -412,6 +412,16 @@ bool host_world_active();
 /// <summary>Client (client.cpp): a reliable world message for the host, and whether a shared-world session runs.</summary>
 bool client_world_send(const uint8_t* data, size_t len);
 bool client_world_active();
+/// <summary>Host: a reliable world message for every client (true alone or if any queued it).</summary>
+bool host_world_send_all(const uint8_t* data, size_t len);
+/// <summary>The host's game time: the game time on the host, the client's estimate of it on a client.</summary>
+double net_host_now();
+double client_host_now();
+/// <summary>Weapon launches (weapon_net.cpp): the weapon id's seeker (GuidanceType != 0); a released weapon (from
+/// the weapon tracker's Release hook, in flight only); a peer's launch to replay here (host_now in host time).</summary>
+bool weapon_guided(uint32_t weapon_id);
+void weapons_on_release(void* missile);
+void weapons_apply_launch(const uint8_t* data, size_t len, double host_now);
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>
 bool client_connect_target(char* host, size_t cap, uint16_t* port);
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>
