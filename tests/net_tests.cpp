@@ -2365,11 +2365,13 @@ void tacview_tests() {
     // Weapon type classification and the ring slot size.
     {
         using LazyWorks::SF2Patch::hooks::WeaponClass;
-        using LazyWorks::SF2Patch::hooks::classify_weapon_type;
-        expect(classify_weapon_type(0) == WeaponClass::Bomb && classify_weapon_type(1) == WeaponClass::Missile &&
-                   classify_weapon_type(7) == WeaponClass::Missile && classify_weapon_type(2) == WeaponClass::Rocket &&
-                   classify_weapon_type(-5) == WeaponClass::Missile,
-               "weapon class: 0 bomb, 1 and 7 missile, 2 rocket, anything else a missile");
+        using LazyWorks::SF2Patch::hooks::classify_weapon;
+        expect(classify_weapon(0, 0) == WeaponClass::Bomb && classify_weapon(0, 4) == WeaponClass::Bomb &&
+                   classify_weapon(1, 4) == WeaponClass::Bomb && classify_weapon(1, 5) == WeaponClass::Bomb &&
+                   classify_weapon(1, 0) == WeaponClass::Rocket && classify_weapon(1, 10) == WeaponClass::Missile &&
+                   classify_weapon(1, 13) == WeaponClass::Missile && classify_weapon(7, 0) == WeaponClass::Missile &&
+                   classify_weapon(7, 9) == WeaponClass::Missile && classify_weapon(-5, 0) == WeaponClass::Missile,
+               "weapon class: type 0 bomb, type 1 guidance 0 rocket, guided bombs bombs, other guided a missile");
         expect(sizeof(TacviewRec) == 168, "tacview: ring slot is 168 bytes");
     }
 

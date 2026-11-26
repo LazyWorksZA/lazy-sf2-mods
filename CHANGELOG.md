@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Fixed
+
+- **Rockets show as rockets in Tacview recordings, not as missiles.** Unguided rockets are now written with the Tacview rocket type. Bombs (including laser and TV guided ones) stay bombs, and missiles stay missiles.
+
 ### Releases
 
 - **The Tacview add-on is published on its own.** Each release now also has `Lazy-SF2-Patch-<version>-Tacview-AddOn.zip`, for players who install `winmm.dll` by hand. Extract it into `%APPDATA%\Tacview\AddOns\`.
