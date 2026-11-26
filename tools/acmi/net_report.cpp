@@ -49,6 +49,11 @@ bool read_file(const uint8_t* data, size_t size, File& f, std::string& err, cons
     net::StreamStatus st;
     while ((st = rd.next(rec)) == net::StreamStatus::Ok) {
         if (!std::isfinite(rec.time)) continue;
+        if (const uint8_t pv = net::record_protocol_version(rec); pv != 0 && pv != net::kVersion) {
+            err = std::string("the ") + which + " file was recorded with protocol v" + std::to_string(pv) +
+                  "; this build reads v" + std::to_string(net::kVersion) + " (record it again)";
+            return false;
+        }
         if (rec.kind == static_cast<uint8_t>(StreamKind::SessionInfo) && !f.have_session &&
             rec.payload_len == sizeof(f.session)) {
             std::memcpy(&f.session, rec.payload, sizeof(f.session));

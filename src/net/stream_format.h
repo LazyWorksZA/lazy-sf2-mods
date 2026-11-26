@@ -128,6 +128,25 @@ struct StreamRecord {
     uint32_t payload_len = 0;
 };
 
+/// <summary>
+/// The protocol version byte (protocol.h Header) of a record that holds a wire message (kinds 1 to 4, 7 and 10), or 0
+/// for other kinds and payloads too short to have one. A file recorded by another protocol version (v3 before Phase 5)
+/// is refused by the tools with that version named, rather than read as bad samples.
+/// </summary>
+inline uint8_t record_protocol_version(const StreamRecord& r) {
+    switch (static_cast<StreamKind>(r.kind)) {
+        case StreamKind::StateReceived:
+        case StreamKind::HostState:
+        case StreamKind::WelcomeSent:
+        case StreamKind::ByeReceived:
+        case StreamKind::LocalState:
+        case StreamKind::PeerInfoReceived:
+            return r.payload && r.payload_len >= 4 && r.payload[0] == 'L' && r.payload[1] == 'Z' ? r.payload[2] : 0;
+        default:
+            return 0;
+    }
+}
+
 /// <summary>Parses a stream held in memory. It never reads outside [data, data + size), and never allocates.</summary>
 class StreamReader {
 public:

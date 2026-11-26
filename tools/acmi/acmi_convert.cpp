@@ -104,6 +104,10 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
             ++info.skipped_bad;
             continue;
         }
+        if (const uint8_t pv = net::record_protocol_version(rec); pv != 0 && pv != net::kVersion) {
+            if (!info.other_protocol++) info.other_version = pv;
+            continue;
+        }
         switch (rec.kind) {
             case static_cast<uint8_t>(StreamKind::HostState):
             case static_cast<uint8_t>(StreamKind::StateReceived):

@@ -27,6 +27,8 @@ struct Info {
     size_t skipped_bad = 0;   // samples dropped (non-finite values, or a client that never joined)
     size_t objects = 0;       // objects created
     size_t ghost_samples = 0; // transform lines written for RemoteShown tracks (with Options::ghosts)
+    size_t other_protocol = 0;    // wire-message records of another protocol version (not read)
+    uint8_t other_version = 0;    // ... the first such version
 };
 
 /// <summary>

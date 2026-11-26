@@ -1699,6 +1699,27 @@ void acmi_tests() {
                    o2.find("\n1,T=") != std::string::npos,
                "corrupt length: stops, keeps the earlier records");
     }
+    {  // A v3 recording (before Phase 5): its States are not read as bad samples, and the version is named.
+        std::vector<uint8_t> g(48 + 2000);
+        size_t m = encode_stream_header(10.0, "", g.data(), g.size());
+        for (int k = 0; k < 3; ++k) {
+            StateMsg hs{};
+            hs.game_time = 10.0 + 0.1 * k;
+            const size_t len = encode(hs, buf, sizeof(buf));
+            buf[2] = 3;
+            m += encode_stream_record(StreamKind::HostState, hs.game_time, buf, len, g.data() + m, g.size() - m);
+        }
+        std::string o3;
+        LazyWorks::SF2Patch::acmi::Info i3;
+        LazyWorks::SF2Patch::acmi::convert_stream(g.data(), m, opt, o3, i3);
+        expect(i3.other_protocol == 3 && i3.other_version == 3 && i3.samples_in == 0 && i3.skipped_bad == 0,
+               "a v3 recording: its records are counted as another protocol version, not as bad samples");
+        LazyWorks::SF2Patch::acmi::ReportOptions ro3;
+        LazyWorks::SF2Patch::acmi::Report r3;
+        expect(!LazyWorks::SF2Patch::acmi::make_report(g.data(), m, g.data(), m, ro3, r3) &&
+                   r3.error.find("protocol v3; this build reads v4") != std::string::npos,
+               "a v3 recording: the report refuses it and names both versions");
+    }
     {  // A client joins again while its object is still shown: the old one is removed first. Headings that print as 360 or -0 are 0.
         std::vector<uint8_t> g(48 + 4000);
         size_t m = encode_stream_header(10.0, "", g.data(), g.size());

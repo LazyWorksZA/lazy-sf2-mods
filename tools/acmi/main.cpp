@@ -9,6 +9,7 @@
 
 #include "acmi/acmi_convert.h"
 #include "acmi/net_report.h"
+#include "net/protocol.h"
 
 namespace {
 
@@ -117,6 +118,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s: not a valid stream file (%s)\n", pos[0], net::stream_status_name(info.end));
         return 1;
     }
+    if (info.other_protocol && info.samples_in == 0) {
+        std::fprintf(stderr, "%s: recorded with protocol v%u; this build reads v%u (record it again)\n", pos[0],
+                     static_cast<unsigned>(info.other_version), static_cast<unsigned>(net::kVersion));
+        return 1;
+    }
+    if (info.other_protocol)
+        std::fprintf(stderr, "warning: %zu records of protocol v%u skipped (this build reads v%u)\n", info.other_protocol,
+                     static_cast<unsigned>(info.other_version), static_cast<unsigned>(net::kVersion));
     if (info.end != net::StreamStatus::End)
         std::fprintf(stderr, "warning: the stream stops early (%s); converted what was read\n",
                      net::stream_status_name(info.end));
