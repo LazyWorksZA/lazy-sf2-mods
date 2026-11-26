@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Player features
+
+- **Tacview structures.** Recordings now show the placed buildings and bridges (hangars, bunkers, factories, town buildings) of the target areas the mission populates, as static objects on the ground, written once per recording; those the game already shows as live objects (guns, SAM sites, radars, mission targets) are not doubled. In single missions only the buildings the game actually draws are recorded, and a building the game destroys gets Tacview's destroyed event and an explosion.
+
 ### Developer tools (off unless enabled)
 
 - **Probe hotkeys for the Phase 4 recon.** Ctrl+Shift+J moves the player's own jet 1 km ahead and turns it 90 degrees right; Ctrl+Shift+K moves it 1 km ahead only. Either then logs the jet's state once a second for 5 s. The probe also logs once per flight whether the player's aircraft steps before or after the other aircraft in a frame.

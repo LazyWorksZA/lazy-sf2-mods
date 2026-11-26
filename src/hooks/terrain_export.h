@@ -1,4 +1,4 @@
-// Exports the loaded theatre's heightmap, ground texture and airfields for Tacview. See lazy-sf2-recon: recon-notes
+// Exports the loaded theatre's heightmap, ground texture, airfields and placed structures for Tacview. See lazy-sf2-recon: recon-notes
 // §19.9 and §21.
 #pragma once
 
@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "acmi/acmi_format.h"
+#include "acmi/airfields.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -22,6 +23,7 @@ struct TextureEntry {
 struct TextureCapture {
     std::wstring folder;       // the theatre's folder: the files are read from here (absolute)
     std::wstring targets_ini;  // bare names
+    std::wstring theatre_ini;  // the theatre's own ini (its base name): names the types ini
     std::wstring data_ini;
     int tiles_w = 0, tiles_h = 0;  // 0 when the tile field was not usable: no texture, but airfields still work
     double tile_m = 0;             // a tile's side in metres
@@ -63,12 +65,30 @@ struct AerodromeMark {
     double heading = 0;
 };
 
-enum class AerodromeList { Pending, Ready, None };
+enum class StaticList { Pending, Ready, None };
 
 /// <summary>
 /// The airfields of theatre id: Pending until the export thread has read them, then Ready (out shares the list) or
 /// None. The list is never copied under the lock. Any thread.
 /// </summary>
-AerodromeList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out);
+StaticList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out);
+
+/// <summary>A placed building or bridge for the recording: world metres, z on the terrain, heading in radians.</summary>
+struct StructureMark {
+    std::string name;
+    double x = 0, y = 0, z = 0;
+    double heading = 0;
+    bool bridge = false;
+};
+
+/// <summary>A theatre's structures by target area: marks[first[i] .. first[i + 1]) are area i's.</summary>
+struct StructureList {
+    std::vector<acmi::TargetArea> areas;
+    std::vector<uint32_t> first;  // areas.size() + 1 entries
+    std::vector<StructureMark> marks;
+};
+
+/// <summary>The structures of theatre id, published like the airfields (see terrain_aerodromes). Any thread.</summary>
+StaticList terrain_structures(const std::string& id, std::shared_ptr<const StructureList>& out);
 
 }  // namespace LazyWorks::SF2Patch::hooks

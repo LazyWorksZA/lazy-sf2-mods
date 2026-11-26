@@ -3216,6 +3216,261 @@ void aerodrome_core_tests() {
     static_assert(TacviewRec::kSeriesAerodrome != TacviewRec::kSeriesBullet && (TacviewRec::kSeriesAerodrome & 0x3f) == 0, "series bit is its own");
 }
 
+void structure_tests() {
+    using namespace LazyWorks::SF2Patch::acmi;
+    using LazyWorks::SF2Patch::hooks::AircraftSide;
+    std::printf("tacview structures\n");
+    const double deg = kPi / 180;
+    const auto targets = utf16le(
+        L"[TargetArea001]\r\nName=Base\r\nPosition=100000,200000\r\nAirfieldDataFile=af.ini\r\n"
+        L"Target[001].Type=Runway1\r\nTarget[001].Offset=0,0\r\nTarget[001].Heading=90\r\n"
+        L"Target[002].Type=Hangar1\r\nTarget[002].Offset=0,1000\r\nTarget[002].Heading=0\r\n"
+        L"Target[003].Type=AAA\r\nTarget[003].Offset=5,5\r\nTarget[003].Heading=0\r\n"
+        L"Target[004].Type=Unlisted1\r\nTarget[004].Offset=100,0\r\nTarget[004].Heading=-90\r\n\r\n"
+        L"[TargetArea002]\r\nName=USS Somebody\r\nPosition=5,5\r\nCarrierStation=TRUE\r\n"
+        L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,0\r\n\r\n"
+        L"[TargetArea003]\r\nName=Far Away\r\nPosition=5,5\r\nOffMapAirBase=1\r\n"
+        L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,0\r\n\r\n"
+        L"[TargetArea004]\r\nName=River\r\nPosition=5000,6000\r\nRotateToRunwayHeading=0\r\n"
+        L"Target[001].Type=Runway2\r\nTarget[001].Heading=90\r\n"
+        L"Target[002].Type=vBridge1\r\nTarget[002].Offset=10,20\r\nTarget[002].Heading=45\r\n\r\n"
+        L"[TargetArea005]\r\nName=Village\r\nPosition=1000,1000\r\n"
+        L"Target[001].Type=hangar1\r\nTarget[001].Offset=-100,50\r\nTarget[001].Heading=30\r\n");
+    const auto types = ansi(
+        "[TargetType001]\r\nName=Hangar1\r\nFullName=Hangar\r\nTargetType=HANGAR\r\nUseGroundObject=FALSE\r\n"
+        "[TargetType002]\r\nName=AAA\r\nFullName=AAA Site\r\nTargetType=AAA\r\nUseGroundObject=TRUE\r\n"
+        "[TargetType003]\r\nName=Runway1\r\nFullName=Runway\r\nTargetType=MEDIUM_RUNWAY\r\nUseGroundObject=FALSE\r\n"
+        "[TargetType004]\r\nName=vBridge1\r\nFullName=Paul Doumer Bridge\r\nTargetType=BRIDGE\r\nUseGroundObject=FALSE\r\n");
+    const Ini t = parse_ini(targets.data(), targets.size());
+    const Ini ty = parse_ini(types.data(), types.size());
+    const auto placed = structures_from(t, ty);
+    const auto& s = placed.items;
+    expect(s.size() == 4, "structures: runways, live types, carriers and off-map bases left out");
+    if (s.size() == 4) {
+        // A = 90 (the runway's heading): offset (0, 1000) turns to (+1000, 0), the heading to 90.
+        expect(s[0].name == "Hangar" && std::fabs(s[0].x - 101000) < 1e-6 && std::fabs(s[0].y - 200000) < 1e-6 &&
+                   std::fabs(s[0].heading - 90 * deg) < 1e-9 && !s[0].bridge,
+               "structures: an airfield's object is turned by the area heading, named by FullName");
+        // Offset (100, 0) at A = 90: (0, -100); heading 90 - 90 = 0.
+        expect(s[1].name == "Unlisted1" && std::fabs(s[1].x - 100000) < 1e-6 && std::fabs(s[1].y - 199900) < 1e-6 &&
+                   std::fabs(s[1].heading) < 1e-9,
+               "structures: a type the types ini does not list keeps its type id");
+        expect(s[2].bridge && s[2].name == "Paul Doumer Bridge" && std::fabs(s[2].x - 5010) < 1e-6 && std::fabs(s[2].y - 6020) < 1e-6 &&
+                   std::fabs(s[2].heading - 45 * deg) < 1e-9,
+               "structures: RotateToRunwayHeading=0 keeps offsets and headings as given; a BRIDGE type is a bridge");
+        expect(s[3].name == "Hangar" && std::fabs(s[3].x - 900) < 1e-6 && std::fabs(s[3].y - 1050) < 1e-6 &&
+                   std::fabs(s[3].heading - 30 * deg) < 1e-9,
+               "structures: an area without a runway has heading 0; type names match without case");
+    }
+    const Ini none = parse_ini(nullptr, 0);
+    const auto bare = structures_from(t, none).items;
+    expect(bare.size() == 5 && bare[1].name == "AAA" && !bare[3].bridge && bare[3].name == "vBridge1",
+           "structures: without a types ini, only runways (by name) are left out");
+    expect(structures_from(none, ty).items.empty() && structures_from(none, ty).areas.empty(), "structures: an empty targets ini has none");
+
+    const auto theatre = ansi("[Terrain]\r\nTargetFile=desert_targets.ini\r\nTargetTypeFile=desert_types.ini\r\n");
+    const Ini th = parse_ini(theatre.data(), theatre.size());
+    expect(types_file_name(th, "x_TARGETS.INI") == "desert_types.ini", "types file: the theatre ini names it");
+    expect(types_file_name(none, "GermanyCE_targets.INI") == "GermanyCE_TYPES.INI" && types_file_name(none, "foo.ini").empty(),
+           "types file: else from the targets ini's name, or none");
+
+    // The core: dedupe against live ground objects, the line format, written once, removed only by the final frame.
+    TacviewCoreConfig cfg;
+    cfg.ref_lat = -4.5;
+    cfg.ref_lon = -25.0;
+    TacviewCore core{cfg};
+    auto structure = [](uint64_t seq, const char* name, double x, double y, float heading, bool bridge) {
+        TacviewRec r = make_rec(seq, false, AircraftSide::Unknown, name, 2.0, x, y, 0, 0.0f, heading, 0.0f);
+        r.obj_class = bridge ? TacviewRec::kBridge : TacviewRec::kStructure;
+        return r;
+    };
+    std::string out;
+    TacviewRec gun = make_rec(7, false, AircraftSide::Enemy, "AAA", 1.0, 1000, 1000, 0, 0, 0, 0);
+    gun.obj_class = TacviewRec::kGroundStatic;
+    TacviewRec truck = make_rec(8, false, AircraftSide::Enemy, "Truck", 1.0, 3000, 3000, 0, 0, 0, 0);
+    truck.obj_class = TacviewRec::kGroundVehicle;
+    core.add(gun);
+    core.add(truck);
+    core.end_frame(1.0, out, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile);
+    std::string o1;
+    core.add(structure(1, "Hangar", 1010, 1000, 0.0f, false));          // 10 m from the gun: the game's own object
+    core.add(structure(2, "Hangar", 1020, 1000, static_cast<float>(kPi / 2), false));  // 20 m: kept
+    core.add(structure(3, "Bridge", 5000, 5000, 0.0f, true));
+    core.add(structure(4, "Shed", 3005, 3000, 0.0f, false));            // next to a vehicle: kept
+    core.end_frame(2.0, o1, 0);
+    const auto m = make_mapping(-4.5);
+    const std::string want2 = "7000002,T=" + num(1020 * m.lon_scale, 9) + "|" + num(1000 * m.lat_scale, 9) +
+                              "|0|0|0|90|1020|1000|90,Name=Hangar,Type=Ground+Static+Building";
+    const auto l1 = lines_of(o1);
+    expect(l1.size() == 4 && l1[0] == "#1.000" && l1[1] == want2, "structures: one line each, id 0x7000000+seq, Ground+Static+Building, no coalition");
+    expect(o1.find("7000001,") == std::string::npos, "structures: one within 15 m of a live ground object is skipped");
+    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Bridge\n") != std::string::npos,
+           "structures: a bridge is Ground+Static+Bridge");
+    expect(o1.find("7000004,T=") != std::string::npos, "structures: vehicles do not hide them");
+    // The next chunk: a repeat writes nothing; a new one is added; the earlier ones stay.
+    std::string o2;
+    core.add(structure(2, "Hangar", 1020, 1000, static_cast<float>(kPi / 2), false));
+    core.add(structure(5, "Barn", 8000, 8000, 0.0f, false));
+    core.end_frame(3.0, o2, 0);
+    expect(count_of(o2, "7000002") == 0 && count_of(o2, "\n7000005,T=") == 1 && o2.find("-700000") == std::string::npos,
+           "structures: written once; a later chunk does not remove the earlier ones");
+    expect(core.stats().structures == 4 && core.stats().structures_skipped == 1, "structures: the counts");
+    // Other series' frames leave them alone, even when the gun goes.
+    std::string o3;
+    core.add(make_rec(1, true, AircraftSide::Friendly, "P", 4.0, 0, 0, 100, 0, 0, 0));
+    core.end_frame(4.0, o3, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+    core.end_frame(5.0, o3, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile | TacviewRec::kSeriesAerodrome);
+    expect(o3.find("-2000007\n") != std::string::npos && o3.find("-700000") == std::string::npos,
+           "structures: frames of other series never remove them");
+    std::string o4;
+    core.end_frame(6.0, o4);
+    expect(count_of(o4, "\n-700000") + (o4.rfind("-700000", 0) == 0 ? 1 : 0) == 4 && core.live_objects() == 0,
+           "structures: the final frame removes all of them");
+    static_assert(TacviewRec::series_of(TacviewRec::kStructure) == TacviewRec::kSeriesStructure &&
+                      TacviewRec::series_of(TacviewRec::kBridge) == TacviewRec::kSeriesStructure,
+                  "series");
+    static_assert((TacviewRec::kSeriesStructure & 0x7f) == 0 && (TacviewRec::kSeriesAll & TacviewRec::kSeriesStructure) != 0,
+                  "the structure series bit is its own, and the final frame names it");
+
+    // Areas: radius, index, and the game's rotation rule (airfield areas only, targets after a runway only).
+    expect(placed.areas.size() == 3 && s.size() == 4 && s[0].area == 0 && s[1].area == 0 && s[2].area == 1 && s[3].area == 2,
+           "structures: each belongs to its area; carriers and off-map bases have no area");
+    expect(placed.areas.size() == 3 && std::fabs(placed.areas[0].radius - 1000) < 1e-9 &&
+               std::fabs(placed.areas[2].radius - std::hypot(100.0, 50.0)) < 1e-9 && placed.areas[1].x == 5000,
+           "structures: an area's radius reaches its farthest placed object");
+    {
+        const auto t2b = utf16le(
+            L"[TargetArea001]\r\nName=Strip\r\nPosition=0,0\r\nRadius=5000\r\nAirfieldDataFile=x.ini\r\n"
+            L"Target[003].Type=Hangar1\r\nTarget[003].Offset=0,100\r\nTarget[003].Heading=0\r\n"
+            L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,100\r\nTarget[001].Heading=0\r\n"
+            L"Target[002].Type=RwyMod\r\nTarget[002].Heading=90\r\n\r\n"
+            L"[TargetArea002]\r\nName=Town\r\nPosition=1000,0\r\n"
+            L"Target[001].Type=Runway1\r\nTarget[001].Heading=90\r\n"
+            L"Target[002].Type=Hangar1\r\nTarget[002].Offset=0,100\r\nTarget[002].Heading=0\r\n");
+        const auto ty2b = ansi("[TargetType001]\r\nName=Hangar1\r\nFullName=Hangar\r\nTargetType=HANGAR\r\n"
+                               "[TargetType002]\r\nName=RwyMod\r\nTargetType=SMALL_RUNWAY\r\n"
+                               "[TargetType003]\r\nName=Runway1\r\nTargetType=MEDIUM_RUNWAY\r\n");
+        const Ini t2 = parse_ini(t2b.data(), t2b.size());
+        const Ini ty2 = parse_ini(ty2b.data(), ty2b.size());
+        const auto p2 = structures_from(t2, ty2);
+        const auto& i2 = p2.items;
+        expect(i2.size() == 3 && p2.areas.size() == 2 && p2.areas[0].radius == 5000, "structures: a runway by category is left out; Radius kept when larger");
+        if (i2.size() == 3) {
+            expect(std::fabs(i2[0].x) < 1e-9 && std::fabs(i2[0].y - 100) < 1e-9 && std::fabs(i2[0].heading) < 1e-12,
+                   "structures: a target before the runway is not turned (targets by number, not file order)");
+            expect(std::fabs(i2[1].x - 100) < 1e-6 && std::fabs(i2[1].y) < 1e-6 && std::fabs(i2[1].heading - 90 * deg) < 1e-9,
+                   "structures: a target after it is turned by its heading");
+            expect(std::fabs(i2[2].x - 1000) < 1e-9 && std::fabs(i2[2].y - 100) < 1e-9 && std::fabs(i2[2].heading) < 1e-12,
+                   "structures: an area without an airfield is never turned");
+        }
+        const AirfieldLoader none_loader = [](const std::string&) { return std::vector<uint8_t>{}; };
+        const auto af2 = airfields_from(t2, none_loader, &ty2);
+        const auto af3 = airfields_from(t2, none_loader);
+        expect(af2.size() == 1 && std::fabs(af2[0].heading - 90 * deg) < 1e-9 && af3.size() == 1 && std::fabs(af3[0].heading) < 1e-12,
+               "airfields: the runway by category with the types ini, by name without it");
+    }
+
+    // Picking areas: the game's own set, else near the player or holding a live ground object.
+    {
+        const TargetArea areas[3] = {{0, 0, 1000}, {50000, 0, 1000}, {100000, 0, 500}};
+        uint8_t on[3] = {9, 9, 9};
+        const double active[1][2] = {{50000.5, 0}};
+        AreaPick pk;
+        pk.use_active = true;
+        pk.active = active;
+        pk.n_active = 1;
+        pk.have_player = true;  // ignored with the game's set
+        expect(pick_areas(areas, 3, pk, on) == 1 && on[0] == 0 && on[1] == 1 && on[2] == 0, "pick: exactly the game's populated areas");
+        pk.n_active = 0;
+        expect(pick_areas(areas, 3, pk, on) == 0, "pick: an empty game set picks none");
+        const double ground[1][2] = {{100000, 500}};
+        AreaPick fb;
+        fb.have_player = true;
+        fb.player[0] = 0;
+        fb.player[1] = 31000;  // exactly radius + range
+        fb.range = 30000;
+        fb.ground = ground;
+        fb.n_ground = 1;
+        expect(pick_areas(areas, 3, fb, on) == 2 && on[0] == 1 && on[1] == 0 && on[2] == 1,
+               "pick: fallback by the player's reach and by a live ground object inside the radius");
+        fb.player[1] = 31001;
+        fb.n_ground = 0;
+        expect(pick_areas(areas, 3, fb, on) == 0, "pick: beyond the reach, no ground objects: none");
+    }
+
+    expect(utf8_prefix("abc", 2) == 2 && utf8_prefix("a\xc3\xbc", 2) == 1 && utf8_prefix("a\xc3\xbc", 3) == 3 &&
+               utf8_prefix("\xe2\x82\xac" "x", 2) == 0,
+           "utf8_prefix: never cuts a character");
+    expect(TacviewWriter::ring_fits(0, 0, 64, 63) && !TacviewWriter::ring_fits(0, 0, 64, 64) &&
+               TacviewWriter::ring_fits(10, 0, 64, 53) && !TacviewWriter::ring_fits(10, 0, 64, 54) &&
+               TacviewWriter::ring_fits(5, 0xfffffffeu, 64, 56) && !TacviewWriter::ring_fits(5, 0xfffffffeu, 64, 57),
+           "tacview writer: ring_fits at the boundary, and across the index wrap");
+
+    // The 15 m boundary, markers and repeats of a skipped one.
+    {
+        TacviewCore c2{cfg};
+        std::string ob;
+        TacviewRec g2 = make_rec(1, false, AircraftSide::Enemy, "AAA", 1.0, 0, 0, 0, 0, 0, 0);
+        g2.obj_class = TacviewRec::kGroundStatic;
+        c2.add(g2);
+        c2.end_frame(1.0, ob, TacviewRec::kSeriesGroundStatic);
+        c2.add(structure(1, "A", 15.0, 0, 0.0f, false));
+        c2.add(structure(2, "B", 15.001, 0, 0.0f, false));
+        TacviewRec dead = structure(3, "C", 9000, 0, 0.0f, false);
+        dead.destroyed = TacviewRec::kDestroyed;
+        c2.add(dead);
+        std::string oc;
+        c2.end_frame(2.0, oc, 0);
+        c2.add(structure(1, "A", 15.0, 0, 0.0f, false));
+        c2.end_frame(3.0, oc, 0);
+        expect(oc.find("7000001,") == std::string::npos && oc.find("7000002,T=") != std::string::npos &&
+                   oc.find("7000003") == std::string::npos && c2.stats().structures == 1,
+               "structures: 15 m is still the game's object, just over it is not; a marker or a repeat writes nothing");
+    }
+
+    // A destroyed structure: the event, an explosion, its removal; only once.
+    {
+        TacviewCore c3{cfg};
+        std::string o;
+        c3.add(structure(4, "Fuel Tank", 2000, 3000, 0.0f, false));
+        c3.add(structure(5, "Bridge", 2500, 3000, 0.0f, true));
+        c3.end_frame(1.0, o, 0);
+        std::string od;
+        TacviewRec boom = structure(4, "", 0, 0, 0.0f, false);
+        boom.destroyed = TacviewRec::kDestroyed;
+        boom.t = 2.0;
+        c3.add(boom);
+        TacviewRec bridge_boom = structure(5, "", 0, 0, 0.0f, false);
+        bridge_boom.obj_class = TacviewRec::kStructure;  // the marker's class need not say bridge: one family
+        bridge_boom.destroyed = TacviewRec::kDestroyed;
+        c3.add(bridge_boom);
+        c3.end_frame(2.0, od, 0);
+        const size_t ev = od.find("0,Event=Destroyed|7000004|"), rm = od.find("-7000004\n");
+        expect(ev != std::string::npos && rm != std::string::npos && ev < rm && od.find("Type=Misc+Explosion") != std::string::npos &&
+                   od.find("0,Event=Destroyed|7000005|") != std::string::npos && od.find("-7000005\n") != std::string::npos,
+               "structures: a destroyed one gets its Destroyed event, an explosion and its removal");
+        std::string oe;
+        c3.add(boom);
+        c3.end_frame(3.0, oe, 0);
+        std::string of;
+        c3.end_frame(9.0, of);
+        expect(oe.find("7000004") == std::string::npos && of.find("7000004") == std::string::npos && of.find("7000005") == std::string::npos &&
+                   c3.stats().structures_destroyed == 2 && c3.live_objects() == 0,
+               "structures: destroyed once; the final frame does not remove it again");
+    }
+    {
+        const double pts[4][2] = {{0, 0}, {10, 0}, {20, 0}, {10, 0.5}};
+        const uint8_t taken[4] = {0, 1, 0, 0};
+        expect(find_near(pts, 4, 10.4, 0, 2.0, nullptr) == 1 && find_near(pts, 4, 10.1, 0.4, 2.0, nullptr) == 3 &&
+                   find_near(pts, 4, 10.4, 0, 2.0, taken) == 3 && find_near(pts, 4, 0.5, 0, 2.0, taken) == 0 &&
+                   find_near(pts, 4, 50, 0, 2.0, nullptr) == 4 && find_near(pts, 0, 0, 0, 2.0, nullptr) == 0,
+               "find_near: the nearest within the tolerance, never a taken one; n when none");
+    }
+
+    TacviewWriter w(64);
+    expect(!w.can_take(1), "tacview writer: can_take is false while nothing is open");
+}
+
 void placement_tests() {
     using namespace LazyWorks::SF2Patch::acmi;
     const Placement none = place_theatre(false, 10.817, 51.111, 1000000.0, 1000000.0);
@@ -3279,6 +3534,7 @@ int main() {
     terrain_tests();
     texture_tests();
     aerodrome_core_tests();
+    structure_tests();
     placement_tests();
     gameplay_row_splice_tests();
 

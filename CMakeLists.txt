@@ -57,6 +57,7 @@ add_library(lazysf2 SHARED
     src/hooks/game_files.cpp
     src/hooks/wic_jpeg.cpp
     src/hooks/world_walk.cpp
+    src/hooks/mission_areas.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
