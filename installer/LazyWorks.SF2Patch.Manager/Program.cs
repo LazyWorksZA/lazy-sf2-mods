@@ -211,11 +211,15 @@ static class Program
     {
         Log($"uninstall hook: user={CurrentUser()}");
         TacviewHook(() => TacviewAddOn.Uninstall(AppData));
-        // The detected folder and the one the player chose (usually the same).
-        string?[] candidates = [ModInstaller.FindGameDir(Log), GameLocator.SavedChoice(Env)];
-        foreach (string game in candidates.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
-            UninstallFrom(game);
-        GameLocator.ForgetChoice(Env, Log);
+        // The detected folder and the one the player chose (usually the same). The saved choice stays in the
+        // registry: an upgrade may run the old uninstall after the new install, and a reinstall finds it.
+        foreach (string game in UninstallTargets(Env, Log)) UninstallFrom(game);
+    }
+
+    internal static IEnumerable<string> UninstallTargets(IGameEnvironment env, Action<string> log)
+    {
+        string?[] candidates = [GameLocator.Find(env, log), GameLocator.SavedChoice(env)];
+        return candidates.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     static void UninstallFrom(string game)

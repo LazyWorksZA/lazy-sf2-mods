@@ -194,9 +194,14 @@ public sealed class GameLocatorTests
         Assert.Equal("HKLM", GameLocator.SaveChoice(_env, Game(@"G:\mine")));
         Assert.Equal(@"G:\mine", GameLocator.SavedChoice(_env));
         Assert.Equal(@"G:\mine", Find());
-        GameLocator.ForgetChoice(_env, _log.Add);
-        Assert.Null(GameLocator.SavedChoice(_env));
-        Assert.Null(Find());
+    }
+
+    [Fact]
+    public void Uninstall_targets_include_the_saved_folder_and_keep_the_key()
+    {
+        GameLocator.SaveChoice(_env, Game(@"G:\mine"));
+        Assert.Equal([@"G:\mine"], Program.UninstallTargets(_env, _log.Add));
+        Assert.Equal(@"G:\mine", GameLocator.SavedChoice(_env));
     }
 
     [Fact]

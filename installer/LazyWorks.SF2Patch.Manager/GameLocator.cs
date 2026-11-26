@@ -162,14 +162,6 @@ public static class GameLocator
         return env.SetString(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey, SavedValue, dir) ? "HKCU" : null;
     }
 
-    /// <summary>Removes the remembered folder from both hives (the uninstall hook).</summary>
-    public static void ForgetChoice(IGameEnvironment env, Action<string> log)
-    {
-        bool lm = env.DeleteKey(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey);
-        bool cu = env.DeleteKey(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey);
-        log($"game folder: saved choice removed (HKLM ok={lm}, HKCU ok={cu})");
-    }
-
     /// <summary>The folder saved by <see cref="SaveChoice"/>, if any (HKLM first), whether or not it is still valid.</summary>
     public static string? SavedChoice(IGameEnvironment env) =>
         env.GetString(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey, SavedValue)
