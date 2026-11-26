@@ -3168,6 +3168,70 @@ void texture_tests() {
                "texture xml: patch corners from the world square");
         expect(has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"), "texture xml: patch structure");
     }
+
+    // The base texture in bands of tile rows (north first), runways painted per band, is the image composed whole.
+    {
+        std::vector<Image> tiles(3);
+        for (int k = 0; k < 3; ++k) {
+            tiles[k].w = tiles[k].h = 4;
+            tiles[k].px.resize(64);
+            for (size_t i = 0; i < 64; ++i) tiles[k].px[i] = static_cast<uint8_t>(k * 50 + i);
+        }
+        const std::vector<RGB> colours = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+        const uint16_t field[15] = {0, 1, 2, 2, 1, 0, 1, 1, 2, 0, 0, 2, 1, 2, 0};  // 3 wide, 5 high, row 0 south
+        const uint8_t frot[15] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2};
+        const double mpp = 2000.0 / 4;
+        RGBImage whole;
+        compose(3, 5, 4, field, frot, tiles, colours, whole);
+        paint_runway(whole, mpp, 3000, 4100, 0.3, 3000, 600);  // crosses the band edge at 4000 m
+        std::vector<uint8_t> banded;
+        for (int top = 5; top > 0; top -= 2) {
+            PatchTiles pt;
+            pt.ty0 = (std::max)(0, top - 2);
+            pt.nx = 3;
+            pt.ny = top - pt.ty0;
+            RGBImage band;
+            compose_patch(pt, 3, 4, field, frot, tiles, colours, band);
+            paint_runway(band, mpp, 3000, 4100 - pt.ty0 * 2000.0, 0.3, 3000, 600);
+            banded.insert(banded.end(), band.px.begin(), band.px.end());
+        }
+        expect(!whole.px.empty() && banded == whole.px,
+               "base texture bands: the same pixels as the whole image, runway across a band edge");
+    }
+
+    // The size of an existing texture, from its header.
+    {
+        const std::vector<uint8_t> j = {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x4a, 0x46, 0xff, 0xc4, 0x00, 0x03, 0x00,
+                                        0xff, 0xc0, 0x00, 0x11, 0x08, 0x1f, 0x40, 0x0f, 0xa0, 0x03};
+        int w = 0, h = 0;
+        expect(jpeg_size(j.data(), j.size(), w, h) && w == 4000 && h == 8000, "jpeg size: from the frame header, after other segments");
+        std::vector<uint8_t> prog = j;
+        prog[14] = 0xc2;
+        expect(jpeg_size(prog.data(), prog.size(), w, h) && w == 4000, "jpeg size: progressive");
+        std::vector<uint8_t> scan = j;
+        scan[14] = 0xda;
+        expect(!jpeg_size(scan.data(), scan.size(), w, h), "jpeg size: a scan before any frame header");
+        std::vector<uint8_t> dht = j;
+        dht[14] = 0xc4;  // a Huffman table, not a frame header
+        expect(!jpeg_size(dht.data(), dht.size(), w, h), "jpeg size: DHT is not a frame header");
+        expect(!jpeg_size(j.data(), 18, w, h), "jpeg size: cut short");
+        const uint8_t png[4] = {0x89, 'P', 'N', 'G'};
+        expect(!jpeg_size(png, 4, w, h) && !jpeg_size(nullptr, 0, w, h), "jpeg size: not a JPEG");
+    }
+
+    // The files of the export before the rename: exact shapes only.
+    {
+        expect(is_pre_rename_file("LazySF2-GermanyCE.jpg", ".jpg") && is_pre_rename_file("lazysf2-GermanyCE-AF001.JPG", ".jpg") &&
+                   is_pre_rename_file("LazySF2-GermanyCE.xml", ".xml") && is_pre_rename_file("LazySF2-GermanyCE.raw", ".raw"),
+               "pre-rename: LazySF2- names with the extension, any case");
+        expect(!is_pre_rename_file("LazySF2Patch-GermanyCE.jpg", ".jpg") && !is_pre_rename_file("LazySF2Patch-GermanyCE.xml", ".xml"),
+               "pre-rename: LazySF2Patch- names are never matched");
+        expect(!is_pre_rename_file("LazySF2-.jpg", ".jpg") && !is_pre_rename_file("LazySF2-GermanyCE.jpg", ".xml") &&
+                   !is_pre_rename_file("LazySF2-GermanyCE.jpg.bak", ".jpg") && !is_pre_rename_file("MyLazySF2-x.jpg", ".jpg") &&
+                   !is_pre_rename_file("LazySF2-a\\b.jpg", ".jpg") && !is_pre_rename_file("LazySF2-a/b.jpg", ".jpg") &&
+                   !is_pre_rename_file("LazySF2.GermanyCE.jpg", ".jpg"),
+               "pre-rename: nothing else (empty stem, other extension, suffix, prefix, path, dotted)");
+    }
 }
 }  // namespace
 

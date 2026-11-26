@@ -49,7 +49,8 @@ constexpr int kMaxTiles = 512;      // tiles per side
 constexpr int kMaxTextures = 512;
 constexpr int kTileToHeightRatio = 4;  // heightmap samples per tile, per side
 
-constexpr int kTexturePixelsPerTile = 8;  // 250 m per pixel at 2000 m tiles: a 4000 x 4000 image for 500 tiles
+constexpr int kTexturePixelsPerTile = 16;  // 125 m per pixel at 2000 m tiles: an 8000 x 8000 image for 500 tiles
+constexpr int kBandTileRows = 16;          // the base texture is composed this many tile rows at a time
 constexpr float kJpegQuality = 0.9f;
 
 struct Raw {
@@ -562,8 +563,70 @@ std::vector<acmi::RGB> entry_colours(const TextureCapture& t) {
 bool write_jpeg_file(const acmi::RGBImage& img, const std::wstring& path) {
     // The encoder opens the file itself: temporary name first, then moved into place.
     const std::wstring tmp = path + L".tmp";
-    bool ok = write_jpeg_wic(img, tmp, kJpegQuality);
+    bool ok = false;
+    try {
+        ok = write_jpeg_wic(img, tmp, kJpegQuality);
+    } catch (...) {  // out of memory in the encoder's row buffer
+    }
     if (ok) ok = MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    if (!ok) DeleteFileW(tmp.c_str());
+    return ok;
+}
+
+/// <summary>The size of the JPEG at path, from its first bytes. False when it is missing or not a JPEG.</summary>
+bool jpeg_file_size(const std::wstring& path, int& w, int& h) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    uint8_t head[16 * 1024];
+    DWORD got = 0;
+    const bool read = ReadFile(f, head, sizeof head, &got, nullptr) != 0;
+    CloseHandle(f);
+    return read && acmi::jpeg_size(head, got, w, h);
+}
+
+/// <summary>The base texture's bands into an open writer. See write_base_texture.</summary>
+bool write_base_bands(const TextureCapture& t, const std::vector<acmi::Airfield>& airfields,
+                      const std::vector<acmi::RGB>& colours, JpegStreamWriter& jw, TextureStats& stats) {
+    const int n = kTexturePixelsPerTile;
+    std::vector<acmi::Image> base;
+    load_base_tiles(t, base, stats);
+    const double mpp = t.tile_m / n;
+    acmi::RGBImage band;
+    for (int top = t.tiles_h; top > 0; top -= kBandTileRows) {
+        acmi::PatchTiles pt;
+        pt.ty0 = std::max(0, top - kBandTileRows);
+        pt.nx = t.tiles_w;
+        pt.ny = top - pt.ty0;
+        acmi::compose_patch(pt, t.tiles_w, n, t.index.data(), t.rot.data(), base, colours, band);
+        if (band.px.empty()) return false;
+        const double band_y0 = pt.ty0 * t.tile_m;  // paint_runway measures y from the image's south edge
+        for (const acmi::Airfield& a : airfields)
+            for (const acmi::Runway& r : a.runways)
+                acmi::paint_runway(band, mpp, r.x, r.y - band_y0, r.heading, r.length, r.width);
+        if (!jw.write_rows(band.px.data(), band.h)) return false;
+    }
+    return true;
+}
+
+/// <summary>
+/// Export thread: the base texture, composed and encoded one band of kBandTileRows tile rows at a time (north first),
+/// so the full image is never held. Runways are painted into each band. False (and no file, the old one kept) on
+/// failure, out of memory included.
+/// </summary>
+bool write_base_texture(const TextureCapture& t, const std::vector<acmi::Airfield>& airfields,
+                        const std::vector<acmi::RGB>& colours, const std::wstring& path, TextureStats& stats) {
+    const std::wstring tmp = path + L".tmp";
+    JpegStreamWriter jw;
+    bool ok = false;
+    try {
+        ok = jw.open(tmp, t.tiles_w * kTexturePixelsPerTile, t.tiles_h * kTexturePixelsPerTile, kJpegQuality) &&
+             write_base_bands(t, airfields, colours, jw, stats);
+    } catch (...) {
+        log_once(15, "tacview terrain: out of memory composing the texture");
+        ok = false;
+    }
+    const bool finished = jw.finish();  // always: it releases the encoder and closes the file
+    ok = ok && finished && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
     if (!ok) DeleteFileW(tmp.c_str());
     return ok;
 }
@@ -607,7 +670,9 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
     const std::wstring shown = log::log_path(dir);
     const int n = kTexturePixelsPerTile;
     const double extent_x = t.tiles_w * t.tile_m, extent_y = t.tiles_h * t.tile_m;
-    const bool have_jpg = exists(stem + L".jpg");
+    const int want_w = t.tiles_w * n, want_h = t.tiles_h * n;
+    int have_w = 0, have_h = 0;
+    const bool have_jpg = jpeg_file_size(stem + L".jpg", have_w, have_h);
 
     std::vector<PatchPlan> plans;
     std::vector<bool> want_patch(t.entries.size(), false);
@@ -644,30 +709,24 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
         std::any_of(plans.begin(), plans.end(), [](const PatchPlan& p) { return !p.present; });
 
     const std::vector<acmi::RGB> colours = entry_colours(t);
-    // Phase 1, the base texture: its tiles, image and encoder buffers are gone before the patch cache is built.
-    if (!have_jpg) {
+    // Phase 1, the base texture, made once and kept, except one smaller than this version makes (the earlier 4000 px
+    // ones): replaced once. Composed in bands, so its buffers are gone before the patch cache is built.
+    if (!have_jpg || have_w < want_w || have_h < want_h) {
         TextureStats stats;
-        try {
-            std::vector<acmi::Image> base;
-            load_base_tiles(t, base, stats);
-            acmi::RGBImage img;
-            acmi::compose(t.tiles_w, t.tiles_h, n, t.index.data(), t.rot.data(), base, colours, img);
-            base = {};
-            if (img.px.empty()) {
-                LOG("tacview terrain: %s: could not compose the texture", job.id.c_str());
-                return;
-            }
-            const double mpp = t.tile_m / n;
-            for (const acmi::Airfield& a : airfields)
-                for (const acmi::Runway& r : a.runways) acmi::paint_runway(img, mpp, r.x, r.y, r.heading, r.length, r.width);
-            if (!write_jpeg_file(img, stem + L".jpg")) {
-                LOG("tacview terrain: %s: could not encode the texture; there will be none", job.id.c_str());
-                return;
-            }
-            LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
-                job.id.c_str(), img.w, img.h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
-        } catch (...) {
-            log_once(15, "tacview terrain: no texture: out of memory");
+        if (write_base_texture(t, airfields, colours, stem + L".jpg", stats)) {
+            if (have_jpg)
+                LOG("tacview terrain: replaced the smaller %s texture (%dx%d) with %dx%d (%d tiles' images decoded, %d from "
+                    "colour, %zu airfields) in %ls",
+                    job.id.c_str(), have_w, have_h, want_w, want_h, stats.decoded, stats.fallback, airfields.size(),
+                    shown.c_str());
+            else
+                LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
+                    job.id.c_str(), want_w, want_h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
+        } else if (have_jpg) {
+            LOG("tacview terrain: %s: could not replace the smaller texture (%dx%d); kept the old texture", job.id.c_str(),
+                have_w, have_h);
+        } else {
+            LOG("tacview terrain: %s: could not compose or encode the texture; there will be none", job.id.c_str());
             return;
         }
     } else {
@@ -754,6 +813,52 @@ int remove_legacy_files(const std::wstring& dir, const std::string& id) {
     return removed;
 }
 
+/// <summary>
+/// Deletes, in dir, the files whose names is_pre_rename_file accepts for one of exts, then dir itself if it is empty.
+/// Adds the counts.
+/// </summary>
+void remove_pre_rename_in(const std::wstring& dir, std::initializer_list<const char*> exts, int& files, int& folders) {
+    std::vector<std::wstring> found;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\LazySF2-*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::string name = narrow_utf8(fd.cFileName);
+            for (const char* ext : exts)
+                if (acmi::is_pre_rename_file(name, ext)) {
+                    found.push_back(fd.cFileName);
+                    break;
+                }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    for (const std::wstring& name : found)
+        if (DeleteFileW((dir + L"\\" + name).c_str())) ++files;
+    if (RemoveDirectoryW(dir.c_str())) ++folders;  // only when empty
+}
+
+/// <summary>
+/// Once per session: removes the files of the export before the rename (folders and files named LazySF2, not
+/// LazySF2Patch), only those exact patterns, then their folders if empty. One log line when anything went.
+/// </summary>
+void remove_pre_rename_files(const std::wstring& appdata) {
+    static bool done = false;  // export thread only
+    if (done) return;
+    done = true;
+    int files = 0, folders = 0;
+    const std::wstring tv = appdata + L"\\Tacview";
+    remove_pre_rename_in(tv + L"\\Data\\Terrain\\Textures\\LazySF2", {".jpg", ".xml"}, files, folders);
+    remove_pre_rename_in(tv + L"\\Data\\Terrain\\Custom\\LazySF2", {".raw", ".xml"}, files, folders);
+    const std::wstring addon = tv + L"\\AddOns\\LazySF2";
+    for (const wchar_t* name : {L"\\main.lua", L"\\main.lua.tmp"})
+        if (DeleteFileW((addon + name).c_str())) ++files;
+    if (RemoveDirectoryW(addon.c_str())) ++folders;
+    if (files + folders > 0)
+        LOG("tacview terrain: removed %d file(s) and %d empty folder(s) left by the export before the rename (LazySF2)",
+            files, folders);
+}
+
 // Writes the embedded Tacview add-on to %APPDATA%\Tacview\AddOns\LazySF2Patch\main.lua, only when the content differs.
 // Once per session: the export thread runs one job at a time, so a plain static is enough.
 void install_addon(const std::wstring& appdata) {
@@ -803,6 +908,7 @@ bool export_files(Job& job) {
         LOG("tacview terrain: %s: the AppData folder was not found", job.id.c_str());
         return false;
     }
+    remove_pre_rename_files(root);
     install_addon(root);
     root += L"\\Tacview\\Data\\Terrain";
     const int removed = remove_legacy_files(root + L"\\Custom\\LazySF2Patch", job.id) +
