@@ -60,15 +60,18 @@ void stop_session_timer() {
     if (HWND hwnd = game_window()) KillTimer(hwnd, kSessionTimer);
 }
 
-// Window thread (dispatched by the game's pump). The session ended while unfocused: hand the focus loss back to the
-// game, which then pauses as stock.
+// Window thread, dispatched by the game's pump like a WndProc message. When the session has ended, or the window was
+// minimised (Present would not throttle the loop), hand the focus loss to the stock handler, which pauses. Called
+// directly rather than posted, so a click back in between can't pause a foreground game.
 void CALLBACK session_timer(HWND hwnd, UINT, UINT_PTR, DWORD) {
-    if (!g_kept_running.load() || net_session_active()) return;
+    if (!g_kept_running.load()) return;
+    const bool ended = !net_session_active();
+    if (!ended && !IsIconic(hwnd)) return;
     if (GetForegroundWindow() == hwnd) return;  // the player is back; the activation clears the state
     KillTimer(hwnd, kSessionTimer);
     g_kept_running = false;
-    LOG("focus: session ended while unfocused: stock pause re-applied");
-    PostMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0);
+    LOG("focus: %s while unfocused: stock pause re-applied", ended ? "session ended" : "minimised");
+    o_FocusHandler(0);
 }
 
 // Why a session's focus loss pauses as stock, once per reason.
@@ -86,16 +89,26 @@ void log_decision_once(BgDecision d) {
 void __cdecl h_FocusHandler(int on) {
     if (on == 0) {
         HWND hwnd = game_window();
-        const BgDecision d = bg_decision(net_session_active(), config::background_sim(), config::display_mode(),
-                                         hwnd && IsIconic(hwnd));
-        if (d == BgDecision::KeepRunning) {
+        // WM_DESTROY also arrives here with 0; DestroyWindow has hidden the window by then.
+        const bool closing = !hwnd || !IsWindowVisible(hwnd);
+        const BgDecision d = !net_session_active()
+                                 ? BgDecision::NoSession  // single-player: no config reads, no extra log lines
+                                 : bg_decision(true, config::background_sim(), config::display_mode(),
+                                               hwnd && IsIconic(hwnd));
+        if (d == BgDecision::KeepRunning && closing) {
+            if (g_kept_running.exchange(false)) stop_session_timer();
+            if (!hwnd) {
+                static std::atomic<bool> logged{false};
+                if (!logged.exchange(true)) LOG("focus: no game window known: stock pause (session)");
+            }
+        } else if (d == BgDecision::KeepRunning) {
             // WM_KILLFOCUS and WM_ACTIVATEAPP(0) both arrive: act on the first only.
             if (g_kept_running.load()) return;
             if (app_active_idle()) {
                 g_kept_running = true;
                 inp_set_active(0);
                 cursor_clip_update("focus lost, simulation kept running");
-                if (hwnd) SetTimer(hwnd, kSessionTimer, kSessionPollMs, &session_timer);
+                SetTimer(hwnd, kSessionTimer, kSessionPollMs, &session_timer);
                 LOG("focus lost: simulation kept running (session)");
                 return;
             }
@@ -113,6 +126,8 @@ void __cdecl h_FocusHandler(int on) {
         cursor_clip_update("focus back");
         LOG("focus back: input re-acquired (simulation never paused)");
     }
+    // For on == 1 this returns at once (APP is still active); a click activation passes 2, which re-runs SetActive and
+    // the notifications with 2, exactly as stock does after WM_ACTIVATEAPP(1).
     o_FocusHandler(on);
 }
 
