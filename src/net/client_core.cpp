@@ -224,6 +224,7 @@ bool ClientCore::send_state(const StateMsg& s) {
         if (out_n_ < kOutCap) {
             OutMsg& o = out_[(out_head_ + out_n_) % kOutCap];
             o.len = static_cast<uint8_t>(n);
+            o.reliable = 0;
             std::memcpy(o.data, buf, n);
             ++out_n_;
             return true;
@@ -231,6 +232,20 @@ bool ClientCore::send_state(const StateMsg& s) {
     }
     n_out_.fetch_add(1, std::memory_order_relaxed);
     return false;
+}
+
+bool ClientCore::send_world(const uint8_t* data, size_t len) {
+    if (!data || len == 0 || len > sizeof(OutMsg::data) || phase_.load(std::memory_order_acquire) != Phase::Welcomed ||
+        bye_reason_.load(std::memory_order_relaxed) >= 0)
+        return false;
+    std::lock_guard<std::mutex> lock(out_mx_);
+    if (out_n_ >= kOutCap) return false;
+    OutMsg& o = out_[(out_head_ + out_n_) % kOutCap];
+    o.len = static_cast<uint8_t>(len);
+    o.reliable = 1;
+    std::memcpy(o.data, data, len);
+    ++out_n_;
+    return true;
 }
 
 void ClientCore::bye(uint8_t reason) {
@@ -388,13 +403,17 @@ void ClientCore::run() {
         WorldEventsHead eh;
         const WorldObjState* sr = nullptr;
         const WorldEventRec* er = nullptr;
+        AvatarStateMsg am;
         const bool ok = (wt == static_cast<uint8_t>(WorldType::WorldStates) && channel == kChannelUnreliable &&
                          decode_world_states(data, len, sh, &sr) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::WorldEvents) && channel == kChannelReliable &&
-                         decode_world_events(data, len, eh, &er) == Status::Ok);
+                         decode_world_events(data, len, eh, &er) == Status::Ok) ||
+                        (wt == static_cast<uint8_t>(WorldType::AvatarState) && channel == kChannelReliable &&
+                         decode(data, len, am) == Status::Ok);
         if (!ok) return drop(n_format_);
         if (!welcomed || len > sizeof(WorldPacket::data)) return drop(n_state_);
-        const bool event = wt == static_cast<uint8_t>(WorldType::WorldEvents);
+        // Reliable world messages (events, jet states) are never dropped: they share the events ring.
+        const bool event = wt != static_cast<uint8_t>(WorldType::WorldStates);
         bool full = false;
         {
             std::lock_guard<std::mutex> lock(world_mx_);
@@ -610,7 +629,8 @@ void ClientCore::run() {
                 n_out_.fetch_add(static_cast<uint32_t>(n), std::memory_order_relaxed);
                 continue;
             }
-            for (size_t i = 0; i < n; ++i) send_now(batch[i].data, batch[i].len, kChannelUnreliable);
+            for (size_t i = 0; i < n; ++i)
+                send_now(batch[i].data, batch[i].len, batch[i].reliable ? kChannelReliable : kChannelUnreliable);
         }
     };
 

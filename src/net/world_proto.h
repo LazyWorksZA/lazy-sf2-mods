@@ -18,8 +18,9 @@ enum class WorldType : uint8_t {
     MissionChunk = 22,    // host to client, reliable, variable length
     WorldStates = 23,     // host to client, unreliable (channel 1), 1..kWorldStatesMax object states
     WorldEvents = 24,     // host to client, reliable, 1..kWorldEventsMax events
+    AvatarState = 25,     // each player's own jet, reliable, on change: client to host, host to clients (relayed)
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 24;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 25;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -267,6 +268,49 @@ private:
     size_t n_ = 0;
     uint64_t clock_ = 0;
 };
+
+// ---- a player's jet state (T7) ----
+
+#pragma pack(push, 1)
+/// <summary>
+/// A player's discrete jet state, sent by its owner on change. radar_mode is the detect interface's mode (0 off,
+/// 1 search, 2 track, 3 lock); the target is a stable key (KeyKind::Aircraft slot/member; kind 0 = none). config is
+/// the object's state word +0x5f0 masked to kAvatarConfigMask (flaps, airbrake, gear, hook, lights, wheel brakes).
+/// </summary>
+struct AvatarStateMsg {
+    Header h;
+    uint16_t peer;  // the owner: 0 the host, k client k (the host sets it from the connection)
+    uint16_t seq;   // per owner, increasing
+    uint8_t radar_mode;
+    uint8_t target_kind;
+    uint16_t target_a, target_b;
+    uint16_t config;
+};
+#pragma pack(pop)
+static_assert(sizeof(AvatarStateMsg) == 16);  // 4:2 peer, 6:2 seq, 8:1 mode, 9:1 target kind, 10:2 a, 12:2 b, 14:2 config
+inline constexpr uint16_t kAvatarConfigMask = 0xff00;  // +0x5f0: 0x100/0x200 flaps, 0x400 airbrake, 0x800 gear,
+                                                       // 0x1000 hook, 0x2000/0x4000 lights, 0x8000 wheel brakes
+size_t encode(const AvatarStateMsg& m, uint8_t* out, size_t cap);
+Status decode(const uint8_t* data, size_t len, AvatarStateMsg& out);
+
+/// <summary>The detect-interface mode for a radar block (state +0x970, stage +0x974, a target +0x988).</summary>
+inline uint8_t radar_mode_of(int state, int stage, bool has_target) {
+    if (state < 2 || state > 4) return 0;
+    if (has_target && stage >= 3) return 3;
+    if (has_target && stage >= 2) return 2;
+    return 1;
+}
+/// <summary>True when what the receivers see would differ (seq and peer not compared).</summary>
+inline bool avatar_state_differs(const AvatarStateMsg& a, const AvatarStateMsg& b) {
+    return a.radar_mode != b.radar_mode || a.target_kind != b.target_kind || a.target_a != b.target_a ||
+           a.target_b != b.target_b || a.config != b.config;
+}
+/// <summary>The receiver's RWR call is due: a lock (mode 3) on a target that was not locked by this sender before.</summary>
+inline bool avatar_lock_started(const AvatarStateMsg& prev, const AvatarStateMsg& now) {
+    return now.radar_mode == 3 && now.target_kind != 0 &&
+           (prev.radar_mode != 3 || prev.target_a != now.target_a || prev.target_b != now.target_b ||
+            prev.target_kind != now.target_kind);
+}
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>
 class MissionAssembly {

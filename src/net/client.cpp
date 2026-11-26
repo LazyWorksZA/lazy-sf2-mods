@@ -738,6 +738,8 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
                 refresh_clock(wall);
                 pump(aircraft, wall);
                 pump_world();
+                if (g_session && world_client_tag())
+                    world_avatar_tick(aircraft, g_id, [](const uint8_t* d, size_t n) { return g_core->send_world(d, n); });
             }
             if (g_disconnected && g_core->finished()) {
                 g_core->stop(false);  // the thread has cleaned up: the join returns at once
@@ -808,6 +810,11 @@ void client_install() {
     g_enabled = true;
     LOG("net: client on: joins %s:%u as \"%s\" once airborne; join %s", g_host, static_cast<unsigned>(g_port),
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
+}
+
+void* client_avatar_object(int peer) {
+    if (!g_rm || peer < 0 || peer >= kSources) return nullptr;
+    return g_rm[peer].h.obj;
 }
 
 bool client_drives_object(const void* obj) {

@@ -318,6 +318,20 @@ void HostCore::run() {
     // A MissionRequest is answered here, in any phase (before a Hello too, and while the game is in menus): the offer
     // and every chunk are handed to ENet at once, which paces them on the reliable channel.
     auto handle_world = [&](int slot, uint8_t channel, uint8_t wt, const uint8_t* data, size_t len) {
+        if (wt == static_cast<uint8_t>(WorldType::AvatarState)) {  // a client's jet state: to the game thread
+            AvatarStateMsg am;
+            if (channel != kChannelReliable || decode(data, len, am) != Status::Ok) return drop(n_format_);
+            if (!(slot_state_[slot].load(std::memory_order_acquire) & 1)) return drop(n_state_);  // welcomed only
+            am.peer = static_cast<uint16_t>(slot + 1);  // the connection says who sent it
+            HostEvent e;
+            e.kind = HostEvent::Message;
+            e.slot = static_cast<uint8_t>(slot);
+            e.gen = gens[slot];
+            e.channel = channel;
+            e.len = static_cast<uint16_t>(encode(am, e.data, sizeof(e.data)));
+            if (!push_in(e, true)) drop(n_queue_);
+            return;
+        }
         MissionRequestMsg rq;
         if (wt != static_cast<uint8_t>(WorldType::MissionRequest) || channel != kChannelReliable ||
             decode(data, len, rq) != Status::Ok)

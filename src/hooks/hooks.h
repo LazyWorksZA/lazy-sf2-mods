@@ -353,6 +353,17 @@ void world_client_session_end();
 /// <summary>True if the host's or the client's Phase 4 code drives this aircraft as an avatar (game thread).</summary>
 bool host_drives_object(const void* obj);
 bool client_drives_object(const void* obj);
+/// <summary>Sends one AvatarState of the local player's jet (to the host, or from the host to every client).</summary>
+using AvatarSendFn = bool (*)(const uint8_t* data, size_t len);
+/// <summary>
+/// Game thread, the player's step, in a shared world: sends the player's radar mode and lock target (by stable key)
+/// and its configuration bits when they change (T7).
+/// </summary>
+void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send);
+/// <summary>Game thread: applies a peer's AvatarState to the aircraft that is its avatar here (config, radar, RWR).</summary>
+void world_avatar_apply(const uint8_t* data, size_t len, void* avatar);
+/// <summary>Client: the aircraft that shows peer id here (its Phase 4 avatar), or null.</summary>
+void* client_avatar_object(int peer);
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>
 bool client_connect_target(char* host, size_t cap, uint16_t* port);
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>

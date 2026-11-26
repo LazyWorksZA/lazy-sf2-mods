@@ -7370,6 +7370,39 @@ void world_stream_tests() {
     h.core.stop(false);
 }
 
+void world_avatar_tests() {
+    std::printf("world jet state\n");
+    expect(sizeof(AvatarStateMsg) == 16, "jet state: 16 bytes (reliable, on change)");
+    AvatarStateMsg a{};
+    a.peer = 2;
+    a.seq = 7;
+    a.radar_mode = 3;
+    a.target_kind = 1;
+    a.target_a = 4;
+    a.target_b = 1;
+    a.config = 0x0900;
+    uint8_t b[32];
+    AvatarStateMsg r{};
+    expect(encode(a, b, sizeof(b)) == 16 && peek_world_type(b, 16) == 25 && decode(b, 16, r) == Status::Ok &&
+               r.peer == 2 && r.radar_mode == 3 && r.target_a == 4 && r.config == 0x0900 &&
+               decode(b, 15, r) == Status::Truncated,
+           "jet state: round trip");
+    expect(radar_mode_of(1, 0, false) == 0 && radar_mode_of(2, 1, false) == 1 && radar_mode_of(3, 2, true) == 2 &&
+               radar_mode_of(4, 3, true) == 3 && radar_mode_of(4, 3, false) == 1 && radar_mode_of(5, 0, false) == 0,
+           "jet state: radar block to detect-interface mode (off, search, track, lock; ground map off)");
+    AvatarStateMsg p = a;
+    p.seq = 8;
+    expect(!avatar_state_differs(a, p), "jet state: only the visible fields count as a change");
+    p.config = 0x0100;
+    expect(avatar_state_differs(a, p), "jet state: a configuration change is a change");
+    AvatarStateMsg none{};
+    expect(avatar_lock_started(none, a) && !avatar_lock_started(a, a), "jet state: the RWR hears a new lock once");
+    AvatarStateMsg other = a;
+    other.target_b = 2;
+    expect(avatar_lock_started(a, other), "jet state: a lock on another target warns that target");
+    std::printf("    estimate: a state change is 16 bytes; a few per minute (locks, gear, flaps)\n");
+}
+
 void world_seat_rule_tests() {
     std::printf("world seats and queues\n");
     {
@@ -7817,6 +7850,7 @@ int main() {
     world_mission_tests();
     world_stream_tests();
     world_seat_rule_tests();
+    world_avatar_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

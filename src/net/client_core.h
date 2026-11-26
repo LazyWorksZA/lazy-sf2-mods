@@ -142,6 +142,8 @@ public:
     /// connection (QueueFull), as a lost control event does, since the world would diverge.
     /// </summary>
     size_t poll_world(WorldPacket* out, size_t max);
+    /// <summary>Queues a reliable world message (at most 96 bytes: AvatarState) for the host. Welcomed only.</summary>
+    bool send_world(const uint8_t* data, size_t len);
     static constexpr size_t kWorldStatesIn = 64, kWorldEventsIn = 256;
 
     static constexpr size_t kInCap = 512, kOutCap = 64;
@@ -154,6 +156,7 @@ public:
 private:
     struct OutMsg {
         uint8_t len = 0;
+        uint8_t reliable = 0;
         uint8_t data[96] = {};
     };
     static_assert(sizeof(ClientEvent::data) >= kMaxMessage && sizeof(OutMsg::data) >= kMaxMessage,

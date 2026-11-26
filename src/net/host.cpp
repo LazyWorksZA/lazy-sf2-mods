@@ -24,6 +24,7 @@
 #include "net/remote_jet.h"
 #include "net/stream_format.h"
 #include "net/stream_record.h"
+#include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -95,6 +96,7 @@ struct Avatar {
 };
 Avatar* g_av = nullptr;  // net::kMaxClients entries (see above)
 int g_nclients = 0;
+bool g_world_behind[net::kMaxClients] = {};  // a client whose world events could not be queued (ended after the tick)
 uint32_t g_newest_gen[net::kMaxClients] = {};  // per slot: the newest connection generation seen in a Connect event
 constexpr double kHoldTimeout = 5.0;  // game seconds from the Welcome to the first State, before the avatar is released
 constexpr double kParkAfter = 10.0;   // game seconds without a State before a connected client's avatar is given back
@@ -517,6 +519,16 @@ bool retake(int slot, const net::StateMsg& s, double now) {
 
 void handle_message(const HostEvent& e, void* player, double now) {
     const int slot = e.slot;
+    if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::AvatarState)) {
+        // A client's jet state (T7): onto its avatar here, and on to the other clients.
+        if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
+            world_avatar_apply(e.data, e.len, g_av[slot].h.obj);
+            for (int s = 0; s < net::kMaxClients; ++s)
+                if (s != slot && g_av[s].active && !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, true))
+                    g_world_behind[s] = true;
+        }
+        return;
+    }
     net::MsgType type{};
     if (net::peek_type(e.data, e.len, type) != net::Status::Ok) return;  // the network thread checked already
     switch (type) {
@@ -651,8 +663,6 @@ void check_order(void* aircraft, bool is_player) {
         g_order_shift ? "avatars are shown at the game time plus the player's step" : "the game time is current");
 }
 
-bool g_world_behind[net::kMaxClients] = {};  // a client whose world events could not be queued (ended after the tick)
-
 bool world_send(const uint8_t* data, size_t len, bool reliable) {
     bool any = false;
     for (int s = 0; s < net::kMaxClients; ++s) {
@@ -670,6 +680,7 @@ void world_tick(void* player, double now) {
     for (int s = 0; s < net::kMaxClients; ++s)
         if (g_av[s].active && g_av[s].h.obj) obj_read(g_av[s].h.obj, kOffPos, pl[np++], 3);
     world_host_tick(now, pl, np, world_send);
+    world_avatar_tick(player, 0, [](const uint8_t* d, size_t n) { return world_send(d, n, true); });
     for (int s = 0; s < net::kMaxClients; ++s) {
         if (!g_world_behind[s]) continue;
         g_world_behind[s] = false;

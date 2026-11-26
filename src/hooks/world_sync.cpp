@@ -1737,6 +1737,11 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         return read_member_id(t, a, b, &id) && id != player && resolve_obj(om, id, obj, group) && *group != 0;
     };
     const uint8_t wt = net::peek_world_type(data, len);
+    if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
+        net::AvatarStateMsg am;
+        if (net::decode(data, len, am) == net::Status::Ok) world_avatar_apply(data, len, client_avatar_object(am.peer));
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::WorldStates)) {
         net::WorldStatesHead h;
         const net::WorldObjState* r = nullptr;
@@ -1838,6 +1843,179 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         LOG("world: stream: %llu states applied, %llu stale, %llu without an object, %llu not remote, %llu events",
             cs.applied, cs.stale, cs.missing, cs.not_remote, cs.events);
     }
+}
+
+namespace {
+
+// ---- a player's jet state (T7): radar lock and configuration ----
+
+// AircraftObject: the radar block (state +0x970, stage +0x974, target +0x988), the state word +0x5f0, and the detect
+// interface at +0x24 (vtable +0x94374): slot 20 sets the mode, 21 the target by id, 22 is the RWR input
+// (shooter id, stage, frequency, CW). See lazy-sf2-recon: recon-notes §27 and network-recon §10.19.
+constexpr size_t kObjRadarState = 0x970, kObjRadarStage = 0x974, kObjRadarTarget = 0x988, kObjStateWord = 0x5f0;
+constexpr size_t kObjId = 0x08, kObjDetect = 0x24, kObjData = 0x380, kDataTrackFreq = 0x920, kDataCw = 0x92a;
+constexpr DWORD kRvaAoDetectVtable = 0x94374, kRvaAoSetMode = 0x40ca0, kRvaAoSetTarget = 0x40cd0, kRvaAoRwr = 0x41dc0;
+constexpr size_t kDetectSetMode = 20, kDetectSetTarget = 21, kDetectRwr = 22;
+
+struct OwnJet {
+    int state = 0, stage = 0;
+    uint32_t target_id = 0xffffffffu;
+    uint32_t word = 0;
+};
+bool read_own_jet(const BYTE* obj, OwnJet* j) {
+    __try {
+        std::memcpy(&j->state, obj + kObjRadarState, 4);
+        std::memcpy(&j->stage, obj + kObjRadarStage, 4);
+        const BYTE* t = *reinterpret_cast<const BYTE* const*>(obj + kObjRadarTarget);
+        j->target_id = t ? *reinterpret_cast<const uint32_t*>(t + kObjId) : 0xffffffffu;
+        std::memcpy(&j->word, obj + kObjStateWord, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The stable key (aircraft slot and member) of an object id, from the mission's slot table.
+bool key_of_id(const SlotTable& t, uint32_t id, uint16_t* a, uint16_t* b) {
+    if (id == 0xffffffffu) return false;
+    for (int i = 0; i < t.count && i < t.first_ground; ++i) {
+        SlotRaw s{};
+        if (!read_slot(t, i, &s)) return false;
+        for (int m = 0; m < s.members; ++m)
+            if (s.ids[m] == id) {
+                *a = static_cast<uint16_t>(i);
+                *b = static_cast<uint16_t>(m);
+                return true;
+            }
+    }
+    return false;
+}
+
+// 0 done, 1 an interface or slot is not the one we read, 2 faulted.
+int detect_call(BYTE* obj, uintptr_t ao, size_t slot, DWORD rva, int arg) {
+    __try {
+        BYTE* iface = obj + kObjDetect;
+        void** vt = *reinterpret_cast<void***>(iface);
+        if (reinterpret_cast<uintptr_t>(vt) != ao + kRvaAoDetectVtable ||
+            reinterpret_cast<uintptr_t>(vt[slot]) != ao + rva)
+            return 1;
+        reinterpret_cast<void(__fastcall*)(void*, void*, int)>(vt[slot])(iface, nullptr, arg);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
+// The target's RWR hears the shooter's lock (what the game's own radar update does once per lock, skipped for a
+// REMOTEOBJECT shooter). 0 done, 1 refused, 2 faulted.
+int rwr_lock(BYTE* target, const BYTE* shooter, uintptr_t ao) {
+    __try {
+        const uint32_t shooter_id = *reinterpret_cast<const uint32_t*>(shooter + kObjId);
+        const BYTE* data = *reinterpret_cast<const BYTE* const*>(shooter + kObjData);
+        if (!data) return 1;
+        float freq = 0;
+        int16_t cw = 0;
+        std::memcpy(&freq, data + kDataTrackFreq, 4);
+        std::memcpy(&cw, data + kDataCw, 2);
+        BYTE* iface = target + kObjDetect;
+        void** vt = *reinterpret_cast<void***>(iface);
+        if (reinterpret_cast<uintptr_t>(vt) != ao + kRvaAoDetectVtable ||
+            reinterpret_cast<uintptr_t>(vt[kDetectRwr]) != ao + kRvaAoRwr)
+            return 1;
+        reinterpret_cast<void(__fastcall*)(void*, void*, uint32_t, int, float, int)>(vt[kDetectRwr])(
+            iface, nullptr, shooter_id, 3, freq, cw);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
+bool write_config(BYTE* obj, uint16_t config) {
+    __try {
+        uint32_t w = 0;
+        std::memcpy(&w, obj + kObjStateWord, 4);
+        w = (w & ~static_cast<uint32_t>(net::kAvatarConfigMask)) | config;
+        std::memcpy(obj + kObjStateWord, &w, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+struct AvatarTx {
+    net::AvatarStateMsg last{};
+    bool have = false;
+    uint16_t seq = 0;
+    uint32_t epoch = 0;
+};
+AvatarTx g_atx;  // game thread
+net::AvatarStateMsg g_arx[1 + 4] = {};  // per peer: the last state applied (host 0, clients 1..4)
+
+}  // namespace
+
+void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
+    if (!player || !send) return;
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    if (!sm) return;
+    SlotTable t{};
+    OwnJet j;
+    if (!read_slot_table(at_rva(sm, kRvaMsn), &t) || !read_own_jet(static_cast<const BYTE*>(player), &j)) return;
+    if (g_atx.epoch != sim_player_epoch()) g_atx = AvatarTx{{}, false, 0, sim_player_epoch()};
+    net::AvatarStateMsg m{};
+    m.peer = own_peer;
+    uint16_t a = 0, b = 0;
+    const bool keyed = key_of_id(t, j.target_id, &a, &b);
+    m.radar_mode = net::radar_mode_of(j.state, j.stage, keyed);
+    if (keyed && m.radar_mode >= 2) {
+        m.target_kind = static_cast<uint8_t>(net::KeyKind::Aircraft);
+        m.target_a = a;
+        m.target_b = b;
+    }
+    m.config = static_cast<uint16_t>(j.word & net::kAvatarConfigMask);
+    if (g_atx.have && !net::avatar_state_differs(m, g_atx.last)) return;
+    m.seq = ++g_atx.seq;
+    uint8_t buf[sizeof(m)];
+    const size_t n = net::encode(m, buf, sizeof(buf));
+    if (!n || !send(buf, n)) return;  // tried again next step
+    if (!g_atx.have || m.radar_mode != g_atx.last.radar_mode || m.target_a != g_atx.last.target_a ||
+        m.target_b != g_atx.last.target_b)
+        LOG("world: jet state: radar mode %u, target %s%03u.%02u, config 0x%04x (sent)",
+            static_cast<unsigned>(m.radar_mode), m.target_kind ? "A " : "none ", static_cast<unsigned>(m.target_a),
+            static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.config));
+    g_atx.last = m;
+    g_atx.have = true;
+}
+
+void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
+    net::AvatarStateMsg m;
+    if (net::decode(data, len, m) != net::Status::Ok || m.peer > 4 || !avatar) return;
+    net::AvatarStateMsg& prev = g_arx[m.peer];
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
+    const uintptr_t ao = module_if(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll");
+    if (!sm || !omm || !ao) return;
+    BYTE* av = static_cast<BYTE*>(avatar);
+    write_config(av, m.config);
+    const int rm = detect_call(av, ao, kDetectSetMode, kRvaAoSetMode, m.radar_mode);
+    SlotTable t{};
+    Om om;
+    uint32_t tid = 0xffffffffu;
+    BYTE* tobj = nullptr;
+    int tg = 0;
+    const bool have_target = m.target_kind == static_cast<uint8_t>(net::KeyKind::Aircraft) &&
+                             read_slot_table(at_rva(sm, kRvaMsn), &t) && read_om(omm, &om) &&
+                             read_member_id(t, m.target_a, m.target_b, &tid) && resolve_obj(om, tid, &tobj, &tg) &&
+                             tg == 1;
+    int rt = 0, rw = -1;
+    if (have_target) rt = detect_call(av, ao, kDetectSetTarget, kRvaAoSetTarget, static_cast<int>(tid));
+    if (have_target && net::avatar_lock_started(prev, m)) rw = rwr_lock(tobj, av, ao);
+    if (m.radar_mode != prev.radar_mode || m.target_a != prev.target_a || m.target_b != prev.target_b)
+        LOG("world: jet state of peer %u: radar mode %u%s, target %s (%s%s)", static_cast<unsigned>(m.peer),
+            static_cast<unsigned>(m.radar_mode), rm == 0 ? "" : rm == 1 ? " NOT set (unexpected slot)" : " FAULTED",
+            have_target ? "set" : m.target_kind ? "not found here" : "none",
+            rw < 0 ? "no RWR call" : rw == 0 ? "the target's RWR warned" : rw == 1 ? "RWR refused" : "RWR FAULTED",
+            rt == 0 ? "" : ", target slot unexpected");
+    prev = m;
 }
 
 namespace {
