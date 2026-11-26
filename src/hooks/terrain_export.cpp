@@ -813,6 +813,21 @@ int remove_legacy_files(const std::wstring& dir, const std::string& id) {
     return removed;
 }
 
+/// <summary>True when dir, or a folder between appdata and it, is a junction or link (and so is skipped, logged).</summary>
+bool reparse_below(const std::wstring& appdata, const std::wstring& dir) {
+    for (size_t pos = appdata.size(); pos != std::wstring::npos && pos < dir.size();) {
+        pos = dir.find(L'\\', pos + 1);
+        const std::wstring part = pos == std::wstring::npos ? dir : dir.substr(0, pos);
+        const DWORD a = GetFileAttributesW(part.c_str());
+        if (a == INVALID_FILE_ATTRIBUTES) return false;  // missing: nothing below it to delete
+        if (a & FILE_ATTRIBUTE_REPARSE_POINT) {
+            LOG("tacview terrain: skipped the old-file cleanup in %ls: a junction or link in its path", log::log_path(dir).c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
 /// <summary>
 /// Deletes, in dir, the files whose names is_pre_rename_file accepts for one of exts, then dir itself if it is empty.
 /// Adds the counts.
@@ -848,12 +863,15 @@ void remove_pre_rename_files(const std::wstring& appdata) {
     done = true;
     int files = 0, folders = 0;
     const std::wstring tv = appdata + L"\\Tacview";
-    remove_pre_rename_in(tv + L"\\Data\\Terrain\\Textures\\LazySF2", {".jpg", ".xml"}, files, folders);
-    remove_pre_rename_in(tv + L"\\Data\\Terrain\\Custom\\LazySF2", {".raw", ".xml"}, files, folders);
+    const std::wstring textures = tv + L"\\Data\\Terrain\\Textures\\LazySF2", custom = tv + L"\\Data\\Terrain\\Custom\\LazySF2";
+    if (!reparse_below(appdata, textures)) remove_pre_rename_in(textures, {".jpg", ".xml"}, files, folders);
+    if (!reparse_below(appdata, custom)) remove_pre_rename_in(custom, {".raw", ".xml"}, files, folders);
     const std::wstring addon = tv + L"\\AddOns\\LazySF2";
-    for (const wchar_t* name : {L"\\main.lua", L"\\main.lua.tmp"})
-        if (DeleteFileW((addon + name).c_str())) ++files;
-    if (RemoveDirectoryW(addon.c_str())) ++folders;
+    if (!reparse_below(appdata, addon)) {
+        for (const wchar_t* name : {L"\\main.lua", L"\\main.lua.tmp"})
+            if (DeleteFileW((addon + name).c_str())) ++files;
+        if (RemoveDirectoryW(addon.c_str())) ++folders;
+    }
     if (files + folders > 0)
         LOG("tacview terrain: removed %d file(s) and %d empty folder(s) left by the export before the rename (LazySF2)",
             files, folders);

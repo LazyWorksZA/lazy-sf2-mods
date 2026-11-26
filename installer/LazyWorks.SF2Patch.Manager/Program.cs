@@ -70,7 +70,8 @@ static class Program
         {
             ModInstaller.Result.Ok =>
                 $"Lazy SF2 Patch is installed in:\n{game}\n\nSettings are in the game:\n" +
-                "  Options > Graphics: Display Mode, Screen\n  Options > Controls: Mouse Pointer\n\n" +
+                "  Options > Graphics: Display Mode, Screen\n  Options > Controls: Mouse Pointer, Pilot Twist\n" +
+                "  Options > Gameplay: Tacview Recording\n\n" +
                 "To remove it, uninstall Lazy SF2 Patch from Windows' Installed apps.",
             ModInstaller.Result.GameNotFound => "Strike Fighters 2 wasn't found (no installer registry entry).",
             ModInstaller.Result.Foreign => $"Another winmm.dll is already in\n{game}\nLazySF2 left it untouched.",
@@ -97,14 +98,39 @@ static class Program
 
     static void HookInstall(string what)
     {
+        Log($"{what} hook: user={CurrentUser()}");
+        // First, so nothing in the game-folder part can keep it from running.
+        TacviewHook(() => TacviewAddOn.Install(new CurrentUserRegistry(), AppData, TacviewAddOn.Content, TacviewRunning()));
         string? game = ModInstaller.FindGameDir();
         if (game != null && ModInstaller.HasReparsePoint(game)) Log("install hook: refused, reparse point in game path");
         var r = ModInstaller.Install(game);
         Log($"{what} hook: game={game ?? "(not found)"} -> {r}");
         // Per-user installs can't write a game folder under Program Files: finish on the next normal
         // start (Setup starts us right after installing), with a UAC prompt. The MSI runs elevated.
-        if (r == ModInstaller.Result.AccessDenied) File.WriteAllText(PendingInstallMarker, game);
-        TacviewHook(() => TacviewAddOn.Install(new CurrentUserRegistry(), AppData, TacviewAddOn.Content));
+        if (r == ModInstaller.Result.AccessDenied)
+        {
+            try { File.WriteAllText(PendingInstallMarker, game); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"{what} hook: could not write the pending-install marker: {e.Message}"); }
+        }
+    }
+
+    static string CurrentUser()
+    {
+        using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return id.Name;
+    }
+
+    /// <summary>True when a Tacview process (Tacview.exe or Tacview64.exe) is running in any session.</summary>
+    static bool TacviewRunning()
+    {
+        foreach (string name in new[] { "Tacview", "Tacview64" })
+        {
+            var ps = Process.GetProcessesByName(name);
+            bool any = ps.Length > 0;
+            foreach (var p in ps) p.Dispose();
+            if (any) return true;
+        }
+        return false;
     }
 
     static string AppData => Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -125,6 +151,7 @@ static class Program
 
     static void HookUninstall()
     {
+        Log($"uninstall hook: user={CurrentUser()}");
         TacviewHook(() => TacviewAddOn.Uninstall(AppData));
         string? game = ModInstaller.FindGameDir();
         if (game != null && ModInstaller.HasReparsePoint(game)) Log("uninstall hook: refused, reparse point in game path");

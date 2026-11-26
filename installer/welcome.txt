@@ -6,6 +6,6 @@ The Lazy SF2 Patch adds display and mouse options to Strike Fighters 2 (July 201
 
 It also fixes Alt-Tab back into Fullscreen, display scaling above 100%, and the Windows key in Borderless.
 
-Setup copies one file (winmm.dll) into your Strike Fighters 2 folder, and adds the mod's Tacview add-on for your Windows account and turns it on. No game files are changed, and uninstalling removes the mod and the add-on again.
+Setup copies one file (winmm.dll) into your Strike Fighters 2 folder, and, if Tacview is installed, adds the mod's Tacview add-on for your Windows account and turns it on (close Tacview first). No game files are changed, and uninstalling removes the mod and the add-on again.
 
 The Lazy SF2 Patch is a fan-made mod, not affiliated with Third Wire Productions. You need your own copy of the game.

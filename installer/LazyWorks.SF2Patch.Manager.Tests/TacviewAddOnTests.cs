@@ -36,11 +36,31 @@ public sealed class TacviewAddOnTests : IDisposable
     readonly FakeRegistry _reg = new();
     readonly byte[] _content = "-- add-on\n"u8.ToArray();
 
-    public TacviewAddOnTests() => Directory.CreateDirectory(_appData);
+    // Tacview present: its AppData folder exists.
+    public TacviewAddOnTests() => Directory.CreateDirectory(Path.Combine(_appData, "Tacview"));
 
     public void Dispose()
     {
+        // Junctions first (only these two places get one), so the recursive delete cannot follow them.
+        foreach (string d in new[] { OldDir, Path.Combine(_appData, "Tacview") })
+            if (Directory.Exists(d) && new DirectoryInfo(d).Attributes.HasFlag(FileAttributes.ReparsePoint)) Directory.Delete(d);
         try { Directory.Delete(_appData, recursive: true); } catch (IOException) { }
+        if (_target != null) try { Directory.Delete(_target, recursive: true); } catch (IOException) { }
+    }
+
+    string? _target;
+
+    void MakeJunction(string link)
+    {
+        _target = Path.Combine(Path.GetTempPath(), "lsf2j-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(_target);
+        File.WriteAllText(Path.Combine(_target, "main.lua"), "elsewhere");
+        Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{_target}\"")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!;
+        p.StandardOutput.ReadToEnd();
+        p.WaitForExit();
+        Assert.True(Directory.Exists(link), "mklink /J failed");
     }
 
     string AddOnFile => Path.Combine(_appData, "Tacview", "AddOns", "LazySF2Patch", "main.lua");
@@ -57,9 +77,9 @@ public sealed class TacviewAddOnTests : IDisposable
     }
 
     [Fact]
-    public void Fresh_install_without_Tacview_writes_the_file_and_enables_it_with_the_marker()
+    public void Fresh_install_writes_the_file_and_enables_it_with_the_marker()
     {
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
         Assert.False(File.Exists(AddOnFile + ".tmp"));
         Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
@@ -70,7 +90,7 @@ public sealed class TacviewAddOnTests : IDisposable
     public void Tacviews_own_0_without_the_marker_is_turned_on_once()
     {
         _reg.SetDword(Key, "Enabled", 0);  // Tacview writes this itself for a new add-on (and 1.0 players have it)
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
         Assert.Equal(1, _reg.GetDword(Key, "EnabledByInstaller"));
     }
@@ -80,31 +100,89 @@ public sealed class TacviewAddOnTests : IDisposable
     {
         _reg.SetDword(Key, "Enabled", 0);
         _reg.SetDword(Key, "EnabledByInstaller", 1);
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
     }
 
     [Fact]
     public void Turned_off_after_install_stays_off_on_the_next_hook()
     {
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         _reg.SetDword(Key, "Enabled", 0);  // the player turns it off in Tacview
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
     }
 
     [Fact]
-    public void An_MSI_upgrade_keeps_the_players_choice()
+    public void Uninstall_and_install_in_either_order_keep_the_players_choice()
     {
-        // The MSI runs the old version's uninstall hook, then the new version's install hook.
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         _reg.SetDword(Key, "Enabled", 0);
         _reg.SetDword(Key, "TheatreSwitch", 0);
         TacviewAddOn.Uninstall(_appData);
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
         Assert.Equal(0, _reg.GetDword(Key, "TheatreSwitch"));
         Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
+        TacviewAddOn.Install(_reg, _appData, _content, false);
+        TacviewAddOn.Uninstall(_appData);
+        Assert.Equal(0, _reg.GetDword(Key, "Enabled"));
+        Assert.Equal(0, _reg.GetDword(Key, "TheatreSwitch"));
+    }
+
+    [Fact]
+    public void Without_Tacview_nothing_is_done()
+    {
+        Directory.Delete(Path.Combine(_appData, "Tacview"));
+        var log = TacviewAddOn.Install(_reg, _appData, _content, false);
+        Assert.Contains(log, l => l.Contains("Tacview not found"));
+        Assert.False(Directory.Exists(Path.Combine(_appData, "Tacview")));
+        Assert.Empty(_reg.Keys);
+    }
+
+    [Fact]
+    public void Tacviews_registry_key_alone_counts_as_present()
+    {
+        Directory.Delete(Path.Combine(_appData, "Tacview"));
+        _reg.SetDword(TacviewAddOn.TacviewKey, "x", 1);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
+        Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
+        Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
+    }
+
+    [Fact]
+    public void While_Tacview_runs_the_marker_is_not_written()
+    {
+        _reg.SetDword(Key, "Enabled", 0);
+        var log = TacviewAddOn.Install(_reg, _appData, _content, tacviewRunning: true);
+        Assert.Contains(log, l => l.Contains("Tacview is running"));
+        Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
+        Assert.Null(_reg.GetDword(Key, "EnabledByInstaller"));
+        _reg.SetDword(Key, "Enabled", 0);  // Tacview wrote its settings back on closing
+        TacviewAddOn.Install(_reg, _appData, _content, tacviewRunning: false);
+        Assert.Equal(1, _reg.GetDword(Key, "Enabled"));
+        Assert.Equal(1, _reg.GetDword(Key, "EnabledByInstaller"));
+    }
+
+    [Fact]
+    public void A_junctioned_old_add_on_folder_is_not_emptied()
+    {
+        MakeJunction(OldDir);
+        var log = TacviewAddOn.Install(_reg, _appData, _content, false);
+        Assert.Contains(log, l => l.Contains("remove old add-on files failed"));
+        Assert.True(File.Exists(Path.Combine(_target!, "main.lua")));
+    }
+
+    [Fact]
+    public void A_junctioned_Tacview_folder_is_refused_on_uninstall()
+    {
+        Directory.Delete(Path.Combine(_appData, "Tacview"));
+        MakeJunction(Path.Combine(_appData, "Tacview"));
+        Directory.CreateDirectory(Path.Combine(_target!, "AddOns", "LazySF2Patch"));
+        File.WriteAllText(Path.Combine(_target!, "AddOns", "LazySF2Patch", "main.lua"), "elsewhere");
+        var log = TacviewAddOn.Uninstall(_appData);
+        Assert.Contains(log, l => l.Contains("remove add-on failed"));
+        Assert.True(File.Exists(Path.Combine(_target!, "AddOns", "LazySF2Patch", "main.lua")));
     }
 
     [Fact]
@@ -112,7 +190,7 @@ public sealed class TacviewAddOnTests : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(AddOnFile)!);
         File.WriteAllText(AddOnFile, "old");
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(_content, File.ReadAllBytes(AddOnFile));
     }
 
@@ -125,7 +203,7 @@ public sealed class TacviewAddOnTests : IDisposable
         File.WriteAllText(Path.Combine(OldDir, "main.lua"), "old");
         File.WriteAllText(Path.Combine(OldDir, "main.lua.tmp"), "old");
 
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
 
         Assert.False(_reg.KeyExists(OldKey));
         Assert.Equal(0, _reg.GetDword(Key, "TheatreSwitch"));
@@ -138,7 +216,7 @@ public sealed class TacviewAddOnTests : IDisposable
     {
         _reg.SetDword(OldKey, "TheatreSwitch", 0);
         _reg.SetDword(Key, "TheatreSwitch", 1);
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Equal(1, _reg.GetDword(Key, "TheatreSwitch"));
         Assert.False(_reg.KeyExists(OldKey));
     }
@@ -149,7 +227,7 @@ public sealed class TacviewAddOnTests : IDisposable
         Directory.CreateDirectory(OldDir);
         File.WriteAllText(Path.Combine(OldDir, "main.lua"), "old");
         File.WriteAllText(Path.Combine(OldDir, "notes.txt"), "player's");
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.False(File.Exists(Path.Combine(OldDir, "main.lua")));
         Assert.True(File.Exists(Path.Combine(OldDir, "notes.txt")));
     }
@@ -157,7 +235,7 @@ public sealed class TacviewAddOnTests : IDisposable
     [Fact]
     public void Uninstall_removes_the_file_and_folder_and_leaves_Tacviews_key()
     {
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         _reg.SetDword(Key, "TheatreSwitch", 0);
 
         TacviewAddOn.Uninstall(_appData);
@@ -172,7 +250,7 @@ public sealed class TacviewAddOnTests : IDisposable
     [Fact]
     public void Uninstall_keeps_a_folder_with_other_files()
     {
-        TacviewAddOn.Install(_reg, _appData, _content);
+        TacviewAddOn.Install(_reg, _appData, _content, false);
         File.WriteAllText(AddOnFile + ".tmp", "partial");
         string other = Path.Combine(Path.GetDirectoryName(AddOnFile)!, "notes.txt");
         File.WriteAllText(other, "player's");
@@ -196,7 +274,7 @@ public sealed class TacviewAddOnTests : IDisposable
         File.WriteAllText(AddOnFile, "old");
         List<string> log;
         using (new FileStream(AddOnFile, FileMode.Open, FileAccess.Read, FileShare.None))
-            log = TacviewAddOn.Install(_reg, _appData, _content);
+            log = TacviewAddOn.Install(_reg, _appData, _content, false);
         Assert.Contains(log, l => l.Contains("write add-on failed"));
         Assert.False(File.Exists(AddOnFile + ".tmp"));
         Assert.Equal(1, _reg.GetDword(Key, "Enabled"));

@@ -45,15 +45,16 @@ public sealed class CurrentUserRegistry : IUserRegistry
 /// Puts the mod's Tacview add-on in place for the installing user and enables it once: Tacview keeps a per-user
 /// switch for every add-on folder (AddOns\[folder]\Enabled, a DWORD) and writes 0 for a new add-on itself, so an
 /// existing 0 is not the player's choice. The installer sets Enabled=1 once, with the EnabledByInstaller marker, and
-/// never again while the marker exists. The key is Tacview's: uninstall leaves it, so an MSI upgrade (which runs the
-/// old uninstall first) keeps the player's choice. Also moves the settings of the add-on's pre-rename folder (LazySF2)
-/// over. Never throws: every step is best-effort and logged.
+/// never again while the marker exists. The key is Tacview's: uninstall leaves it, so whichever order an upgrade runs
+/// the hooks in, the key and the player's choice are kept. Also moves the settings of the add-on's pre-rename folder
+/// (LazySF2) over. Nothing is done when Tacview is not found. Never throws: every step is best-effort and logged.
 /// </summary>
 public static class TacviewAddOn
 {
     public const string Folder = "LazySF2Patch";
     public const string OldFolder = "LazySF2";
-    public const string AddOnsKey = @"Software\Raia Software Inc.\Tacview\Local\AddOns";
+    public const string TacviewKey = @"Software\Raia Software Inc.\Tacview";
+    public const string AddOnsKey = TacviewKey + @"\Local\AddOns";
     public const string EnabledValue = "Enabled";
     public const string TheatreSwitchValue = "TheatreSwitch";
     public const string MarkerValue = "EnabledByInstaller";
@@ -76,16 +77,24 @@ public static class TacviewAddOn
 
     /// <summary>
     /// Install and update hook. Writes the add-on (when it differs), carries the old LazySF2 settings over and removes
-    /// them, then enables the add-on once: only while the EnabledByInstaller marker is missing.
+    /// them, then enables the add-on once: only while the EnabledByInstaller marker is missing. Only when Tacview is
+    /// present (its AppData folder or its HKCU key). While Tacview runs, the marker is not written, so the next hook
+    /// enables it again (Tacview may write its settings back when it closes).
     /// </summary>
     /// <returns>Log lines.</returns>
-    public static List<string> Install(IUserRegistry reg, string appData, byte[] content)
+    public static List<string> Install(IUserRegistry reg, string appData, byte[] content, bool tacviewRunning)
     {
         var log = new List<string>();
+        if (!Directory.Exists(Path.Combine(appData, "Tacview")) && !reg.KeyExists(TacviewKey))
+        {
+            log.Add("tacview: Tacview not found; add-on not installed (the mod writes it on the first recorded flight)");
+            return log;
+        }
+        if (tacviewRunning) log.Add("tacview: Tacview is running; the add-on switch is set but will be set again by the next install or update");
         Step(log, "write add-on", () => log.Add(WriteFile(appData, content)));
         Step(log, "remove old add-on files", () =>
         {
-            int n = RemoveFiles(AddOnDir(appData, OldFolder));
+            int n = RemoveFiles(appData, AddOnDir(appData, OldFolder));
             if (n > 0) log.Add($"tacview: removed {n} file(s) of the old LazySF2 add-on");
         });
         string key = AddOnsKey + "\\" + Folder, oldKey = AddOnsKey + "\\" + OldFolder;
@@ -107,7 +116,8 @@ public static class TacviewAddOn
             if (reg.GetDword(key, MarkerValue) == null)
             {
                 reg.SetDword(key, EnabledValue, 1);
-                reg.SetDword(key, MarkerValue, 1);  // after Enabled: a failed write is retried by the next hook
+                // After Enabled, so a failed write is retried by the next hook; not while Tacview runs, for the same reason.
+                if (!tacviewRunning) reg.SetDword(key, MarkerValue, 1);
                 log.Add($"tacview: enabled the Lazy SF2 Patch add-on (was {(enabled == null ? "not set" : enabled.Value.ToString())})");
             }
             else
@@ -120,13 +130,13 @@ public static class TacviewAddOn
 
     /// <summary>
     /// Uninstall hook: removes the add-on's files and its folder if empty. Tacview's key for it (with the switch and
-    /// the marker) stays, so an upgrade keeps the player's choice.
+    /// the marker) stays, so the player's choice survives an upgrade whichever order its hooks run in.
     /// </summary>
     /// <returns>Log lines.</returns>
     public static List<string> Uninstall(string appData)
     {
         var log = new List<string>();
-        Step(log, "remove add-on", () => log.Add($"tacview: removed {RemoveFiles(AddOnDir(appData))} add-on file(s)"));
+        Step(log, "remove add-on", () => log.Add($"tacview: removed {RemoveFiles(appData, AddOnDir(appData))} add-on file(s)"));
         return log;
     }
 
@@ -158,10 +168,14 @@ public static class TacviewAddOn
         return "tacview: wrote the add-on (AddOns\\LazySF2Patch\\main.lua)";
     }
 
-    /// <summary>Deletes main.lua and main.lua.tmp in dir, then dir itself if empty. Returns the files removed.</summary>
-    static int RemoveFiles(string dir)
+    /// <summary>
+    /// Deletes main.lua and main.lua.tmp in dir, then dir itself if empty. Returns the files removed. Refuses (throws,
+    /// so the step logs it) when a folder in the path below appData is a reparse point.
+    /// </summary>
+    static int RemoveFiles(string appData, string dir)
     {
-        if (!Directory.Exists(dir) || new DirectoryInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint)) return 0;
+        if (!Directory.Exists(dir)) return 0;
+        if (HasReparsePoint(appData, dir)) throw new IOException("a reparse point in the add-on path; nothing removed");
         int n = 0;
         foreach (string name in new[] { "main.lua", "main.lua.tmp" })
         {
