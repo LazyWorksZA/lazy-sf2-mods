@@ -8,9 +8,9 @@
 namespace LazyWorks::SF2Patch::net {
 
 inline constexpr uint16_t kMagic = 0x5A4C;  // bytes 'L','Z' on the wire (little-endian)
-// v3 adds the shared-world messages (world_proto.h). Each version is a clean break: an older peer is refused with
-// BadVersion.
-inline constexpr uint8_t kVersion = 3;
+// v3 adds the shared-world messages (world_proto.h); v4 the jet controls in AvatarState (Phase 5). Each version is a
+// clean break: an older peer is refused with BadVersion.
+inline constexpr uint8_t kVersion = 4;
 
 /// <summary>ENet channels.</summary>
 inline constexpr uint8_t kChannelReliable = 0;    // Hello, Welcome, PeerInfo, PeerLeft, Bye

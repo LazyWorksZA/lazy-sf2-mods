@@ -298,6 +298,8 @@ Status decode(const uint8_t* data, size_t len, WorldSnapshotMsg& out);
 /// A player's discrete jet state, sent by its owner on change. radar_mode is the detect interface's mode (0 off,
 /// 1 search, 2 track, 3 lock); the target is a stable key (KeyKind::Aircraft slot/member; kind 0 = none). config is
 /// the object's state word +0x5f0 masked to kAvatarConfigMask (flaps, airbrake, gear, hook, lights, wheel brakes).
+/// throttle is input channel 3 (0..1, 1 = full afterburner) as 0..255; engines has bit i set while engine i runs
+/// (the first 8); guns has bit 0 for the primary gun trigger (input 12) and bit 1 for the secondary (13).
 /// </summary>
 struct AvatarStateMsg {
     Header h;
@@ -307,9 +309,14 @@ struct AvatarStateMsg {
     uint8_t target_kind;
     uint16_t target_a, target_b;
     uint16_t config;
+    uint8_t throttle;
+    uint8_t engines;
+    uint8_t guns;
+    uint8_t spare;  // 0
 };
 #pragma pack(pop)
-static_assert(sizeof(AvatarStateMsg) == 16);  // 4:2 peer, 6:2 seq, 8:1 mode, 9:1 target kind, 10:2 a, 12:2 b, 14:2 config
+static_assert(sizeof(AvatarStateMsg) == 20);  // 4:2 peer, 6:2 seq, 8:1 mode, 9:1 target kind, 10:2 a, 12:2 b, 14:2 config,
+                                              // 16:1 throttle, 17:1 engines, 18:1 guns, 19:1 spare
 inline constexpr uint16_t kAvatarConfigMask = 0xff00;  // +0x5f0: 0x100/0x200 flaps, 0x400 airbrake, 0x800 gear,
                                                        // 0x1000 hook, 0x2000/0x4000 lights, 0x8000 wheel brakes
 size_t encode(const AvatarStateMsg& m, uint8_t* out, size_t cap);
@@ -322,10 +329,35 @@ inline uint8_t radar_mode_of(int state, int stage, bool has_target) {
     if (has_target && stage >= 2) return 2;
     return 1;
 }
+/// <summary>Input channel 3 (0..1) as the wire's 0..255; out of range is clamped, not finite gives 0.</summary>
+inline uint8_t throttle_to_wire(float v) {
+    if (!(v > 0.0f)) return 0;  // also NaN
+    if (v >= 1.0f) return 255;
+    return static_cast<uint8_t>(v * 255.0f + 0.5f);
+}
+inline float throttle_from_wire(uint8_t q) { return q / 255.0f; }
+/// <summary>A throttle change worth sending: at least 2 steps (an axis' noise is not), or onto idle or full.</summary>
+inline bool throttle_moved(uint8_t from, uint8_t to) {
+    const int d = from > to ? from - to : to - from;
+    return d >= 2 || (d == 1 && (to == 0 || to == 255));
+}
 /// <summary>True when what the receivers see would differ (seq and peer not compared).</summary>
 inline bool avatar_state_differs(const AvatarStateMsg& a, const AvatarStateMsg& b) {
     return a.radar_mode != b.radar_mode || a.target_kind != b.target_kind || a.target_a != b.target_a ||
-           a.target_b != b.target_b || a.config != b.config;
+           a.target_b != b.target_b || a.config != b.config || a.engines != b.engines || a.guns != b.guns ||
+           throttle_moved(a.throttle, b.throttle);
+}
+/// <summary>Seconds between two sends that only move the throttle: at most 5 a second while it moves.</summary>
+inline constexpr double kAvatarThrottleGap = 0.2;
+/// <summary>
+/// The owner's send rule: a change of anything but the throttle goes at once; a throttle move goes once
+/// kAvatarThrottleGap has passed since the last send (since = seconds since then). Nothing goes without a change.
+/// </summary>
+inline bool avatar_state_due(const AvatarStateMsg& last, const AvatarStateMsg& now, double since) {
+    if (!avatar_state_differs(last, now)) return false;
+    AvatarStateMsg same = now;
+    same.throttle = last.throttle;
+    return avatar_state_differs(last, same) || since >= kAvatarThrottleGap;
 }
 /// <summary>The receiver's RWR call is due: a lock (mode 3) on a target that was not locked by this sender before.</summary>
 inline bool avatar_lock_started(const AvatarStateMsg& prev, const AvatarStateMsg& now) {

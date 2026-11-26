@@ -469,6 +469,7 @@ void avatar_step(int slot, double now) {
 
     // The game must not take the avatar back: keep REMOTEOBJECT set (also while coasting).
     if (avatar_keep_remote(a.h)) ++a.flag_clears;
+    world_avatar_refresh(slot + 1, a.h.obj);
 
     const double t = g_order_shift ? now + static_cast<double>(g_player_dt) : now;
     Kin k{};

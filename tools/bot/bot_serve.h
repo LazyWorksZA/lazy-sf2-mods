@@ -51,6 +51,9 @@ struct ServeConfig {
     };
     std::vector<WorldObj> world;
     std::vector<WorldEv> world_events;
+    /// <summary>The jet's controls (throttle, engines) sent as the host's AvatarState (peer 0) to a welcomed client,
+    /// on change, from the client's Welcome on.</summary>
+    JetScript jet = JetScript::None;
 };
 
 struct ServeResult {
@@ -69,6 +72,9 @@ struct ServeResult {
     double host_time_end = 0;
     uint32_t missions_sent = 0;  // missions sent in full (T5)
     uint32_t world_msgs = 0, world_events = 0;  // T6 messages queued
+    uint32_t jet_states_sent = 0;  // the jet's AvatarStates queued (--jet)
+    uint32_t jet_states_rx = 0;    // the client's AvatarStates received
+    uint8_t last_rx_throttle = 0, last_rx_engines = 0;
 };
 
 /// <summary>

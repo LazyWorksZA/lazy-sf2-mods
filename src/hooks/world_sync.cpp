@@ -8,6 +8,7 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -20,6 +21,7 @@
 #include "hooks/hook_util.h"
 #include "hooks/game_files.h"
 #include "hooks/hooks.h"
+#include "hooks/jet_mirror.h"
 #include "hooks/replay_math.h"
 #include "hooks/world_files.h"
 #include "hooks/world_logic.h"
@@ -1995,9 +1997,11 @@ struct AvatarTx {
     bool have = false;
     uint16_t seq = 0;
     uint32_t epoch = 0;
+    double sent_at = 0;  // game time of the last send
 };
 AvatarTx g_atx;  // game thread
 net::AvatarStateMsg g_arx[1 + 4] = {};  // per peer: the last state applied (host 0, clients 1..4)
+bool g_arx_have[1 + 4] = {};            // ... and whether one came this flight (its controls are kept on the avatar)
 uint32_t g_arx_epoch = 0;
 uintptr_t g_arx_ao = 0;  // AircraftObject, checked once per player epoch
 
@@ -2020,7 +2024,7 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
     SlotTable t{};
     OwnJet j;
     if (!read_slot_table(at_rva(sm, kRvaMsn), &t) || !read_own_jet(static_cast<const BYTE*>(player), &j)) return;
-    if (g_atx.epoch != sim_player_epoch()) g_atx = AvatarTx{{}, false, 0, sim_player_epoch()};
+    if (g_atx.epoch != sim_player_epoch()) g_atx = AvatarTx{{}, false, 0, sim_player_epoch(), 0};
     net::AvatarStateMsg m{};
     m.peer = own_peer;
     uint16_t a = 0, b = 0;
@@ -2032,27 +2036,58 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
         m.target_b = b;
     }
     m.config = static_cast<uint16_t>(j.word & net::kAvatarConfigMask);
-    if (g_atx.have && !net::avatar_state_differs(m, g_atx.last)) return;
+    JetControls jc;
+    if (jet_read_controls(player, &jc)) {
+        m.throttle = net::throttle_to_wire(jc.throttle);
+        m.engines = jc.engines;
+    } else if (g_atx.have) {
+        m.throttle = g_atx.last.throttle;
+        m.engines = g_atx.last.engines;
+    } else {
+        m.engines = 0xff;  // unknown: no avatar switches its engines off
+    }
+    const double now = sim_game_time();
+    if (g_atx.have && !net::avatar_state_due(g_atx.last, m, now - g_atx.sent_at)) return;
     m.seq = ++g_atx.seq;
     uint8_t buf[sizeof(m)];
     const size_t n = net::encode(m, buf, sizeof(buf));
     if (!n || !send(buf, n)) return;  // tried again next step
     if (!g_atx.have || m.radar_mode != g_atx.last.radar_mode || m.target_a != g_atx.last.target_a ||
-        m.target_b != g_atx.last.target_b)
-        LOG("world: jet state: radar mode %u, target %s%03u.%02u, config 0x%04x (sent)",
+        m.target_b != g_atx.last.target_b || m.engines != g_atx.last.engines)
+        LOG("world: jet state: radar mode %u, target %s%03u.%02u, config 0x%04x, throttle %u/255, engines 0x%02x (sent)",
             static_cast<unsigned>(m.radar_mode), m.target_kind ? "A " : "none ", static_cast<unsigned>(m.target_a),
-            static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.config));
+            static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.config), static_cast<unsigned>(m.throttle),
+            static_cast<unsigned>(m.engines));
     g_atx.last = m;
     g_atx.have = true;
+    g_atx.sent_at = now;
 }
 
 void world_avatar_forget(int peer) {
-    if (peer >= 0 && peer < 5) g_arx[peer] = net::AvatarStateMsg{};
+    if (peer >= 0 && peer < 5) {
+        g_arx[peer] = net::AvatarStateMsg{};
+        g_arx_have[peer] = false;
+    }
 }
 
 void world_avatar_session_reset() {
-    g_atx = AvatarTx{{}, false, 0, sim_player_epoch()};  // our state goes out again
+    g_atx = AvatarTx{{}, false, 0, sim_player_epoch(), 0};  // our state goes out again
     for (auto& p : g_arx) p = net::AvatarStateMsg{};
+    for (bool& h : g_arx_have) h = false;
+}
+
+namespace {
+JetControls controls_of(const net::AvatarStateMsg& m) {
+    JetControls c;
+    c.throttle = net::throttle_from_wire(m.throttle);
+    c.engines = m.engines;
+    return c;
+}
+}  // namespace
+
+void world_avatar_refresh(int peer, void* avatar) {
+    if (peer < 0 || peer >= 5 || !avatar || !g_arx_have[peer] || g_arx_epoch != sim_player_epoch()) return;
+    jet_write_controls(avatar, controls_of(g_arx[peer]));
 }
 
 void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
@@ -2061,6 +2096,7 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
     if (g_arx_epoch != sim_player_epoch()) {  // a new flight: nothing applied yet
         g_arx_epoch = sim_player_epoch();
         for (auto& p : g_arx) p = net::AvatarStateMsg{};
+        for (bool& h : g_arx_have) h = false;
         g_arx_ao = module_if(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll");
     }
     net::AvatarStateMsg& prev = g_arx[m.peer];
@@ -2070,6 +2106,12 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
     if (!sm || !omm || !ao) return;
     BYTE* av = static_cast<BYTE*>(avatar);
     write_config(av, m.config);
+    const JetWriteResult jw = jet_write_controls(av, controls_of(m));
+    if (!g_arx_have[m.peer] || m.engines != prev.engines || jw.engines_set || jw.engines_refused)
+        LOG("world: jet state of peer %u: throttle %u/255, engines 0x%02x%s (%u switched%s)",
+            static_cast<unsigned>(m.peer), static_cast<unsigned>(m.throttle), static_cast<unsigned>(m.engines),
+            jw.ok ? "" : ", NOT written (input array not readable)", static_cast<unsigned>(std::popcount(jw.engines_set)),
+            jw.engines_refused ? ", some engines' class not the one we read" : "");
     const int rm = detect_call(av, ao, kDetectSetMode, kRvaAoSetMode, m.radar_mode);
     SlotTable t{};
     Om om;
@@ -2090,6 +2132,7 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
             rw < 0 ? "no RWR call" : rw == 0 ? "the target's RWR warned" : rw == 1 ? "RWR refused" : "RWR FAULTED",
             rt == 0 ? "" : ", target slot unexpected");
     prev = m;
+    g_arx_have[m.peer] = true;
 }
 
 namespace {

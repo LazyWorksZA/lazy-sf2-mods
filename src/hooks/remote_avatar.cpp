@@ -9,6 +9,7 @@
 
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/jet_mirror.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -155,6 +156,7 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     out->obj = c.obj;
     out->seq = c.seq;
     out->set_bits = mask & ~c.orig_flags;
+    jet_takeover(c.obj);  // the AI's gun and fire triggers stay in its input array otherwise
     AvatarInfo local;
     AvatarInfo& in = info ? *info : local;
     in = AvatarInfo{};

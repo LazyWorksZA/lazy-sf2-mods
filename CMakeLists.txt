@@ -78,6 +78,7 @@ add_library(lazysf2 SHARED
     src/hooks/step_order.cpp
     src/hooks/remote_avatar.cpp
     src/hooks/jet_census.cpp
+    src/hooks/jet_mirror.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp

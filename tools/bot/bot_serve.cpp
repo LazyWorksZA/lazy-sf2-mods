@@ -156,6 +156,37 @@ struct Serve {
         }
     }
 
+    // --jet: the host's AvatarState (peer 0) from the client's Welcome on, sent on change as the mod's owner rule does.
+    double jet_t0 = -1, jet_sent_at = 0;
+    bool jet_have = false;
+    AvatarStateMsg jet_last{};
+    uint16_t jet_seq = 0;
+    void jet_tick() {
+        if (!c.on) {
+            jet_t0 = -1;
+            jet_have = false;
+            return;
+        }
+        if (jet_t0 < 0) jet_t0 = host_t;
+        float thr = 0;
+        AvatarStateMsg m{};
+        jet_script_at(cfg.jet, host_t - jet_t0, &thr, &m.engines);
+        m.throttle = throttle_to_wire(thr);
+        if (jet_have && !avatar_state_due(jet_last, m, host_t - jet_sent_at)) return;
+        m.peer = 0;
+        m.seq = ++jet_seq;
+        uint8_t buf[sizeof(AvatarStateMsg)];
+        const size_t n = encode(m, buf, sizeof(buf));
+        if (!n || !core.send_world(c.slot, c.gen, buf, n, true)) return;  // tried again next step
+        ++res.jet_states_sent;
+        if (!jet_have || m.engines != jet_last.engines || throttle_moved(jet_last.throttle, m.throttle))
+            say("bot serve: jet controls: throttle %u/255, engines 0x%02x at +%.1f s", static_cast<unsigned>(m.throttle),
+                static_cast<unsigned>(m.engines), host_t - jet_t0);
+        jet_last = m;
+        jet_have = true;
+        jet_sent_at = host_t;
+    }
+
     template <typename... A>
     void say(const char* fmt, A... args) const {
         char line[320];
@@ -267,6 +298,19 @@ struct Serve {
         if (e.kind == HostEvent::Disconnect) {
             if (c.on && e.slot == c.slot && e.gen == c.gen)
                 leave(e.reason == 1 ? "timed out" : "disconnected", e.reason == 1 ? kPeerLeftTimeout : kPeerLeftLeft);
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::AvatarState)) {
+            AvatarStateMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
+            const bool first = res.jet_states_rx == 0;
+            if (first || m.engines != res.last_rx_engines || throttle_moved(res.last_rx_throttle, m.throttle))
+                say("bot serve: client %u jet: throttle %u/255, engines 0x%02x, radar mode %u, config 0x%04x",
+                    static_cast<unsigned>(m.peer), static_cast<unsigned>(m.throttle), static_cast<unsigned>(m.engines),
+                    static_cast<unsigned>(m.radar_mode), static_cast<unsigned>(m.config));
+            ++res.jet_states_rx;
+            res.last_rx_throttle = m.throttle;
+            res.last_rx_engines = m.engines;
             return;
         }
         MsgType t{};
@@ -523,6 +567,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
         }
 
         if (!cfg.world.empty() || !cfg.world_events.empty()) sv.world_tick();
+        if (cfg.jet != JetScript::None) sv.jet_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

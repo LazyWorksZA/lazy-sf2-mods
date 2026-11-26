@@ -7460,7 +7460,7 @@ void world_snapshot_tests() {
 
 void world_avatar_tests() {
     std::printf("world jet state\n");
-    expect(sizeof(AvatarStateMsg) == 16, "jet state: 16 bytes (reliable, on change)");
+    expect(sizeof(AvatarStateMsg) == 20, "jet state: 20 bytes (reliable, on change)");
     AvatarStateMsg a{};
     a.peer = 2;
     a.seq = 7;
@@ -7471,9 +7471,9 @@ void world_avatar_tests() {
     a.config = 0x0900;
     uint8_t b[32];
     AvatarStateMsg r{};
-    expect(encode(a, b, sizeof(b)) == 16 && peek_world_type(b, 16) == 25 && decode(b, 16, r) == Status::Ok &&
+    expect(encode(a, b, sizeof(b)) == 20 && peek_world_type(b, 20) == 25 && decode(b, 20, r) == Status::Ok &&
                r.peer == 2 && r.radar_mode == 3 && r.target_a == 4 && r.config == 0x0900 &&
-               decode(b, 15, r) == Status::Truncated,
+               decode(b, 19, r) == Status::Truncated,
            "jet state: round trip");
     expect(radar_mode_of(1, 0, false) == 0 && radar_mode_of(2, 1, false) == 1 && radar_mode_of(3, 2, true) == 2 &&
                radar_mode_of(4, 3, true) == 3 && radar_mode_of(4, 3, false) == 1 && radar_mode_of(5, 0, false) == 0,
@@ -7488,7 +7488,7 @@ void world_avatar_tests() {
     AvatarStateMsg other = a;
     other.target_b = 2;
     expect(avatar_lock_started(a, other), "jet state: a lock on another target warns that target");
-    std::printf("    estimate: a state change is 16 bytes; a few per minute (locks, gear, flaps)\n");
+    std::printf("    estimate: a state change is 20 bytes; a few per minute (locks, gear, flaps)\n");
     AvatarStateCache cache;
     AvatarStateMsg host{}, c1{}, c2{};
     host.peer = 0;
@@ -7937,6 +7937,86 @@ void jet_census_tests() {
            "census: an unreadable pointer is skipped");
 }
 
+void jet_controls_tests() {
+    std::printf("jet controls (Phase 5 T2: engine and afterburner)\n");
+    expect(kVersion == 4 && sizeof(AvatarStateMsg) == 20, "protocol v4: the jet state grew to 20 bytes");
+    expect(throttle_to_wire(0.0f) == 0 && throttle_to_wire(1.0f) == 255 && throttle_to_wire(0.7f) == 179 &&
+               throttle_to_wire(2.0f) == 255 && throttle_to_wire(-1.0f) == 0 &&
+               throttle_to_wire(std::numeric_limits<float>::quiet_NaN()) == 0 && throttle_from_wire(255) == 1.0f &&
+               std::fabs(throttle_from_wire(179) - 0.7f) < 0.003f,
+           "throttle: 0..1 as 0..255, clamped, NaN as idle, back within half a step");
+    expect(!throttle_moved(100, 101) && throttle_moved(100, 102) && throttle_moved(1, 0) && throttle_moved(254, 255) &&
+               !throttle_moved(7, 7),
+           "throttle: a one-step wobble is no change, except onto idle or full");
+    AvatarStateMsg last{}, now{};
+    last.throttle = 100;
+    last.engines = 1;
+    now = last;
+    now.throttle = 150;
+    expect(!avatar_state_due(last, now, 0.1) && avatar_state_due(last, now, 0.25),
+           "send rule: a throttle move waits for 0.2 s after the last send (5 a second at most)");
+    now.config = 0x0800;
+    expect(avatar_state_due(last, now, 0.05), "send rule: any other change (gear here) goes at once, with the throttle");
+    now = last;
+    now.engines = 0;
+    expect(avatar_state_due(last, now, 0.0), "send rule: an engine switched off goes at once");
+    now = last;
+    now.throttle = 101;
+    expect(!avatar_state_due(last, now, 10.0) && !avatar_state_due(last, last, 10.0), "send rule: nothing without a change");
+    float thr = -1;
+    uint8_t eng = 0;
+    bot::jet_script_at(bot::JetScript::Ab, 1.0, &thr, &eng);
+    const bool idle = thr == 0.0f && eng == 0xff;
+    bot::jet_script_at(bot::JetScript::Ab, 5.0, &thr, &eng);
+    const bool mil = thr == 0.7f && eng == 0xff;
+    bot::jet_script_at(bot::JetScript::Ab, 9.0, &thr, &eng);
+    const bool ab = thr == 1.0f && eng == 0xff;
+    bot::jet_script_at(bot::JetScript::Ab, 13.0, &thr, &eng);
+    const bool off = eng == 0;
+    bot::jet_script_at(bot::JetScript::Ab, 15.0, &thr, &eng);
+    expect(idle && mil && ab && off && thr == 0.0f && eng == 0xff, "bot --jet ab: idle, Mil, full AB, engines off, again");
+    std::printf("    estimate: 20 B a state, about 64 B on the wire with UDP, ENet and its ack; a moving throttle sends at\n"
+                "    most 5 a second (320 B/s per player), a steady one nothing; engines and other changes once each\n");
+
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    s.cfg.jet = bot::JetScript::Ab;
+    if (!s.start()) return expect(false, "bot serve listening (--jet ab)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<AvatarStateMsg> got;
+    bool sent_own = false;
+    WorldPacket wp[8];
+    serve_run_for(c, 6.0, [&] {
+        const size_t n = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < n; ++i) {
+            AvatarStateMsg m{};
+            if (decode(wp[i].data, wp[i].len, m) == Status::Ok) got.push_back(m);
+        }
+        if (!sent_own && !c.welcomes.empty()) {
+            AvatarStateMsg own{};
+            own.throttle = 200;
+            own.engines = 1;
+            uint8_t b[sizeof(own)];
+            sent_own = c.core.send_world(b, encode(own, b, sizeof(b)));
+        }
+        return false;
+    });
+    s.finish();
+    c.core.stop(false);
+    bool first_idle = !got.empty() && got[0].peer == 0 && got[0].throttle == 0 && got[0].engines == 0xff;
+    bool saw_mil = false;
+    for (const AvatarStateMsg& m : got) saw_mil = saw_mil || (m.throttle == 179 && m.engines == 0xff);
+    char what[200];
+    std::snprintf(what, sizeof(what), "loopback: the host's jet controls reach the client (%zu states: idle first, then Mil)",
+                  got.size());
+    expect(first_idle && saw_mil && got.size() <= 4, what);
+    expect(sent_own && s.res.jet_states_rx == 1 && s.res.last_rx_throttle == 200 && s.res.last_rx_engines == 1,
+           "loopback: the client's jet controls reach the host");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -7964,8 +8044,8 @@ int main() {
         expect(n == 60 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
-        expect(kVersion == 3 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7,
-               "v3 sizes");
+        expect(kVersion == 4 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7,
+               "v4 sizes (as v3)");
     }
 
     loopback();
@@ -8012,6 +8092,7 @@ int main() {
     world_snapshot_tests();
     pilot_twist_settings_tests();
     jet_census_tests();
+    jet_controls_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

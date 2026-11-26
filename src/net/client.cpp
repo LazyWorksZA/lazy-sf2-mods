@@ -632,6 +632,7 @@ void avatar_step(int id, double now, double wall) {
         return;
     }
     if (avatar_keep_remote(r.h)) ++r.flag_clears;
+    world_avatar_refresh(id, r.h.obj);
     replay_math::Kin k{};
     const net::RemoteJet::Out out = g_hold ? net::RemoteJet::Out::Coast : r.jet.shown(now, &k);
     if (out == net::RemoteJet::Out::Coast) {

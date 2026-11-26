@@ -188,4 +188,28 @@ private:
 
 using net::ClockSync;  // the shared clock estimate lives in net/clock_sync.h
 
+/// <summary>Scripted jet controls for the bot's AvatarState (Phase 5): none, or `ab` (a 14 s cycle).</summary>
+enum class JetScript { None, Ab };
+inline bool parse_jet_script(const char* name, JetScript* out) {
+    if (!name) return false;
+    if (!std::strcmp(name, "none")) *out = JetScript::None;
+    else if (!std::strcmp(name, "ab")) *out = JetScript::Ab;
+    else return false;
+    return true;
+}
+/// <summary>
+/// `ab` at t seconds from its start: idle 4 s, Mil (0.7) 4 s, full afterburner 4 s, then the engines off at idle
+/// for 2 s, and again. throttle is input channel 3 (0..1); engines has bit 0 set while running.
+/// </summary>
+inline void jet_script_at(JetScript s, double t, float* throttle, uint8_t* engines) {
+    *throttle = 0.0f;
+    *engines = 0xff;
+    if (s != JetScript::Ab || !(t >= 0)) return;
+    const double p = std::fmod(t, 14.0);
+    if (p < 4.0) *throttle = 0.0f;
+    else if (p < 8.0) *throttle = 0.7f;
+    else if (p < 12.0) *throttle = 1.0f;
+    else *engines = 0;
+}
+
 }  // namespace LazyWorks::SF2Patch::bot

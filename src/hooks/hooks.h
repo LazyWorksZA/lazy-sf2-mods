@@ -367,8 +367,12 @@ using AvatarSendFn = bool (*)(const uint8_t* data, size_t len);
 /// and its configuration bits when they change (T7).
 /// </summary>
 void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send);
-/// <summary>Game thread: applies a peer's AvatarState to the aircraft that is its avatar here (config, radar, RWR).</summary>
+/// <summary>Game thread: applies a peer's AvatarState to the aircraft that is its avatar here (config, radar, RWR,
+/// throttle and engines).</summary>
 void world_avatar_apply(const uint8_t* data, size_t len, void* avatar);
+/// <summary>From the avatar's own step: writes that peer's last controls (throttle, engines) again, so an avatar taken
+/// or retaken after the state came still shows them. Does nothing before the peer's first AvatarState this flight.</summary>
+void world_avatar_refresh(int peer, void* avatar);
 /// <summary>A peer left: its next state is applied as new (the RWR hears its lock again).</summary>
 void world_avatar_forget(int peer);
 /// <summary>A session starts or ends: our own state is sent again in full, and every peer's applied as new.</summary>
