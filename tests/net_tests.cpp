@@ -7243,6 +7243,31 @@ void world_seat_tests() {
            "world seat: parse refuses 0, 48, empty, junk");
 }
 
+void world_remote_tests() {
+    using namespace LazyWorks::SF2Patch::hooks;
+    std::printf("world remote\n");
+    expect(should_mark_remote(0x01000003, 0x01000001, true), "world remote: an AI object is marked");
+    expect(!should_mark_remote(0x01000001, 0x01000001, true), "world remote: the player is not marked");
+    expect(!should_mark_remote(0x01000003, 0x01000001, false) && !should_mark_remote(0xffffffffu, 1, true),
+           "world remote: unresolved or -1 ids are not marked");
+    expect(block_damage(true, 0x40 | 0x3, 0x40), "world remote: damage to a REMOTEOBJECT object is blocked");
+    expect(!block_damage(false, 0x40, 0x40), "world remote: nothing is blocked while the remote world is off");
+    expect(!block_damage(true, 0x3, 0x40) && !block_damage(true, 0xffffffffu, 0),
+           "world remote: a local object, or an unknown mask, is not blocked");
+    expect(log_milestone(1) && log_milestone(10) && log_milestone(1000) && !log_milestone(2) && !log_milestone(11) &&
+               !log_milestone(20) && !log_milestone(0),
+           "world remote: log at 1, 10, 100, ...");
+    RemoteCounts c;
+    c.count(RemoteKind::Aircraft);
+    c.count(RemoteKind::Aircraft);
+    c.count(RemoteKind::Ground);
+    c.count(RemoteKind::Placed);
+    c.player = 1;
+    expect(format_remote_counts(c) == "marked 2 aircraft, 1 ground-group members, 1 placed objects remote; player 1, "
+                                      "already 0, unresolved 0, faulted 0",
+           "world remote: counts line");
+}
+
 void world_files_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     std::printf("world files\n");
@@ -7415,6 +7440,7 @@ int main() {
     probe_snapshot_tests();
     world_files_tests();
     world_seat_tests();
+    world_remote_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

@@ -2,6 +2,8 @@
 // Pure decisions of the shared-world tooling (world_sync.cpp), free of Windows headers so the tests can use them.
 // See lazy-sf2-recon: network-recon §10.2 (seat) and §10.4 (remote).
 #include <cstdint>
+#include <cstdio>
+#include <string>
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -48,6 +50,44 @@ inline int parse_seat(const wchar_t* s) {
         if (v >= kWorldMaxMembers) return -1;
     }
     return v >= 1 ? v : -1;
+}
+
+enum class RemoteKind : uint8_t { Aircraft, Ground, Placed };
+
+/// <summary>What one marking pass did, for its log line.</summary>
+struct RemoteCounts {
+    int aircraft = 0, ground = 0, placed = 0;  // made REMOTEOBJECT now
+    int player = 0;      // the player's object, left alone
+    int already = 0;     // already REMOTEOBJECT
+    int unresolved = 0;  // an id that names no aircraft or ground object
+    int faulted = 0;
+    void count(RemoteKind k) { (k == RemoteKind::Aircraft ? aircraft : k == RemoteKind::Ground ? ground : placed)++; }
+};
+
+/// <summary>A mission object is made remote unless it is the player's, or its id names no object.</summary>
+inline bool should_mark_remote(uint32_t id, uint32_t player_id, bool resolved) {
+    return resolved && id != 0xffffffffu && id != player_id;
+}
+
+/// <summary>Local damage is dropped only while the remote world is on, for objects with the REMOTEOBJECT bit.</summary>
+inline bool block_damage(bool remote_on, uint32_t flags, uint32_t remote_mask) {
+    return remote_on && remote_mask != 0 && (flags & remote_mask) != 0;
+}
+
+/// <summary>Log the 1st, 10th, 100th, ... occurrence (n counts from 1).</summary>
+inline bool log_milestone(uint64_t n) {
+    if (n == 0) return false;
+    while (n % 10 == 0) n /= 10;
+    return n == 1;
+}
+
+inline std::string format_remote_counts(const RemoteCounts& c) {
+    char b[200];
+    const int n = std::snprintf(b, sizeof(b),
+                                "marked %d aircraft, %d ground-group members, %d placed objects remote; player %d, "
+                                "already %d, unresolved %d, faulted %d",
+                                c.aircraft, c.ground, c.placed, c.player, c.already, c.unresolved, c.faulted);
+    return std::string(b, n > 0 ? static_cast<size_t>(n) : 0);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

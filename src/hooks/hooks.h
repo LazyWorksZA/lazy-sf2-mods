@@ -311,7 +311,8 @@ bool client_welcomed();
 /// seed and start options) and runs from it; LAZYSF2_WORLD_LOAD=&lt;file&gt; runs that file instead, with the
 /// sidecar's seed and options forced. Both write world_NNN.manifest.txt after the mission's objects are created.
 /// LAZYSF2_WORLD_SEED=n fixes the seed for a save. LAZYSF2_WORLD_SEAT=n puts the player on member n (n = 1 is "x-2") of
-/// the player flight in every single mission. world_install() reads the variables (DllMain, after
+/// the player flight in every single mission. LAZYSF2_WORLD_REMOTE=1 makes every mission object but the player's
+/// REMOTEOBJECT after the start and blocks local damage to REMOTEOBJECT objects (the client's world). world_install() reads the variables (DllMain, after
 /// install_probe_hooks()); world_on_modules_loaded() hooks SingleMissionScreen.dll and SingleMission.dll images.
 /// </summary>
 void world_install();

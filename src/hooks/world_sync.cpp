@@ -75,6 +75,7 @@ constexpr size_t kAircraftData = 0x380, kGroundTypeRec = 0x360, kTypeName = 0x04
 enum class Mode { Off, Save, Load };
 Mode g_mode = Mode::Off;          // set once in world_install()
 std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
+bool g_remote = false;            // LAZYSF2_WORLD_REMOTE=1
 int g_seat = -1;                  // LAZYSF2_WORLD_SEAT: the player's member index, or -1 (stock)
 bool g_seed_from_env = false;
 uint32_t g_env_seed = 0;
@@ -815,6 +816,9 @@ int __fastcall h_Start(void* msn) {
     return result;
 }
 
+void remote_before_start();
+void remote_after_start(void* msn);
+
 // ---- seat (T3) ----
 
 struct PlayerFlight {
@@ -918,12 +922,198 @@ void check_seat(void* msn) {
 
 int __fastcall h_Slot32(void* msn) {
     HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
-    if (g_seat < 0 || !sm || msn != at_rva(sm, kRvaMsn)) return o_Slot32(msn);
-    const bool seated = apply_seat(msn);
+    if ((g_seat < 0 && !g_remote) || !sm || msn != at_rva(sm, kRvaMsn)) return o_Slot32(msn);
+    if (g_remote) remote_before_start();
+    const bool seated = g_seat >= 0 && apply_seat(msn);
     const int r = o_Slot32(msn);
     if (seated) check_seat(msn);
+    if (g_remote) remote_after_start(msn);
     return r;
 }
+
+// ---- mass remote and the damage block (T4) ----
+
+// AircraftObject's and GroundObject's REMOTEOBJECT masks (the object manager hands out one bit per flag name, so
+// vehicles and ships in the GroundObject group use the same bit). See lazy-sf2-recon: network-recon §10.4 and §10.13.
+constexpr DWORD kAoStamp = 0x51d220bd, kAoSize = 0xc2000, kRvaAoRemoteMask = 0xb7b28;
+constexpr DWORD kGoStamp = 0x51d220a7, kGoSize = 0x54000, kRvaGoRemoteMask = 0x4d620;
+constexpr DWORD kGmStamp = 0x51d220a2, kGmSize = 0x47000;
+constexpr DWORD kNvStamp = 0x51d220cd, kNvSize = 0x4a000;
+constexpr size_t kDamageIface = 0x1c;  // QI 9, the damage interface, inside every aircraft and ground object
+
+std::atomic<bool> g_remote_on{false};          // set after the marking pass, cleared at the next start
+std::atomic<uint32_t> g_mask_air{0}, g_mask_ground{0};
+std::atomic<uint64_t> g_blocked{0};
+HMODULE g_ao = nullptr, g_ao_bad = nullptr, g_go = nullptr, g_go_bad = nullptr, g_gm = nullptr, g_gm_bad = nullptr,
+        g_nv = nullptr, g_nv_bad = nullptr;  // guarded by g_hook_lock
+
+bool read_mask(const wchar_t* module, DWORD stamp, DWORD size, const char* name, DWORD rva, uint32_t* out) {
+    HMODULE m = GetModuleHandleW(module);
+    if (!m || !is_expected_build(m, stamp, size, name)) return false;
+    __try {
+        std::memcpy(out, at_rva(m, rva), sizeof(uint32_t));
+        return *out != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The object an id names, and which group it is in. SEH only.
+bool resolve_obj(const Om& o, uint32_t id, BYTE** obj, int* group_kind) {
+    __try {
+        if (id == 0xffffffffu || !o.mgr) return false;
+        const uint32_t ngroups = *reinterpret_cast<const uint32_t*>(o.mgr + kMgrGroupCount);
+        const uintptr_t arr = *reinterpret_cast<const uintptr_t*>(o.mgr + kMgrGroups);
+        const uint32_t gi = id >> 24, slot = id & 0xffffff;
+        if (!arr || gi >= ngroups || gi >= kMaxGroups) return false;
+        const uintptr_t grp = arr + gi * kGroupStride;
+        const uint32_t count = *reinterpret_cast<const uint32_t*>(grp + kGrpCount);
+        const uintptr_t* slots = *reinterpret_cast<const uintptr_t* const*>(grp + kGrpSlots);
+        if (!slots || slot >= count || slot >= kMaxGroupSlots) return false;
+        *obj = reinterpret_cast<BYTE*>(slots[slot]);
+        *group_kind = grp == o.aircraft_grp ? 1 : grp == o.ground_grp ? 2 : 0;
+        return *obj != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// 0 set now, 1 already set, 2 faulted.
+int set_flag(BYTE* obj, uint32_t mask) {
+    __try {
+        uint32_t f = 0;
+        std::memcpy(&f, obj + kObjFlags, sizeof(f));
+        if (f & mask) return 1;
+        f |= mask;
+        std::memcpy(obj + kObjFlags, &f, sizeof(f));
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
+void mark_one(const Om& om, uint32_t id, uint32_t player, RemoteKind kind, RemoteCounts* c) {
+    BYTE* obj = nullptr;
+    int group = 0;
+    const bool resolved = resolve_obj(om, id, &obj, &group);
+    if (resolved && id == player) {
+        ++c->player;
+        return;
+    }
+    if (!should_mark_remote(id, player, resolved) || group == 0) {
+        ++c->unresolved;
+        return;
+    }
+    const uint32_t mask = group == 1 ? g_mask_air.load() : g_mask_ground.load();
+    const int r = set_flag(obj, mask);
+    if (r == 0) c->count(kind);
+    else if (r == 1) ++c->already;
+    else ++c->faulted;
+}
+
+void remote_before_start() {
+    const bool was = g_remote_on.exchange(false);
+    const uint64_t n = g_blocked.exchange(0);
+    if (was) LOG("world: remote: the last mission blocked %llu local damage calls to remote objects", n);
+}
+
+// After the start: every object of the mission except the player's is made REMOTEOBJECT, and from now on local
+// damage to REMOTEOBJECT objects is dropped (with NET null the game would apply it; network-recon §10.4).
+void remote_after_start(void* msn) {
+    uint32_t air = 0, ground = 0;
+    if (!read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoRemoteMask, &air) ||
+        !read_mask(L"GroundObject.dll", kGoStamp, kGoSize, "GroundObject.dll", kRvaGoRemoteMask, &ground)) {
+        LOG("world: remote: refused (REMOTEOBJECT masks unreadable or not set)");
+        return;
+    }
+    if (air != ground) LOG("world: remote: note the aircraft and ground REMOTEOBJECT masks differ (0x%08lx, 0x%08lx)",
+                           static_cast<unsigned long>(air), static_cast<unsigned long>(ground));
+    g_mask_air = air;
+    g_mask_ground = ground;
+    Om om;
+    HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
+    SlotTable t{};
+    uint32_t player = 0xffffffffu;
+    if (!omm || !is_expected_build(omm, kOmStamp, kOmSize, "ObjectManager.dll") || !read_om(omm, &om) ||
+        !read_slot_table(msn, &t) || !read_player_obj(msn, &player)) {
+        LOG("world: remote: refused (object manager or slot table not as expected)");
+        return;
+    }
+    RemoteCounts c;
+    for (int i = 0; i < t.count; ++i) {
+        SlotRaw s{};
+        if (!read_slot(t, i, &s)) break;
+        if (s.formation == 0xffffffffu) continue;
+        for (int m = 0; m < s.members; ++m)
+            mark_one(om, s.ids[m], player, i < t.first_ground ? RemoteKind::Aircraft : RemoteKind::Ground, &c);
+    }
+    const BYTE* areas = nullptr;
+    int n_areas = 0;
+    if (read_areas_head(msn, &areas, &n_areas)) {
+        for (int i = 0; i < n_areas; ++i) {
+            AreaRaw ar{};
+            if (!read_area(areas, i, &ar)) break;
+            if (ar.active != 1) continue;
+            for (int j = 0; j < ar.n_placed; ++j) {
+                PlacedRaw p{};
+                if (read_placed(ar, j, &p) && p.obj && p.id != 0xffffffffu)
+                    mark_one(om, p.id, player, RemoteKind::Placed, &c);
+            }
+        }
+    }
+    g_remote_on = true;
+    LOG("world: remote: %s (mask 0x%08lx); local damage to REMOTEOBJECT objects is now blocked",
+        format_remote_counts(c).c_str(), static_cast<unsigned long>(air));
+}
+
+// Damage interface slots 4 (kinetic, 5 args), 5 (directed, 8) and 6 (blast, 6), per class DLL; the shooter id is the
+// fourth argument in each. Index: class * 3 + (slot - 4); classes aircraft, ground, vehicle, ship.
+void* g_dmg_orig[12] = {};
+const char* const kDmgClass[4] = {"aircraft", "ground object", "vehicle", "ship"};
+
+bool damage_blocked(void* iface, int k, uint32_t shooter) {
+    if (!g_remote_on.load(std::memory_order_acquire)) return false;
+    const uint32_t mask =
+        k < 3 ? g_mask_air.load(std::memory_order_relaxed) : g_mask_ground.load(std::memory_order_relaxed);
+    uint32_t flags = 0;
+    BYTE* obj = static_cast<BYTE*>(iface) - kDamageIface;
+    __try {
+        std::memcpy(&flags, obj + kObjFlags, sizeof(flags));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!block_damage(true, flags, mask)) return false;
+    const uint64_t n = g_blocked.fetch_add(1) + 1;
+    if (log_milestone(n))
+        LOG("world: remote: blocked %s damage (slot %d) to %s %p from shooter 0x%08lx (%llu blocked so far)",
+            k % 3 == 0 ? "kinetic" : k % 3 == 1 ? "directed" : "blast", 4 + k % 3, kDmgClass[k / 3], obj,
+            static_cast<unsigned long>(shooter), n);
+    return true;
+}
+
+using Dmg5_t = int(__fastcall*)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+using Dmg8_t = int(__fastcall*)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                                uint32_t);
+using Dmg6_t = int(__fastcall*)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+
+// The originals are void; eax is passed through anyway. A blocked call returns 0 and pops the same arguments.
+template <int K>
+int __fastcall h_dmg5(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t f) {
+    if (damage_blocked(i, K, d)) return 0;
+    return reinterpret_cast<Dmg5_t>(g_dmg_orig[K])(i, e, a, b, c, d, f);
+}
+template <int K>
+int __fastcall h_dmg8(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t f, uint32_t g,
+                      uint32_t h, uint32_t j) {
+    if (damage_blocked(i, K, d)) return 0;
+    return reinterpret_cast<Dmg8_t>(g_dmg_orig[K])(i, e, a, b, c, d, f, g, h, j);
+}
+template <int K>
+int __fastcall h_dmg6(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t f, uint32_t g) {
+    if (damage_blocked(i, K, d)) return 0;
+    return reinterpret_cast<Dmg6_t>(g_dmg_orig[K])(i, e, a, b, c, d, f, g);
+}
+
 
 // ---- hook installation, per image ----
 
@@ -982,7 +1172,8 @@ void install_save_load();
 
 void world_install() {
     if (!probe_output_dir()) {
-        if (env_set(L"LAZYSF2_WORLD_SAVE") || env_set(L"LAZYSF2_WORLD_LOAD") || env_set(L"LAZYSF2_WORLD_SEAT"))
+        if (env_set(L"LAZYSF2_WORLD_SAVE") || env_set(L"LAZYSF2_WORLD_LOAD") || env_set(L"LAZYSF2_WORLD_SEAT") ||
+            env_set(L"LAZYSF2_WORLD_REMOTE"))
             LOG("world: off (LAZYSF2_WORLD_* need LAZYSF2_PROBE_DIR)");
         return;
     }
@@ -994,6 +1185,11 @@ void world_install() {
         else
             LOG("world: seat mode: the player takes member %d (x-%d) of the player flight in single missions", g_seat,
                 g_seat + 1);
+    }
+    if (env_set(L"LAZYSF2_WORLD_REMOTE")) {
+        g_remote = true;
+        LOG("world: remote mode: after each single mission start every object but the player's is made REMOTEOBJECT, "
+            "and local damage to REMOTEOBJECT objects is blocked");
     }
     install_save_load();
 }
@@ -1036,7 +1232,7 @@ void install_save_load() {
 }
 
 void world_on_modules_loaded() {
-    if (g_mode == Mode::Off && g_seat < 0) return;
+    if (g_mode == Mode::Off && g_seat < 0 && !g_remote) return;
     static const HookDef kSms[] = {
         {kRvaNewEvent, reinterpret_cast<void*>(&h_NewEvent), reinterpret_cast<void**>(&o_NewEvent),
          "world: SingleMissionScreen New page events", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08}, 6},
@@ -1049,13 +1245,42 @@ void world_on_modules_loaded() {
         {kRvaIniGetInt, reinterpret_cast<void*>(&h_IniGetInt), reinterpret_cast<void**>(&o_IniGetInt),
          "world: SingleMission ini int getter", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x53}, 7},
     };
-    // Only what the switches need: slot 32 for the seat; the start and the getter for save/load.
-    const HookDef* sm_defs = g_seat >= 0 ? kSmAll : kSmAll + 1;
-    const size_t sm_n = (g_seat >= 0 ? 1 : 0) + (g_mode != Mode::Off ? 2 : 0);
+    // Only what the switches need: slot 32 for the seat and the remote pass; the start and the getter for save/load.
+    const bool slot32 = g_seat >= 0 || g_remote;
+    const HookDef* sm_defs = slot32 ? kSmAll : kSmAll + 1;
+    const size_t sm_n = (slot32 ? 1 : 0) + (g_mode != Mode::Off ? 2 : 0);
     if (g_mode != Mode::Off)
         hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 1, g_sms,
                    g_sms_bad);
-    hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, sm_defs, sm_n, g_sm, g_sm_bad);
+    if (sm_n) hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, sm_defs, sm_n, g_sm, g_sm_bad);
+    if (!g_remote) return;
+#define LZ_DMG(K, ARGS, RVA, ...)                                                                         \
+    {RVA, reinterpret_cast<void*>(&h_dmg##ARGS<K>), &g_dmg_orig[K], "world: damage block " #K, {__VA_ARGS__}, 9}
+    static const HookDef kAo[] = {
+        LZ_DMG(0, 5, 0x69210, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+        LZ_DMG(1, 8, 0x693d0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x4c),
+        LZ_DMG(2, 6, 0x692f0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+    };
+    static const HookDef kGo[] = {
+        LZ_DMG(3, 5, 0x18e60, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x8b, 0x45, 0x08),
+        LZ_DMG(4, 8, 0x14780, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x4c),
+        LZ_DMG(5, 6, 0x146a0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+    };
+    static const HookDef kGm[] = {
+        LZ_DMG(6, 5, 0x11500, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x8b, 0x45, 0x08),
+        LZ_DMG(7, 8, 0xbf70, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x4c),
+        LZ_DMG(8, 6, 0xbe90, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+    };
+    static const HookDef kNv[] = {
+        LZ_DMG(9, 5, 0x35d0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x14, 0xd9, 0x45, 0x10),
+        LZ_DMG(10, 8, 0x3700, 0x55, 0x8b, 0xec, 0xd9, 0x45, 0x24, 0x8b, 0x45, 0x20),
+        LZ_DMG(11, 6, 0x3660, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x1c, 0xd9, 0x45, 0x10),
+    };
+#undef LZ_DMG
+    hook_image(L"AircraftObject.dll", "AircraftObject.dll", kAoStamp, kAoSize, kAo, 3, g_ao, g_ao_bad);
+    hook_image(L"GroundObject.dll", "GroundObject.dll", kGoStamp, kGoSize, kGo, 3, g_go, g_go_bad);
+    hook_image(L"GroundMobileObject.dll", "GroundMobileObject.dll", kGmStamp, kGmSize, kGm, 3, g_gm, g_gm_bad);
+    hook_image(L"NavalObject.dll", "NavalObject.dll", kNvStamp, kNvSize, kNv, 3, g_nv, g_nv_bad);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks
