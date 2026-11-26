@@ -33,6 +33,8 @@ JetWriteResult jet_write_controls(void* obj, const JetControls& c);
 /// <summary>A newly taken avatar: zeroes the gun and fire triggers the AI left in its input array, and returns the
 /// engines' running state as taken (for jet_restore_engines). False if not readable.</summary>
 bool jet_takeover(void* obj, JetControls* taken);
+/// <summary>An avatar given back to the AI: its gun and fire triggers off, so it does not keep firing.</summary>
+void jet_clear_triggers(void* obj);
 /// <summary>Gives the engines back as they were taken, so the AI does not glide on. The throttle is left.</summary>
 JetWriteResult jet_restore_engines(void* obj, uint8_t engines, uint8_t count);
 

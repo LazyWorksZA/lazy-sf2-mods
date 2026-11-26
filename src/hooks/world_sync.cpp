@@ -2188,7 +2188,9 @@ const DmgModule kDmgModules[4] = {
 uintptr_t g_dmg_base[4] = {};
 HMODULE g_dmg_checked[4] = {};
 
-// The function slot `slot` (4..6) of the object's damage interface must be one we read. Game thread.
+// The function slot `slot` (4..6) of the object's damage interface must be one we read; the hook's trampoline is
+// returned when it is hooked, so an applied hit does not run through the damage block and the claims again.
+// Game thread.
 void* checked_damage_fn(void** vt, int slot) {
     void* f = vt[slot];
     for (int i = 0; i < 4; ++i) {
@@ -2199,7 +2201,10 @@ void* checked_damage_fn(void** vt, int slot) {
                                 ? reinterpret_cast<uintptr_t>(m)
                                 : 0;
         }
-        if (g_dmg_base[i] && reinterpret_cast<uintptr_t>(f) == g_dmg_base[i] + kDmgModules[i].rva[slot - 4]) return f;
+        if (g_dmg_base[i] && reinterpret_cast<uintptr_t>(f) == g_dmg_base[i] + kDmgModules[i].rva[slot - 4]) {
+            void* tramp = g_dmg_orig[i * 3 + (slot - 4)];
+            return tramp ? tramp : f;
+        }
     }
     return nullptr;
 }

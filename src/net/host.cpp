@@ -205,6 +205,7 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
     if (!a.active) return;
     g_avatar_states.forget(slot + 1);
     world_avatar_forget(slot + 1);
+    hits_forget(slot);
     void* const obj = a.h.obj;
     avatar_release(a.h, aircraft_live);
     if (bye_reason != kByeNone) {
@@ -542,7 +543,10 @@ void handle_message(const HostEvent& e, void* player, double now) {
         // A client's jet state (T7): onto its avatar here, and on to the other clients.
         if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
             net::AvatarStateMsg m;
-            if (net::decode(e.data, e.len, m) == net::Status::Ok) g_avatar_states.set(m);
+            if (net::decode(e.data, e.len, m) == net::Status::Ok) {
+                g_avatar_states.set(m);
+                hits_note_guns(slot, m.guns);
+            }
             if (!g_av[slot].parked) world_avatar_apply(e.data, e.len, g_av[slot].h.obj);  // parked: the AI flies it
             for (int s = 0; s < net::kMaxClients; ++s)
                 if (s != slot && g_av[s].active && !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, true))
@@ -553,6 +557,8 @@ void handle_message(const HostEvent& e, void* player, double now) {
     if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::WeaponLaunch)) {
         // A client's weapon release: replayed here, and on to the other clients.
         if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
+            net::WeaponLaunchMsg wl;
+            if (net::decode(e.data, e.len, wl) == net::Status::Ok) hits_note_launch(slot, wl.weapon_id);
             weapons_apply_launch(e.data, e.len, now);
             for (int s = 0; s < net::kMaxClients; ++s)
                 if (s != slot && g_av[s].active && !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, true))

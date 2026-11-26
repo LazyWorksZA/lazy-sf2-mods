@@ -8,7 +8,8 @@
 
 namespace LazyWorks::SF2Patch::net {
 
-enum class HitVerdict : uint8_t { Ok, RateLimited, TooMuchEnergy, TooFar, OffTarget, TargetGone, BadSlot };
+enum class HitVerdict : uint8_t { Ok, RateLimited, TooMuchEnergy, TooFar, OffTarget, TargetGone, BadSlot, NoShot,
+                                  NoShooter, Replayed };
 
 inline const char* hit_verdict_name(HitVerdict v) {
     switch (v) {
@@ -19,6 +20,9 @@ inline const char* hit_verdict_name(HitVerdict v) {
         case HitVerdict::OffTarget: return "the hit too far from the target";
         case HitVerdict::TargetGone: return "no live target";
         case HitVerdict::BadSlot: return "not a damage slot";
+        case HitVerdict::NoShot: return "no recent shot of that weapon by the claimer";
+        case HitVerdict::NoShooter: return "the claimer has no avatar here";
+        case HitVerdict::Replayed: return "an old or repeated claim";
     }
     return "?";
 }
@@ -64,6 +68,67 @@ private:
     bool started_ = false;
     double tokens_ = 0, last_ = 0;
 };
+
+/// <summary>
+/// The claimer's recent shots, as the host saw them: its guns (AvatarState) and its store launches (WeaponLaunch, by
+/// the claimer's own weapon id). A gun claim needs the trigger on now or released at most kGunGrace ago; a store
+/// claim takes one of kStoreBudget hits from a launch of that weapon at most kStoreWindow ago. now in seconds.
+/// </summary>
+class ShotLedger {
+public:
+    static constexpr double kGunGrace = 1.0, kStoreWindow = 90.0;
+    static constexpr int kStoreBudget = 64;  // objects in the blasts of one bomb or cluster, at most
+    static constexpr int kLaunches = 16;
+    void guns(bool on, double now) {
+        if (on_ && !on) off_at_ = now;
+        on_ = on;
+        seen_ = true;
+    }
+    bool allow_gun(double now) const { return on_ || (seen_ && now - off_at_ <= kGunGrace && now >= off_at_); }
+    void launch(uint16_t weapon_id, double now) {
+        Launch& l = l_[next_++ % kLaunches];
+        l = Launch{weapon_id, now, kStoreBudget};
+    }
+    bool take_store(uint16_t weapon_id, double now) {
+        for (Launch& l : l_)
+            if (l.budget > 0 && l.id == weapon_id && now >= l.t && now - l.t <= kStoreWindow) {
+                --l.budget;
+                return true;
+            }
+        return false;
+    }
+    /// <summary>Claims come in the claimer's seq order (reliable channel): an old or repeated one is refused.</summary>
+    bool fresh(uint16_t seq) {
+        if (have_seq_ && static_cast<int16_t>(seq - last_seq_) <= 0) return false;
+        have_seq_ = true;
+        last_seq_ = seq;
+        return true;
+    }
+    void reset() { *this = ShotLedger{}; }
+
+private:
+    struct Launch {
+        uint16_t id = 0;
+        double t = 0;
+        int budget = 0;
+    };
+    Launch l_[kLaunches];
+    unsigned next_ = 0;
+    bool on_ = false, seen_ = false, have_seq_ = false;
+    double off_at_ = 0;
+    uint16_t last_seq_ = 0;
+};
+
+/// <summary>The shot check before the plausibility checks: replay, then the claimer's matching shot.</summary>
+inline HitVerdict check_hit_shot(const HitMsg& m, ShotLedger& ledger, double now) {
+    if (!ledger.fresh(m.seq)) return HitVerdict::Replayed;
+    if (m.weapon & kHitStoreBit) {
+        if (!ledger.take_store(static_cast<uint16_t>(m.weapon & ~kHitStoreBit), now)) return HitVerdict::NoShot;
+    } else if (!ledger.allow_gun(now)) {
+        return HitVerdict::NoShot;
+    }
+    return HitVerdict::Ok;
+}
 
 inline double hit_offset_m(const int16_t p[3]) {
     const double x = hit_rel_from_wire(p[0]), y = hit_rel_from_wire(p[1]), z = hit_rel_from_wire(p[2]);

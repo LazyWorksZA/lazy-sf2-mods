@@ -110,7 +110,7 @@ int32_t pos_to_wire(double p) {
 }
 
 struct Released {
-    uint32_t shooter_id = 0xffffffffu, target_id = 0xffffffffu;
+    uint32_t shooter_id = 0xffffffffu, target_id = 0xffffffffu, weapon_id = 0xffffffffu;
     bool guided = false;
     double pos[3] = {};
     float ang[3] = {}, bvel[3] = {}, wvel[3] = {};
@@ -233,7 +233,6 @@ struct Spawn {
     uint32_t weapon;
     double pos[3];
     float ang[3], bvel[3];
-    bool past_boost;
     uint32_t target;
     void* shooter;
     bool live;
@@ -250,7 +249,7 @@ int spawn_missile(const Spawn& s, uintptr_t ao, uintptr_t mo) {
         if (!service || cls < 0 || grp < 0) return 1;
         void** svt = *static_cast<void***>(service);
         alignas(8) unsigned char desc[kDescSize] = {};
-        const int16_t one = 1, boost = s.past_boost ? 1 : 0;
+        const int16_t one = 1, boost = 0;  // a release: the motor starts its boost
         const int32_t minus1 = -1;
         std::memcpy(desc + 0x00, &s.weapon, 4);
         std::memcpy(desc + 0x04, &one, 2);
@@ -305,6 +304,11 @@ int16_t selected_station(const void* obj) {
 }
 
 }  // namespace
+
+void weapons_forget_avatar(const void* avatar) {
+    for (Pending& p : g_pending)
+        if (p.avatar == avatar) p = Pending{};
+}
 
 bool weapon_guided(uint32_t id) {
     const uintptr_t mo = mo_base();
@@ -362,6 +366,8 @@ void weapons_on_release(void* missile) {
         m.wvel[i] = vel_to_wire(r.wvel[i]);
     }
     std::memcpy(m.weapon, r.name, sizeof(m.weapon));
+    const int wid = weapon_id_by_name(r.name);  // our own id: the host matches our store-hit claims to it
+    m.weapon_id = wid >= 0 ? static_cast<uint16_t>(wid) : 0xffff;
     m.weapon[sizeof(m.weapon) - 1] = '\0';
     m.seq = ++g_launch_seq;
     // Our own missile does damage only where its target is owned (on the host: not at a client's jet).
@@ -412,9 +418,10 @@ void weapons_apply_launch(const uint8_t* data, size_t len, double host_now) {
             }
     }
     // The avatar's own fire path launches unguided stores and guided missiles at our jet; for the others (or when it
-    // could not fire: an empty or other station) the recipe makes the copy.
+    // could not fire: an empty or other station) the recipe makes the copy, live where the role is.
+    const net::LaunchPlan plan = net::launch_plan(role, guided, nat == 0);
     int sp = -1;
-    if (nat != 0 || (guided && role != net::LaunchRole::LiveNative)) {
+    if (plan.spawn) {
         double age = host_now - m.host_ms / 1000.0;
         if (!(age > 0)) age = 0;
         if (age > 1.0) age = 1.0;
@@ -425,10 +432,9 @@ void weapons_apply_launch(const uint8_t* data, size_t len, double host_now) {
             s.ang[i] = ang_from_wire(m.ang[i]);
             s.bvel[i] = static_cast<float>(m.bvel[i] / 20.0);
         }
-        s.past_boost = (m.flags & net::kLaunchPastBoost) != 0;
         s.target = guided ? tid : 0xffffffffu;
         s.shooter = shooter;
-        s.live = role == net::LaunchRole::LiveSpawn;
+        s.live = plan.live;
         sp = spawn_missile(s, ao, mo);
     }
     ++g_replayed;

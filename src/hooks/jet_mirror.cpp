@@ -34,6 +34,11 @@ JetWriteResult jet_write_controls(void* obj, const JetControls& c) {
 
 bool jet_takeover(void* obj, JetControls* taken) { return jet_takeover_at(obj, ao_base(), taken); }
 
+void jet_clear_triggers(void* obj) {
+    JetControls ignored;
+    jet_takeover_at(obj, ao_base(), &ignored);  // the same clearing as at takeover
+}
+
 JetWriteResult jet_restore_engines(void* obj, uint8_t engines, uint8_t count) {
     JetControls c;
     c.engines = engines;

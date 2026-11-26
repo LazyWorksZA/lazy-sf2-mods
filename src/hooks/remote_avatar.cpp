@@ -213,6 +213,7 @@ bool avatar_keep_remote(const AvatarHandle& h) {
 }
 
 void avatar_release(AvatarHandle& h, bool live) {
+    weapons_forget_avatar(h.obj);
     if (h.obj && live) {
         uint32_t flags;
         obj_read(h.obj, kOffFlags, &flags, 1);
@@ -220,6 +221,7 @@ void avatar_release(AvatarHandle& h, bool live) {
         obj_write(h.obj, kOffFlags, &flags, 1);
         // An owner's engines-off must not leave the AI gliding.
         if (h.engine_count_taken) jet_restore_engines(h.obj, h.engines_taken, h.engine_count_taken);
+        jet_clear_triggers(h.obj);
     }
     h = AvatarHandle{};
 }

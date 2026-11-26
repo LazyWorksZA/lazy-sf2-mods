@@ -460,12 +460,13 @@ struct WeaponLaunchMsg {
     int16_t bvel[3];
     int16_t wvel[3];
     char weapon[24];
+    uint16_t weapon_id;  // the sender's own id for it: the host ties the sender's store-hit claims to this launch
 };
 #pragma pack(pop)
-static_assert(sizeof(WeaponLaunchMsg) == 78);  // 4:2 peer, 6:2 seq, 8:5 shooter, 13:5 target, 18:1 station, 19:1 flags,
-                                               // 20:4 ms, 24:12 pos, 36:6 ang, 42:6 bvel, 48:6 wvel, 54:24 weapon
+static_assert(sizeof(WeaponLaunchMsg) == 80);  // 4:2 peer, 6:2 seq, 8:5 shooter, 13:5 target, 18:1 station, 19:1 flags,
+                                               // 20:4 ms, 24:12 pos, 36:6 ang, 42:6 bvel, 48:6 wvel, 54:24 weapon,
+                                               // 78:2 weapon id
 inline constexpr uint8_t kLaunchGuided = 0x01;         // the weapon has a seeker (GuidanceType != 0)
-inline constexpr uint8_t kLaunchPastBoost = 0x02;      // descriptor +0x06 (the motor is past its boost)
 inline constexpr uint8_t kLaunchPlacedTarget = 0x04;   // aimed at placed scenery: not replicated as a target
 size_t encode(const WeaponLaunchMsg& m, uint8_t* out, size_t cap);
 Status decode(const uint8_t* data, size_t len, WeaponLaunchMsg& out);
@@ -486,6 +487,21 @@ inline LaunchRole launch_role(bool guided, bool target_is_us, bool we_are_host, 
     if (target_is_us) return LaunchRole::LiveNative;
     if (we_are_host && target_host_owned) return LaunchRole::LiveSpawn;
     return LaunchRole::Visual;
+}
+/// <summary>What the receiver does with a launch: spawn a copy with the recipe, and make that copy live.</summary>
+struct LaunchPlan {
+    bool spawn = false;
+    bool live = false;
+};
+/// <summary>
+/// native_fired: the avatar's own fire path took the store (remote event 2). It launches unguided stores and guided
+/// missiles at our jet itself; every other case is spawned, and a spawned copy is live whenever its role is.
+/// </summary>
+inline LaunchPlan launch_plan(LaunchRole role, bool guided, bool native_fired) {
+    LaunchPlan p;
+    p.spawn = !native_fired || (guided && role != LaunchRole::LiveNative);
+    p.live = p.spawn && role != LaunchRole::Visual;
+    return p;
 }
 /// <summary>The shooter's own missile does damage only on the PC that owns its target: false on the host for a
 /// guided missile at a client's jet (that client flies the live one). A client's own weapons are already blocked

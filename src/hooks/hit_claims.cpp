@@ -23,7 +23,8 @@ struct Stats {
 };
 Stats g_st;
 uint16_t g_seq = 0;
-net::HitRate g_rate[5];  // per claimer (client 1..4)
+net::HitRate g_gun_rate[4], g_store_rate[4];  // per claimer slot (client 1..4)
+net::ShotLedger g_ledger[4];                   // per claimer slot: its recent shots
 net::HitLimits g_limits;
 const net::HitLimits g_store_limits = net::store_limits();
 
@@ -134,6 +135,8 @@ bool hits_on_damage(void* obj, int slot, const uint32_t* args, bool remote) {
     uint16_t wire = 0;
     if (!net::hit_weapon_to_wire(args[4], &wire)) return false;
     if (remote ? !client_world_active() : !host_world_active()) return false;
+    const int s = remote ? -1 : host_avatar_slot(obj);  // the host only takes hits on a client's avatar
+    if (!remote && s < 0) return false;
     const bool guided = !net::weapon_is_gun(args[4]) && weapon_guided(args[4]);
     double tpos[3];
     uint32_t tid = 0;
@@ -163,8 +166,6 @@ bool hits_on_damage(void* obj, int slot, const uint32_t* args, bool remote) {
         return true;
     }
     // The host: a hit on a client's avatar goes to that client, who owns the jet.
-    const int s = host_avatar_slot(obj);
-    if (s < 0) return false;
     if (!world_key_of_object(args[3], &m.shooter_kind, &m.shooter_a, &m.shooter_b)) m.shooter_kind = 0;
     if (guided) {
         // A player's guided missile is flown live on the target's PC: dropped here. The host's AI missiles are
@@ -195,8 +196,12 @@ void hits_host_claim(int claimer_slot, const uint8_t* data, size_t len) {
     const bool have = target && world_object_state(target, tpos, &tid2, &alive);
     const bool have_shooter = shooter && world_object_state(shooter, spos, &sid, &salive);
     const double d = have && have_shooter ? dist3(tpos, spos) : 1e9;
-    const net::HitVerdict v = net::check_hit_claim(m, d, have && alive && have_shooter, g_rate[claimer_slot + 1],
-                                                   wall_s(), net::hit_is_store(m) ? g_store_limits : g_limits);
+    const bool store = net::hit_is_store(m);
+    net::HitVerdict v = net::check_hit_shot(m, g_ledger[claimer_slot], wall_s());
+    if (v == net::HitVerdict::Ok && !have_shooter) v = net::HitVerdict::NoShooter;
+    if (v == net::HitVerdict::Ok)
+        v = net::check_hit_claim(m, d, have && alive, store ? g_store_rate[claimer_slot] : g_gun_rate[claimer_slot],
+                                 wall_s(), store ? g_store_limits : g_limits);
     if (v != net::HitVerdict::Ok) {
         if (log_milestone(++g_st.refused))
             LOG("hits: client %d's hit on %c %03u.%02u refused: %s (%llu refused so far)", claimer_slot + 1,
@@ -250,7 +255,22 @@ void hits_client_apply(const uint8_t* data, size_t len) {
 }
 
 void hits_session_reset() {
-    for (auto& r : g_rate) r.reset();
+    for (int i = 0; i < 4; ++i) hits_forget(i);
+}
+
+void hits_forget(int slot) {
+    if (slot < 0 || slot > 3) return;
+    g_gun_rate[slot].reset();
+    g_store_rate[slot].reset();
+    g_ledger[slot].reset();
+}
+
+void hits_note_guns(int slot, uint8_t guns) {
+    if (slot >= 0 && slot <= 3) g_ledger[slot].guns(guns != 0, wall_s());
+}
+
+void hits_note_launch(int slot, uint16_t weapon_id) {
+    if (slot >= 0 && slot <= 3) g_ledger[slot].launch(weapon_id, wall_s());
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

@@ -8250,13 +8250,15 @@ void weapon_launch_tests() {
     w.pos[0] = -123456789;
     w.wvel[1] = 6000;
     std::memset(w.weapon, 'X', sizeof(w.weapon));  // no terminator on the wire: the decoder adds one
+    w.weapon_id = 321;
     uint8_t b[96];
     WeaponLaunchMsg r{};
     const size_t n = encode(w, b, sizeof(b));
-    expect(sizeof(WeaponLaunchMsg) == 78 && n == 78 && peek_world_type(b, n) == 29 && decode(b, n, r) == Status::Ok &&
+    expect(sizeof(WeaponLaunchMsg) == 80 && n == 80 && peek_world_type(b, n) == 29 && decode(b, n, r) == Status::Ok &&
+               r.weapon_id == 321 &&
                r.pos[0] == -123456789 && r.wvel[1] == 6000 && r.flags == kLaunchGuided && r.weapon[23] == '\0' &&
                std::strlen(r.weapon) == 23 && decode(b, n - 1, r) == Status::Truncated,
-           "launch: 78 bytes, the weapon's name always terminated");
+           "launch: 80 bytes, the weapon's name always terminated, the sender's weapon id kept");
     expect(launch_role(false, true, true, true) == LaunchRole::Visual &&
                launch_role(true, true, false, false) == LaunchRole::LiveNative &&
                launch_role(true, false, true, true) == LaunchRole::LiveSpawn &&
@@ -8266,6 +8268,52 @@ void weapon_launch_tests() {
     expect(!own_launch_stays_live(true, true, true) && own_launch_stays_live(true, true, false) &&
                own_launch_stays_live(false, true, true) && own_launch_stays_live(true, false, true),
            "launch: the host's own missile at a client's jet is visual-only (that client flies the live one)");
+    {
+        const LaunchPlan nat_us = launch_plan(LaunchRole::LiveNative, true, true);
+        const LaunchPlan fail_us = launch_plan(LaunchRole::LiveNative, true, false);
+        const LaunchPlan host_own = launch_plan(LaunchRole::LiveSpawn, true, true);
+        const LaunchPlan vis_g = launch_plan(LaunchRole::Visual, true, true);
+        const LaunchPlan bomb_ok = launch_plan(LaunchRole::Visual, false, true);
+        const LaunchPlan bomb_fail = launch_plan(LaunchRole::Visual, false, false);
+        expect(!nat_us.spawn && fail_us.spawn && fail_us.live && host_own.spawn && host_own.live && vis_g.spawn &&
+                   !vis_g.live && !bomb_ok.spawn && bomb_fail.spawn && !bomb_fail.live,
+               "launch plan: the avatar's own fire for bombs and missiles at us; a spawn otherwise, live wherever the "
+               "role is (also a missile at us the avatar could not fire)");
+    }
+    {
+        ShotLedger led;
+        HitMsg gun{};
+        gun.slot = 4;
+        gun.weapon = 3;
+        HitMsg st{};
+        st.slot = 6;
+        st.weapon = static_cast<uint16_t>(0x8000 | 42);
+        uint16_t seq = 0;
+        auto shot = [&](HitMsg m, double t) {
+            m.seq = ++seq;
+            return check_hit_shot(m, led, t);
+        };
+        const bool no_trigger = shot(gun, 10.0) == HitVerdict::NoShot;
+        led.guns(true, 10.0);
+        const bool firing = shot(gun, 10.5) == HitVerdict::Ok;
+        led.guns(false, 11.0);
+        const bool grace = shot(gun, 11.8) == HitVerdict::Ok && shot(gun, 12.2) == HitVerdict::NoShot;
+        expect(no_trigger && firing && grace, "shots: a gun claim needs the claimer's trigger on, or off at most 1 s");
+        const bool no_launch = shot(st, 20.0) == HitVerdict::NoShot;
+        led.launch(41, 20.0);
+        const bool other = shot(st, 21.0) == HitVerdict::NoShot;
+        led.launch(42, 21.0);
+        int taken = 0;
+        for (int i = 0; i < 70; ++i) taken += shot(st, 30.0) == HitVerdict::Ok;
+        led.launch(42, 40.0);
+        const bool late = shot(st, 40.0 + 91.0) == HitVerdict::NoShot;
+        expect(no_launch && other && taken == ShotLedger::kStoreBudget && late,
+               "shots: a store claim needs a launch of that weapon, at most 64 hits each, within 90 s");
+        HitMsg again = gun;
+        again.seq = seq;  // the last one again
+        led.guns(true, 50.0);
+        expect(check_hit_shot(again, led, 50.0) == HitVerdict::Replayed, "shots: an old or repeated seq is refused");
+    }
     uint16_t wire = 0;
     expect(hit_weapon_to_wire(0xffff + 7, &wire) && wire == 7 && hit_weapon_from_wire(wire) == 0xffff + 7 &&
                hit_weapon_to_wire(42, &wire) && wire == (0x8000 | 42) && hit_weapon_from_wire(wire) == 42 &&
@@ -8310,6 +8358,7 @@ void weapon_launch_tests() {
         if (!sent && !c.welcomes.empty()) {
             WeaponLaunchMsg own{};
             std::snprintf(own.weapon, sizeof(own.weapon), "Mk82");
+            own.weapon_id = 42;
             uint8_t ob[sizeof(own)];
             sent = c.core.send_world(ob, encode(own, ob, sizeof(ob)));
         }

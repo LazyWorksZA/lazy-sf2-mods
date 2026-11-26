@@ -401,8 +401,13 @@ bool hits_on_damage(void* obj, int slot, const uint32_t* args, bool remote);
 void hits_host_claim(int slot, const uint8_t* data, size_t len);
 /// <summary>Client: a hit on our own jet from the host.</summary>
 void hits_client_apply(const uint8_t* data, size_t len);
-/// <summary>A session starts or ends: the claim rate limits start again.</summary>
+/// <summary>A session starts or ends: the claim rate limits and shot records start again.</summary>
 void hits_session_reset();
+/// <summary>Host: a client slot was released (its limits and shots start again); its guns trigger (AvatarState) and
+/// its launches (WeaponLaunch, its own weapon id), which its claims must match.</summary>
+void hits_forget(int slot);
+void hits_note_guns(int slot, uint8_t guns);
+void hits_note_launch(int slot, uint16_t weapon_id);
 /// <summary>Host (host.cpp): the client slot whose avatar obj is, or -1; that slot's avatar; a reliable or unreliable
 /// world message for one client; and whether a shared-world session with clients is running.</summary>
 int host_avatar_slot(const void* obj);
@@ -422,6 +427,8 @@ double client_host_now();
 bool weapon_guided(uint32_t weapon_id);
 void weapons_on_release(void* missile);
 void weapons_apply_launch(const uint8_t* data, size_t len, double host_now);
+/// <summary>An avatar was given back: no native fire on it is awaited any more.</summary>
+void weapons_forget_avatar(const void* avatar);
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>
 bool client_connect_target(char* host, size_t cap, uint16_t* port);
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>
