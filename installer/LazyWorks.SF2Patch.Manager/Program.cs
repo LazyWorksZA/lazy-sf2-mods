@@ -19,6 +19,7 @@ static class Program
     static string PendingInstallMarker => Path.Combine(StateDir, "pending-install");
     static string LogPath => Path.Combine(StateDir, "lazysf2-setup.log");
 
+    [STAThread]  // the folder picker is a COM dialog
     static int Main(string[] args)
     {
         // Must run first: handles --veloapp-* hook invocations (which exit inside Run()).
@@ -30,7 +31,7 @@ static class Program
 
         switch (args.FirstOrDefault())
         {
-            case "--elevated-install": return (int)ElevatedInstall(args.Length > 1 ? args[1] : null);
+            case "--elevated-install": return (int)ElevatedInstall(args.Length > 1 ? args[1] : null, Env, Log);
             case "--elevated-uninstall": return (int)ModInstaller.Uninstall(ModInstaller.FindGameDir(Log));
         }
 
@@ -53,15 +54,15 @@ static class Program
     static readonly SystemGameEnvironment Env = new();
 
     /// <summary>The elevated half of a manual install: the folder came from the command line, so it is checked again.</summary>
-    static ModInstaller.Result ElevatedInstall(string? folder)
+    internal static ModInstaller.Result ElevatedInstall(string? folder, IGameEnvironment env, Action<string> log)
     {
-        if (folder != null && GameLocator.CheckFolder(Env, folder) != GameLocator.Check.Ok)
+        if (folder != null && GameLocator.CheckFolder(env, folder) is var c && c != GameLocator.Check.Ok)
         {
-            Log($"elevated install: {folder} is not a valid game folder");
+            log($"elevated install: {folder} is not a valid game folder ({c})");
             return ModInstaller.Result.GameNotFound;
         }
-        var r = ModInstaller.Install(folder ?? ModInstaller.FindGameDir(Log));
-        if (r == ModInstaller.Result.Ok && folder != null) Log($"saved game folder in {GameLocator.SaveChoice(Env, folder) ?? "(nowhere)"}");
+        var r = ModInstaller.Install(folder ?? GameLocator.Find(env, log));
+        if (r == ModInstaller.Result.Ok && folder != null) log($"saved game folder in {GameLocator.SaveChoice(env, folder) ?? "(nowhere)"}");
         return r;
     }
 
@@ -80,6 +81,8 @@ static class Program
             {
                 Native.Message(check == GameLocator.Check.NoExe
                     ? $"{GameLocator.ExeName} isn't in\n{picked}\n\nChoose the folder that contains it. The Lazy SF2 Patch is for the July 2013 version of Strike Fighters 2 (the merged install)."
+                    : check == GameLocator.Check.Unsafe
+                    ? $"{picked}\nis (or is inside) a junction or symbolic link, which the installer won't write through. Choose the real folder."
                     : $"The {GameLocator.ExeName} in\n{picked}\nisn't the July 2013 version of Strike Fighters 2, so the Lazy SF2 Patch can't be used with it.", warning: true);
                 continue;
             }
@@ -89,14 +92,23 @@ static class Program
         }
     }
 
+    /// <summary>A quoted command-line argument for a folder. A trailing backslash would escape the quote, so it is dropped, except on a drive root, where it is doubled.</summary>
+    internal static string QuoteArg(string dir)
+    {
+        bool root = Path.GetPathRoot(dir) is { } r && r.Equals(dir, StringComparison.OrdinalIgnoreCase);
+        string d = dir.TrimEnd('\\', '/');
+        return root ? "\"" + d + "\\\\\"" : "\"" + d + "\"";
+    }
+
     /// <summary>Installs into a folder the player chose and remembers it. Elevates (UAC) when the folder needs it.</summary>
     static ModInstaller.Result InstallChosen(string dir)
     {
+        if (GameLocator.CheckFolder(Env, dir) != GameLocator.Check.Ok) return ModInstaller.Result.GameNotFound;
         var r = ModInstaller.Install(dir);
         if (r == ModInstaller.Result.AccessDenied)
         {
-            // The elevated copy saves the folder (HKLM) itself. A trailing backslash would escape the closing quote.
-            return RunElevated("--elevated-install \"" + dir.TrimEnd('\\', '/') + "\"") ?? r;
+            // The elevated copy checks the folder again and saves it (HKLM) itself.
+            return RunElevated("--elevated-install " + QuoteArg(dir)) ?? r;
         }
         if (r == ModInstaller.Result.Ok) Log($"saved game folder in {GameLocator.SaveChoice(Env, dir) ?? "(nowhere)"}");
         return r;
@@ -218,8 +230,16 @@ static class Program
 
     internal static IEnumerable<string> UninstallTargets(IGameEnvironment env, Action<string> log)
     {
-        string?[] candidates = [GameLocator.Find(env, log), GameLocator.SavedChoice(env)];
-        return candidates.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var targets = new List<string>();
+        if (GameLocator.Find(env, log) is { } found) targets.Add(found);
+        // The saved value is only a hint: check it like any folder before deleting anything in it.
+        if (GameLocator.SavedChoice(env) is { } saved && !targets.Contains(saved, StringComparer.OrdinalIgnoreCase))
+        {
+            var c = GameLocator.CheckFolder(env, saved);
+            if (c == GameLocator.Check.Ok) targets.Add(saved);
+            else log($"uninstall hook: saved folder {saved} skipped ({c})");
+        }
+        return targets;
     }
 
     static void UninstallFrom(string game)

@@ -58,7 +58,7 @@ static class Native
                 dwFlags = 0x8 | (chooseText != null ? 0x10u : 0),  // allow cancel (Esc), command links
                 dwCommonButtons = 0x20,                              // Close
                 pszWindowTitle = Str("Lazy SF2 Patch"),
-                pszMainIcon = (IntPtr)(int)icon,
+                pszMainIcon = (IntPtr)(ushort)(short)(int)icon,
                 pszMainInstruction = Str(heading),
                 pszContent = Str(text),
             };

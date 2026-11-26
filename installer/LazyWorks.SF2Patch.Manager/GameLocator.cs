@@ -35,16 +35,19 @@ public static class GameLocator
     const string Uninstall = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
     const string VirtualStore = @"Software\Classes\VirtualStore\MACHINE\SOFTWARE";
 
-    public enum Check { Ok, NoExe, WrongBuild }
+    public enum Check { Ok, NoExe, WrongBuild, Unsafe }
 
-    /// <summary>Whether <paramref name="dir"/> holds the StrikeFighters2.exe of the July 2013 build.</summary>
+    /// <summary>
+    /// Whether <paramref name="dir"/> is a folder the helper may install into: no reparse point in its path, and a
+    /// StrikeFighters2.exe that is a PE with the July 2013 stamp.
+    /// </summary>
     public static Check CheckFolder(IGameEnvironment env, string dir)
     {
+        if (ModInstaller.HasReparsePoint(dir)) return Check.Unsafe;
         string exe = Path.Combine(dir, ExeName);
         if (!env.FileExists(exe)) return Check.NoExe;
-        // An exe we can't parse is accepted: the mod itself skips its hooks on a build it doesn't know.
-        if (env.ReadPeStamp(exe) is { } s && (s.TimeDateStamp != ExeTimestamp || s.SizeOfImage != ExeImageSize)) return Check.WrongBuild;
-        return Check.Ok;
+        return env.ReadPeStamp(exe) is { } s && s.TimeDateStamp == ExeTimestamp && s.SizeOfImage == ExeImageSize
+            ? Check.Ok : Check.WrongBuild;  // an exe that isn't a PE counts as the wrong build
     }
 
     /// <summary>The first valid game folder, in the order of the steps below, or null.</summary>
@@ -128,6 +131,9 @@ public static class GameLocator
                 return dir;
             case Check.WrongBuild:
                 log($"game folder: {label}: {dir} has a {ExeName} that is not the July 2013 build; skipped");
+                return null;
+            case Check.Unsafe:
+                log($"game folder: {label}: {dir} is or is inside a junction or symbolic link; skipped");
                 return null;
         }
         string? other = null;

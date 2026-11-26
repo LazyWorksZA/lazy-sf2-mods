@@ -64,7 +64,9 @@ public sealed class GameLocatorTests
 
     string Game(string dir)
     {
-        _env.Files.Add(Path.Combine(dir, GameLocator.ExeName));
+        string exe = Path.Combine(dir, GameLocator.ExeName);
+        _env.Files.Add(exe);
+        _env.Stamps[exe] = (GameLocator.ExeTimestamp, GameLocator.ExeImageSize);
         return dir;
     }
 
@@ -170,12 +172,13 @@ public sealed class GameLocatorTests
     }
 
     [Fact]
-    public void The_known_build_and_an_unreadable_exe_pass()
+    public void The_known_build_passes_and_an_unparseable_exe_does_not()
     {
         string a = Game(@"C:\ok");
         _env.Stamps[Path.Combine(a, GameLocator.ExeName)] = (GameLocator.ExeTimestamp, GameLocator.ExeImageSize);
         Assert.Equal(GameLocator.Check.Ok, GameLocator.CheckFolder(_env, a));
-        Assert.Equal(GameLocator.Check.Ok, GameLocator.CheckFolder(_env, Game(@"C:\nopeinfo")));
+        _env.Files.Add(@"C:\notpe\StrikeFighters2.exe");
+        Assert.Equal(GameLocator.Check.WrongBuild, GameLocator.CheckFolder(_env, @"C:\notpe"));
         Assert.Equal(GameLocator.Check.NoExe, GameLocator.CheckFolder(_env, @"C:\empty"));
     }
 
@@ -195,6 +198,28 @@ public sealed class GameLocatorTests
         Assert.Equal(@"G:\mine", GameLocator.SavedChoice(_env));
         Assert.Equal(@"G:\mine", Find());
     }
+
+    [Fact]
+    public void Uninstall_skips_an_invalid_saved_folder()
+    {
+        _env.Set(LM, V64, GameLocator.SavedKey, GameLocator.SavedValue, @"C:\Windows\System32");
+        Assert.Empty(Program.UninstallTargets(_env, _log.Add));
+        Assert.Contains(_log, l => l.Contains("saved folder") && l.Contains("skipped"));
+    }
+
+    [Fact]
+    public void Elevated_install_refuses_an_invalid_folder_and_saves_nothing()
+    {
+        Assert.Equal(ModInstaller.Result.GameNotFound, Program.ElevatedInstall(@"C:\nowhere", _env, _log.Add));
+        Assert.Null(GameLocator.SavedChoice(_env));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Games\SF2", "\"C:\\Games\\SF2\"")]
+    [InlineData(@"C:\Games\SF2\", "\"C:\\Games\\SF2\"")]
+    [InlineData(@"C:\", "\"C:\\\\\"")]
+    public void QuoteArg_never_lets_a_backslash_escape_the_quote(string dir, string expected) =>
+        Assert.Equal(expected, Program.QuoteArg(dir));
 
     [Fact]
     public void Uninstall_targets_include_the_saved_folder_and_keep_the_key()
