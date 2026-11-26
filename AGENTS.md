@@ -31,7 +31,7 @@ These locations differ per machine, so this repo doesn't name them: the game ins
 
 ## Fixed-address hooks
 
-The July 2013 binaries never change, so hooking by RVA is acceptable. But **every RVA hook must first check the module's PE `TimeDateStamp` and `SizeOfImage`**, and skip with a log line if they don't match. See `is_expected_build` in `src/hooks/mouse_hooks.cpp`.
+The July 2013 binaries never change, so hooking by RVA is acceptable. But **every RVA hook must first check the module's PE `TimeDateStamp` and `SizeOfImage`**, and skip with a log line if they don't match. See `is_expected_build` in `src/hooks/hook_util.h`.
 
 The game DLLs are linked at `0x10000000`, and the exe at `0x00400000`.
 

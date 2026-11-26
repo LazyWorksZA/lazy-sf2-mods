@@ -3,6 +3,12 @@
 All notable changes to the Lazy SF2 Patch, the runtime mods for Strike Fighters 2 (July 2013).
 Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Releases page.
 
+## Unreleased
+
+### Releases
+
+- **The Tacview add-on is published on its own.** Each release now also has `Lazy-SF2-Patch-<version>-Tacview-AddOn.zip`, for players who install `winmm.dll` by hand. Extract it into `%APPDATA%\Tacview\AddOns\`.
+
 ## 1.1.0 (2026-11-26)
 
 ### Tacview
