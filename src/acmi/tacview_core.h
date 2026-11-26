@@ -23,8 +23,8 @@
 // Ground+Static+Building, Ground+Vehicle or Sea+Watercraft with the type name as Name; flares and chaff are Misc+Decoy+...
 // An aerodrome (0x6000000+seq) is a static Ground+Static+Aerodrome with its name and heading, written once: the recorder
 // lists it in one frame of its own, and only the final frame (every series) removes it.
-// A structure (0x7000000+seq) is a placed building or bridge from the theatre's inis: Ground+Static+Building or
-// Ground+Static+Bridge, written once and never updated; the recorder lists them over several frames that name no series,
+// A structure (0x7000000+seq) is a placed building or bridge from the theatre's inis: Ground+Static+Building (a bridge too: no Bridge tag) or
+// Ground+Static+Container (a storage tank), written once and never updated; the recorder lists them over several frames that name no series,
 // so only the final frame removes them. A structure within kStructureDedupeMetres of a live ground object (a
 // GroundObject the core already has a position for) is skipped: the game made that one a real object. A destroyed
 // marker for a written structure writes its Destroyed event and an explosion, and removes it.
@@ -67,7 +67,7 @@ struct TacviewRec {
     static constexpr uint8_t kObject = 0, kEndFrame = 1;
     static constexpr uint8_t kAircraft = 0, kMissile = 1, kBomb = 2, kRocket = 3;
     static constexpr uint8_t kGroundStatic = 4, kGroundVehicle = 5, kShip = 6, kFlare = 7, kChaff = 8, kBullet = 9,
-                             kAerodrome = 10, kStructure = 11, kBridge = 12;
+                             kAerodrome = 10, kStructure = 11, kBridge = 12, kStorage = 13;
     /// <summary>The kinds of object that share an id range and a sequence counter.</summary>
     enum class Family : uint8_t { Aircraft, Weapon, Ground, CounterMeasure, Bullet, Aerodrome, Structure };
     static constexpr Family family_of(uint8_t cls) {
@@ -76,7 +76,7 @@ struct TacviewRec {
         if (cls == kFlare || cls == kChaff) return Family::CounterMeasure;
         if (cls == kBullet) return Family::Bullet;
         if (cls == kAerodrome) return Family::Aerodrome;
-        if (cls == kStructure || cls == kBridge) return Family::Structure;
+        if (cls == kStructure || cls == kBridge || cls == kStorage) return Family::Structure;
         return Family::Weapon;  // missile, bomb, rocket, and any unknown value
     }
     /// <summary>Frame series: a frame lists some series completely, and only those can lose objects (removal).</summary>

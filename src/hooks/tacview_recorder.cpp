@@ -537,7 +537,9 @@ void write_structures(double t) {
             const StructureMark& sm = list.marks[m];
             acmi::TacviewRec& r = g_writer->slot(used++);
             r.kind = acmi::TacviewRec::kObject;
-            r.obj_class = sm.bridge ? acmi::TacviewRec::kBridge : acmi::TacviewRec::kStructure;
+            r.obj_class = sm.bridge    ? acmi::TacviewRec::kBridge
+                          : sm.storage ? acmi::TacviewRec::kStorage
+                                       : acmi::TacviewRec::kStructure;
             r.side = 0;
             r.is_player = 0;
             r.parent_class = acmi::TacviewRec::kAircraft;

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "acmi/acmi_format.h"
+#include "acmi/object_types.h"
 
 namespace LazyWorks::SF2Patch::acmi {
 
@@ -155,9 +156,7 @@ void TacviewCore::add(const TacviewRec& r) {
                 p.parent = parent_id;
             }
         } else if (family == TacviewRec::Family::Ground) {
-            p.type = r.obj_class == TacviewRec::kGroundStatic    ? "Ground+Static+Building"
-                     : r.obj_class == TacviewRec::kGroundVehicle ? "Ground+Vehicle"
-                                                                  : "Sea+Watercraft";
+            p.type = ground_type_tags(r.obj_class, name);
         } else if (family == TacviewRec::Family::Aerodrome) {
             side = hooks::AircraftSide::Unknown;  // an airfield has no coalition here
             p.type = "Ground+Static+Aerodrome";
@@ -244,7 +243,7 @@ void TacviewCore::add_structure(const TacviewRec& r) {
     name[kRecNameChars] = '\0';
     ObjectProps p;
     p.name = name;
-    p.type = r.obj_class == TacviewRec::kBridge ? "Ground+Static+Bridge" : "Ground+Static+Building";
+    p.type = ground_type_tags(r.obj_class, name);
     append_props(pending_, p);
     pending_ += '\n';
     ++stats_.objects;
