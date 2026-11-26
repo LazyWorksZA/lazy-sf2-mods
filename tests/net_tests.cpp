@@ -37,6 +37,7 @@
 
 #include "bot_core.h"
 #include "net/clock_sync.h"
+#include "net/client_core.h"
 #include "net/host_core.h"
 #include "net/protocol.h"
 #include "net/stream_format.h"
@@ -4119,6 +4120,542 @@ void remote_jet_tests() {
     }
 }
 
+namespace {
+
+// --- ClientCore (the client's network thread) against HostCore, a fake host game thread, or a raw ENet host ---
+
+void cc_client_log(const char* l) { std::printf("    [client] %s\n", l); }
+void cc_host_log(const char* l) { std::printf("    [core] %s\n", l); }
+
+HelloMsg cc_hello(uint32_t theatre) {
+    HelloMsg h{};
+    set_str(h.callsign, "CLIENT1");
+    set_str(h.aircraft, "F-4E");
+    h.theatre_hash = theatre;
+    return h;
+}
+
+StateMsg cc_jet(uint16_t id, uint32_t seq, double t) {
+    StateMsg s{};
+    s.client_id = id;
+    s.seq = seq;
+    s.game_time = t;
+    s.pos[0] = 10.0 * seq;
+    s.pos[2] = 3000.0;
+    s.vel[0] = 200.0f;
+    return s;
+}
+
+// The game thread of a host: answers a Hello with a Welcome and a PeerInfo for itself (or refuses a wrong theatre with
+// Bye 5), sends its own jet as id 0 at 20 Hz when asked, and collects what the client sends. Host time runs with the
+// wall clock, from 1000 s.
+struct FakeHost {
+    HostCore core;
+    double t0 = ClientCore::wall_now();
+    uint32_t theatre = 0;
+    bool answer_hello = true, send_jet = false;
+    bool welcomed = false, got_hello = false, got_disconnect = false;
+    uint8_t slot = 0;
+    uint32_t gen = 0, seq = 0;
+    double next_jet = 0;
+    std::vector<StateMsg> states;
+    std::vector<ByeMsg> byes;
+
+    bool start() {
+        core.start("127.0.0.1", 0, cc_host_log);
+        for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        core.set_host_time(time());
+        return core.state() == HostCore::State::Running;
+    }
+    double time() const { return 1000.0 + (ClientCore::wall_now() - t0); }
+    template <class M>
+    void send(const M& m, bool reliable) {
+        uint8_t b[128];
+        core.send(slot, gen, b, encode(m, b, sizeof(b)), reliable ? kChannelReliable : kChannelUnreliable, reliable);
+    }
+    void bye_and_disconnect(uint8_t reason) {  // as host.cpp does: the Bye, then the disconnect, in one go
+        ByeMsg b{};
+        b.client_id = static_cast<uint16_t>(slot + 1);
+        b.reason = reason;
+        send(b, true);
+        core.disconnect(slot, gen);
+        welcomed = false;
+    }
+    void pump() {
+        core.set_host_time(time());
+        HostEvent ev[16];
+        const size_t n = core.poll(ev, 16);
+        for (size_t i = 0; i < n; ++i) {
+            const HostEvent& e = ev[i];
+            if (e.kind == HostEvent::Connect) {
+                slot = e.slot;
+                gen = e.gen;
+            } else if (e.kind == HostEvent::Disconnect) {
+                got_disconnect = true;
+                welcomed = false;
+            } else {
+                MsgType t{};
+                if (peek_type(e.data, e.len, t) != Status::Ok) continue;
+                if (t == MsgType::Hello) {
+                    got_hello = true;
+                    HelloMsg h{};
+                    if (!answer_hello || decode(e.data, e.len, h) != Status::Ok) continue;
+                    if (theatre && h.theatre_hash && h.theatre_hash != theatre) {
+                        bye_and_disconnect(kByeWrongTheatre);
+                        continue;
+                    }
+                    core.set_welcomed(slot, gen, true);
+                    WelcomeMsg w{};
+                    w.client_id = static_cast<uint16_t>(slot + 1);
+                    w.spawn_pos[0] = 500.0;
+                    w.spawn_pos[1] = -300.0;
+                    w.spawn_pos[2] = 1200.0;
+                    w.spawn_heading = 0.5f;
+                    w.spawn_vel[0] = 200.0f;
+                    w.host_game_time = time();
+                    w.theatre_hash = theatre;
+                    send(w, true);
+                    PeerInfoMsg p{};
+                    p.id = 0;
+                    set_str(p.callsign, "HOST");
+                    set_str(p.aircraft, "F-4E");
+                    send(p, true);
+                    welcomed = true;
+                    next_jet = ClientCore::wall_now();
+                } else if (t == MsgType::State) {
+                    StateMsg s{};
+                    if (decode(e.data, e.len, s) == Status::Ok) states.push_back(s);
+                } else if (t == MsgType::Bye) {
+                    ByeMsg b{};
+                    if (decode(e.data, e.len, b) == Status::Ok) byes.push_back(b);
+                }
+            }
+        }
+        const double now = ClientCore::wall_now();
+        if (send_jet && welcomed && now >= next_jet) {
+            send(cc_jet(0, ++seq, time()), false);
+            next_jet += 0.05;
+            if (next_jet < now) next_jet = now + 0.05;
+        }
+    }
+};
+
+// An ENet host on the test thread, for hosts HostCore cannot imitate (another protocol version, malformed packets,
+// a host that stops answering).
+struct RawHost {
+    ENetHost* host = nullptr;
+    ENetPeer* peer = nullptr;
+    bool got_hello = false;
+    ~RawHost() {
+        if (host) enet_host_destroy(host);
+    }
+    bool open() {
+        ENetAddress a{};
+        enet_address_set_host_ip(&a, "127.0.0.1");
+        a.port = 0;
+        host = enet_host_create(&a, 1, kChannelCount, 0, 0);
+        return host != nullptr;
+    }
+    uint16_t port() const { return host ? host->address.port : 0; }
+    void service() {
+        ENetEvent ev;
+        while (enet_host_service(host, &ev, 0) > 0) {
+            if (ev.type == ENET_EVENT_TYPE_CONNECT) peer = ev.peer;
+            if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
+                MsgType t{};
+                if (peek_type(ev.packet->data, ev.packet->dataLength, t) == Status::Ok && t == MsgType::Hello) got_hello = true;
+                enet_packet_destroy(ev.packet);
+            }
+        }
+    }
+    void send_raw(const uint8_t* d, size_t n, uint8_t channel) {
+        if (!peer) return;
+        ENetPacket* p = enet_packet_create(d, n, channel == kChannelReliable ? ENET_PACKET_FLAG_RELIABLE : 0);
+        if (p && enet_peer_send(peer, channel, p) != 0) enet_packet_destroy(p);
+        enet_host_flush(host);
+    }
+    template <class M>
+    void send(const M& m, uint8_t channel) {
+        uint8_t b[128];
+        send_raw(b, encode(m, b, sizeof(b)), channel);
+    }
+    void welcome(double host_time) {
+        WelcomeMsg w{};
+        w.client_id = 1;
+        w.spawn_pos[2] = 1000.0;
+        w.host_game_time = host_time;
+        send(w, kChannelReliable);
+    }
+};
+
+struct CcRx {
+    std::vector<ClientEvent> ev;
+    void pull(ClientCore& c) {
+        ClientEvent b[16];
+        size_t n;
+        while ((n = c.poll(b, 16)) > 0) ev.insert(ev.end(), b, b + n);
+    }
+    int find(ClientEvent::Kind k, size_t from = 0) const {
+        for (size_t i = from; i < ev.size(); ++i)
+            if (ev[i].kind == k) return static_cast<int>(i);
+        return -1;
+    }
+    bool has(ClientEvent::Kind k) const { return find(k) >= 0; }
+    size_t count(ClientEvent::Kind k) const {
+        size_t n = 0;
+        for (const ClientEvent& e : ev) n += e.kind == k ? 1 : 0;
+        return n;
+    }
+};
+
+// Runs the fake host (if any) and the client's game side until done() or the wall-clock deadline.
+template <class F>
+bool cc_run(FakeHost* h, RawHost* raw, ClientCore& c, CcRx& rx, double seconds, F done) {
+    const double until = ClientCore::wall_now() + seconds;
+    for (;;) {
+        if (h) h->pump();
+        if (raw) raw->service();
+        rx.pull(c);
+        if (done()) return true;
+        if (ClientCore::wall_now() >= until) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+uint8_t cc_bye_reason(const ClientEvent& e) {
+    ByeMsg b{};
+    return decode(e.data, e.len, b) == Status::Ok ? b.reason : 255;
+}
+
+void client_core_session_tests() {
+    std::printf("client core: a session against HostCore\n");
+    FakeHost h;
+    h.theatre = fnv1a("Korea");
+    if (!h.start()) return expect(false, "host core running");
+    auto c = std::make_unique<ClientCore>();
+    expect(c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("Korea")), cc_client_log), "client start");
+    expect(!c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log), "a second start is refused");
+    CcRx rx;
+    const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+    expect(welcomed && c->phase() == ClientCore::Phase::Welcomed && c->client_id() == 1, "connect, Hello, Welcome: client 1");
+    if (!welcomed) return;
+    const ClientEvent we = rx.ev[rx.find(ClientEvent::Welcome)];
+    WelcomeMsg w{};
+    expect(decode(we.data, we.len, w) == Status::Ok && w.client_id == 1 && w.spawn_pos[0] == 500.0 &&
+               w.spawn_vel[0] == 200.0f && w.theatre_hash == fnv1a("Korea"),
+           "the Welcome event carries the host's message");
+
+    // Clock: synced within 1 s of the Welcome, and then on the host's time.
+    double synced_at = 0, est = 0;
+    cc_run(&h, nullptr, *c, rx, 3.0, [&] {
+        if (c->clock_now(ClientCore::wall_now(), &est)) synced_at = ClientCore::wall_now();
+        return synced_at > 0;
+    });
+    char what[200];
+    std::snprintf(what, sizeof(what), "clock synced %.0f ms after the Welcome (limit 1000)", (synced_at - we.wall_rx) * 1000.0);
+    expect(synced_at > 0 && synced_at - we.wall_rx <= 1.0, what);
+    expect(rx.find(ClientEvent::PeerInfo) > rx.find(ClientEvent::Welcome), "PeerInfo for the host follows the Welcome");
+    if (rx.has(ClientEvent::PeerInfo)) {
+        const ClientEvent& pe = rx.ev[rx.find(ClientEvent::PeerInfo)];
+        PeerInfoMsg p{};
+        expect(decode(pe.data, pe.len, p) == Status::Ok && p.id == 0 && std::strcmp(p.callsign, "HOST") == 0,
+               "PeerInfo: id 0, callsign HOST");
+    }
+
+    // Two seconds of traffic both ways: the host's jet at 20 Hz, the client's own States at 20 Hz in host time.
+    h.send_jet = true;
+    double worst_clock = 0, next_send = ClientCore::wall_now();
+    uint32_t sent = 0, refused_send = 0;
+    int samples = 0;
+    cc_run(&h, nullptr, *c, rx, 2.0, [&] {
+        const double wall = ClientCore::wall_now();
+        double t = 0;
+        if (c->clock_now(wall, &t)) {
+            worst_clock = std::fmax(worst_clock, std::fabs(t - h.time()));
+            ++samples;
+            if (wall >= next_send) {
+                next_send += 0.05;
+                if (!c->send_state(cc_jet(9, ++sent, t))) ++refused_send;
+            }
+        }
+        return false;
+    });
+    std::printf("    clock: worst error %.2f ms over %d reads; rtt %u ms\n", worst_clock * 1000.0, samples, c->rtt_ms());
+    expect(samples > 0 && worst_clock < 0.05, "the client's estimate of host time stays within 50 ms on loopback");
+    std::vector<StateMsg> got;
+    for (const ClientEvent& e : rx.ev) {
+        StateMsg s{};
+        if (e.kind == ClientEvent::State && decode(e.data, e.len, s) == Status::Ok) got.push_back(s);
+    }
+    bool ordered = true, intact = true;
+    for (size_t i = 0; i < got.size(); ++i) {
+        if (got[i].client_id != 0 || got[i].pos[0] != 10.0 * got[i].seq) intact = false;
+        if (i && got[i].seq <= got[i - 1].seq) ordered = false;
+    }
+    std::snprintf(what, sizeof(what), "the host's States (id 0) arrive in order and intact: %zu of %u sent", got.size(), h.seq);
+    expect(got.size() >= 10 && got.size() <= h.seq && ordered && intact, what);
+    bool host_ordered = true, host_ids = true;
+    for (size_t i = 0; i < h.states.size(); ++i) {
+        if (h.states[i].client_id != 1) host_ids = false;
+        if (i && h.states[i].seq <= h.states[i - 1].seq) host_ordered = false;
+    }
+    std::snprintf(what, sizeof(what), "the client's States reach the host as client 1, in order: %zu of %u sent (%u refused)",
+                  h.states.size(), sent, refused_send);
+    expect(h.states.size() >= 10 && host_ids && host_ordered && refused_send == 0, what);
+
+    // Another peer joins, is relayed, and leaves.
+    h.send_jet = false;
+    PeerInfoMsg p2{};
+    p2.id = 2;
+    set_str(p2.callsign, "THIRD");
+    h.send(p2, true);
+    h.send(cc_jet(2, 1, h.time()), false);
+    PeerLeftMsg l2{};
+    l2.id = 2;
+    l2.reason = 1;
+    h.send(l2, true);
+    const size_t mark = rx.ev.size();
+    cc_run(&h, nullptr, *c, rx, 3.0, [&] { return rx.find(ClientEvent::PeerLeft, mark) >= 0; });
+    const int pi = rx.find(ClientEvent::PeerInfo, mark), pl = rx.find(ClientEvent::PeerLeft, mark);
+    bool relayed = false;
+    for (size_t i = mark; i < rx.ev.size(); ++i) {
+        StateMsg s{};
+        if (rx.ev[i].kind == ClientEvent::State && decode(rx.ev[i].data, rx.ev[i].len, s) == Status::Ok && s.client_id == 2)
+            relayed = true;
+    }
+    expect(pi >= 0 && pl > pi && relayed, "PeerInfo, a relayed State (id 2) and PeerLeft for another peer arrive");
+    const ClientCounters cn = c->counters();
+    std::printf("    client counters: %u received, %u Pings, %u Pongs, drops %u/%u/%u/%u/%u\n", cn.received, cn.pings, cn.pongs,
+                cn.dropped_format, cn.dropped_range, cn.dropped_state, cn.dropped_queue, cn.dropped_control);
+    expect(cn.dropped_format == 0 && cn.dropped_range == 0 && cn.dropped_queue == 0 && cn.dropped_control == 0,
+           "the client dropped nothing");
+
+    // The client says Bye.
+    c->bye(3);
+    expect(!c->send_state(cc_jet(1, 1, h.time())), "no States after bye()");
+    const bool ended = cc_run(&h, nullptr, *c, rx, 4.0, [&] { return rx.has(ClientEvent::Disconnected) && h.got_disconnect; });
+    const int de = rx.find(ClientEvent::Disconnected);
+    expect(ended && h.byes.size() == 1 && h.byes[0].reason == 3 && h.byes[0].client_id == 1,
+           "client Bye (reason 3) reaches the host, then the host sees the disconnect");
+    expect(de >= 0 && rx.ev[de].reason == static_cast<uint8_t>(ClientEnd::Left) &&
+               de == static_cast<int>(rx.ev.size()) - 1 && rx.count(ClientEvent::Disconnected) == 1 &&
+               c->phase() == ClientCore::Phase::Closed,
+           "the client gets one Disconnected (we left), last; phase Closed");
+    double t = 0;
+    expect(!c->clock_now(ClientCore::wall_now(), &t), "no clock after the end");
+    c->stop(false);
+    expect(c->phase() == ClientCore::Phase::Idle, "stop: phase Idle");
+    h.core.stop(false);
+}
+
+void client_core_host_bye_tests() {
+    std::printf("client core: the host ends the session\n");
+    {  // A Bye from the host (sent with the disconnect straight after it, as host.cpp does); the client is given a name.
+        FakeHost h;
+        if (!h.start()) return expect(false, "host core running");
+        auto c = std::make_unique<ClientCore>();
+        c->start("localhost", h.core.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+        expect(ok, "a host name is resolved on the network thread: localhost, Welcome");
+        if (ok) h.bye_and_disconnect(2);
+        cc_run(&h, nullptr, *c, rx, 4.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        const int b = rx.find(ClientEvent::Bye), d = rx.find(ClientEvent::Disconnected);
+        expect(b >= 0 && cc_bye_reason(rx.ev[b]) == 2 && d > b, "host Bye (reason 2) arrives, then Disconnected");
+        expect(d >= 0 && rx.ev[d].reason == static_cast<uint8_t>(ClientEnd::HostClosed) && c->phase() == ClientCore::Phase::Closed,
+               "Disconnected: the host closed; phase Closed");
+        c->stop(false);
+        h.core.stop(false);
+    }
+    {  // The host goes away (its core stops).
+        FakeHost h;
+        if (!h.start()) return expect(false, "host core running");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+        h.core.stop(false);
+        const double t0 = ClientCore::wall_now();
+        const bool ok = cc_run(nullptr, nullptr, *c, rx, 8.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        char what[160];
+        std::snprintf(what, sizeof(what), "host gone: Disconnected after %.2f s (limit 6)", ClientCore::wall_now() - t0);
+        expect(ok && ClientCore::wall_now() - t0 <= 6.0 && c->phase() == ClientCore::Phase::Closed, what);
+    }
+    {  // The host stops answering without a word: the silence limit.
+        RawHost raw;
+        if (!raw.open()) return expect(false, "raw host");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
+        raw.welcome(50.0);
+        cc_run(nullptr, &raw, *c, rx, 3.0, [&] { return rx.has(ClientEvent::Welcome); });
+        const double t0 = ClientCore::wall_now();
+        const bool ok = cc_run(nullptr, nullptr, *c, rx, 9.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        const double dt = ClientCore::wall_now() - t0;
+        const int d = rx.find(ClientEvent::Disconnected);
+        char what[160];
+        std::snprintf(what, sizeof(what), "silent host: Disconnected (reason %d) after %.2f s (4..6)", d >= 0 ? rx.ev[d].reason : -1, dt);
+        expect(ok && dt >= 4.0 && dt <= 6.0 &&
+                   (rx.ev[d].reason == static_cast<uint8_t>(ClientEnd::Silent) ||
+                    rx.ev[d].reason == static_cast<uint8_t>(ClientEnd::HostClosed)),
+               what);
+    }
+}
+
+void client_core_refusal_tests() {
+    std::printf("client core: refusals and bad packets\n");
+    {  // Wrong theatre: HostCore's fake host refuses with Bye 5.
+        FakeHost h;
+        h.theatre = fnv1a("Korea");
+        if (!h.start()) return expect(false, "host core running");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("GermanyCE")), cc_client_log);
+        CcRx rx;
+        cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        const int b = rx.find(ClientEvent::Bye), d = rx.find(ClientEvent::Disconnected);
+        expect(h.got_hello && !rx.has(ClientEvent::Welcome) && b >= 0 && cc_bye_reason(rx.ev[b]) == kByeWrongTheatre && d > b &&
+                   c->phase() == ClientCore::Phase::Closed,
+               "a wrong theatre arrives as Bye 5, then Disconnected; never Welcomed");
+        c->stop(false);
+        h.core.stop(false);
+    }
+    {  // Another protocol version: a v1-framed reply becomes Bye 6, and the client leaves.
+        RawHost raw;
+        if (!raw.open()) return expect(false, "raw host");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
+        ByeMsg v1{};
+        uint8_t b1[16];
+        const size_t n = encode(v1, b1, sizeof(b1));
+        b1[2] = 1;  // version byte
+        raw.send_raw(b1, n, kChannelReliable);
+        cc_run(nullptr, &raw, *c, rx, 4.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        const int b = rx.find(ClientEvent::Bye), d = rx.find(ClientEvent::Disconnected);
+        expect(b >= 0 && cc_bye_reason(rx.ev[b]) == kByeWrongVersion && d > b &&
+                   rx.ev[d].reason == static_cast<uint8_t>(ClientEnd::Refused) && c->phase() == ClientCore::Phase::Closed,
+               "a host of another version arrives as Bye 6, then Disconnected (refused)");
+    }
+    {  // Malformed, wrong-channel, wrong-type and out-of-range packets are dropped and counted.
+        RawHost raw;
+        if (!raw.open()) return expect(false, "raw host");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
+        raw.send(cc_jet(0, 1, 50.0), kChannelUnreliable);  // before the Welcome: wrong phase
+        raw.welcome(50.0);
+        cc_run(nullptr, &raw, *c, rx, 3.0, [&] { return rx.has(ClientEvent::Welcome); });
+        raw.send(cc_jet(0, 2, 50.0), kChannelReliable);  // wrong channel
+        const uint8_t junk[5] = {1, 2, 3, 4, 5};
+        raw.send_raw(junk, sizeof(junk), kChannelUnreliable);  // garbage
+        raw.send(cc_hello(0), kChannelReliable);  // a client-only type
+        raw.send(cc_jet(1, 3, 50.0), kChannelUnreliable);  // our own id
+        StateMsg wide = cc_jet(0, 4, 50.0);
+        wide.pos[1] = 1e8;
+        raw.send(wide, kChannelUnreliable);  // out of range
+        StateMsg late = cc_jet(0, 5, 50.0 + 7200.0);
+        raw.send(late, kChannelUnreliable);  // two hours from host time
+        raw.send(cc_jet(0, 6, 50.0), kChannelUnreliable);  // good
+        cc_run(nullptr, &raw, *c, rx, 3.0, [&] { return rx.has(ClientEvent::State); });
+        cc_run(nullptr, &raw, *c, rx, 0.2, [] { return false; });
+        const ClientCounters cn = c->counters();
+        std::printf("    drops: %u malformed, %u out of range, %u wrong phase\n", cn.dropped_format, cn.dropped_range,
+                    cn.dropped_state);
+        StateMsg s{};
+        const int si = rx.find(ClientEvent::State);
+        expect(rx.count(ClientEvent::State) == 1 && si >= 0 && decode(rx.ev[si].data, rx.ev[si].len, s) == Status::Ok && s.seq == 6,
+               "only the good State reaches the game thread");
+        expect(cn.dropped_format == 4 && cn.dropped_range == 2 && cn.dropped_state == 1, "each bad packet is counted once");
+    }
+}
+
+void client_core_connect_tests() {
+    std::printf("client core: connecting\n");
+    uint16_t dead_port = 0;
+    {  // a port nothing listens on
+        RawHost tmp;
+        if (tmp.open()) dead_port = tmp.port();
+    }
+    expect(dead_port != 0, "a free port");
+    {
+        ClientCore c;
+        HelloMsg h = cc_hello(0);
+        expect(!c.start(nullptr, 7777, h, cc_client_log) && !c.start("", 7777, h, cc_client_log) &&
+                   !c.start("127.0.0.1", 0, h, cc_client_log) && c.phase() == ClientCore::Phase::Idle,
+               "start refuses a missing host or port 0");
+    }
+    {  // no answer to the connect request
+        auto c = std::make_unique<ClientCore>();
+        ClientLimits lim;
+        lim.connect_ms = 600;
+        const double t0 = ClientCore::wall_now();
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, lim);
+        CcRx rx;
+        const bool ok = cc_run(nullptr, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        const double dt = ClientCore::wall_now() - t0;
+        char what[160];
+        std::snprintf(what, sizeof(what), "no answer: Disconnected (cannot connect) after %.2f s, phase Failed", dt);
+        expect(ok && dt >= 0.5 && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::CannotConnect) &&
+                   c->phase() == ClientCore::Phase::Failed && rx.ev.size() == 1,
+               what);
+    }
+    {  // a name that does not resolve
+        auto c = std::make_unique<ClientCore>();
+        c->start("no-such-host.invalid", 7777, cc_hello(0), cc_client_log);
+        CcRx rx;
+        const bool ok = cc_run(nullptr, nullptr, *c, rx, 20.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        expect(ok && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::CannotConnect) && c->phase() == ClientCore::Phase::Failed,
+               "an unknown name: Disconnected (cannot connect), phase Failed");
+    }
+    {  // connected, but the host never sends the Welcome
+        FakeHost h;
+        h.answer_hello = false;
+        if (!h.start()) return expect(false, "host core running");
+        auto c = std::make_unique<ClientCore>();
+        ClientLimits lim;
+        lim.welcome_ms = 800;
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, lim);
+        CcRx rx;
+        bool awaiting = false;
+        const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] {
+            awaiting = awaiting || c->phase() == ClientCore::Phase::AwaitWelcome;
+            return rx.has(ClientEvent::Disconnected);
+        });
+        expect(ok && awaiting && h.got_hello && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::NoWelcome) &&
+                   c->phase() == ClientCore::Phase::Failed,
+               "no Welcome: AwaitWelcome, then Disconnected (no Welcome), phase Failed");
+        c->stop(false);
+        h.core.stop(false);
+    }
+    for (int loader = 0; loader < 2; ++loader) {  // stop while the connect is still pending
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const ClientCore::Phase before = c->phase();
+        const double t0 = ClientCore::wall_now();
+        c->stop(loader != 0);
+        const double dt = ClientCore::wall_now() - t0;
+        char what[160];
+        std::snprintf(what, sizeof(what), "stop(%s) during the connect returns in %.0f ms", loader ? "in loader lock" : "join",
+                      dt * 1000.0);
+        expect(before == ClientCore::Phase::Connecting && dt < 1.5 && c->phase() == ClientCore::Phase::Idle, what);
+        if (loader) std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the detached thread has finished its clean-up
+    }
+}
+
+void client_core_tests() {
+    client_core_connect_tests();
+    client_core_session_tests();
+    client_core_host_bye_tests();
+    client_core_refusal_tests();
+}
+
+}  // namespace
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -4155,6 +4692,7 @@ int main() {
 
     if (enet_initialize() == 0) {
         host_core_tests();
+        client_core_tests();
         enet_deinitialize();
     } else {
         expect(false, "enet_initialize");

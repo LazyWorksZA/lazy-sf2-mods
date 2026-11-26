@@ -404,7 +404,8 @@ void HostCore::run() {
                 ENetPeer* peer = peers[m.slot];
                 if (!peer || m.gen != gens[m.slot]) continue;  // a command for a connection that is gone
                 if (m.op == OutMsg::Disconnect) {
-                    enet_peer_disconnect(peer, 0);
+                    // _later: enet_peer_disconnect would discard what is still queued for the peer (a Bye just sent).
+                    enet_peer_disconnect_later(peer, 0);
                 } else if (ENetPacket* p =
                                enet_packet_create(m.data, m.len, m.reliable ? ENET_PACKET_FLAG_RELIABLE : 0)) {
                     if (enet_peer_send(peer, m.channel, p) != 0) enet_packet_destroy(p);

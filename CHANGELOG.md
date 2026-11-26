@@ -8,6 +8,8 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 ### Developer tools (off unless enabled)
 
 - **Network protocol v2.** The host/client wire protocol changed (theatre check, join velocity, peer messages). It breaks compatibility with earlier builds and with older bots: the host refuses a v1 peer and logs it once.
+- **Client network core.** A network thread for the client side (connect, Hello, Welcome, clock sync on Pings, checked and queued host messages, Bye). Not wired into the game yet.
+- **Host: a Bye sent just before a disconnect now arrives.** The host's refusals and goodbyes (for example Bye 5, wrong theatre) were discarded by the disconnect that followed them.
 - **Probe hotkeys for the Phase 4 recon.** Ctrl+Shift+J moves the player's own jet 1 km ahead and turns it 90 degrees right; Ctrl+Shift+K moves it 1 km ahead only. Either then logs the jet's state once a second for 5 s. The probe also logs once per flight whether the player's aircraft steps before or after the other aircraft in a frame.
 
 ## 1.0.0 (2026-11-25)
