@@ -88,6 +88,8 @@ The test project is only for development: it is not published or shipped.
 
 - **GitHub flow, without pull requests.** Do each piece of work on its own branch off `master`, and commit there. **Never commit to `master` directly.** Merge into `master` and push it **only when the user explicitly says so**. Don't open pull requests.
 - Delete branches after they are merged.
+- **Scripts that contain Windows paths go in a file.** Write the script to a file, then run it. Don't inline it in a shell heredoc or a quoted `-Command` string: backslashes get mangled (`\\` collapses, `\L` turns into something else). The same applies to Python that edits paths.
+- **Live tests use the scripts in `tools/test/`** (`sf2drive.ps1`, `tvshot.ps1`), not ad-hoc input or screenshot code. Read the `-small.png` copies; the full-size shots are for the user.
 - Each branch adds its user-visible changes to `CHANGELOG.md` under **Unreleased**, in the same branch.
 - End commit messages with the `Co-Authored-By` lines given in your session instructions, if any.
 - Testing needs the live game. Get the user to drive it, ask specific questions, and read `lazysf2.log` yourself.
