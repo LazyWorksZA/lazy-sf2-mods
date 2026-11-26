@@ -1456,7 +1456,7 @@ struct HostStream {
     net::WorldSendClock clock;
     net::WorldEventTracker tracker;
     uint32_t seq = 0, eseq = 0;
-    double next_events = 0, next_report = 0;
+    double next_events = 0, next_report = 0, next_waypoints = 0;
     uint64_t states = 0, state_bytes = 0, events = 0, msgs = 0, send_fail = 0;
     bool logged_start = false;
 };
@@ -1476,7 +1476,11 @@ bool world_host_snapshot(int slot, uint32_t mission_id, WorldSendToFn send) {
     if (!g_world_host.load(std::memory_order_acquire) || !send) return true;
     std::vector<net::WorldEventRec> ev;
     if (g_hs && g_hs->mission == g_published_id) g_hs->tracker.snapshot(&ev);
-    if (ev.size() > net::kSnapshotMaxRecords) ev.resize(net::kSnapshotMaxRecords);
+    const size_t cap = net::kSnapshotMaxParts * net::kWorldEventsMax;
+    if (ev.size() > cap) {
+        LOG("world: snapshot for client %d: %zu events, cut to %zu (the events ring)", slot + 1, ev.size(), cap);
+        ev.resize(cap);
+    }
     const uint32_t ms = static_cast<uint32_t>(sim_game_time() * 1000.0);
     net::WorldSnapshotMsg head{};
     head.mission_id = mission_id;
@@ -1587,6 +1591,10 @@ void world_host_tick(double now, const double (*players)[3], int n_players, Worl
             out.push_back(q);
         }
     }
+    if (event_walk && now >= hs.next_waypoints) {  // every 10 s: the clients' formations cannot drift for long
+        hs.next_waypoints = now + 10.0;
+        hs.tracker.waypoints(&ev);
+    }
     if (event_walk) {
         const BYTE* areas = nullptr;
         int n_areas = 0;
@@ -1651,6 +1659,7 @@ struct ClientStream {
     StreamMasks masks[2];
     std::unordered_map<uint64_t, uint32_t> last_ms;  // per key: the newest state applied
     std::unordered_map<uint64_t, bool> destroyed;    // keys the host destroyed: late states are not written on the wreck
+    int skip_parts = 0;  // WorldEvents parts of a snapshot for another mission: not applied
     uintptr_t af = 0;
     uint64_t applied = 0, stale = 0, missing = 0, not_remote = 0, events = 0;
     double next_report = 0;
@@ -1768,7 +1777,8 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         LOG("world: snapshot from the host: mission 0x%08lx, %u events in %u parts at host time %.1f s (ours %.1f s)%s",
             static_cast<unsigned long>(sn.mission_id), static_cast<unsigned>(sn.records),
             static_cast<unsigned>(sn.parts), sn.host_ms / 1000.0, sim_game_time(),
-            sn.mission_id == g_flying_id ? "" : "; ANOTHER mission: not applied");
+            sn.mission_id == g_flying_id ? "" : "; ANOTHER mission: its parts are not applied");
+        if (g_cs && sn.mission_id != g_flying_id) g_cs->skip_parts = sn.parts;
         return;
     }
     if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
@@ -1819,6 +1829,10 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         net::WorldEventsHead h;
         const net::WorldEventRec* r = nullptr;
         if (net::decode_world_events(data, len, h, &r) != net::Status::Ok) return;
+        if (cs.skip_parts > 0) {
+            --cs.skip_parts;
+            return;
+        }
         for (size_t i = 0; i < h.count; ++i) {
             net::WorldEventRec e;
             std::memcpy(&e, &r[i], sizeof(e));
@@ -1984,6 +1998,18 @@ struct AvatarTx {
 };
 AvatarTx g_atx;  // game thread
 net::AvatarStateMsg g_arx[1 + 4] = {};  // per peer: the last state applied (host 0, clients 1..4)
+uint32_t g_arx_epoch = 0;
+uintptr_t g_arx_ao = 0;  // AircraftObject, checked once per player epoch
+
+bool target_alive(const BYTE* obj) {
+    __try {
+        int level = 0;
+        std::memcpy(&level, obj + kObjDamage, 4);
+        return level < kDestroyedLevel;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 }  // namespace
 
@@ -2020,13 +2046,27 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
     g_atx.have = true;
 }
 
+void world_avatar_forget(int peer) {
+    if (peer >= 0 && peer < 5) g_arx[peer] = net::AvatarStateMsg{};
+}
+
+void world_avatar_session_reset() {
+    g_atx = AvatarTx{{}, false, 0, sim_player_epoch()};  // our state goes out again
+    for (auto& p : g_arx) p = net::AvatarStateMsg{};
+}
+
 void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
     net::AvatarStateMsg m;
     if (net::decode(data, len, m) != net::Status::Ok || m.peer > 4 || !avatar) return;
+    if (g_arx_epoch != sim_player_epoch()) {  // a new flight: nothing applied yet
+        g_arx_epoch = sim_player_epoch();
+        for (auto& p : g_arx) p = net::AvatarStateMsg{};
+        g_arx_ao = module_if(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll");
+    }
     net::AvatarStateMsg& prev = g_arx[m.peer];
     HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
     HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
-    const uintptr_t ao = module_if(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll");
+    const uintptr_t ao = g_arx_ao;
     if (!sm || !omm || !ao) return;
     BYTE* av = static_cast<BYTE*>(avatar);
     write_config(av, m.config);
@@ -2042,7 +2082,7 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
                              tg == 1;
     int rt = 0, rw = -1;
     if (have_target) rt = detect_call(av, ao, kDetectSetTarget, kRvaAoSetTarget, static_cast<int>(tid));
-    if (have_target && net::avatar_lock_started(prev, m)) rw = rwr_lock(tobj, av, ao);
+    if (have_target && net::avatar_lock_started(prev, m) && target_alive(tobj)) rw = rwr_lock(tobj, av, ao);
     if (m.radar_mode != prev.radar_mode || m.target_a != prev.target_a || m.target_b != prev.target_b)
         LOG("world: jet state of peer %u: radar mode %u%s, target %s (%s%s)", static_cast<unsigned>(m.peer),
             static_cast<unsigned>(m.radar_mode), rm == 0 ? "" : rm == 1 ? " NOT set (unexpected slot)" : " FAULTED",

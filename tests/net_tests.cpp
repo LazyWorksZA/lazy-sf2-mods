@@ -7394,11 +7394,34 @@ void world_snapshot_tests() {
     tr.observe(1, 2, kFlightKey, flight, &ev);
     std::vector<WorldEventRec> snap;
     tr.snapshot(&snap);
-    expect(ev.empty() && snap.size() == 5 && snap[0].event == kEventAwake && snap[0].a == 2 && snap[1].b == kFlightKey &&
-               snap[1].event == kEventWaypoint && snap[1].value == 4 && snap[2].event == kEventAsleep &&
-               snap[3].event == kEventDestroyed && snap[3].b == 1 && snap[4].event == kEventPlacedDamage &&
-               snap[4].value == 40,
-           "snapshot: every key's state now, sorted by key; intact placed records are left out");
+    // Everything above was the mission's start: only the flight's waypoint differs from what a fresh copy has.
+    expect(ev.empty() && snap.size() == 1 && snap[0].event == kEventWaypoint && snap[0].value == 4,
+           "snapshot: the start state is not resent (only the flights' waypoints)");
+    // The host flies alone: a kill, a building hit, a flight woken, then a client joins.
+    WorldSeen killed;
+    killed.alive = false;
+    tr.observe(1, 2, 0, killed, &ev);
+    WorldSeen hit;
+    hit.level = 70;
+    tr.observe(3, 12, 8, hit, &ev);
+    WorldSeen woke = sleeping;
+    woke.asleep = false;
+    woke.awake = true;
+    tr.observe(1, 3, 0, woke, &ev);
+    snap.clear();
+    tr.snapshot(&snap);
+    bool has_kill = false, has_hit = false, has_wake = false, has_old_dead = false;
+    for (const auto& r : snap) {
+        has_kill = has_kill || (r.event == kEventDestroyed && r.a == 2 && r.b == 0);
+        has_old_dead = has_old_dead || (r.event == kEventDestroyed && r.a == 3 && r.b == 1);
+        has_hit = has_hit || (r.event == kEventPlacedDamage && r.b == 8 && r.value == 70);
+        has_wake = has_wake || (r.event == kEventAwake && r.a == 3 && r.b == 0);
+    }
+    expect(has_kill && has_hit && has_wake && !has_old_dead,
+           "snapshot: the first joiner gets every death, hit and wake-up since the start (not what was dead at the start)");
+    std::vector<WorldEventRec> wps;
+    tr.waypoints(&wps);
+    expect(wps.size() == 1 && wps[0].value == 4, "snapshot: the periodic waypoint resend lists every flight");
     WorldSnapshotMsg h{};
     h.mission_id = 9;
     h.host_ms = 600000;
@@ -7465,6 +7488,24 @@ void world_avatar_tests() {
     other.target_b = 2;
     expect(avatar_lock_started(a, other), "jet state: a lock on another target warns that target");
     std::printf("    estimate: a state change is 16 bytes; a few per minute (locks, gear, flaps)\n");
+    AvatarStateCache cache;
+    AvatarStateMsg host{}, c1{}, c2{};
+    host.peer = 0;
+    host.config = 0x0800;  // gear down
+    c1.peer = 1;
+    c1.radar_mode = 3;
+    c2.peer = 2;
+    cache.set(host);
+    cache.set(c1);
+    cache.set(c2);
+    AvatarStateMsg got[5];
+    const size_t n2 = cache.for_joiner(2, got);
+    expect(n2 == 2 && got[0].peer == 0 && got[0].config == 0x0800 && got[1].peer == 1 && got[1].radar_mode == 3,
+           "jet state: a joiner gets the host's and the other clients' current states, not its own");
+    cache.forget(2);
+    cache.forget(1);
+    const size_t n3 = cache.for_joiner(2, got);
+    expect(n3 == 1 && got[0].peer == 0, "jet state: a reconnecting client gets the current lock and gear of who is left");
 }
 
 void world_seat_rule_tests() {

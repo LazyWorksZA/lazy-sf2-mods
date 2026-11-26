@@ -369,6 +369,10 @@ using AvatarSendFn = bool (*)(const uint8_t* data, size_t len);
 void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send);
 /// <summary>Game thread: applies a peer's AvatarState to the aircraft that is its avatar here (config, radar, RWR).</summary>
 void world_avatar_apply(const uint8_t* data, size_t len, void* avatar);
+/// <summary>A peer left: its next state is applied as new (the RWR hears its lock again).</summary>
+void world_avatar_forget(int peer);
+/// <summary>A session starts or ends: our own state is sent again in full, and every peer's applied as new.</summary>
+void world_avatar_session_reset();
 /// <summary>Client: the aircraft that shows peer id here (its Phase 4 avatar), or null.</summary>
 void* client_avatar_object(int peer);
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>

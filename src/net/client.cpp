@@ -208,7 +208,10 @@ void end_session(const char* why) {
         sim_set_run_active(false);
     }
     g_stream->close(false);  // the writer thread drains, flushes and closes the file
-    if (g_session) world_client_session_end();
+    if (g_session) {
+        world_client_session_end();
+        world_avatar_session_reset();
+    }
     g_session = false;
     g_welcomed.store(false, std::memory_order_relaxed);
     g_snap_ok = false;
@@ -335,6 +338,7 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
         g_blocked = true;
         return;
     }
+    if (first) world_avatar_session_reset();
     if (first && !world_client_welcome(w.mission_id, w.seat, w.host_seat)) {
         g_core->bye(net::kByeWrongMission);
         g_leaving = true;
@@ -412,6 +416,7 @@ void handle_peer_left(const ClientEvent& e) {
     bool live[kSources] = {};
     if (g_rm[m.id].h.obj) check_live(live);
     release_remote(m.id, "the peer left", live[m.id], true);
+    world_avatar_forget(m.id);
 }
 
 /// <summary>Takes an aircraft for a remote, placed on the State. At most once per kTakeEvery; false while none.</summary>

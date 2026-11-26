@@ -25,6 +25,7 @@
 #include "net/stream_format.h"
 #include "net/stream_record.h"
 #include "net/world_proto.h"
+#include "net/world_stream_logic.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -96,6 +97,7 @@ struct Avatar {
 };
 Avatar* g_av = nullptr;  // net::kMaxClients entries (see above)
 int g_nclients = 0;
+net::AvatarStateCache g_avatar_states;  // everyone's latest jet state, for joiners (T7/T8)
 bool g_world_behind[net::kMaxClients] = {};  // a client whose world events could not be queued (ended after the tick)
 uint32_t g_newest_gen[net::kMaxClients] = {};  // per slot: the newest connection generation seen in a Connect event
 constexpr double kHoldTimeout = 5.0;  // game seconds from the Welcome to the first State, before the avatar is released
@@ -201,6 +203,8 @@ void check_live(bool live[net::kMaxClients]) {
 void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, net::LeaveReason leave, bool announce = true) {
     Avatar& a = g_av[slot];
     if (!a.active) return;
+    g_avatar_states.forget(slot + 1);
+    world_avatar_forget(slot + 1);
     void* const obj = a.h.obj;
     avatar_release(a.h, aircraft_live);
     if (bye_reason != kByeNone) {
@@ -386,7 +390,17 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     const size_t n = net::encode(w, buf, sizeof(buf));
     if (n) rec(net::StreamKind::WelcomeSent, now, buf, n);
     // A late joiner (or a reconnect) gets the world's events so far, after its Welcome on the same channel (T8).
-    if (world_host_streaming()) world_host_snapshot(slot, w.mission_id, world_send_to);
+    if (world_host_streaming()) {
+        world_host_snapshot(slot, w.mission_id, world_send_to);
+        // Then everyone's current jet state (the host's and the other clients'), as if it had just changed.
+        net::AvatarStateMsg st[net::AvatarStateCache::kPeers];
+        const size_t ns = g_avatar_states.for_joiner(slot + 1, st);
+        for (size_t i = 0; i < ns; ++i) {
+            uint8_t ab[sizeof(net::AvatarStateMsg)];
+            world_send_to(slot, ab, net::encode(st[i], ab, sizeof(ab)), true);
+        }
+        g_avatar_states.forget(slot + 1);  // its own comes from it again
+    }
     LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg, theatre %s; "
         "host \"%s\" (%s)",
         slot + 1, a.callsign, a.aircraft, got.obj, why, a.spawn[0], a.spawn[1], a.spawn[2],
@@ -526,7 +540,9 @@ void handle_message(const HostEvent& e, void* player, double now) {
     if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::AvatarState)) {
         // A client's jet state (T7): onto its avatar here, and on to the other clients.
         if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
-            world_avatar_apply(e.data, e.len, g_av[slot].h.obj);
+            net::AvatarStateMsg m;
+            if (net::decode(e.data, e.len, m) == net::Status::Ok) g_avatar_states.set(m);
+            if (!g_av[slot].parked) world_avatar_apply(e.data, e.len, g_av[slot].h.obj);  // parked: the AI flies it
             for (int s = 0; s < net::kMaxClients; ++s)
                 if (s != slot && g_av[s].active && !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, true))
                     g_world_behind[s] = true;
@@ -675,6 +691,7 @@ bool world_send_to(int s, const uint8_t* data, size_t len, bool reliable) {
 }
 
 bool world_send(const uint8_t* data, size_t len, bool reliable) {
+    if (g_nclients == 0) return true;  // flying alone: the tracker still runs, nobody to send to
     bool any = false;
     for (int s = 0; s < net::kMaxClients; ++s) {
         if (!g_av[s].active) continue;
@@ -691,7 +708,11 @@ void world_tick(void* player, double now) {
     for (int s = 0; s < net::kMaxClients; ++s)
         if (g_av[s].active && g_av[s].h.obj) obj_read(g_av[s].h.obj, kOffPos, pl[np++], 3);
     world_host_tick(now, pl, np, world_send);
-    world_avatar_tick(player, 0, [](const uint8_t* d, size_t n) { return world_send(d, n, true); });
+    world_avatar_tick(player, 0, [](const uint8_t* d, size_t n) {
+        net::AvatarStateMsg m;
+        if (net::decode(d, n, m) == net::Status::Ok) g_avatar_states.set(m);
+        return g_nclients == 0 || world_send(d, n, true);  // alone: kept for the first joiner
+    });
     for (int s = 0; s < net::kMaxClients; ++s) {
         if (!g_world_behind[s]) continue;
         g_world_behind[s] = false;
@@ -729,7 +750,8 @@ void on_step(void* aircraft, float dt, bool is_player) {
         pump(aircraft, now);
         if (g_nclients > 0) record_host_state(aircraft, now);
         if (g_nclients > 0 && g_tick.due(now)) send_host_state(aircraft, now);
-        if (g_nclients > 0 && world_host_streaming()) world_tick(aircraft, now);
+        // From the mission's start, clients or not: the event tracker must see every death for a later snapshot.
+        if (world_host_streaming()) world_tick(aircraft, now);
         if (g_nclients > 0 && now >= g_next_report) {
             report(aircraft, now);
             g_next_report = std::floor(now) + 1.0;
