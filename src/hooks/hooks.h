@@ -275,6 +275,11 @@ void client_on_modules_loaded();
 void client_shutdown();
 /// <summary>True from the client's Welcome until its session ends. Any thread.</summary>
 bool client_welcomed();
+/// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>
+inline bool env_set(const wchar_t* name) {
+    wchar_t b[2];
+    return GetEnvironmentVariableW(name, b, 2) > 0;
+}
 /// <summary>A network session is running: the host has clients, or the client is welcomed. Any thread.</summary>
 inline bool net_session_active() { return host_has_clients() || client_welcomed(); }
 

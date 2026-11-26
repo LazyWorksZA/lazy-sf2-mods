@@ -5937,7 +5937,7 @@ void remote_avatar_tests() {
     expect(i == 4 && r.tier == AvatarTier::SameType, "pick: the whole flight taken -> friendly of the same type");
     f2[4].taken = true;
     i = pick_avatar(f2, nf, "F-105D", &r);
-    expect(i == 5 && r.tier == AvatarTier::Nearest, "pick: no friendly left -> the nearest (an enemy)");
+    expect(i == nf && r.tier == AvatarTier::None, "pick: no friendly left -> none (never an enemy, even the nearest)");
     f2[5].taken = true;
     expect(pick_avatar(f2, nf, "F-105D", &r) == nf && r.tier == AvatarTier::None, "pick: all taken -> none, never the player");
 
@@ -5960,7 +5960,7 @@ void remote_avatar_tests() {
     i = pick_avatar(mixed, 4, "F-4C", &r);
     expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 22, "pick: the wanted type decides the wingman");
 
-    // No player in the list (it was destroyed) and sides unknown (masks not read): the nearest, never a taken one.
+    // No player in the list (it was destroyed) and sides unknown (masks not read): not known to be friendly, so none.
     const AvatarCandidate bare[] = {
         {L"A 1", "", 5, U, false, false, 300},
         {L"B 1", nullptr, 6, U, false, false, 100},
@@ -5968,7 +5968,12 @@ void remote_avatar_tests() {
         {L"D 1", "F-4E", 8, U, false, false, std::numeric_limits<double>::quiet_NaN()},
     };
     i = pick_avatar(bare, 4, "F-4E", &r);
-    expect(i == 1 && r.tier == AvatarTier::Nearest, "pick: no player, unknown sides -> the nearest free one");
+    expect(i == 4 && r.tier == AvatarTier::None, "pick: unknown sides -> none (only friendly aircraft are taken)");
+    AvatarCandidate bare_f[4];
+    std::memcpy(bare_f, bare, sizeof(bare));
+    for (AvatarCandidate& b : bare_f) b.side = F;
+    i = pick_avatar(bare_f, 4, "F-4E", &r);
+    expect(i == 1 && r.tier == AvatarTier::Friendly, "pick: no player, friendly -> the nearest free one, never a taken one");
     const AvatarCandidate tie[] = {
         {L"P", "X", 1, F, true, false, 0},
         {L"Q", "X", 9, F, false, false, 50},
@@ -6049,7 +6054,7 @@ void remote_avatar_tests() {
         expect(!ca.taken && cb.taken && std::fabs(ca.dist - 50.0) < 1e-9 && ca.seq == 7 && ca.side == F &&
                    std::wcscmp(ca.name, L"DENVER 12") == 0 && std::strcmp(ca.type_name, "F-105D") == 0,
                "candidate: fields copied, taken by pointer and seq (a reused address is not taken), distance");
-        // Within 20 km of the player first, whatever the tier: a far wingman loses to a near aircraft of any kind.
+        // Within 20 km of the placement first, whatever the tier: a far wingman loses to a near friendly of any type.
         const AvatarCandidate far_wing[] = {
             {L"DENVER 11", "F-105D", 1, F, true, false, 0},
             {L"DENVER 12", "F-105D", 2, F, false, false, 30000},
@@ -6064,9 +6069,16 @@ void remote_avatar_tests() {
         fw2[2].dist = 21000;
         expect(pick_avatar(fw2, 4, "F-105D", &fr) == 1 && !fr.nearby && fr.tier == AvatarTier::Wingman,
                "pick: nothing within 20 km -> the best tier among the far ones (my #2), marked not nearby");
-        fw2[3].dist = 20000;
-        expect(pick_avatar(fw2, 4, "F-105D", &fr) == 3 && fr.nearby && fr.tier == AvatarTier::Nearest,
-               "pick: an enemy at exactly 20 km is near, and beats far friendlies");
+        fw2[3].dist = 100;
+        expect(pick_avatar(fw2, 4, "F-105D", &fr) == 1 && !fr.nearby && fr.tier == AvatarTier::Wingman,
+               "pick: an enemy 100 m away is never taken; the far wingman is");
+        fw2[2].dist = 20000;
+        expect(pick_avatar(fw2, 4, "F-105D", &fr) == 2 && fr.nearby && fr.tier == AvatarTier::Friendly,
+               "pick: a friendly at exactly 20 km is near, and beats a far wingman");
+        fw2[1].taken = true;
+        fw2[2].taken = true;
+        expect(pick_avatar(fw2, 4, "F-105D", &fr) == 4 && fr.tier == AvatarTier::None,
+               "pick: only an enemy left -> no avatar");
 
         AvatarPicker pk(nullptr, "F-105D");
         expect(!pk.offer(0, cb) && pk.offer(1, ca) && pk.best().tier == AvatarTier::SameType,

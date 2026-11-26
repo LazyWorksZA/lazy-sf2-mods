@@ -48,7 +48,7 @@ constexpr double kTakeEvery = 1.0;    // host seconds between tries to take an a
 bool g_enabled = false;
 char g_host[64] = {};
 uint16_t g_port = 0;
-char g_callsign[17] = "PLAYER";  // LAZYSF2_CALLSIGN, printable ASCII; the wire field keeps 15 characters
+char g_callsign[16] = "PLAYER";  // LAZYSF2_CALLSIGN, printable ASCII, at most 15 characters (the wire field)
 bool g_join_move = true;         // LAZYSF2_NET_JOIN=move (default) or none
 
 // On the heap, created in client_on_modules_loaded() only when client mode is on. Never freed (as in host.cpp).
@@ -66,6 +66,8 @@ double g_next_try = 0;        // wall time of the next connection attempt
 bool g_blocked = false;       // refused in a way a retry cannot fix (theatre, version) until the player changes
 bool g_busy_logged = false;   // "not connecting while a puppet or replay runs", once per block
 bool g_retry_quiet = false;   // a failed attempt was logged: later ones are not, until a Welcome or a new player
+// The network thread's lines are dropped while a quiet retry has not connected (it clears this when it does).
+std::atomic<bool> g_core_quiet{false};
 uint32_t g_epoch = 0;
 char g_own_type[33] = {};
 uint32_t g_theatre_hash = 0;
@@ -79,13 +81,15 @@ int g_welcomes = 0;           // Welcomes in this session; a re-Welcome re-seeds
 double g_welcome_wall = 0;    // the first Welcome's arrival
 double g_reannounce_at = 0;   // wall: after a re-Welcome, remotes not announced again by then are dropped
 bool g_peer0_logged = false;  // R1: the host's PeerInfo did not come (logged once)
-bool g_moved = false;         // the jet was moved to a join position in this session
+bool g_moved = false;         // the jet was moved to a join position for this player (kept across reconnects)
 unsigned g_join_logged = 0;   // the join actions already logged in this session (bit per JoinAction)
 
 // The shared clock, read once per player step; avatars read the HostClock again at their own step.
 net::ClockSync g_snap;
 bool g_snap_ok = false;
-bool g_hold = true;     // no States out and no avatar writes: no clock, the host's clock frozen, or no Pong for 3 s
+// No avatar writes (and no States): no clock, the host's clock frozen, no Pong for 3 s, or never synced yet. The wait
+// for the first Pong after a Welcome's re-seed is not a hold: the seeded clock drives the avatars meanwhile.
+bool g_hold = true;
 double g_now = 0;       // host time at the player's latest step
 net::HostClock g_hclock;
 cl::ClockWatch g_watch;
@@ -122,6 +126,17 @@ struct Remote {
 Remote* g_rm = nullptr;  // kSources entries, indexed by id
 
 void core_log(const char* line) { LOG("%s", line); }
+
+/// <summary>
+/// ClientCore's log (network thread). Its "connecting to" line names the address, which client_install() logged once
+/// already; during a quiet retry nothing is logged until the connection is made.
+/// </summary>
+void client_core_log(const char* line) {
+    if (std::strncmp(line, "net: client connected", 21) == 0) g_core_quiet.store(false, std::memory_order_relaxed);
+    if (g_core_quiet.load(std::memory_order_relaxed) || std::strncmp(line, "net: client connecting to ", 26) == 0)
+        return;
+    LOG("%s", line);
+}
 
 void rec(net::StreamKind kind, double t, const void* payload, size_t len) { g_stream->record(kind, t, payload, len); }
 
@@ -201,7 +216,7 @@ void release_dead() {
 }
 
 void reset_jets() {
-    for (int i = 0; i < kSources; ++i) g_rm[i].jet.reset();  // the next State snaps (counted in the 1 Hz line)
+    for (int i = 0; i < kSources; ++i) g_rm[i].jet.reset();  // the next State snaps; the stats window starts again
     g_tick.reset();
 }
 
@@ -213,8 +228,8 @@ void refresh_clock(double wall) {
         return;
     }
     g_now = g_hclock.read(wall, g_snap);
-    g_hold = !g_snap.have_pong() || g_snap.on_hold(wall);
     const unsigned ev = g_watch.update(g_snap, g_hclock, wall);
+    g_hold = g_snap.on_hold(wall) || (!g_snap.have_pong() && !g_watch.synced());
     if (ev & cl::ClockWatch::kReset) {
         reset_jets();
         if (!(ev & cl::ClockWatch::kReseed))  // a Welcome's re-seed is logged with the Welcome
@@ -291,6 +306,13 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
     net::WelcomeMsg w;
     if (net::decode(e.data, e.len, w) != net::Status::Ok) return;
     const bool first = !g_session;
+    if (g_puppet_state.load() != 0 || replay_active()) {
+        LOG("net: client: a puppet or replay run started; leaving the session (Bye 1)");
+        g_core->bye(1);  // busy
+        g_leaving = true;
+        end_session("a puppet or replay run is active");
+        return;
+    }
     if (first && net::theatre_mismatch(g_theatre_hash, w.theatre_hash)) {
         LOG("net: client: the host flies in another theatre (its hash %08x; ours %08x, %s); leaving (Bye 5), no retry "
             "until the player changes",
@@ -310,7 +332,6 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
         g_welcome_wall = wall;
         g_reannounce_at = 0;
         g_peer0_logged = false;
-        g_moved = false;
         g_join_logged = 0;
         g_watch.clear();
         g_hclock = net::HostClock{};
@@ -408,14 +429,15 @@ void handle_state(const ClientEvent& e, double wall) {
     double t_rx = g_snap.now(e.wall_rx);
     if (t_rx > g_now) t_rx = g_now;
     rec(net::StreamKind::StateReceived, t_rx, e.data, e.len);
+    // Heard from, with or without an aircraft: the 1 Hz line and the park rule go by this.
+    r.last_state_wall = wall;
+    r.last_game_time = s.game_time;
     if (!r.h.obj && !take(id, s)) return;
     if (!r.jet.push(s, t_rx)) return;
     if (!r.got_state)
         LOG("net: remote %d \"%s\": first State, seq %u, age %.0f ms", id, r.callsign, static_cast<unsigned>(s.seq),
             (t_rx - s.game_time) * 1000.0);
     r.got_state = true;
-    r.last_state_wall = wall;
-    r.last_game_time = s.game_time;
 }
 
 void handle_end(const ClientEvent& e, double wall) {
@@ -532,9 +554,9 @@ void report(void* player, double wall) {
     obj_read(player, kOffPos, pp, 3);
     for (int i = 0; i < kSources; ++i) {
         Remote& r = g_rm[i];
-        if (!r.known || !r.got_state) continue;
+        if (!r.known || r.last_state_wall == 0) continue;
         if (!r.h.obj) {
-            LOG("net: remote %d \"%s\" no avatar (no State for %.0f s) rtt %.0f ms", i, r.callsign, wall - r.last_state_wall,
+            LOG("net: remote %d \"%s\" no avatar (last State %.0f s ago) rtt %.0f ms", i, r.callsign, wall - r.last_state_wall,
                 static_cast<double>(g_core->rtt_ms()));
             continue;
         }
@@ -627,7 +649,8 @@ void maybe_connect(void* player, double wall) {
     net::set_str(h.callsign, g_callsign);
     net::set_str(h.aircraft, g_own_type[0] ? g_own_type : "unknown");
     h.theatre_hash = g_theatre_hash;
-    if (!g_core->start(g_host, g_port, h, core_log)) {
+    g_core_quiet.store(g_retry_quiet, std::memory_order_relaxed);
+    if (!g_core->start(g_host, g_port, h, client_core_log)) {
         LOG("net: client: could not start the network thread; trying again in 5 s");
         return;
     }
@@ -648,6 +671,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         g_epoch = sim_player_epoch();
         g_blocked = false;
         g_retry_quiet = false;
+        g_moved = false;
         if (g_link == Link::Running && !g_leaving && !g_disconnected) {
             g_core->bye(kByeSessionEnded);
             g_leaving = true;
@@ -704,8 +728,8 @@ bool env_ascii(const wchar_t* name, char* out, size_t cap) {
 }  // namespace
 
 void client_install() {
-    if (GetEnvironmentVariableW(L"LAZYSF2_CONNECT", nullptr, 0) == 0) return;
-    if (GetEnvironmentVariableW(L"LAZYSF2_HOST", nullptr, 0) > 0) return;  // host_install() logged that both are off
+    if (!env_set(L"LAZYSF2_CONNECT")) return;
+    if (env_set(L"LAZYSF2_HOST")) return;  // host_install() logged that both are off
     if (!probe_output_dir()) {
         LOG("net: client off (the probe is off: LAZYSF2_PROBE_DIR is not set or not valid)");
         return;

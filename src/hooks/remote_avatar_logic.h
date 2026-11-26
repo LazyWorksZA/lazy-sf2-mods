@@ -17,7 +17,7 @@ struct AvatarHandle {
     uint32_t set_bits = 0;
 };
 
-/// <summary>One aircraft as the picker sees it: the LiveAircraft fields it ranks on, plus its distance to the player.</summary>
+/// <summary>One aircraft as the picker sees it: the LiveAircraft fields it ranks on, plus its distance to the placement.</summary>
 struct AvatarCandidate {
     const wchar_t* name;    // may be null
     const char* type_name;  // may be null or empty (unknown)
@@ -25,20 +25,22 @@ struct AvatarCandidate {
     AircraftSide side;
     bool is_player;
     bool taken;   // another remote already holds it (pointer and seq)
-    double dist;  // metres from the player
-};
-
-/// <summary>The preference order of plan 2.6; lower is better.</summary>
-enum class AvatarTier : uint8_t {
-    None = 0,      // never taken: the player, or one already held
-    Wingman = 1,   // friendly, the wanted type, named with the player's flight callsign
-    SameType = 2,  // friendly, the wanted type
-    Friendly = 3,
-    Nearest = 4,
+    double dist;  // metres from where the avatar will be placed (the player's position if that is unknown)
 };
 
 /// <summary>
-/// Candidates within this many metres of the player rank before any farther one, whatever their tier: moving an
+/// The preference order of plan 2.6; lower is better. Only friendly aircraft are ever taken (owner ruling, Task 11
+/// review): an enemy, neutral or unknown-side aircraft is None.
+/// </summary>
+enum class AvatarTier : uint8_t {
+    None = 0,      // never taken: the player, one already held, or not friendly
+    Wingman = 1,   // friendly, the wanted type, named with the player's flight callsign
+    SameType = 2,  // friendly, the wanted type
+    Friendly = 3,
+};
+
+/// <summary>
+/// Candidates within this many metres of the placement rank before any farther one, whatever their tier: moving an
 /// aircraft across the theatre can stall the simulation (a 125 km takeover was once followed by a 44 s host stall).
 /// </summary>
 inline constexpr double kAvatarNear = 20000.0;
@@ -48,7 +50,7 @@ struct AvatarRank {
     int flight_no = -1;  // the number after the flight callsign ("DENVER 12" -> 12), -1 if not of the flight
     double dist = 0;
     unsigned long long seq = 0;
-    bool nearby = false;  // within kAvatarNear of the player
+    bool nearby = false;  // within kAvatarNear of the placement
 };
 
 namespace avatar_logic {
@@ -127,8 +129,8 @@ inline int flight_member_no(const wchar_t* name, const wchar_t* base, size_t bas
 }  // namespace avatar_logic
 
 /// <summary>
-/// Ranks candidates one at a time and keeps the best (plan 2.6): those within kAvatarNear of the player first; then
-/// Wingman, then SameType, then Friendly, then Nearest. Within a tier: members of the player's flight first, the lowest flight number first (the player's #2
+/// Ranks candidates one at a time and keeps the best (plan 2.6): friendly only; those within kAvatarNear of the
+/// placement first; then Wingman, then SameType, then Friendly. Within a tier: members of the player's flight first, the lowest flight number first (the player's #2
 /// before #3), then the nearest, then the earliest constructed.
 /// </summary>
 class AvatarPicker {
@@ -154,7 +156,6 @@ public:
         if (friendly && type && r.flight_no >= 0) r.tier = AvatarTier::Wingman;
         else if (friendly && type) r.tier = AvatarTier::SameType;
         else if (friendly) r.tier = AvatarTier::Friendly;
-        else r.tier = AvatarTier::Nearest;
         return r;
     }
 
@@ -225,7 +226,6 @@ inline const char* tier_name(AvatarTier t) {
         case AvatarTier::Wingman: return "the player's wingman";
         case AvatarTier::SameType: return "friendly, same type";
         case AvatarTier::Friendly: return "friendly, other type";
-        case AvatarTier::Nearest: return "nearest, not friendly";
         default: return "none";
     }
 }

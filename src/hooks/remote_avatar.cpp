@@ -57,11 +57,14 @@ void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     const LiveAircraft* player = nullptr;
     for (size_t i = 0; i < n; ++i)
         if (list[i].is_player) player = &list[i];
+    // Distances from where the avatar goes (the join position on the host, the remote's State on the client); from the
+    // player only if the placement is not a finite position.
     double ref[3];
-    if (player) {
-        obj_read(player->obj, kOffPos, ref, 3);
+    const double* pl = c.pick->place;
+    if ((std::isfinite(pl[0]) && std::isfinite(pl[1]) && std::isfinite(pl[2])) || !player) {
+        std::memcpy(ref, pl, sizeof(ref));
     } else {
-        std::memcpy(ref, c.pick->place, sizeof(ref));
+        obj_read(player->obj, kOffPos, ref, 3);
     }
     AvatarPicker picker(player ? player->name : nullptr, c.pick->want_type);
     for (size_t i = 0; i < n; ++i) {
@@ -129,7 +132,7 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     c.mask = mask;
     probe_with_aircraft(take_cb, &c);
     if (!c.found) {
-        put_why(why, why_cap, "no free AI aircraft to use as an avatar");
+        put_why(why, why_cap, "no free friendly AI aircraft to use as an avatar");
         return false;
     }
     out->obj = c.obj;
@@ -147,9 +150,9 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     std::memcpy(in.from, c.from, sizeof(in.from));
     in.moved = avatar_logic::dist3(in.from, pick.place);
     if (why && why_cap) {
-        std::snprintf(why, why_cap, "\"%s\" %s (was %.0f m from the player at (%.0f, %.0f, %.0f), moved %.0f m); %s%s",
-                      in.name, in.type[0] ? in.type : "(type unknown)", in.dist, in.from[0], in.from[1], in.from[2],
-                      in.moved, tier_name(in.tier), in.nearby ? "" : "; nothing free within 20 km of the player");
+        std::snprintf(why, why_cap, "\"%s\" %s (was at (%.0f, %.0f, %.0f), moved %.0f m); %s%s", in.name,
+                      in.type[0] ? in.type : "(type unknown)", in.from[0], in.from[1], in.from[2], in.moved,
+                      tier_name(in.tier), in.nearby ? "" : "; no friendly free within 20 km, taken from farther");
     }
     return true;
 }
