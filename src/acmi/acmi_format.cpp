@@ -137,6 +137,15 @@ void append_removal(std::string& out, uint32_t id) {
     out += b;
 }
 
+void append_lock(std::string& out, uint32_t id, uint32_t target) {
+    char b[64];
+    if (target)
+        std::snprintf(b, sizeof(b), "%x,LockedTarget=%x,LockedTargetMode=1\n", id, target);
+    else
+        std::snprintf(b, sizeof(b), "%x,LockedTargetMode=0,LockedTarget=\n", id);
+    out += b;
+}
+
 void append_event_destroyed(std::string& out, uint32_t id) {
     char b[48];
     std::snprintf(b, sizeof(b), "0,Event=Destroyed|%x|\n", id);

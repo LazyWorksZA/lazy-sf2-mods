@@ -2616,6 +2616,88 @@ void tacview_tests() {
         expect(norm_deg(-90.0) == 270.0 && norm_deg(360.0) == 0.0 && norm_deg(359.999) == 0.0,
                "acmi format: heading normalised");
     }
+    // Lock lines: the formatter, then change-only writing in the core.
+    {
+        std::string s;
+        append_lock(s, 0x10002, 1);
+        append_lock(s, 0x1000005, 0);
+        expect(s == "10002,LockedTarget=1,LockedTargetMode=1\n1000005,LockedTargetMode=0,LockedTarget=\n",
+               "acmi format: lock and lock-lost lines");
+    }
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        auto locked = [](TacviewRec r, uint64_t target) {
+            r.lock_mode = 1;
+            r.lock_seq = static_cast<uint32_t>(target);
+            return r;
+        };
+        auto frame = [&](double t, uint64_t ai_target, bool with_second) {
+            std::string o;
+            core.add(make_rec(1, true, AircraftSide::Friendly, "P", t, 0, 0, 1000, 0, 0, 0));
+            TacviewRec ai = make_rec(2, false, AircraftSide::Enemy, "E", t, 0, 3000, 1000, 0, 0, 0);
+            core.add(ai_target ? locked(ai, ai_target) : ai);
+            if (with_second) core.add(make_rec(3, false, AircraftSide::Enemy, "E2", t, 0, 5000, 1000, 0, 0, 0));
+            core.end_frame(t, o);
+            return o;
+        };
+        const std::string f1 = frame(1.0, 1, false);
+        expect(f1.find("10002,LockedTarget=1,LockedTargetMode=1\n") != std::string::npos,
+               "tacview locks: an AI's lock on the player names id 1");
+        expect(f1.rfind("10002,LockedTarget") > f1.rfind("10002,T="), "tacview locks: the lock line follows the transforms");
+        expect(frame(1.1, 1, false).find("LockedTarget") == std::string::npos, "tacview locks: an unchanged lock writes nothing");
+        expect(frame(1.2, 3, true).find("10002,LockedTarget=10003,LockedTargetMode=1\n") != std::string::npos,
+               "tacview locks: a new target is written once described (same frame, later in the list)");
+        expect(frame(1.3, 0, true).find("10002,LockedTargetMode=0,LockedTarget=\n") != std::string::npos,
+               "tacview locks: a lost lock is cleared");
+        expect(frame(1.4, 0, true).find("LockedTarget") == std::string::npos, "tacview locks: no lock, nothing more");
+        expect(frame(1.5, 99, true).find("LockedTarget") == std::string::npos, "tacview locks: an unknown target counts as no lock");
+        expect(frame(1.6, 2, true).find("LockedTarget") == std::string::npos, "tacview locks: a lock on itself is ignored");
+        expect(core.stats().lock_changes == 3, "tacview locks: three lock changes counted");
+    }
+    {  // a missile's target
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 0, 0, 1000, 0, 0, 0));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "E", 1.0, 0, 3000, 1000, 0, 0, 0));
+        TacviewRec m = make_rec(7, false, AircraftSide::Unknown, "AIM-9B", 1.0, 0, 100, 1000, 0, 0, 0);
+        m.obj_class = TacviewRec::kMissile;
+        m.parent_seq = 1;
+        m.lock_mode = 1;
+        m.lock_seq = 2;
+        core.add(m);
+        core.end_frame(1.0, out);
+        expect(out.find("1000007,LockedTarget=10002,LockedTargetMode=1\n") != std::string::npos,
+               "tacview locks: a missile's target is written on the weapon");
+    }
+    {  // the target leaves while the locker still names it; a frame of other series keeps the lock
+        TacviewCore core{TacviewCoreConfig{}};
+        auto ai = [](double t, uint64_t target) {
+            TacviewRec r = make_rec(2, false, AircraftSide::Enemy, "E", t, 0, 3000, 1000, 0, 0, 0);
+            r.lock_mode = target ? 1 : 0;
+            r.lock_seq = static_cast<uint32_t>(target);
+            return r;
+        };
+        std::string o1;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 0, 0, 1000, 0, 0, 0));
+        core.add(make_rec(3, false, AircraftSide::Enemy, "E2", 1.0, 0, 5000, 1000, 0, 0, 0));
+        core.add(ai(1.0, 3));
+        core.end_frame(1.0, o1);
+        expect(o1.find("10002,LockedTarget=10003,LockedTargetMode=1\n") != std::string::npos, "tacview locks: lock written");
+        std::string o2;  // a weapons-only frame: aircraft not sampled
+        core.end_frame(1.05, o2, TacviewRec::kSeriesWeapon);
+        expect(o2.find("LockedTarget") == std::string::npos, "tacview locks: a frame of other series keeps the lock");
+        std::string o3;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.1, 0, 0, 1000, 0, 0, 0));
+        core.add(ai(1.1, 3));
+        core.end_frame(1.1, o3, TacviewRec::kSeriesAircraft);
+        expect(o3.find("-10003\n") != std::string::npos && o3.find("10002,LockedTargetMode=0,LockedTarget=\n") != std::string::npos,
+               "tacview locks: the target removed while still named writes a clear");
+        std::string o4;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.2, 0, 0, 1000, 0, 0, 0));
+        core.add(ai(1.2, 3));
+        core.end_frame(1.2, o4, TacviewRec::kSeriesAircraft);
+        expect(o4.find("LockedTarget") == std::string::npos, "tacview locks: the clear is written once");
+    }
 }
 
 // The Gameplay row splice, on a miniature of the stock OptionsScreen.ini shape.

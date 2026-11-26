@@ -75,6 +75,7 @@ add_library(lazysf2 SHARED
     src/hooks/recorder.cpp
     src/hooks/replay.cpp
     src/hooks/player_jump.cpp
+    src/hooks/lock_probe.cpp
     src/hooks/step_order.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp

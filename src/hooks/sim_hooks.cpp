@@ -15,7 +15,7 @@ namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 constexpr DWORD kUpdateRva = 0x466c0;  // AircraftObject::Update
-constexpr int kMaxCallbacks = 8;
+constexpr int kMaxCallbacks = 12;
 constexpr unsigned kDtStatSteps = 300;
 constexpr ULONGLONG kRevalidateMs = 1000;  // re-check the cached player under the lock this often
 constexpr ULONGLONG kStaleMs = 250;        // no player step for this long while others update: cache suspect
