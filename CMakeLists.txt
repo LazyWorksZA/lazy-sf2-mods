@@ -79,6 +79,7 @@ add_library(lazysf2 SHARED
     src/hooks/remote_avatar.cpp
     src/hooks/jet_census.cpp
     src/hooks/jet_mirror.cpp
+    src/hooks/jet_mirror_core.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp
@@ -131,6 +132,7 @@ add_executable(lazysf2-net-tests
     src/acmi/ini.cpp
     src/hooks/options_gameplay_splice.cpp
     src/hooks/jet_census.cpp
+    src/hooks/jet_mirror_core.cpp
 )
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
 target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)

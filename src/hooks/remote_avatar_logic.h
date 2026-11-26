@@ -15,6 +15,8 @@ struct AvatarHandle {
     void* obj = nullptr;
     unsigned long long seq = 0;
     uint32_t set_bits = 0;
+    uint8_t engines_taken = 0;       // the engines' running bits when taken (restored when given back)
+    uint8_t engine_count_taken = 0;  // 0: not read, nothing to restore
 };
 
 /// <summary>One aircraft as the picker sees it: the LiveAircraft fields it ranks on, plus its distance to the placement.</summary>

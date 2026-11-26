@@ -299,7 +299,8 @@ Status decode(const uint8_t* data, size_t len, WorldSnapshotMsg& out);
 /// 1 search, 2 track, 3 lock); the target is a stable key (KeyKind::Aircraft slot/member; kind 0 = none). config is
 /// the object's state word +0x5f0 masked to kAvatarConfigMask (flaps, airbrake, gear, hook, lights, wheel brakes).
 /// throttle is input channel 3 (0..1, 1 = full afterburner) as 0..255; engines has bit i set while engine i runs
-/// (the first 8); guns has bit 0 for the primary gun trigger (input 12) and bit 1 for the secondary (13).
+/// (the first 8), engine_count says how many of those bits are meaningful (a receiver leaves the avatar's other engines
+/// alone); guns has bit 0 for the primary gun trigger (input 12) and bit 1 for the secondary (13).
 /// </summary>
 struct AvatarStateMsg {
     Header h;
@@ -312,11 +313,11 @@ struct AvatarStateMsg {
     uint8_t throttle;
     uint8_t engines;
     uint8_t guns;
-    uint8_t spare;  // 0
+    uint8_t engine_count;  // 0..8
 };
 #pragma pack(pop)
 static_assert(sizeof(AvatarStateMsg) == 20);  // 4:2 peer, 6:2 seq, 8:1 mode, 9:1 target kind, 10:2 a, 12:2 b, 14:2 config,
-                                              // 16:1 throttle, 17:1 engines, 18:1 guns, 19:1 spare
+                                              // 16:1 throttle, 17:1 engines, 18:1 guns, 19:1 engine count
 inline constexpr uint16_t kAvatarConfigMask = 0xff00;  // +0x5f0: 0x100/0x200 flaps, 0x400 airbrake, 0x800 gear,
                                                        // 0x1000 hook, 0x2000/0x4000 lights, 0x8000 wheel brakes
 size_t encode(const AvatarStateMsg& m, uint8_t* out, size_t cap);
@@ -345,6 +346,7 @@ inline bool throttle_moved(uint8_t from, uint8_t to) {
 inline bool avatar_state_differs(const AvatarStateMsg& a, const AvatarStateMsg& b) {
     return a.radar_mode != b.radar_mode || a.target_kind != b.target_kind || a.target_a != b.target_a ||
            a.target_b != b.target_b || a.config != b.config || a.engines != b.engines || a.guns != b.guns ||
+           a.engine_count != b.engine_count ||
            throttle_moved(a.throttle, b.throttle);
 }
 /// <summary>Seconds between two sends that only move the throttle: at most 5 a second while it moves.</summary>

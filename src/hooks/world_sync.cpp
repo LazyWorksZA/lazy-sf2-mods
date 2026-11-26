@@ -2040,12 +2040,12 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
     if (jet_read_controls(player, &jc)) {
         m.throttle = net::throttle_to_wire(jc.throttle);
         m.engines = jc.engines;
+        m.engine_count = jc.engine_count;
     } else if (g_atx.have) {
         m.throttle = g_atx.last.throttle;
         m.engines = g_atx.last.engines;
-    } else {
-        m.engines = 0xff;  // unknown: no avatar switches its engines off
-    }
+        m.engine_count = g_atx.last.engine_count;
+    }  // else engine count 0: no avatar's engines are switched
     const double now = sim_game_time();
     if (g_atx.have && !net::avatar_state_due(g_atx.last, m, now - g_atx.sent_at)) return;
     m.seq = ++g_atx.seq;
@@ -2081,6 +2081,7 @@ JetControls controls_of(const net::AvatarStateMsg& m) {
     JetControls c;
     c.throttle = net::throttle_from_wire(m.throttle);
     c.engines = m.engines;
+    c.engine_count = m.engine_count > 8 ? 8 : m.engine_count;
     return c;
 }
 }  // namespace

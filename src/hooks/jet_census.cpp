@@ -31,6 +31,8 @@ void put(std::string& s, const char* fmt, ...) {
     s += line;
 }
 
+constexpr int kMaxSystemLines = 256;
+
 uint32_t rva_of(uint32_t p, uintptr_t ao) {
     return ao && p >= ao && p < ao + jet::kAoSize ? static_cast<uint32_t>(p - ao) : 0;
 }
@@ -169,7 +171,8 @@ std::string jet_census(const void* object, uintptr_t ao) {
     rd(o + kComponents + kListCount, &ncomp);
     rd(o + kComponents + kListArray, &comps);
     put(s, "  components %d:\n", ncomp);
-    for (int i = 0; i < ncomp && i < 64; ++i) {
+    int lines = 0;  // bounds the reads made under the aircraft table's lock
+    for (int i = 0; i < ncomp && i < 64 && lines < kMaxSystemLines; ++i) {
         uint32_t c = 0, vt = 0, systems = 0;
         int32_t attached = 0, index = 0, shows = 0, nsys = 0;
         float strength = 0, dmg = 0;
@@ -183,7 +186,7 @@ std::string jet_census(const void* object, uintptr_t ao) {
         rd(c + kCompSystems + kListArray, &systems);
         put(s, "    comp %d %08x vt +0x%05x attached %d index %d strength %.1f damage %.1f shows %d systems %d\n", i, c,
             rva_of(vt, ao), attached, index, strength, dmg, shows, nsys);
-        for (int j = 0; j < nsys && j < 64; ++j) {
+        for (int j = 0; j < nsys && j < 64 && lines < kMaxSystemLines; ++j, ++lines) {
             uint32_t sys = 0;
             if (rd(systems + 4 * j, &sys) && sys) system_line(s, sys, ao, j);
         }

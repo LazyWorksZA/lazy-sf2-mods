@@ -35,6 +35,7 @@
 #include "hooks/world_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/jet_layout.h"
+#include "hooks/jet_mirror.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/focus_logic.h"
 #include "hooks/remote_avatar_logic.h"
@@ -8038,6 +8039,93 @@ void jet_controls_tests() {
            "loopback: the client's jet controls reach the host");
 }
 
+void jet_mirror_tests() {
+    std::printf("jet controls on a fake aircraft (slot 22 checked and called)\n");
+    namespace jet = LazyWorks::SF2Patch::hooks::jet;
+    using LazyWorks::SF2Patch::hooks::JetControls;
+    using LazyWorks::SF2Patch::hooks::JetWriteResult;
+    // A fake AircraftObject image, executable: the engine vtable's slot 22 points at a copy of the game's setter
+    // (mov ax,[esp+4]; mov [ecx+0x2c],ax; ret 4).
+    uint8_t* image = static_cast<uint8_t*>(VirtualAlloc(nullptr, jet::kAoSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!image) return expect(false, "fake image");
+    const uintptr_t ao = reinterpret_cast<uintptr_t>(image);
+    const uint8_t setter[] = {0x66, 0x8b, 0x44, 0x24, 0x04, 0x66, 0x89, 0x41, 0x2c, 0xc2, 0x04, 0x00};
+    std::memcpy(image + jet::kRvaEngSetRunning, setter, sizeof(setter));
+    const uint32_t fn = static_cast<uint32_t>(ao + jet::kRvaEngSetRunning);
+    std::memcpy(image + 0x93494 + 4 * jet::kEngSetRunningSlot, &fn, 4);
+    FlushInstructionCache(GetCurrentProcess(), image, jet::kAoSize);
+    uint32_t other_vt[32] = {};  // a class outside the image: refused
+    struct Jet {
+        std::vector<uint8_t> obj = std::vector<uint8_t>(0x9a8);
+        std::vector<uint8_t> eng[4];
+        float in[16] = {};
+        void make(uintptr_t vt, int n) {
+            const uint32_t ip = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(in));
+            std::memcpy(obj.data() + jet::kInputs, &ip, 4);
+            const int16_t c = static_cast<int16_t>(n);
+            std::memcpy(obj.data() + jet::kEngineCount, &c, 2);
+            for (int i = 0; i < n; ++i) {
+                eng[i].assign(0x90, 0);
+                const uint32_t v = static_cast<uint32_t>(vt);
+                std::memcpy(eng[i].data(), &v, 4);
+                const uint32_t ep = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(eng[i].data()));
+                std::memcpy(obj.data() + jet::kEngines + 4 * i, &ep, 4);
+            }
+        }
+        int16_t running(int i) const {
+            int16_t r = 0;
+            std::memcpy(&r, eng[i].data() + jet::kEngRunning, 2);
+            return r;
+        }
+        void set_running(int i, int16_t r) { std::memcpy(eng[i].data() + jet::kEngRunning, &r, 2); }
+    };
+    Jet owner, av;
+    owner.make(ao + 0x93494, 2);
+    owner.set_running(0, 1);
+    owner.in[3] = 0.9f;
+    JetControls c;
+    expect(LazyWorks::SF2Patch::hooks::jet_read_controls_at(owner.obj.data(), ao, &c) && c.engine_count == 2 &&
+               c.engines == 0x01 && c.throttle == 0.9f,
+           "read: throttle, two engines, the first running");
+    av.make(ao + 0x93494, 3);
+    for (int i = 0; i < 3; ++i) av.set_running(i, 1);
+    av.in[12] = av.in[13] = av.in[14] = 1.0f;
+    JetControls taken;
+    expect(LazyWorks::SF2Patch::hooks::jet_takeover_at(av.obj.data(), ao, &taken) && taken.engines == 0x07 &&
+               taken.engine_count == 3 && av.in[12] == 0.0f && av.in[13] == 0.0f && av.in[14] == 0.0f,
+           "takeover: the AI's triggers cleared, its three running engines kept for the release");
+    JetWriteResult w = LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, c, true);
+    expect(w.ok && w.engines_set == 0x02 && av.running(0) == 1 && av.running(1) == 0 && av.running(2) == 1 &&
+               av.in[3] == 0.9f && av.in[7] == 0.9f,
+           "write: throttle into inputs 3..7; the owner's second engine off through slot 22; a third engine left as taken");
+    int32_t failed = 1;
+    std::memcpy(av.eng[1].data() + jet::kEngFire, &failed, 4);
+    c.engines = 0x03;
+    w = LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, c, true);
+    expect(w.ok && w.engines_set == 0 && av.running(1) == 0, "write: an engine on fire or failed is not restarted");
+    failed = 0;
+    std::memcpy(av.eng[1].data() + jet::kEngFire, &failed, 4);
+    c.engines = 0;
+    LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, c, true);
+    JetControls back;
+    back.engines = taken.engines;
+    back.engine_count = taken.engine_count;
+    w = LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, back, false);
+    expect(w.engines_set == 0x03 && av.running(0) == 1 && av.running(1) == 1 && av.running(2) == 1 && av.in[3] == 0.9f,
+           "release: the engines as taken again, the throttle untouched");
+    Jet odd;
+    odd.make(reinterpret_cast<uintptr_t>(other_vt), 1);
+    c.engines = 0x01;
+    c.engine_count = 1;
+    w = LazyWorks::SF2Patch::hooks::jet_write_controls_at(odd.obj.data(), ao, c, true);
+    expect(w.ok && w.engines_refused == 0x01 && w.engines_set == 0 && odd.running(0) == 0,
+           "write: an engine of a class we did not read is refused, not called");
+    JetControls oc;
+    expect(LazyWorks::SF2Patch::hooks::jet_read_controls_at(odd.obj.data(), ao, &oc) && oc.engines == 0x01,
+           "read: such an engine is reported running, so no avatar switches it off");
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -8114,6 +8202,7 @@ int main() {
     pilot_twist_settings_tests();
     jet_census_tests();
     jet_controls_tests();
+    jet_mirror_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

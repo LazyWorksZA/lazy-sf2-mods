@@ -172,6 +172,7 @@ struct Serve {
         AvatarStateMsg m{};
         jet_script_at(cfg.jet, host_t - jet_t0, &thr, &m.engines);
         m.throttle = throttle_to_wire(thr);
+        m.engine_count = 8;  // the script switches all of them
         if (jet_have && !avatar_state_due(jet_last, m, host_t - jet_sent_at)) return;
         m.peer = 0;
         m.seq = ++jet_seq;

@@ -17,7 +17,7 @@ inline constexpr size_t kLoadout = 0x6cc, kLoadoutStations = 32, kLoadoutEntry =
 inline constexpr size_t kSelectedStation = 0x8d0, kGunMask = 0x8e8, kChaffTotal = 0x8f0, kFlareTotal = 0x8f2;
 inline constexpr size_t kRemoteFire = 0x918;
 inline constexpr size_t kInputCount = 16;  // AIRCRAFTCONTROLLIST.INI channels the census prints
-inline constexpr size_t kInputThrottle = 3, kInputGun1 = 12, kInputGun2 = 13, kInputFire = 14;
+inline constexpr size_t kInputThrottle = 3, kInputThrottleLast = 7, kInputGun1 = 12, kInputGun2 = 13, kInputFire = 14;
 
 // A list (ObjectComponentClass and the aircraft): +0x04 count, +0x10 array of pointers.
 inline constexpr size_t kListCount = 0x04, kListArray = 0x10;

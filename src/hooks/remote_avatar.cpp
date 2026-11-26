@@ -156,7 +156,11 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     out->obj = c.obj;
     out->seq = c.seq;
     out->set_bits = mask & ~c.orig_flags;
-    jet_takeover(c.obj);  // the AI's gun and fire triggers stay in its input array otherwise
+    JetControls as_taken;  // the AI's gun and fire triggers stay in its input array otherwise
+    if (jet_takeover(c.obj, &as_taken)) {
+        out->engines_taken = as_taken.engines;
+        out->engine_count_taken = as_taken.engine_count;
+    }
     AvatarInfo local;
     AvatarInfo& in = info ? *info : local;
     in = AvatarInfo{};
@@ -214,6 +218,8 @@ void avatar_release(AvatarHandle& h, bool live) {
         obj_read(h.obj, kOffFlags, &flags, 1);
         flags &= ~h.set_bits;  // clear only what we set
         obj_write(h.obj, kOffFlags, &flags, 1);
+        // An owner's engines-off must not leave the AI gliding.
+        if (h.engine_count_taken) jet_restore_engines(h.obj, h.engines_taken, h.engine_count_taken);
     }
     h = AvatarHandle{};
 }
