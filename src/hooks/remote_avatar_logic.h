@@ -10,6 +10,13 @@
 
 namespace LazyWorks::SF2Patch::hooks {
 
+/// <summary>An aircraft we hold. set_bits are the REMOTEOBJECT bits we set (the mask less what was already set).</summary>
+struct AvatarHandle {
+    void* obj = nullptr;
+    unsigned long long seq = 0;
+    uint32_t set_bits = 0;
+};
+
 /// <summary>One aircraft as the picker sees it: the LiveAircraft fields it ranks on, plus its distance to the player.</summary>
 struct AvatarCandidate {
     const wchar_t* name;    // may be null
@@ -38,6 +45,29 @@ struct AvatarRank {
 };
 
 namespace avatar_logic {
+
+inline double dist3(const double a[3], const double b[3]) {
+    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+/// <summary>Printable ASCII only ('?' for anything else), NUL-terminated, for log lines and kept fields. src may be null.</summary>
+template <typename C>
+void to_ascii(char* dst, size_t cap, const C* src) {
+    if (!cap) return;
+    size_t i = 0;
+    for (; src && i + 1 < cap && src[i]; ++i) {
+        const auto c = src[i];
+        dst[i] = (c >= 0x20 && c <= 0x7e) ? static_cast<char>(c) : '?';
+    }
+    dst[i] = '\0';
+}
+
+/// <summary>True if one of the n handles holds this aircraft (pointer and construction seq).</summary>
+inline bool is_taken(const AvatarHandle* taken, int n, const void* obj, unsigned long long seq) {
+    for (int t = 0; t < n; ++t)
+        if (taken[t].obj && taken[t].obj == obj && taken[t].seq == seq) return true;
+    return false;
+}
 
 inline wchar_t up(wchar_t c) { return (c >= L'a' && c <= L'z') ? static_cast<wchar_t>(c - L'a' + L'A') : c; }
 inline char up(char c) { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c; }
@@ -106,8 +136,11 @@ public:
         if (c.is_player || c.taken) return r;
         r.dist = std::isfinite(c.dist) ? c.dist : 1e300;
         r.seq = c.seq;
-        const int no = avatar_logic::flight_member_no(c.name, base_, base_len_);
-        r.flight_no = (no >= 0 && no != lead_no_) ? no : -1;
+        int no = avatar_logic::flight_member_no(c.name, base_, base_len_);
+        // SF2 names are flight digit then member digit (DENVER 11-14, a second DENVER flight 21-24): with a
+        // two-digit lead, only the lead's own tens are its flight.
+        if (no == lead_no_ || (lead_no_ >= 10 && lead_no_ <= 99 && no / 10 != lead_no_ / 10)) no = -1;
+        r.flight_no = no;
         const bool friendly = c.side == AircraftSide::Friendly;
         const bool type = avatar_logic::same_type(c.type_name, want_);
         if (friendly && type && r.flight_no >= 0) r.tier = AvatarTier::Wingman;
@@ -118,11 +151,11 @@ public:
     }
 
     /// <summary>True if a ranks before b. Both must have a tier.</summary>
-    static bool better(const AvatarRank& a, const AvatarRank& b) {
+    bool better(const AvatarRank& a, const AvatarRank& b) const {
         if (a.tier != b.tier) return a.tier < b.tier;
         const bool ma = a.flight_no >= 0, mb = b.flight_no >= 0;
         if (ma != mb) return ma;
-        if (ma && a.flight_no != b.flight_no) return a.flight_no < b.flight_no;
+        if (ma && a.flight_no != b.flight_no) return order_no(a.flight_no) < order_no(b.flight_no);
         if (a.dist != b.dist) return a.dist < b.dist;
         return a.seq < b.seq;
     }
@@ -143,6 +176,10 @@ public:
     const AvatarRank& best() const { return best_; }
 
 private:
+    // With a bare player name ("GUNSLINGER") the lead's number is unknown; an x1 is probably the lead's own slot, so
+    // the members after it (x2, x3, ...) rank first.
+    int order_no(int no) const { return (lead_no_ < 0 && no % 10 == 1) ? no + 100000 : no; }
+
     const wchar_t* base_;
     const char* want_;
     size_t base_len_ = 0;
@@ -151,6 +188,17 @@ private:
     size_t index_ = 0;
     AvatarRank best_;
 };
+
+/// <summary>
+/// The candidate for one entry of a LiveAircraft-like list (obj, name, seq, is_player, side, type_name), at pos,
+/// measured from ref: the player's position, or the placement when there is no player.
+/// </summary>
+template <typename L>
+AvatarCandidate avatar_candidate(const L& a, const double pos[3], const double ref[3], const AvatarHandle* taken,
+                                 int n_taken) {
+    return AvatarCandidate{a.name,  a.type_name, a.seq, a.side, a.is_player, avatar_logic::is_taken(taken, n_taken, a.obj, a.seq),
+                           avatar_logic::dist3(pos, ref)};
+}
 
 /// <summary>The whole list at once (the player is the candidate with is_player). Index of the pick, or n if none.</summary>
 inline size_t pick_avatar(const AvatarCandidate* list, size_t n, const char* want_type, AvatarRank* rank_out = nullptr) {

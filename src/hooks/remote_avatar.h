@@ -5,18 +5,22 @@
 // See lazy-sf2-recon: network-recon §4.2 and §8.2, and the Phase 4 plan, section 2.6.
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include "hooks/remote_avatar_logic.h"
 #include "hooks/replay_math.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
-/// <summary>An aircraft we hold. set_bits are the REMOTEOBJECT bits we set (the mask less what was already set).</summary>
-struct AvatarHandle {
-    void* obj = nullptr;
-    unsigned long long seq = 0;
-    uint32_t set_bits = 0;
-};
+/// <summary>Copies n values of T from obj + off (an aircraft field). Game thread, on a live aircraft only.</summary>
+template <typename T>
+void obj_read(const void* obj, size_t off, T* out, size_t n) {
+    std::memcpy(out, static_cast<const char*>(obj) + off, n * sizeof(T));
+}
+template <typename T>
+void obj_write(void* obj, size_t off, const T* in, size_t n) {
+    std::memcpy(static_cast<char*>(obj) + off, in, n * sizeof(T));
+}
 
 /// <summary>What to take: the remote player's aircraft type, and where to put the avatar (world metres, radians, m/s).</summary>
 struct AvatarPick {
@@ -46,6 +50,12 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
 
 /// <summary>Writes position, velocity, rates, matrix and angles. From that aircraft's own step callback only.</summary>
 void avatar_write(const AvatarHandle& h, const replay_math::Kin& k);
+
+/// <summary>
+/// Zeroes the angular rates, so that REMOTEOBJECT's native coasting goes straight on with the attitude held. Same
+/// thread rule as avatar_write: call it once when the writes stop (Coast).
+/// </summary>
+void avatar_zero_rates(const AvatarHandle& h);
 
 /// <summary>Sets our REMOTEOBJECT bits again if the game cleared them. True if it had to. Same thread rule as avatar_write.</summary>
 bool avatar_keep_remote(const AvatarHandle& h);

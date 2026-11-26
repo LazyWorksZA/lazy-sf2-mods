@@ -33,13 +33,7 @@ constexpr double kSpawnAhead = 300.0, kSpawnRight = 50.0;
 // Bye reasons the host sends.
 enum ByeReason : uint8_t { kByeNone = 0, kByeBusy = 1, kByeNoAvatar = 2, kByeSessionEnded = 3, kByeAvatarLost = 4 };
 
-template <typename T>
-void read_at(const void* obj, size_t off, T* out, size_t n) {
-    std::memcpy(out, static_cast<const char*>(obj) + off, n * sizeof(T));
-}
-double dist3(const double a[3], const double b[3]) {
-    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
-}
+using avatar_logic::dist3;
 
 // Set once by host_install(), then read-only.
 bool g_enabled = false;
@@ -69,12 +63,19 @@ struct Avatar {
     bool got_state = false;  // the jet accepted a State
     bool shown_state = false;  // the avatar has shown one (the join snap was logged)
     bool coasting = false;   // the jet said Coast: we stopped writing and REMOTEOBJECT coasts the aircraft
+    // No State for kParkAfter while the peer stays connected (a paused client): the aircraft goes back to the AI and
+    // h is empty; the next State takes one again with the same picker. The session stays up.
+    bool parked = false;
+    bool retake_failed = false;  // logged once per park
+    double last_state_t = 0;     // host time of the newest accepted State
+    double next_retake = 0;
     uint32_t flag_clears = 0;  // in the current one-second window
 };
 Avatar* g_av = nullptr;  // net::kMaxClients entries (see above)
 int g_nclients = 0;
 uint32_t g_newest_gen[net::kMaxClients] = {};  // per slot: the newest connection generation seen in a Connect event
 constexpr double kHoldTimeout = 5.0;  // game seconds from the Welcome to the first State, before the avatar is released
+constexpr double kParkAfter = 10.0;   // game seconds without a State before a connected client's avatar is given back
 uint32_t g_epoch = 0;        // sim_player_epoch() when the current session started
 uint32_t g_checked_gen = 0;  // g_aircraft_generation at the last liveness check
 double g_next_report = 0;
@@ -91,13 +92,6 @@ void set_clients(int n) {
     g_has_clients.store(n > 0, std::memory_order_relaxed);
 }
 
-// Printable ASCII only, for log lines and for the fields we keep.
-void sanitize(char* dst, size_t cap, const char* src) {
-    size_t i = 0;
-    for (; i + 1 < cap && src[i]; ++i) dst[i] = (src[i] >= 0x20 && src[i] <= 0x7e) ? src[i] : '?';
-    dst[i] = '\0';
-}
-
 void core_log(const char* line) { LOG("%s", line); }
 
 // Hands a record to the writer thread: a copy into a ring, no I/O. A no-op while no stream is open.
@@ -109,10 +103,10 @@ void record_host_state(void* player, double now) {
     net::StateMsg s{};
     double pos[3];
     float vel[3], ang[3], rates[3];
-    read_at(player, kOffPos, pos, 3);
-    read_at(player, kOffVel, vel, 3);
-    read_at(player, kOffAngles, ang, 3);
-    read_at(player, kOffRates, rates, 3);
+    obj_read(player, kOffPos, pos, 3);
+    obj_read(player, kOffVel, vel, 3);
+    obj_read(player, kOffAngles, ang, 3);
+    obj_read(player, kOffRates, rates, 3);
     s.client_id = 0;
     s.seq = ++g_host_seq;
     s.game_time = now;
@@ -176,7 +170,8 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
         rec(net::StreamKind::ClientLeft, g_now, &p, sizeof(p));
     }
     LOG("net: client %d \"%s\" left (%s); avatar %p %s", slot + 1, a.callsign, why, obj,
-        aircraft_live ? "given back to the AI" : "is gone, flags not restored");
+        !obj ? "was already given back (no States)"
+             : (aircraft_live ? "given back to the AI" : "is gone, flags not restored"));
     a = Avatar{};
     set_clients(g_nclients - 1);
     if (g_nclients == 0) {
@@ -195,7 +190,7 @@ void release_dead() {
     check_live(live);
     g_checked_gen = gen;
     for (int s = 0; s < net::kMaxClients; ++s) {
-        if (g_av[s].active && !live[s]) release(s, "avatar destroyed", false, kByeAvatarLost, net::LeaveReason::HostEnded);
+        if (g_av[s].active && g_av[s].h.obj && !live[s]) release(s, "avatar destroyed", false, kByeAvatarLost, net::LeaveReason::HostEnded);
     }
 }
 
@@ -212,13 +207,13 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         return;
     }
     char callsign[17], aircraft[33];
-    sanitize(callsign, sizeof(callsign), h.callsign);
-    sanitize(aircraft, sizeof(aircraft), h.aircraft);
+    avatar_logic::to_ascii(callsign, sizeof(callsign), h.callsign);
+    avatar_logic::to_ascii(aircraft, sizeof(aircraft), h.aircraft);
     double ppos[3];
     float pang[3], pvel[3];
-    read_at(player, kOffPos, ppos, 3);
-    read_at(player, kOffAngles, pang, 3);
-    read_at(player, kOffVel, pvel, 3);
+    obj_read(player, kOffPos, ppos, 3);
+    obj_read(player, kOffAngles, pang, 3);
+    obj_read(player, kOffVel, pvel, 3);
     const double hp = pang[1], sh = std::sin(hp), ch = std::cos(hp);
     const double right = kSpawnRight * slot;
     const AvatarPick pick{aircraft,
@@ -262,7 +257,7 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     {
         net::ClientJoinedPayload p{};
         p.client_id = static_cast<uint16_t>(slot + 1);
-        std::memcpy(p.callsign, a.callsign, sizeof(p.callsign) - 1);  // sanitized and NUL-terminated by sanitize()
+        std::memcpy(p.callsign, a.callsign, sizeof(p.callsign) - 1);  // printable and NUL-terminated by to_ascii()
         std::memcpy(p.aircraft, a.aircraft, sizeof(p.aircraft) - 1);
         rec(net::StreamKind::ClientJoined, now, &p, sizeof(p));
     }
@@ -318,6 +313,19 @@ void avatar_step(int slot, double now) {
         return;
     }
 
+    // A connected client that has sent nothing for a long time (paused, or in the background): give the aircraft
+    // back to the AI until its States resume. In its own step, so it is live.
+    if (a.got_state && now - a.last_state_t > kParkAfter) {
+        LOG("net: client %d \"%s\": no State for %.0f s; avatar %p given back to the AI until States resume",
+            slot + 1, a.callsign, kParkAfter, a.h.obj);
+        avatar_release(a.h, true);
+        a.parked = true;
+        a.retake_failed = false;
+        a.coasting = false;
+        a.next_retake = 0;
+        return;
+    }
+
     // The game must not take the avatar back: keep REMOTEOBJECT set (also while coasting).
     if (avatar_keep_remote(a.h)) ++a.flag_clears;
 
@@ -327,7 +335,8 @@ void avatar_step(int slot, double now) {
     if (out == net::RemoteJet::Out::Coast) {
         if (!a.coasting) {
             a.coasting = true;
-            LOG("net: client %d \"%s\": no State for over %.0f s; the avatar coasts on its velocity", slot + 1,
+            avatar_zero_rates(a.h);  // coast straight on, attitude held, not rolling at the last State's rates
+            LOG("net: client %d \"%s\": no State for over %.0f s; the avatar coasts on its velocity, rates zeroed", slot + 1,
                 a.callsign, a.jet.params().coast_after);
         }
         return;  // REMOTEOBJECT coasts it natively
@@ -350,6 +359,30 @@ void avatar_step(int slot, double now) {
     avatar_write(a.h, k);
 }
 
+// A parked slot's States resumed: take an aircraft again (same picker), placed on the State, and start the receiver
+// afresh so the State snaps. At most one try a second; false while it has no aircraft.
+bool retake(int slot, const net::StateMsg& s, double now) {
+    Avatar& a = g_av[slot];
+    if (now < a.next_retake) return false;
+    a.next_retake = now + 1.0;
+    const AvatarPick pick{a.aircraft, {s.pos[0], s.pos[1], s.pos[2]}, s.ang[1], {s.vel[0], s.vel[1], s.vel[2]}};
+    AvatarHandle taken[net::kMaxClients];
+    handles(taken);
+    AvatarHandle got;
+    char why[192];
+    if (!avatar_take(pick, taken, net::kMaxClients, &got, why, sizeof(why))) {
+        if (!a.retake_failed) LOG("net: client %d \"%s\": States again, but no avatar yet: %s", slot + 1, a.callsign, why);
+        a.retake_failed = true;
+        return false;
+    }
+    a.h = got;
+    a.parked = false;
+    a.jet.reset();
+    a.shown_state = false;
+    LOG("net: client %d \"%s\": States again; avatar %p %s", slot + 1, a.callsign, got.obj, why);
+    return true;
+}
+
 void handle_message(const HostEvent& e, void* player, double now) {
     const int slot = e.slot;
     net::MsgType type{};
@@ -367,8 +400,13 @@ void handle_message(const HostEvent& e, void* player, double now) {
             net::StateMsg s;
             if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok) {
                 rec(net::StreamKind::StateReceived, now, e.data, e.len);
-                // now is the drain time (this player step), which stands for the arrival time: at most a frame later.
-                if (g_av[slot].jet.push(s, now)) g_av[slot].got_state = true;
+                if (g_av[slot].parked && !retake(slot, s, now)) break;
+                // now is the drain time (this player step), which stands for the arrival time: up to a frame later,
+                // so the ages in the 1 Hz line include up to a frame of queue wait. Predict shows at the step's now.
+                if (g_av[slot].jet.push(s, now)) {
+                    g_av[slot].got_state = true;
+                    g_av[slot].last_state_t = now;
+                }
             }
             break;
         }
@@ -428,19 +466,26 @@ void pump(void* player, double now) {
 
 void report(void* player, double /*now*/) {
     double pp[3];
-    read_at(player, kOffPos, pp, 3);
+    obj_read(player, kOffPos, pp, 3);
     for (int s = 0; s < net::kMaxClients; ++s) {
         Avatar& a = g_av[s];
         if (!a.active) continue;
+        if (!a.h.obj) {
+            LOG("net: client %d \"%s\" no avatar (no State for %.0f s) rtt %.0f ms", s + 1, a.callsign,
+                g_now - a.last_state_t, static_cast<double>(g_core->rtt_ms(static_cast<uint8_t>(s))));
+            continue;
+        }
         double ap[3];
-        read_at(a.h.obj, kOffPos, ap, 3);
+        obj_read(a.h.obj, kOffPos, ap, 3);
         const net::JetStats st = a.jet.take_stats();
         // "err" is the largest correction offset (the shown path minus the new prediction); every Snap is counted.
+        // Ages are host time at the drain minus the State's stamp. They print as at least 0: on loopback the client's
+        // estimate of host time can lead the host by about a millisecond.
         LOG("net: client %d \"%s\" rate %.1f Hz delay %.0f ms rtt %.0f ms err %.2f m (avatar dist %.0f m) "
             "age %.0f/%.0f ms horizon %.0f ms snaps %u coast %u accel %.1f g",
             s + 1, a.callsign, st.rate_hz, st.delay * 1000.0,
             static_cast<double>(g_core->rtt_ms(static_cast<uint8_t>(s))), st.offset_max, dist3(pp, ap),
-            st.age_p50 * 1000.0, st.age_p90 * 1000.0, st.horizon_max * 1000.0, st.snaps + st.resync_snaps,
+            std::fmax(0.0, st.age_p50) * 1000.0, std::fmax(0.0, st.age_p90) * 1000.0, st.horizon_max * 1000.0, st.snaps + st.resync_snaps,
             st.coasting_steps, st.accel_g_max);
         if (st.dup_or_old || st.restarts || st.resyncs) {
             LOG("net: client %d: %u old or duplicate State(s), %u source restart(s), %u clock resync(s)", s + 1,

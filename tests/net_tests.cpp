@@ -5071,6 +5071,72 @@ void remote_avatar_tests() {
         expect(same && perms == 720, "pick: the choice does not depend on the list order (720 orders)");
     }
 
+    // A second flight with the same callsign (DENVER 21-24) is not the player's flight.
+    {
+        const AvatarCandidate two[] = {
+            {L"DENVER 11", "F-105D", 1, F, true, false, 0},
+            {L"DENVER 12", "F-105D", 2, F, false, true, 50},
+            {L"DENVER 21", "F-105D", 5, F, false, false, 900},
+            {L"DENVER 22", "F-105D", 6, F, false, false, 800},
+            {L"COLT 11", "F-105D", 9, F, false, false, 400},
+        };
+        i = pick_avatar(two, 5, "F-105D", &r);
+        expect(i == 4 && r.tier == AvatarTier::SameType && r.flight_no == -1,
+               "pick: another flight of the same callsign is not a wingman (nearest same type instead)");
+        AvatarCandidate t2[5];
+        std::memcpy(t2, two, sizeof(two));
+        t2[1].taken = false;
+        expect(pick_avatar(t2, 5, "F-105D", &r) == 1 && r.tier == AvatarTier::Wingman, "pick: the lead's own tens digit is its flight");
+    }
+    // A bare player name: x1 is probably the lead's own slot, so x2 comes first, and x1 still before other flights.
+    {
+        const AvatarCandidate bare_lead[] = {
+            {L"GUNSLINGER", "F-100D", 1, F, true, false, 0},
+            {L"GUNSLINGER 11", "F-100D", 2, F, false, false, 20},
+            {L"GUNSLINGER 12", "F-100D", 3, F, false, false, 60},
+            {L"GUNSLINGER 13", "F-100D", 4, F, false, false, 40},
+            {L"SABRE 12", "F-100D", 5, F, false, false, 10},
+        };
+        i = pick_avatar(bare_lead, 5, "F-100D", &r);
+        expect(i == 2 && r.tier == AvatarTier::Wingman && r.flight_no == 12, "pick: bare name -> x2 before the x1 slot");
+        AvatarCandidate b2[5];
+        std::memcpy(b2, bare_lead, sizeof(bare_lead));
+        b2[2].taken = b2[3].taken = true;
+        i = pick_avatar(b2, 5, "F-100D", &r);
+        expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 11,
+               "pick: bare name, x2 and x3 taken -> the x1 member, before a nearer other flight");
+    }
+    // The LiveAircraft -> candidate mapping (as take_cb uses it), on a synthetic list.
+    {
+        struct FakeLive {
+            void* obj;
+            const wchar_t* name;
+            unsigned long long seq;
+            bool is_player;
+            AircraftSide side;
+            unsigned long long created_ms;
+            const char* type_name;
+        };
+        int o1 = 0, o2 = 0;
+        const FakeLive la{&o1, L"DENVER 12", 7, false, F, 0, "F-105D"};
+        const FakeLive lb{&o2, nullptr, 8, false, U, 0, nullptr};
+        const double pos[3] = {30, 40, 0}, ref[3] = {0, 0, 0};
+        const AvatarHandle held[2] = {{&o1, 99, 1}, {&o2, 8, 1}};  // o1 at another seq (reused address), o2 itself
+        const AvatarCandidate ca = avatar_candidate(la, pos, ref, held, 2);
+        const AvatarCandidate cb = avatar_candidate(lb, pos, ref, held, 2);
+        expect(!ca.taken && cb.taken && std::fabs(ca.dist - 50.0) < 1e-9 && ca.seq == 7 && ca.side == F &&
+                   std::wcscmp(ca.name, L"DENVER 12") == 0 && std::strcmp(ca.type_name, "F-105D") == 0,
+               "candidate: fields copied, taken by pointer and seq (a reused address is not taken), distance");
+        AvatarPicker pk(nullptr, "F-105D");
+        expect(!pk.offer(0, cb) && pk.offer(1, ca) && pk.best().tier == AvatarTier::SameType,
+               "candidate: null name and type are safe; no player -> no flight, friendly same type");
+        char buf[8];
+        avatar_logic::to_ascii(buf, sizeof(buf), L"A\u00e9B\x01" L"CDEFGH");
+        char nb[4];
+        avatar_logic::to_ascii(nb, sizeof(nb), static_cast<const char*>(nullptr));
+        expect(std::strcmp(buf, "A?B?CDE") == 0 && nb[0] == 0, "to_ascii: '?' for non-printable, truncated, null safe");
+    }
+
     std::printf("frame order check\n");
     {
         // The player first in every frame: 60 Hz frames of [player, avatar, 3 AI] 0.1 ms apart.

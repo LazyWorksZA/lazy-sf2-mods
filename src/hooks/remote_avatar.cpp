@@ -21,18 +21,6 @@ constexpr DWORD kRemoteMaskRva = 0xb7b28;  // AircraftObject.dll global: the REM
 constexpr size_t kOffFlags = 0xc, kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffMatrix = 0xdc,
                  kOffAngles = 0x100;
 
-template <typename T>
-void read_at(const void* obj, size_t off, T* out, size_t n) {
-    std::memcpy(out, static_cast<const char*>(obj) + off, n * sizeof(T));
-}
-template <typename T>
-void write_at(void* obj, size_t off, const T* in, size_t n) {
-    std::memcpy(static_cast<char*>(obj) + off, in, n * sizeof(T));
-}
-double dist3(const double a[3], const double b[3]) {
-    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
-}
-
 // Game thread only. The mask is read once; a build mismatch is checked (and logged) once.
 uint32_t g_mask = 0;
 bool g_mask_tried = false;
@@ -71,20 +59,15 @@ void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
         if (list[i].is_player) player = &list[i];
     double ref[3];
     if (player) {
-        read_at(player->obj, kOffPos, ref, 3);
+        obj_read(player->obj, kOffPos, ref, 3);
     } else {
         std::memcpy(ref, c.pick->place, sizeof(ref));
     }
     AvatarPicker picker(player ? player->name : nullptr, c.pick->want_type);
     for (size_t i = 0; i < n; ++i) {
-        bool taken = false;
-        for (int t = 0; t < c.n_taken; ++t)
-            if (c.taken[t].obj && c.taken[t].obj == list[i].obj && c.taken[t].seq == list[i].seq) taken = true;
         double p[3];
-        read_at(list[i].obj, kOffPos, p, 3);
-        const AvatarCandidate cand{list[i].name, list[i].type_name, list[i].seq, list[i].side, list[i].is_player, taken,
-                                   dist3(p, ref)};
-        picker.offer(i, cand);
+        obj_read(list[i].obj, kOffPos, p, 3);
+        picker.offer(i, avatar_candidate(list[i], p, ref, c.taken, c.n_taken));
     }
     if (!picker.found()) return;
     const LiveAircraft& a = list[picker.index()];
@@ -92,25 +75,25 @@ void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     c.obj = a.obj;
     c.seq = a.seq;
     c.rank = picker.best();
-    read_at(c.obj, kOffPos, c.from, 3);
+    obj_read(c.obj, kOffPos, c.from, 3);
     if (a.name) wcsncpy_s(c.name, a.name, _TRUNCATE);
     if (a.type_name) strncpy_s(c.type, a.type_name, _TRUNCATE);
     // REMOTEOBJECT on, rates zero, at the place: the aircraft coasts and we are the only writer. Done under the lock,
     // so the aircraft cannot be destroyed between the choice and the writes.
     char* obj = static_cast<char*>(c.obj);
-    read_at(obj, kOffFlags, &c.orig_flags, 1);
+    obj_read(obj, kOffFlags, &c.orig_flags, 1);
     const float zero[3] = {};
-    write_at(obj, kOffRates, zero, 3);
-    write_at(obj, kOffVel, c.pick->vel, 3);
+    obj_write(obj, kOffRates, zero, 3);
+    obj_write(obj, kOffVel, c.pick->vel, 3);
     const uint32_t flags = c.orig_flags | c.mask;
-    write_at(obj, kOffFlags, &flags, 1);
-    write_at(obj, kOffPos, c.pick->place, 3);
+    obj_write(obj, kOffFlags, &flags, 1);
+    obj_write(obj, kOffPos, c.pick->place, 3);
     const double ang[3] = {0.0, static_cast<double>(c.pick->heading), 0.0};
     const float angf[3] = {0.0f, c.pick->heading, 0.0f};
     float m[9];
     build_matrix(ang, m);
-    write_at(obj, kOffMatrix, m, 9);
-    write_at(obj, kOffAngles, angf, 3);
+    obj_write(obj, kOffMatrix, m, 9);
+    obj_write(obj, kOffAngles, angf, 3);
 }
 
 struct LiveCtx {
@@ -122,19 +105,7 @@ void live_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     auto& c = *static_cast<LiveCtx*>(vctx);
     for (size_t i = 0; i < n; ++i)
         for (int s = 0; s < c.n; ++s)
-            if (c.h[s].obj && list[i].obj == c.h[s].obj && list[i].seq == c.h[s].seq) c.live[s] = true;
-}
-
-// Printable ASCII only, for log lines.
-void to_ascii(char* dst, size_t cap, const wchar_t* src) {
-    size_t i = 0;
-    for (; i + 1 < cap && src[i]; ++i) dst[i] = (src[i] >= 0x20 && src[i] <= 0x7e) ? static_cast<char>(src[i]) : '?';
-    dst[i] = '\0';
-}
-void ascii_copy(char* dst, size_t cap, const char* src) {
-    size_t i = 0;
-    for (; i + 1 < cap && src[i]; ++i) dst[i] = (src[i] >= 0x20 && src[i] <= 0x7e) ? src[i] : '?';
-    dst[i] = '\0';
+            if (avatar_logic::is_taken(&c.h[s], 1, list[i].obj, list[i].seq)) c.live[s] = true;
 }
 
 void put_why(char* why, size_t cap, const char* text) {
@@ -167,8 +138,8 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     AvatarInfo local;
     AvatarInfo& in = info ? *info : local;
     in = AvatarInfo{};
-    to_ascii(in.name, sizeof(in.name), c.name);
-    ascii_copy(in.type, sizeof(in.type), c.type);
+    avatar_logic::to_ascii(in.name, sizeof(in.name), c.name);
+    avatar_logic::to_ascii(in.type, sizeof(in.type), c.type);
     in.tier = c.rank.tier;
     in.flight_no = c.rank.flight_no;
     in.dist = c.rank.dist;
@@ -188,29 +159,35 @@ void avatar_write(const AvatarHandle& h, const replay_math::Kin& k) {
     const float rates[3] = {float(k.w[0]), float(k.w[1]), float(k.w[2])};
     float m[9];
     build_matrix(k.a, m);
-    write_at(h.obj, kOffPos, k.p, 3);
-    write_at(h.obj, kOffVel, v, 3);
-    write_at(h.obj, kOffRates, rates, 3);
-    write_at(h.obj, kOffMatrix, m, 9);
-    write_at(h.obj, kOffAngles, ang, 3);
+    obj_write(h.obj, kOffPos, k.p, 3);
+    obj_write(h.obj, kOffVel, v, 3);
+    obj_write(h.obj, kOffRates, rates, 3);
+    obj_write(h.obj, kOffMatrix, m, 9);
+    obj_write(h.obj, kOffAngles, ang, 3);
+}
+
+void avatar_zero_rates(const AvatarHandle& h) {
+    if (!h.obj) return;
+    const float zero[3] = {};
+    obj_write(h.obj, kOffRates, zero, 3);
 }
 
 bool avatar_keep_remote(const AvatarHandle& h) {
     if (!h.obj) return false;
     uint32_t flags;
-    read_at(h.obj, kOffFlags, &flags, 1);
+    obj_read(h.obj, kOffFlags, &flags, 1);
     if ((flags & h.set_bits) == h.set_bits) return false;
     flags |= h.set_bits;
-    write_at(h.obj, kOffFlags, &flags, 1);
+    obj_write(h.obj, kOffFlags, &flags, 1);
     return true;
 }
 
 void avatar_release(AvatarHandle& h, bool live) {
     if (h.obj && live) {
         uint32_t flags;
-        read_at(h.obj, kOffFlags, &flags, 1);
+        obj_read(h.obj, kOffFlags, &flags, 1);
         flags &= ~h.set_bits;  // clear only what we set
-        write_at(h.obj, kOffFlags, &flags, 1);
+        obj_write(h.obj, kOffFlags, &flags, 1);
     }
     h = AvatarHandle{};
 }
