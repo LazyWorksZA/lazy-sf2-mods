@@ -183,6 +183,20 @@ HostCounters HostCore::counters() const {
     return c;
 }
 
+bool HostCore::send_world(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, bool reliable) {
+    if (slot >= kMaxClients || !data || len == 0 || len > sizeof(WorldOut::data)) return false;
+    std::lock_guard<std::mutex> lock(world_mx_);
+    if (world_n_ >= kWorldOutCap) return false;
+    WorldOut& m = world_out_[(world_head_ + world_n_) % kWorldOutCap];
+    m.slot = slot;
+    m.gen = gen;
+    m.reliable = reliable ? 1 : 0;
+    m.len = static_cast<uint16_t>(len);
+    std::memcpy(m.data, data, len);
+    ++world_n_;
+    return true;
+}
+
 void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw) {
     std::shared_ptr<const MissionBlob> b;
     if (!packed.empty()) {
@@ -487,8 +501,27 @@ void HostCore::run() {
         }
     };
 
+    auto drain_world = [&] {
+        for (;;) {
+            WorldOut m;
+            {
+                std::lock_guard<std::mutex> lock(world_mx_);
+                if (world_n_ == 0) return;
+                m = world_out_[world_head_];
+                world_head_ = (world_head_ + 1) % kWorldOutCap;
+                --world_n_;
+            }
+            ENetPeer* peer = peers[m.slot];
+            if (!peer || m.gen != gens[m.slot]) continue;
+            if (ENetPacket* p = enet_packet_create(m.data, m.len, m.reliable ? ENET_PACKET_FLAG_RELIABLE : 0))
+                if (enet_peer_send(peer, m.reliable ? kChannelReliable : kChannelUnreliable, p) != 0)
+                    enet_packet_destroy(p);
+        }
+    };
+
     while (!stop_.load(std::memory_order_relaxed)) {
         drain_out();
+        drain_world();
         ENetEvent ev;
         int r = enet_host_service(host, &ev, 5);  // waits up to 5 ms for traffic, then returns
         for (size_t guard = 0; r > 0 && guard < kMaxServiceLoop; ++guard) {

@@ -34,6 +34,22 @@ struct ServeConfig {
     std::atomic<uint16_t>* port_out = nullptr;  // set to the bound port once listening
     std::vector<uint8_t> mission;  // non-empty: a packed mission (net/world_proto.h) served to clients that ask
     uint32_t mission_id = 0, mission_raw = 0;
+    /// <summary>A synthetic world stream (T6) for a welcomed client: aircraft that fly straight at 150 m/s from their
+    /// manifest position and heading, sent at 10 Hz as WorldStates, and scripted events.</summary>
+    struct WorldObj {
+        uint8_t kind = 1;
+        uint16_t a = 0, b = 0;
+        double pos[3] = {};
+        float heading = 0;
+    };
+    struct WorldEv {
+        double at = 0;  // seconds after the client's Welcome
+        uint8_t event = 0;
+        uint8_t kind = 1;
+        uint16_t a = 0, b = 0;
+    };
+    std::vector<WorldObj> world;
+    std::vector<WorldEv> world_events;
 };
 
 struct ServeResult {
@@ -51,6 +67,7 @@ struct ServeResult {
     double jet_start_heading = 0, jet_start_time = 0;  // host time
     double host_time_end = 0;
     uint32_t missions_sent = 0;  // missions sent in full (T5)
+    uint32_t world_msgs = 0, world_events = 0;  // T6 messages queued
 };
 
 /// <summary>

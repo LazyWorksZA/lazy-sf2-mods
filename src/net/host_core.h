@@ -125,6 +125,13 @@ public:
     /// that asks with a MissionRequest, in menus as in flight. Any thread; replaces the previous one. Empty = none.
     /// </summary>
     void set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw);
+    /// <summary>
+    /// Queues a world message (world_proto.h, up to 1,000 bytes: WorldStates unreliable on channel 1, WorldEvents
+    /// reliable on channel 0) for a slot, on a queue of its own (kWorldOutCap entries) so the world stream can never
+    /// crowd out the session's control messages. False if full or too large; gen as for send().
+    /// </summary>
+    bool send_world(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, bool reliable);
+    static constexpr size_t kWorldOutCap = 64;
     /// <summary>Missions sent in full since start (offers with chunks).</summary>
     uint32_t missions_sent() const { return n_missions_.load(std::memory_order_relaxed); }
     HostCounters counters() const;
@@ -182,6 +189,15 @@ private:
         std::vector<uint8_t> packed;
         uint32_t id = 0, raw = 0;
     };
+    struct WorldOut {
+        uint8_t slot = 0, reliable = 0;
+        uint16_t len = 0;
+        uint32_t gen = 0;
+        uint8_t data[1000] = {};
+    };
+    std::mutex world_mx_;
+    std::unique_ptr<WorldOut[]> world_out_ = std::make_unique<WorldOut[]>(kWorldOutCap);  // heap: 64 KB
+    size_t world_head_ = 0, world_n_ = 0;  // under world_mx_
     std::mutex mission_mx_;
     std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer
     std::atomic<uint32_t> n_missions_{0};

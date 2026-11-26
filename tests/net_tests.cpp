@@ -56,6 +56,7 @@
 #include "net/stream_record.h"
 #include "net/mission_fetch.h"
 #include "net/world_proto.h"
+#include "net/world_stream_logic.h"
 
 using namespace LazyWorks::SF2Patch::net;
 
@@ -7231,6 +7232,138 @@ void pilot_twist_settings_tests() {
            "settings: the limits themselves are kept");
 }
 
+void world_stream_tests() {
+    std::printf("world stream\n");
+    expect(sizeof(WorldObjState) == 35 && sizeof(WorldStatesHead) == 13 && kWorldStatesBytes == 993 &&
+               sizeof(WorldEventRec) == 8 && kWorldEventsBytes == 525 && kWorldStatesBytes < 1024,
+           "stream: sizes (35 per object, 28 per datagram = 993 bytes; events 8 each, 525)");
+    ObjPose p{{123456.789, -98765.4321, 3048.25}, {250.0f, -31.5f, 4.2f}, {0.2f, 3.1f, -1.4f}, {0.05f, -0.3f, 1.2f}};
+    WorldObjState q{};
+    quantise(p, &q);
+    ObjPose r{};
+    dequantise(q, &r);
+    bool close = true;
+    for (int i = 0; i < 3; ++i) {
+        close = close && std::fabs(r.pos[i] - p.pos[i]) <= 0.005 && std::fabs(r.vel[i] - p.vel[i]) <= 0.025f &&
+                std::fabs(r.rates[i] - p.rates[i]) <= 0.0005f;
+        double da = std::fmod(std::fabs(r.ang[i] - p.ang[i]), 6.283185307);
+        if (da > 3.14159265) da = 6.283185307 - da;
+        close = close && da <= 0.0001;
+    }
+    expect(close, "stream: quantisation within half a step (5 mm, 2.5 cm/s, 0.0001 rad, 0.0005 rad/s)");
+    ObjPose big{{1e9, -1e9, std::numeric_limits<double>::quiet_NaN()}, {5000, -5000, 0}, {0, 0, 0}, {100, -100, 0}};
+    quantise(big, &q);
+    expect(q.pos[0] == INT32_MAX && q.pos[1] == INT32_MIN && q.pos[2] == 0 && q.vel[0] == INT16_MAX &&
+               q.vel[1] == INT16_MIN && q.rates[0] == INT16_MAX,
+           "stream: out-of-range values clamp, NaN gives 0");
+    ObjPose wrap{{0, 0, 0}, {0, 0, 0}, {3.14159265358979f, -3.14159265358979f, 7.0f}, {0, 0, 0}};
+    quantise(wrap, &q);
+    dequantise(q, &r);
+    expect(std::fabs(std::fabs(r.ang[0]) - 3.14159265f) < 0.001f && std::fabs(r.ang[2] - (7.0f - 6.2831853f)) < 0.001f,
+           "stream: angles wrap into -pi..pi");
+
+    std::vector<WorldObjState> recs(kWorldStatesMax + 1);
+    for (size_t i = 0; i < recs.size(); ++i) {
+        recs[i].kind = 1;
+        recs[i].a = static_cast<uint16_t>(i);
+        recs[i].b = 2;
+    }
+    uint8_t b[1100];
+    WorldStatesHead sh{};
+    const WorldObjState* sr = nullptr;
+    const size_t n = encode_world_states(9, 123456, recs.data(), kWorldStatesMax, b, sizeof(b));
+    expect(n == 993 && peek_world_type(b, n) == 23 && decode_world_states(b, n, sh, &sr) == Status::Ok && sh.count == 28 &&
+               sh.seq == 9 && sh.host_ms == 123456 && sr[27].a == 27,
+           "stream: a full states message round-trips");
+    expect(encode_world_states(1, 0, recs.data(), kWorldStatesMax + 1, b, sizeof(b)) == 0 &&
+               encode_world_states(1, 0, recs.data(), 0, b, sizeof(b)) == 0,
+           "stream: 0 or more than 28 states are refused");
+    expect(decode_world_states(b, n - 1, sh, &sr) == Status::Truncated && decode_world_states(b, n + 1, sh, &sr) == Status::Oversized,
+           "stream: states length must match the count");
+    size_t msgs = 0, total = 0;
+    world_batches(recs.data(), 60, kWorldStatesMax, [&](const WorldObjState*, size_t k) {
+        ++msgs;
+        total += k;
+    });
+    expect(msgs == 3 && total == 60 && world_states_bytes(60) == 3 * 13 + 60 * 35, "stream: 60 states make 3 messages");
+    WorldEventRec ev[3] = {{kEventDestroyed, 1, 3, 1, 0}, {kEventAwake, 1, 4, 0, 0}, {kEventPlacedDamage, 3, 12, 7, 60}};
+    WorldEventsHead eh{};
+    const WorldEventRec* er = nullptr;
+    const size_t en = encode_world_events(2, 5000, ev, 3, b, sizeof(b));
+    expect(en == 13 + 24 && decode_world_events(b, en, eh, &er) == Status::Ok && eh.count == 3 && er[2].value == 60,
+           "stream: events round-trip");
+
+    expect(world_send_interval(5000) == 0.1 && world_send_interval(50000) == 0.5 && world_send_interval(200000) == 1.0 &&
+               world_send_interval(std::numeric_limits<double>::quiet_NaN()) == 1.0,
+           "stream: 10 Hz near (< 20 km), 2 Hz to 80 km, 1 Hz beyond");
+    WorldSendClock clk;
+    const uint64_t k = world_key(1, 3, 1);
+    expect(clk.due(k, 10.0, 1000) && !clk.due(k, 10.05, 1000) && clk.due(k, 10.1, 1000) && !clk.due(k, 10.5, 50000) &&
+               clk.due(k, 10.6, 50000) && clk.due(k, 5.0, 1000),
+           "stream: the send clock follows the distance, and a clock going back resets it");
+
+    WorldEventTracker tr;
+    std::vector<WorldEventRec> out;
+    WorldSeen s0;
+    s0.alive = true;
+    s0.asleep = true;
+    tr.observe(1, 5, 0, s0, &out);
+    const bool first_silent = out.empty();
+    WorldSeen s1 = s0;
+    s1.asleep = false;
+    s1.awake = true;
+    tr.observe(1, 5, 0, s1, &out);
+    WorldSeen s2 = s1;
+    s2.level = 3;
+    tr.observe(1, 5, 0, s2, &out);
+    WorldSeen s3 = s2;
+    s3.alive = false;
+    s3.level = 5;
+    tr.observe(1, 5, 0, s3, &out);
+    tr.observe(1, 5, 0, s3, &out);  // nothing more once destroyed
+    WorldSeen pl;
+    tr.observe(3, 12, 7, pl, &out);
+    pl.level = 40;
+    tr.observe(3, 12, 7, pl, &out);
+    expect(first_silent && out.size() == 5 && out[0].event == kEventAwake && out[1].event == kEventDamageLevel &&
+               out[1].value == 3 && out[2].event == kEventDamageLevel && out[3].event == kEventDestroyed &&
+               out[4].event == kEventPlacedDamage && out[4].value == 40,
+           "stream: events on change only: awake, damage, destroyed once, placed damage delta");
+
+    // Bytes per second, the T6 estimate: 8 objects near (10 Hz) + 17 far (1 Hz) a second.
+    const size_t per_s = world_states_bytes(8) * 10 + world_states_bytes(17);
+    std::printf("    estimate: 25 movers (8 near) = %zu bytes/s of states before UDP/ENet headers\n", per_s);
+    expect(per_s < 4000, "stream: a typical mission's states stay under 4 KB/s");
+
+    // Loopback: the host core's world queue reaches a welcomed client core's world ring.
+    FakeHost h;
+    if (!h.start()) return expect(false, "stream loopback: host core");
+    auto c = std::make_unique<ClientCore>();
+    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+    CcRx rx;
+    const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+    const bool sent = h.core.send_world(h.slot, h.gen, b, en, true) &&
+                      h.core.send_world(h.slot, h.gen, b, 0, false) == false;
+    uint8_t sb[1100];
+    const size_t sn = encode_world_states(1, 1000, recs.data(), kWorldStatesMax, sb, sizeof(sb));
+    const bool sent2 = h.core.send_world(h.slot, h.gen, sb, sn, false);
+    WorldPacket got[8];
+    size_t ng = 0;
+    bool have_e = false, have_s = false;
+    cc_run(&h, nullptr, *c, rx, 3.0, [&] {
+        ng = c->poll_world(got, 8);
+        for (size_t i = 0; i < ng; ++i) {
+            have_e = have_e || peek_world_type(got[i].data, got[i].len) == 24;
+            have_s = have_s || (peek_world_type(got[i].data, got[i].len) == 23 && got[i].len == 993);
+        }
+        return have_e && have_s;
+    });
+    expect(welcomed && sent && sent2 && have_e && have_s && c->counters().world >= 2,
+           "stream loopback: events (reliable) and a full states message (unreliable) arrive");
+    c->stop(false);
+    h.core.stop(false);
+}
+
 void world_mission_tests() {
     std::printf("world mission transfer\n");
     // Sizes are part of the wire format (v3); a chunk stays under ENet's 1,024-byte packet limit and one datagram.
@@ -7454,6 +7587,19 @@ void world_files_tests() {
                !parse_sidecar("version=1\nseed=1\njunk\n", &r, &err),
            "world sidecar: bad values refused");
 
+    {
+        ManifestEntry pe;
+        expect(parse_manifest_line("A 003.01 type=F-4E side=F pos=1235,0,-1235 hdg=90.0 id=0x01000005", &pe) &&
+                   pe.kind == 'A' && pe.a == 3 && pe.b == 1 && pe.type == "F-4E" && pe.side == 'F' && pe.has_pose &&
+                   pe.pos[0] == 1235 && pe.pos[2] == -1235 && std::fabs(pe.heading - 1.5707963f) < 1e-4f &&
+                   pe.has_id && pe.id == 0x01000005 && pe.state == ManifestEntry::Object,
+               "world manifest: parse an object line back");
+        expect(parse_manifest_line("G 040.-- absent", &pe) && pe.b == -1 && pe.state == ManifestEntry::Absent &&
+                   parse_manifest_line("P 0012.0007 model pos=10,20,0", &pe) && pe.state == ManifestEntry::Model &&
+                   !parse_manifest_line("H seed=1", &pe) && !parse_manifest_line("C aircraft=2", &pe) &&
+                   !parse_manifest_line("# x", &pe),
+               "world manifest: parse absent and model lines; header and counts are not entries");
+    }
     expect(world_file_number(L"world_012.msn") == 12 && world_file_number(L"WORLD_3.manifest.txt") == 3 &&
                world_file_number(L"world_.msn") == -1 && world_file_number(L"world_12") == -1 &&
                world_file_number(L"snap_012.msn") == -1,
@@ -7559,6 +7705,7 @@ int main() {
     world_seat_tests();
     world_remote_tests();
     world_mission_tests();
+    world_stream_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

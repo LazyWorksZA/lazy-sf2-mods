@@ -1,5 +1,7 @@
 #include "net/client_core.h"
 
+#include "net/world_proto.h"
+
 #include <enet/enet.h>
 
 #include <chrono>
@@ -172,6 +174,18 @@ void ClientCore::set_end(ClientEnd why, Phase phase, double wall) {
     }
 }
 
+size_t ClientCore::poll_world(WorldPacket* out, size_t max) {
+    if (!out) return 0;
+    std::lock_guard<std::mutex> lock(world_mx_);
+    size_t n = 0;
+    while (n < max && world_n_ > 0) {
+        out[n++] = world_in_[world_head_];
+        world_head_ = (world_head_ + 1) % kWorldInCap;
+        --world_n_;
+    }
+    return n;
+}
+
 size_t ClientCore::poll(ClientEvent* out, size_t max) {
     if (!out || in_count_.load(std::memory_order_acquire) == 0) return 0;
     std::lock_guard<std::mutex> lock(in_mx_);
@@ -252,6 +266,8 @@ ClientCounters ClientCore::counters() const {
     c.dropped_out = n_out_.load(std::memory_order_relaxed);
     c.pings = n_pings_.load(std::memory_order_relaxed);
     c.pongs = n_pongs_.load(std::memory_order_relaxed);
+    c.world = n_world_.load(std::memory_order_relaxed);
+    c.dropped_world = n_world_drop_.load(std::memory_order_relaxed);
     return c;
 }
 
@@ -364,8 +380,33 @@ void ClientCore::run() {
         say("net: client Bye sent (reason %u)", static_cast<unsigned>(b.reason));
     };
 
+    // World messages: checked for framing and size here, applied by the game thread (world_sync.cpp).
+    auto handle_world = [&](uint8_t channel, uint8_t wt, const uint8_t* data, size_t len, double rx) {
+        WorldStatesHead sh;
+        WorldEventsHead eh;
+        const WorldObjState* sr = nullptr;
+        const WorldEventRec* er = nullptr;
+        const bool ok = (wt == static_cast<uint8_t>(WorldType::WorldStates) && channel == kChannelUnreliable &&
+                         decode_world_states(data, len, sh, &sr) == Status::Ok) ||
+                        (wt == static_cast<uint8_t>(WorldType::WorldEvents) && channel == kChannelReliable &&
+                         decode_world_events(data, len, eh, &er) == Status::Ok);
+        if (!ok) return drop(n_format_);
+        std::lock_guard<std::mutex> lock(world_mx_);
+        if (!welcomed || world_n_ >= kWorldInCap || len > sizeof(WorldPacket::data)) {
+            n_world_drop_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        WorldPacket& p = world_in_[(world_head_ + world_n_) % kWorldInCap];
+        p.wall_rx = rx;
+        p.len = static_cast<uint16_t>(len);
+        std::memcpy(p.data, data, len);
+        ++world_n_;
+        n_world_.fetch_add(1, std::memory_order_relaxed);
+    };
+
     auto handle_packet = [&](uint8_t channel, const uint8_t* data, size_t len, double rx) {
         n_received_.fetch_add(1, std::memory_order_relaxed);
+        if (const uint8_t wt = peek_world_type(data, len)) return handle_world(channel, wt, data, len, rx);
         if (len > kMaxPacket) return drop(n_format_);
         MsgType type{};
         const Status ps = peek_type(data, len, type);

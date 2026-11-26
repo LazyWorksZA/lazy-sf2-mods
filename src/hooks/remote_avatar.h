@@ -28,6 +28,7 @@ struct AvatarPick {
     const double place[3];
     float heading;
     float vel[3];
+    const void* prefer = nullptr;  // take this aircraft if it is live and free (a shared world's seat), else pick
 };
 
 /// <summary>What avatar_take chose, for the caller's log line.</summary>

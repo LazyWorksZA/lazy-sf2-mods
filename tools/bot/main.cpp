@@ -15,6 +15,7 @@
 #include "bot_client.h"
 #include "bot_serve.h"
 #include "net/mission_fetch.h"
+#include "hooks/world_files.h"
 #include "net/world_proto.h"
 
 namespace {
@@ -26,7 +27,8 @@ void usage() {
         "            [--loss PERCENT] [--jitter MS] [--lag MS] [--log-remote] [--drop] [--log FILE]\n"
         "lazysf2-bot --serve PORT [--bind ADDR] [--callsign BOTHOST] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
         "            [--start X,Y,Z,HEADING] [--lag MS] [--pause-at S --pause-for S] [--record DIR] [--duration SECONDS]\n"
-        "            [--mission world_NNN.msn] [--log FILE]\n"
+        "            [--mission world_NNN.msn] [--world world_NNN.manifest.txt]\n"
+        "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
@@ -120,6 +122,41 @@ std::string sidecar_path(const std::string& msn) {
 
 void fetch_log(const char* line) { log_line(line); }
 
+// The aircraft of a world manifest, for --world: every live aircraft member except member 0 of the player's slot (the
+// host's own jet, which travels as Phase 4 States).
+bool load_world(const char* path, std::vector<LazyWorks::SF2Patch::bot::ServeConfig::WorldObj>* out) {
+    namespace hk = LazyWorks::SF2Patch::hooks;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "r") != 0 || !f) return false;
+    char line[512];
+    int player_slot = -1;
+    std::vector<hk::ManifestEntry> es;
+    while (std::fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        unsigned ps = 0;
+        if (sscanf_s(s.c_str(), "H player=A %u.", &ps) == 1) player_slot = static_cast<int>(ps);
+        hk::ManifestEntry e;
+        if (hk::parse_manifest_line(s, &e) && e.kind == 'A' && e.state == hk::ManifestEntry::Object && e.has_pose)
+            es.push_back(e);
+    }
+    std::fclose(f);
+    for (const auto& e : es) {
+        if (e.a == player_slot && e.b == 0) continue;
+        LazyWorks::SF2Patch::bot::ServeConfig::WorldObj o;
+        o.kind = 1;
+        o.a = static_cast<uint16_t>(e.a);
+        o.b = static_cast<uint16_t>(e.b);
+        o.pos[0] = e.pos[0], o.pos[1] = e.pos[1], o.pos[2] = e.pos[2];
+        o.heading = e.heading;
+        out->push_back(o);
+    }
+    char b[160];
+    std::snprintf(b, sizeof(b), "bot: world from %s: %zu aircraft (player slot %d)", path, out->size(), player_slot);
+    log_line(b);
+    return !out->empty();
+}
+
 // --fetch: asks a host for its mission, as the game's join does, and writes DIR\world_fetched.msn and its sidecar.
 int run_fetch(const std::string& spec, const std::string& dir, double duration) {
     namespace net = LazyWorks::SF2Patch::net;
@@ -182,7 +219,7 @@ int main(int argc, char** argv) {
                                                  "--duration", "--loss",   "--jitter",   "--log",      "--lag",
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
                                                  "--pause-at", "--pause-for", "--mission", "--fetch",
-                                                 "--out"};
+                                                 "--out", "--world", "--world-event"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -261,6 +298,28 @@ int main(int argc, char** argv) {
             log_path = v;
         } else if (a == "--mission" && (v = val())) {
             mission_path = v;
+            serve_only = true;
+        } else if (a == "--world" && (v = val())) {
+            if (!load_world(v, &scfg.world)) {
+                std::printf("cannot read a world from %s\n", v);
+                return 1;
+            }
+            serve_only = true;
+        } else if (a == "--world-event" && (v = val())) {
+            bot::ServeConfig::WorldEv e;
+            char what[16] = {}, kind = 0;
+            unsigned sa = 0, sb = 0;
+            if (sscanf_s(v, "%15[a-z],%c,%u,%u,%lf", what, static_cast<unsigned>(sizeof(what)), &kind, 1u, &sa, &sb, &e.at) != 5 || (kind != 'A' && kind != 'G')) {
+                ok = false;
+            } else {
+                e.event = std::strcmp(what, "destroyed") == 0 ? 1 : std::strcmp(what, "awake") == 0 ? 2
+                          : std::strcmp(what, "asleep") == 0  ? 3 : 0;
+                e.kind = kind == 'A' ? 1 : 2;
+                e.a = static_cast<uint16_t>(sa);
+                e.b = static_cast<uint16_t>(sb);
+                ok = e.event != 0;
+                scfg.world_events.push_back(e);
+            }
             serve_only = true;
         } else if (a == "--fetch" && (v = val())) {
             fetch_spec = v;

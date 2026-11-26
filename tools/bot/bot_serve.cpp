@@ -1,5 +1,7 @@
 #include "bot_serve.h"
 
+#include "net/world_proto.h"
+
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -93,6 +95,65 @@ struct Serve {
     std::deque<Out> out_q;
 
     explicit Serve(const ServeConfig& s) : cfg(s), lag(s.lag_ms * 0.001) {}
+
+    // The synthetic world stream (T6): from the client's Welcome on, every aircraft of cfg.world flies straight on at
+    // 150 m/s at its altitude, sent at 10 Hz of host time; cfg.world_events fire once at their times.
+    double world_t0 = -1, world_next = 0;
+    uint32_t world_seq = 0, world_eseq = 0;
+    size_t world_ev_done = 0;
+    bool world_logged = false;
+    void world_tick() {
+        if (!c.on) {
+            world_t0 = -1;
+            world_ev_done = 0;
+            return;
+        }
+        if (world_t0 < 0) {
+            world_t0 = host_t;
+            world_next = host_t;
+        }
+        const uint32_t ms = static_cast<uint32_t>(host_t * 1000.0);
+        uint8_t buf[kWorldMaxMessage];
+        while (world_ev_done < cfg.world_events.size() && host_t - world_t0 >= cfg.world_events[world_ev_done].at) {
+            const auto& e = cfg.world_events[world_ev_done++];
+            const WorldEventRec r{e.event, e.kind, e.a, e.b, 0};
+            const size_t n = encode_world_events(++world_eseq, ms, &r, 1, buf, sizeof(buf));
+            if (n && core.send_world(c.slot, c.gen, buf, n, true)) ++res.world_events;
+            say("bot serve: world event %u for %u %u.%u at +%.1f s", static_cast<unsigned>(e.event),
+                static_cast<unsigned>(e.kind), static_cast<unsigned>(e.a), static_cast<unsigned>(e.b), host_t - world_t0);
+        }
+        if (cfg.world.empty() || host_t < world_next) return;
+        world_next = host_t + 0.1;
+        const double dt = host_t - world_t0;
+        std::vector<WorldObjState> st;
+        for (const auto& o : cfg.world) {
+            ObjPose p{};
+            const double sh = std::sin(o.heading), ch = std::cos(o.heading);
+            p.vel[0] = static_cast<float>(150.0 * sh);
+            p.vel[1] = static_cast<float>(150.0 * ch);
+            p.pos[0] = o.pos[0] + p.vel[0] * dt;
+            p.pos[1] = o.pos[1] + p.vel[1] * dt;
+            p.pos[2] = o.pos[2];
+            p.ang[1] = o.heading;
+            WorldObjState q{};
+            q.kind = o.kind;
+            q.a = o.a;
+            q.b = o.b;
+            quantise(p, &q);
+            st.push_back(q);
+        }
+        for (size_t i = 0; i < st.size(); i += kWorldStatesMax) {
+            const size_t k = st.size() - i < kWorldStatesMax ? st.size() - i : kWorldStatesMax;
+            const size_t n = encode_world_states(++world_seq, ms, st.data() + i, k, buf, sizeof(buf));
+            if (n && core.send_world(c.slot, c.gen, buf, n, false)) ++res.world_msgs;
+        }
+        if (!world_logged) {
+            world_logged = true;
+            say("bot serve: world stream on: %zu aircraft at 10 Hz (%zu bytes a second)", st.size(),
+                ((st.size() + kWorldStatesMax - 1) / kWorldStatesMax * sizeof(WorldStatesHead) +
+                 st.size() * sizeof(WorldObjState)) * 10);
+        }
+    }
 
     template <typename... A>
     void say(const char* fmt, A... args) const {
@@ -455,6 +516,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
             sv.out_q.pop_front();
         }
 
+        if (!cfg.world.empty() || !cfg.world_events.empty()) sv.world_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

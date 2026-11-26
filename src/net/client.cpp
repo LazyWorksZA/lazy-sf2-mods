@@ -411,7 +411,8 @@ bool take(int id, const net::StateMsg& s) {
     Remote& r = g_rm[id];
     if (g_now < r.next_take) return false;
     r.next_take = g_now + kTakeEvery;
-    const AvatarPick pick{r.aircraft, {s.pos[0], s.pos[1], s.pos[2]}, s.ang[1], {s.vel[0], s.vel[1], s.vel[2]}};
+    const AvatarPick pick{r.aircraft, {s.pos[0], s.pos[1], s.pos[2]}, s.ang[1], {s.vel[0], s.vel[1], s.vel[2]},
+                          world_seat_object(id)};
     AvatarHandle taken[kSources];
     handles(taken);
     AvatarHandle got;
@@ -691,6 +692,17 @@ void maybe_connect(void* player, double wall) {
             g_theatre_hash ? g_theatre : "unknown");
 }
 
+// The shared world's stream (T6): applied on the player's step, after the session's own messages.
+void pump_world() {
+    static net::WorldPacket* buf = new (std::nothrow) net::WorldPacket[16];
+    if (!buf || !g_snap_ok) return;
+    for (int round = 0; round < 4; ++round) {
+        const size_t n = g_core->poll_world(buf, 16);
+        for (size_t i = 0; i < n; ++i) world_client_apply(buf[i].data, buf[i].len, g_now);
+        if (n < 16) break;
+    }
+}
+
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
     if (!g_running.load(std::memory_order_relaxed)) return;
     const double wall = ClientCore::wall_now();
@@ -716,6 +728,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
             if (!g_disconnected) {
                 refresh_clock(wall);
                 pump(aircraft, wall);
+                pump_world();
             }
             if (g_disconnected && g_core->finished()) {
                 g_core->stop(false);  // the thread has cleaned up: the join returns at once
@@ -786,6 +799,13 @@ void client_install() {
     g_enabled = true;
     LOG("net: client on: joins %s:%u as \"%s\" once airborne; join %s", g_host, static_cast<unsigned>(g_port),
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
+}
+
+bool client_drives_object(const void* obj) {
+    if (!g_rm || !obj) return false;
+    for (int i = 0; i < kSources; ++i)
+        if (g_rm[i].h.obj == obj) return true;
+    return false;
 }
 
 bool client_connect_target(char* host, size_t cap, uint16_t* port) {

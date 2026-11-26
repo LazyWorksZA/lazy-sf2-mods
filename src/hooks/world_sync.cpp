@@ -8,20 +8,24 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "hooks/aircraft_side.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/replay_math.h"
 #include "hooks/world_files.h"
 #include "hooks/world_logic.h"
 #include "log.h"
 #include "net/mission_fetch.h"
 #include "net/world_proto.h"
+#include "net/world_stream_logic.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -80,6 +84,7 @@ std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
 bool g_join = false;              // LAZYSF2_WORLD_JOIN=1 (with LAZYSF2_CONNECT): fetch the host's mission in menus
 bool g_seat_from_env = false;     // LAZYSF2_WORLD_SEAT was given: it wins over the host's suggestion
 net::MissionFetch* g_fetch = nullptr;  // never freed (no join at DLL unload)
+std::atomic<bool> g_world_host{false};  // a mission was published: this host streams its world to clients
 bool g_remote = false;            // LAZYSF2_WORLD_REMOTE=1
 int g_seat = -1;                  // LAZYSF2_WORLD_SEAT: the player's member index, or -1 (stock)
 bool g_seed_from_env = false;
@@ -851,6 +856,7 @@ void publish_mission(const Armed& a) {
         return;
     }
     host_publish_mission(packed.data(), packed.size(), id, raw);
+    g_world_host.store(true, std::memory_order_release);
 }
 
 int __fastcall h_Start(void* msn) {
@@ -1198,6 +1204,441 @@ int __fastcall h_dmg6(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint
 }
 
 
+bool read_flags(const BYTE* obj, uint32_t* f) {
+    __try {
+        std::memcpy(f, obj + kObjFlags, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// ---- the world stream (T6) ----
+
+// Flag masks for wake-ups (AircraftObject +0x63e70 and GroundObject +0x16ee0 ask the object manager for them by name).
+constexpr DWORD kRvaAoAwakeMask = 0xb7b14, kRvaAoAsleepMask = 0xb7b18;
+constexpr DWORD kRvaGmVtable = 0x347a4, kRvaNvVtable = 0x375f4;  // vehicles and ships move; static sites do not
+constexpr DWORD kRvaAoDestroy = 0x41030, kRvaGoDestroy = 0x159b0;  // primary slot 29 in AircraftObject / GroundObject
+constexpr size_t kSlotDestroy = 29;
+constexpr size_t kObjVel = 0x50, kObjRates = 0xd0, kObjMatrix = 0xdc, kObjDamage = 0x16c, kPlacedDamage = 0x04;
+constexpr int kDestroyedLevel = 5;
+constexpr double kEventEvery = 1.0;  // seconds of host time between event walks
+
+struct ObjFull {
+    BYTE* obj = nullptr;
+    int group = 0;  // 1 aircraft, 2 ground group
+    bool mover = false;
+    uint32_t flags = 0;
+    int level = 0;
+    net::ObjPose pose{};
+};
+
+// Reads what the stream needs from one object. SEH only.
+bool read_full(const Om& om, uint32_t id, uintptr_t gm, uintptr_t nv, ObjFull* f) {
+    if (!resolve_obj(om, id, &f->obj, &f->group) || f->group == 0) return false;
+    __try {
+        const BYTE* o = f->obj;
+        std::memcpy(&f->flags, o + kObjFlags, 4);
+        std::memcpy(&f->level, o + kObjDamage, 4);
+        std::memcpy(f->pose.pos, o + kObjPos, sizeof(f->pose.pos));
+        std::memcpy(f->pose.ang, o + kObjAngles, sizeof(f->pose.ang));
+        if (f->group == 1) {
+            f->mover = true;
+            std::memcpy(f->pose.vel, o + kObjVel, sizeof(f->pose.vel));
+            std::memcpy(f->pose.rates, o + kObjRates, sizeof(f->pose.rates));
+        } else {
+            // Vehicles and ships: position and angles only; their velocity field is not known yet (network-recon §10.4).
+            const uintptr_t vt = *reinterpret_cast<const uintptr_t*>(o);
+            f->mover = (gm && vt == gm + kRvaGmVtable) || (nv && vt == nv + kRvaNvVtable);
+            f->pose.vel[0] = f->pose.vel[1] = f->pose.vel[2] = 0;
+            f->pose.rates[0] = f->pose.rates[1] = f->pose.rates[2] = 0;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool read_i16(const void* p, int16_t* v) {
+    __try {
+        std::memcpy(v, p, 2);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+struct StreamMasks {
+    uint32_t awake = 0, asleep = 0, remote = 0;
+};
+bool read_stream_masks(StreamMasks* m) {
+    return read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoAwakeMask, &m->awake) &&
+           read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoAsleepMask, &m->asleep) &&
+           read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoRemoteMask, &m->remote);
+}
+
+uintptr_t module_if(const wchar_t* name, DWORD stamp, DWORD size, const char* label) {
+    HMODULE m = GetModuleHandleW(name);
+    return m && is_expected_build(m, stamp, size, label) ? reinterpret_cast<uintptr_t>(m) : 0;
+}
+
+// The object a member of the player flight is, for a peer's avatar: the host is member 0, client k member k (the T5
+// seat rule; an assumption until T3 is checked live). Game thread.
+void* seat_object(int member) {
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
+    if (!sm || !omm || member < 0) return nullptr;
+    void* msn = at_rva(sm, kRvaMsn);
+    PlayerFlight f{};
+    SlotTable t{};
+    uint32_t id = 0;
+    Om om;
+    BYTE* obj = nullptr;
+    int group = 0;
+    if (!read_player_flight(msn, &f) || member >= f.members || !read_slot_table(msn, &t) ||
+        !read_member_id(t, f.slot, member, &id) || !read_om(omm, &om) || !resolve_obj(om, id, &obj, &group) ||
+        group != 1)
+        return nullptr;
+    return obj;
+}
+
+struct HostStream {
+    const void* msn = nullptr;
+    const BYTE* slots = nullptr;  // the slot array of the mission being streamed: a new one starts over
+    net::WorldSendClock clock;
+    net::WorldEventTracker tracker;
+    uint32_t seq = 0, eseq = 0;
+    double next_events = 0, next_report = 0;
+    uint64_t states = 0, state_bytes = 0, events = 0, msgs = 0, send_fail = 0;
+    bool logged_start = false;
+};
+HostStream* g_hs = nullptr;  // game thread
+
+
+}  // namespace
+
+bool world_host_streaming() { return g_world_host.load(std::memory_order_acquire); }
+
+void* world_seat_object(int peer_id) {
+    if (!g_world_host.load(std::memory_order_acquire) && !g_join) return nullptr;
+    return seat_object(peer_id);
+}
+
+void world_host_tick(double now, const double (*players)[3], int n_players, WorldSendFn send) {
+    if (!g_world_host.load(std::memory_order_acquire) || !send) return;
+    if (!g_hs) g_hs = new (std::nothrow) HostStream;
+    if (!g_hs) return;
+    HostStream& hs = *g_hs;
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
+    if (!sm || !omm) return;
+    void* msn = at_rva(sm, kRvaMsn);
+    SlotTable t{};
+    Om om;
+    uint32_t player = 0xffffffffu;
+    if (!read_slot_table(msn, &t) || !read_om(omm, &om) || !read_player_obj(msn, &player)) return;
+    if (hs.msn != msn || hs.slots != t.arr) {
+        hs.clock.clear();
+        hs.tracker.clear();
+        hs.msn = msn;
+        hs.slots = t.arr;
+        hs.next_events = now;
+        hs.logged_start = false;
+    }
+    StreamMasks masks;
+    const bool have_masks = read_stream_masks(&masks);
+    const uintptr_t gm = module_if(L"GroundMobileObject.dll", kGmStamp, kGmSize, "GroundMobileObject.dll");
+    const uintptr_t nv = module_if(L"NavalObject.dll", kNvStamp, kNvSize, "NavalObject.dll");
+    const bool event_walk = now >= hs.next_events || now < hs.next_events - 2 * kEventEvery;
+    if (event_walk) hs.next_events = now + kEventEvery;
+    std::vector<net::WorldObjState> out;
+    std::vector<net::WorldEventRec> ev;
+    int movers = 0, statics = 0;
+    for (int i = 0; i < t.count; ++i) {
+        SlotRaw s{};
+        if (!read_slot(t, i, &s)) break;
+        if (s.formation == 0xffffffffu) continue;
+        const uint8_t kind = static_cast<uint8_t>(i < t.first_ground ? net::KeyKind::Aircraft : net::KeyKind::Ground);
+        for (int m = 0; m < s.members; ++m) {
+            ObjFull f;
+            const bool ok = read_full(om, s.ids[m], gm, nv, &f);
+            if (event_walk) {
+                net::WorldSeen seen;
+                seen.alive = ok && f.level < kDestroyedLevel;
+                seen.awake = ok && have_masks && (f.flags & masks.awake);
+                seen.asleep = ok && have_masks && (f.flags & masks.asleep);
+                seen.level = static_cast<int16_t>(ok ? f.level : 0);
+                hs.tracker.observe(kind, static_cast<uint16_t>(i), static_cast<uint16_t>(m), seen, &ev);
+            }
+            if (!ok || f.level >= kDestroyedLevel) continue;
+            if (!f.mover) {
+                ++statics;
+                continue;
+            }
+            ++movers;
+            // The host's own jet and the clients' avatars travel as Phase 4 States, not here.
+            if (s.ids[m] == player || host_drives_object(f.obj)) continue;
+            double d = 1e30;
+            for (int p = 0; p < n_players; ++p) {
+                const double dx = players[p][0] - f.pose.pos[0], dy = players[p][1] - f.pose.pos[1],
+                             dz = players[p][2] - f.pose.pos[2];
+                const double dd = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (dd < d) d = dd;
+            }
+            if (!hs.clock.due(net::world_key(kind, static_cast<uint16_t>(i), static_cast<uint16_t>(m)), now, d)) continue;
+            net::WorldObjState q{};
+            q.kind = kind;
+            q.a = static_cast<uint16_t>(i);
+            q.b = static_cast<uint16_t>(m);
+            net::quantise(f.pose, &q);
+            out.push_back(q);
+        }
+    }
+    if (event_walk) {
+        const BYTE* areas = nullptr;
+        int n_areas = 0;
+        if (read_areas_head(msn, &areas, &n_areas)) {
+            for (int i = 0; i < n_areas; ++i) {
+                AreaRaw ar{};
+                if (!read_area(areas, i, &ar)) break;
+                if (ar.active != 1) continue;
+                for (int j = 0; j < ar.n_placed; ++j) {
+                    PlacedRaw p{};
+                    int16_t dmg = 0;
+                    if (!read_placed(ar, j, &p) || !read_i16(ar.placed[j] + kPlacedDamage, &dmg)) continue;
+                    net::WorldSeen seen;
+                    seen.level = dmg;
+                    hs.tracker.observe(static_cast<uint8_t>(net::KeyKind::Placed), static_cast<uint16_t>(i),
+                                       static_cast<uint16_t>(p.index), seen, &ev);
+                }
+            }
+        }
+    }
+    const uint32_t ms = static_cast<uint32_t>(now * 1000.0);
+    uint8_t buf[net::kWorldMaxMessage];
+    net::world_batches(out.data(), out.size(), net::kWorldStatesMax, [&](const net::WorldObjState* r, size_t n) {
+        const size_t len = net::encode_world_states(++hs.seq, ms, r, n, buf, sizeof(buf));
+        if (len && send(buf, len, false)) {
+            hs.state_bytes += len;
+            ++hs.msgs;
+        } else {
+            ++hs.send_fail;
+        }
+    });
+    net::world_batches(ev.data(), ev.size(), net::kWorldEventsMax, [&](const net::WorldEventRec* r, size_t n) {
+        const size_t len = net::encode_world_events(++hs.eseq, ms, r, n, buf, sizeof(buf));
+        if (!len || !send(buf, len, true)) ++hs.send_fail;
+    });
+    for (const net::WorldEventRec& e : ev)
+        if (e.event == net::kEventDestroyed || e.event == net::kEventAwake || e.event == net::kEventAsleep)
+            LOG("world: stream: event %s %c %03u.%02u", e.event == net::kEventDestroyed ? "destroyed"
+                                                        : e.event == net::kEventAwake   ? "awake"
+                                                                                        : "asleep",
+                e.kind == 1 ? 'A' : 'G', static_cast<unsigned>(e.a), static_cast<unsigned>(e.b));
+    hs.states += out.size();
+    hs.events += ev.size();
+    if (!hs.logged_start) {
+        hs.logged_start = true;
+        hs.next_report = now + 10.0;
+        LOG("world: stream on: %d moving and %d static mission objects; masks %s", movers, statics,
+            have_masks ? "read" : "NOT read (no wake-up events)");
+    } else if (now >= hs.next_report) {
+        hs.next_report = now + 10.0;
+        LOG("world: stream: %llu states (%llu bytes in %llu messages), %llu events, %llu send failures so far",
+            hs.states, hs.state_bytes, hs.msgs, hs.events, hs.send_fail);
+    }
+}
+
+namespace {
+
+struct ClientStream {
+    const BYTE* slots = nullptr;
+    std::unordered_map<uint64_t, uint32_t> last_ms;  // per key: the newest state applied
+    uint64_t applied = 0, stale = 0, missing = 0, not_remote = 0, events = 0;
+    double next_report = 0;
+    bool logged_first = false, logged_refresh = false;
+};
+ClientStream* g_cs = nullptr;
+
+bool write_pose(BYTE* obj, int group, const net::ObjPose& p) {
+    __try {
+        std::memcpy(obj + kObjPos, p.pos, sizeof(p.pos));
+        std::memcpy(obj + kObjAngles, p.ang, sizeof(p.ang));
+        if (group == 1) {
+            const double a[3] = {p.ang[0], p.ang[1], p.ang[2]};
+            float m[9];
+            replay_math::build_matrix(a, m);
+            std::memcpy(obj + kObjVel, p.vel, sizeof(p.vel));
+            std::memcpy(obj + kObjRates, p.rates, sizeof(p.rates));
+            std::memcpy(obj + kObjMatrix, m, sizeof(m));
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool set_flags(BYTE* obj, uint32_t set, uint32_t clear) {
+    __try {
+        uint32_t f = 0;
+        std::memcpy(&f, obj + kObjFlags, 4);
+        f = (f & ~clear) | set;
+        std::memcpy(obj + kObjFlags, &f, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Destroys a remote copy through its own primary slot 29, as the game's remote "destroyed" event does
+// (network-recon §9.7), after checking the slot against the class DLL. 0 done, 1 refused, 2 faulted.
+int destroy_copy(BYTE* obj) {
+    uintptr_t fn = 0;
+    __try {
+        fn = reinterpret_cast<uintptr_t>((*reinterpret_cast<void***>(obj))[kSlotDestroy]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+    const uintptr_t ao = module_if(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll");
+    const uintptr_t go = module_if(L"GroundObject.dll", kGoStamp, kGoSize, "GroundObject.dll");
+    if (!((ao && fn == ao + kRvaAoDestroy) || (go && fn == go + kRvaGoDestroy))) return 1;
+    __try {
+        reinterpret_cast<int(__fastcall*)(void*)>(fn)(obj);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
+// Placed record b of area a (by its +0x54 index), or null.
+BYTE* find_placed(const void* msn, int a, int b) {
+    const BYTE* areas = nullptr;
+    int n_areas = 0;
+    AreaRaw ar{};
+    if (!read_areas_head(msn, &areas, &n_areas) || a < 0 || a >= n_areas || !read_area(areas, a, &ar)) return nullptr;
+    for (int j = 0; j < ar.n_placed; ++j) {
+        PlacedRaw p{};
+        if (read_placed(ar, j, &p) && p.index == b) return const_cast<BYTE*>(ar.placed[j]);
+    }
+    return nullptr;
+}
+
+bool write_i16(BYTE* p, int16_t v) {
+    __try {
+        std::memcpy(p, &v, 2);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+}  // namespace
+
+void world_client_apply(const uint8_t* data, size_t len, double host_now) {
+    if (!g_join) return;
+    if (!g_cs) g_cs = new (std::nothrow) ClientStream;
+    if (!g_cs) return;
+    ClientStream& cs = *g_cs;
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
+    if (!sm || !omm) return;
+    void* msn = at_rva(sm, kRvaMsn);
+    SlotTable t{};
+    Om om;
+    uint32_t player = 0xffffffffu;
+    StreamMasks masks;
+    if (!read_slot_table(msn, &t) || !read_om(omm, &om) || !read_player_obj(msn, &player) || !read_stream_masks(&masks))
+        return;
+    if (cs.slots != t.arr) {
+        cs.slots = t.arr;
+        cs.last_ms.clear();
+    }
+    auto object_of = [&](uint8_t kind, uint16_t a, uint16_t b, BYTE** obj, int* group) {
+        uint32_t id = 0;
+        if (kind != 1 && kind != 2) return false;
+        if (a >= t.count || (kind == 1) != (a < t.first_ground)) return false;
+        return read_member_id(t, a, b, &id) && id != player && resolve_obj(om, id, obj, group) && *group != 0;
+    };
+    const uint8_t wt = net::peek_world_type(data, len);
+    if (wt == static_cast<uint8_t>(net::WorldType::WorldStates)) {
+        net::WorldStatesHead h;
+        const net::WorldObjState* r = nullptr;
+        if (net::decode_world_states(data, len, h, &r) != net::Status::Ok) return;
+        double age = host_now - h.host_ms / 1000.0;
+        if (!(age > 0)) age = 0;
+        if (age > 1.0) age = 1.0;
+        for (size_t i = 0; i < h.count; ++i) {
+            net::WorldObjState q;
+            std::memcpy(&q, &r[i], sizeof(q));
+            BYTE* obj = nullptr;
+            int group = 0;
+            if (!object_of(q.kind, q.a, q.b, &obj, &group)) {
+                ++cs.missing;
+                continue;
+            }
+            if (client_drives_object(obj)) continue;
+            uint32_t flags = 0;
+            if (!read_flags(obj, &flags) || !(flags & masks.remote)) {
+                ++cs.not_remote;
+                continue;
+            }
+            uint32_t& last = cs.last_ms[net::world_key(q.kind, q.a, q.b)];
+            if (h.host_ms < last) {
+                ++cs.stale;
+                continue;
+            }
+            last = h.host_ms;
+            net::ObjPose p;
+            net::dequantise(q, &p);
+            for (int k = 0; k < 3; ++k) p.pos[k] += p.vel[k] * age;  // to the host's present
+            if (write_pose(obj, group, p)) ++cs.applied;
+        }
+        if (!cs.logged_first) {
+            cs.logged_first = true;
+            cs.next_report = host_now + 10.0;
+            LOG("world: stream: first states from the host (%u objects, %.0f ms old)", static_cast<unsigned>(h.count),
+                age * 1000.0);
+        }
+    } else if (wt == static_cast<uint8_t>(net::WorldType::WorldEvents)) {
+        net::WorldEventsHead h;
+        const net::WorldEventRec* r = nullptr;
+        if (net::decode_world_events(data, len, h, &r) != net::Status::Ok) return;
+        for (size_t i = 0; i < h.count; ++i) {
+            net::WorldEventRec e;
+            std::memcpy(&e, &r[i], sizeof(e));
+            ++cs.events;
+            if (e.event == net::kEventPlacedDamage && e.kind == static_cast<uint8_t>(net::KeyKind::Placed)) {
+                if (BYTE* rec = find_placed(msn, e.a, e.b)) write_i16(rec + kPlacedDamage, e.value);
+                if (!cs.logged_refresh) {
+                    cs.logged_refresh = true;
+                    LOG("world: stream: placed damage is written to the record; its model is not refreshed yet");
+                }
+                continue;
+            }
+            BYTE* obj = nullptr;
+            int group = 0;
+            if (!object_of(e.kind, e.a, e.b, &obj, &group)) continue;
+            if (e.event == net::kEventAwake) {
+                set_flags(obj, masks.awake, masks.asleep);
+            } else if (e.event == net::kEventAsleep) {
+                set_flags(obj, masks.asleep, masks.awake);
+            } else if (e.event == net::kEventDestroyed) {
+                const int r2 = destroy_copy(obj);
+                LOG("world: stream: %c %03u.%02u destroyed on the host: %s", e.kind == 1 ? 'A' : 'G',
+                    static_cast<unsigned>(e.a), static_cast<unsigned>(e.b),
+                    r2 == 0 ? "destroyed here" : r2 == 1 ? "not destroyed (its class is not checked)" : "FAULTED");
+            }
+        }
+    }
+    if (cs.logged_first && host_now >= cs.next_report) {
+        cs.next_report = host_now + 10.0;
+        LOG("world: stream: %llu states applied, %llu stale, %llu without an object, %llu not remote, %llu events",
+            cs.applied, cs.stale, cs.missing, cs.not_remote, cs.events);
+    }
+}
+
+namespace {
+
 // ---- hook installation, per image ----
 
 struct HookDef {
@@ -1287,6 +1728,7 @@ void world_install() {
             g_join = true;
             g_mode = Mode::Load;  // the fetched file is loaded at the New page's Accept, as for LAZYSF2_WORLD_LOAD
             if (g_seat < 0) g_seat = 1;  // until the host suggests one
+            g_remote = true;  // the host owns the world: every other object is a remote copy (T4), driven by the stream
             LOG("world: join mode: the host's mission is fetched from %s:%u in menus and flown at the next Accept",
                 host, static_cast<unsigned>(port));
         }

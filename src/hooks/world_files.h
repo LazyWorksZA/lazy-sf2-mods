@@ -277,6 +277,52 @@ inline bool parse_sidecar(const std::string& text, WorldSidecar* out, std::strin
     return true;
 }
 
+/// <summary>
+/// Parses one entry line of a manifest (format_manifest_line's output) back; false for header, counts and bad lines.
+/// The raw id is read when present.
+/// </summary>
+inline bool parse_manifest_line(const std::string& line, ManifestEntry* out) {
+    ManifestEntry e;
+    if (line.size() < 8 || line[1] != ' ') return false;
+    if (line[0] != 'A' && line[0] != 'G' && line[0] != 'P') return false;
+    e.kind = line[0];
+    const size_t dot = line.find('.', 2), sp = line.find(' ', 2);
+    if (dot == std::string::npos || (sp != std::string::npos && dot > sp)) return false;
+    const std::string sa = line.substr(2, dot - 2), sb = line.substr(dot + 1, (sp == std::string::npos ? line.size() : sp) - dot - 1);
+    long a = 0, b = 0;
+    if (!detail::parse_long(sa, 0, 99999, &a)) return false;
+    if (sb == "--") b = -1;
+    else if (!detail::parse_long(sb, 0, 99999, &b)) return false;
+    e.a = static_cast<int>(a), e.b = static_cast<int>(b);
+    size_t pos = sp;
+    bool typed = false;
+    while (pos != std::string::npos && pos < line.size()) {
+        const size_t next = line.find(' ', pos + 1);
+        const std::string f = line.substr(pos + 1, (next == std::string::npos ? line.size() : next) - pos - 1);
+        pos = next;
+        if (f == "absent") e.state = ManifestEntry::Absent;
+        else if (f == "unresolved") e.state = ManifestEntry::Unresolved;
+        else if (f == "model") e.state = ManifestEntry::Model;
+        else if (f == "none") e.state = ManifestEntry::None;
+        else if (f.rfind("type=", 0) == 0) e.type = f.substr(5), typed = true;
+        else if (f.rfind("side=", 0) == 0 && f.size() == 6) e.side = f[5];
+        else if (f.rfind("pos=", 0) == 0) {
+            double v[3];
+            if (sscanf_s(f.c_str() + 4, "%lf,%lf,%lf", &v[0], &v[1], &v[2]) != 3) return false;
+            e.pos[0] = v[0], e.pos[1] = v[1], e.pos[2] = v[2];
+            e.has_pose = true;
+        } else if (f.rfind("hdg=", 0) == 0) {
+            e.heading = static_cast<float>(std::atof(f.c_str() + 4) * 3.14159265358979323846 / 180.0);
+        } else if (f.rfind("id=0x", 0) == 0) {
+            e.id = static_cast<uint32_t>(std::strtoul(f.c_str() + 5, nullptr, 16));
+            e.has_id = true;
+        }
+    }
+    if (typed) e.state = ManifestEntry::Object;
+    *out = e;
+    return true;
+}
+
 /// <summary>NNN of a "world_NNN.<anything>" file name (case-insensitive prefix), or -1.</summary>
 inline int world_file_number(const wchar_t* name) {
     static const wchar_t kPrefix[] = L"world_";

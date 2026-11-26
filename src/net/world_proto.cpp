@@ -2,6 +2,8 @@
 
 #include <miniz.h>
 
+#include <cmath>
+#include <limits>
 #include <cstring>
 
 namespace LazyWorks::SF2Patch::net {
@@ -137,6 +139,91 @@ bool unpack_mission(const std::vector<uint8_t>& packed, uint32_t id, uint32_t ra
     sidecar->assign(reinterpret_cast<const char*>(plain.data() + kPackHead), head[1]);
     msn->assign(plain.begin() + kPackHead + head[1], plain.end());
     return true;
+}
+
+namespace {
+template <typename T>
+T clamp_round(double v, double scale) {
+    if (!std::isfinite(v)) return 0;
+    const double x = std::round(v * scale);
+    const double lo = static_cast<double>(std::numeric_limits<T>::min()), hi = static_cast<double>(std::numeric_limits<T>::max());
+    return static_cast<T>(x < lo ? lo : x > hi ? hi : x);
+}
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kPosScale = 100.0, kVelScale = 20.0, kRateScale = 1000.0, kAngScale = 65536.0 / (2.0 * kPi);
+
+int16_t quantise_angle(double a) {
+    if (!std::isfinite(a)) return 0;
+    double t = std::fmod(a, 2.0 * kPi);
+    if (t >= kPi) t -= 2.0 * kPi;
+    if (t < -kPi) t += 2.0 * kPi;
+    long v = std::lround(t * kAngScale);
+    if (v > 32767) v -= 65536;  // pi itself wraps to -pi
+    return static_cast<int16_t>(v);
+}
+
+template <class Head, class Rec>
+size_t encode_batch(WorldType t, uint32_t seq, uint32_t host_ms, const Rec* r, size_t n, size_t max, uint8_t* out,
+                    size_t cap) {
+    if (!out || !r || n == 0 || n > max || cap < sizeof(Head) + n * sizeof(Rec)) return 0;
+    Head h{};
+    h.h.magic = kMagic;
+    h.h.version = kVersion;
+    h.h.type = static_cast<uint8_t>(t);
+    h.seq = seq;
+    h.host_ms = host_ms;
+    h.count = static_cast<uint8_t>(n);
+    std::memcpy(out, &h, sizeof(h));
+    std::memcpy(out + sizeof(h), r, n * sizeof(Rec));
+    return sizeof(h) + n * sizeof(Rec);
+}
+
+template <class Head, class Rec>
+Status decode_batch(WorldType t, const uint8_t* data, size_t len, size_t max, Head& head, const Rec** recs) {
+    const Status s = check(data, len, t);
+    if (s != Status::Ok) return s;
+    if (len < sizeof(Head)) return Status::Truncated;
+    Head h;
+    std::memcpy(&h, data, sizeof(h));
+    if (h.count == 0 || h.count > max) return Status::Oversized;
+    const size_t want = sizeof(Head) + h.count * sizeof(Rec);
+    if (len < want) return Status::Truncated;
+    if (len > want) return Status::Oversized;
+    head = h;
+    *recs = reinterpret_cast<const Rec*>(data + sizeof(Head));  // packed: byte alignment
+    return Status::Ok;
+}
+}  // namespace
+
+void quantise(const ObjPose& p, WorldObjState* q) {
+    for (int i = 0; i < 3; ++i) {
+        q->pos[i] = clamp_round<int32_t>(p.pos[i], kPosScale);
+        q->vel[i] = clamp_round<int16_t>(p.vel[i], kVelScale);
+        q->ang[i] = quantise_angle(p.ang[i]);
+        q->rates[i] = clamp_round<int16_t>(p.rates[i], kRateScale);
+    }
+}
+
+void dequantise(const WorldObjState& q, ObjPose* p) {
+    for (int i = 0; i < 3; ++i) {
+        p->pos[i] = q.pos[i] / kPosScale;
+        p->vel[i] = static_cast<float>(q.vel[i] / kVelScale);
+        p->ang[i] = static_cast<float>(q.ang[i] / kAngScale);
+        p->rates[i] = static_cast<float>(q.rates[i] / kRateScale);
+    }
+}
+
+size_t encode_world_states(uint32_t seq, uint32_t host_ms, const WorldObjState* s, size_t n, uint8_t* out, size_t cap) {
+    return encode_batch<WorldStatesHead>(WorldType::WorldStates, seq, host_ms, s, n, kWorldStatesMax, out, cap);
+}
+Status decode_world_states(const uint8_t* data, size_t len, WorldStatesHead& head, const WorldObjState** states) {
+    return decode_batch(WorldType::WorldStates, data, len, kWorldStatesMax, head, states);
+}
+size_t encode_world_events(uint32_t seq, uint32_t host_ms, const WorldEventRec* e, size_t n, uint8_t* out, size_t cap) {
+    return encode_batch<WorldEventsHead>(WorldType::WorldEvents, seq, host_ms, e, n, kWorldEventsMax, out, cap);
+}
+Status decode_world_events(const uint8_t* data, size_t len, WorldEventsHead& head, const WorldEventRec** events) {
+    return decode_batch(WorldType::WorldEvents, data, len, kWorldEventsMax, head, events);
 }
 
 bool MissionAssembly::begin(const MissionOfferMsg& offer) {

@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -51,6 +52,13 @@ struct ClientEvent {
     uint8_t data[96] = {};  // a checked Welcome, PeerInfo, PeerLeft, State or Bye, exactly as received
 };
 
+/// <summary>A world message (world_proto.h WorldStates or WorldEvents) from the host, checked, as received.</summary>
+struct WorldPacket {
+    double wall_rx = 0;
+    uint16_t len = 0;
+    uint8_t data[1000] = {};
+};
+
 struct ClientCounters {
     uint32_t received = 0;        // packets that arrived from ENet
     uint32_t dropped_format = 0;  // wrong size, magic, version, type, channel or id
@@ -60,6 +68,7 @@ struct ClientCounters {
     uint32_t dropped_control = 0; // control events lost (the ring was completely full); the connection is then ended
     uint32_t dropped_out = 0;     // our States not sent: the out queue was full, or they were late (after a Bye)
     uint32_t pings = 0, pongs = 0;  // Pings sent, Pongs the ClockSync accepted
+    uint32_t world = 0, dropped_world = 0;  // world messages queued; refused (ring full, or before the Welcome)
 };
 
 /// <summary>Limits a test may shorten. The defaults are the protocol's.</summary>
@@ -127,6 +136,9 @@ public:
     bool clock_snapshot(ClockSync* out) const;
     uint32_t rtt_ms() const { return rtt_.load(std::memory_order_relaxed); }  // ENet's smoothed round trip time
     ClientCounters counters() const;
+    /// <summary>Moves up to max queued world messages into out (game thread). They arrive only once welcomed.</summary>
+    size_t poll_world(WorldPacket* out, size_t max);
+    static constexpr size_t kWorldInCap = 64;
 
     static constexpr size_t kInCap = 512, kOutCap = 64;
     static constexpr int kSources = kMaxClients + 1;  // State sources: the host (0) and clients 1..kMaxClients
@@ -177,6 +189,11 @@ private:
     bool end_pending_ = false, end_delivered_ = false;  // under in_mx_
     ClientEvent end_{};                                 // under in_mx_: the Disconnected event
     std::atomic<uint32_t> in_count_{0};  // in_n_ plus a pending end, for the lock-free emptiness check
+
+    std::mutex world_mx_;
+    std::unique_ptr<WorldPacket[]> world_in_ = std::make_unique<WorldPacket[]>(kWorldInCap);  // heap: 64 KB
+    size_t world_head_ = 0, world_n_ = 0;  // under world_mx_
+    std::atomic<uint32_t> n_world_{0}, n_world_drop_{0};
 
     std::mutex out_mx_;
     OutMsg out_[kOutCap];

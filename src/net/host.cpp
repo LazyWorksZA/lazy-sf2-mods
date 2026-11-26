@@ -294,7 +294,8 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     // The join position on the host's wing (plan 2.7): the client moves its jet there, and its avatar holds there.
     double join[3];
     net::join_position(ppos, pang[1], slot, join);
-    const AvatarPick pick{aircraft, {join[0], join[1], join[2]}, pang[1], {pvel[0], pvel[1], pvel[2]}};
+    const AvatarPick pick{aircraft, {join[0], join[1], join[2]}, pang[1], {pvel[0], pvel[1], pvel[2]},
+                          world_seat_object(slot + 1)};
     AvatarHandle taken[net::kMaxClients];
     handles(taken);
     const uint32_t air_gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
@@ -634,6 +635,22 @@ void check_order(void* aircraft, bool is_player) {
         g_order_shift ? "avatars are shown at the game time plus the player's step" : "the game time is current");
 }
 
+bool world_send(const uint8_t* data, size_t len, bool reliable) {
+    bool any = false;
+    for (int s = 0; s < net::kMaxClients; ++s)
+        if (g_av[s].active && g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, data, len, reliable)) any = true;
+    return any;
+}
+
+void world_tick(void* player, double now) {
+    double pl[1 + net::kMaxClients][3];
+    int np = 0;
+    obj_read(player, kOffPos, pl[np++], 3);
+    for (int s = 0; s < net::kMaxClients; ++s)
+        if (g_av[s].active && g_av[s].h.obj) obj_read(g_av[s].h.obj, kOffPos, pl[np++], 3);
+    world_host_tick(now, pl, np, world_send);
+}
+
 void on_step(void* aircraft, float dt, bool is_player) {
     if (!g_running.load(std::memory_order_relaxed)) return;
     // The player changed (mission end, new flight): the session is over, and the published host time is stale.
@@ -659,6 +676,7 @@ void on_step(void* aircraft, float dt, bool is_player) {
         pump(aircraft, now);
         if (g_nclients > 0) record_host_state(aircraft, now);
         if (g_nclients > 0 && g_tick.due(now)) send_host_state(aircraft, now);
+        if (g_nclients > 0 && world_host_streaming()) world_tick(aircraft, now);
         if (g_nclients > 0 && now >= g_next_report) {
             report(aircraft, now);
             g_next_report = std::floor(now) + 1.0;
@@ -735,6 +753,13 @@ void host_on_modules_loaded() {
     std::lock_guard<std::mutex> lock(g_mission_mx);
     g_core_started.store(true);
     if (!g_mission.empty()) g_core->set_mission(g_mission, g_mission_id, g_mission_raw);
+}
+
+bool host_drives_object(const void* obj) {
+    if (!g_av || !obj) return false;
+    for (int s = 0; s < net::kMaxClients; ++s)
+        if (g_av[s].active && g_av[s].h.obj == obj) return true;
+    return false;
 }
 
 void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw) {

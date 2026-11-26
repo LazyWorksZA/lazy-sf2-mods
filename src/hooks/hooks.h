@@ -324,6 +324,25 @@ void world_on_modules_loaded();
 /// until replaced, and handed to the network core once it runs. No-op without LAZYSF2_HOST.
 /// </summary>
 void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw);
+/// <summary>Sends one world message to every welcomed client (reliable: WorldEvents). True if any took it.</summary>
+using WorldSendFn = bool (*)(const uint8_t* data, size_t len, bool reliable);
+/// <summary>True once this host serves a mission (T5): it then streams its world to its clients (T6).</summary>
+bool world_host_streaming();
+/// <summary>
+/// Host, game thread, the player's step, with clients: sends the moving mission objects' states (10/2/1 Hz by distance to
+/// the nearest of players[0..n_players)) and, once a second, the events (destroyed, awake, asleep, damage). T6.
+/// </summary>
+void world_host_tick(double now, const double (*players)[3], int n_players, WorldSendFn send);
+/// <summary>Client in a world join, game thread: applies one WorldStates or WorldEvents message to the remote copies.</summary>
+void world_client_apply(const uint8_t* data, size_t len, double host_now);
+/// <summary>
+/// The aircraft a peer's avatar should be in a shared world: member peer_id of the player flight (the host member 0,
+/// client k member k). Null outside a shared world or when that member does not exist.
+/// </summary>
+void* world_seat_object(int peer_id);
+/// <summary>True if the host's or the client's Phase 4 code drives this aircraft as an avatar (game thread).</summary>
+bool host_drives_object(const void* obj);
+bool client_drives_object(const void* obj);
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>
 bool client_connect_target(char* host, size_t cap, uint16_t* port);
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>

@@ -66,18 +66,35 @@ void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     } else {
         obj_read(player->obj, kOffPos, ref, 3);
     }
-    AvatarPicker picker(player ? player->name : nullptr, c.pick->want_type);
-    for (size_t i = 0; i < n; ++i) {
-        double p[3];
-        obj_read(list[i].obj, kOffPos, p, 3);
-        picker.offer(i, avatar_candidate(list[i], p, ref, c.taken, c.n_taken));
+    size_t chosen = n;
+    AvatarRank rank;
+    if (c.pick->prefer) {
+        for (size_t i = 0; i < n && chosen == n; ++i)
+            if (list[i].obj == c.pick->prefer && !list[i].is_player &&
+                !avatar_logic::is_taken(c.taken, c.n_taken, list[i].obj, list[i].seq))
+                chosen = i;
+        if (chosen < n) {
+            rank.tier = AvatarTier::Wingman;
+            rank.seq = list[chosen].seq;
+            rank.nearby = true;
+        }
     }
-    if (!picker.found()) return;
-    const LiveAircraft& a = list[picker.index()];
+    if (chosen == n) {
+        AvatarPicker picker(player ? player->name : nullptr, c.pick->want_type);
+        for (size_t i = 0; i < n; ++i) {
+            double p[3];
+            obj_read(list[i].obj, kOffPos, p, 3);
+            picker.offer(i, avatar_candidate(list[i], p, ref, c.taken, c.n_taken));
+        }
+        if (!picker.found()) return;
+        chosen = picker.index();
+        rank = picker.best();
+    }
+    const LiveAircraft& a = list[chosen];
     c.found = true;
     c.obj = a.obj;
     c.seq = a.seq;
-    c.rank = picker.best();
+    c.rank = rank;
     obj_read(c.obj, kOffPos, c.from, 3);
     if (a.name) wcsncpy_s(c.name, a.name, _TRUNCATE);
     if (a.type_name) strncpy_s(c.type, a.type_name, _TRUNCATE);

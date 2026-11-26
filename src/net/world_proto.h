@@ -16,8 +16,10 @@ enum class WorldType : uint8_t {
     MissionRequest = 20,  // client to host, reliable
     MissionOffer = 21,    // host to client, reliable
     MissionChunk = 22,    // host to client, reliable, variable length
+    WorldStates = 23,     // host to client, unreliable (channel 1), 1..kWorldStatesMax object states
+    WorldEvents = 24,     // host to client, reliable, 1..kWorldEventsMax events
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 22;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 24;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -81,6 +83,83 @@ bool pack_mission(const std::string& sidecar, const std::vector<uint8_t>& msn, s
 /// <summary>The reverse; checks the CRC, the sizes and the header. *why says what failed.</summary>
 bool unpack_mission(const std::vector<uint8_t>& packed, uint32_t id, uint32_t raw, std::string* sidecar,
                     std::vector<uint8_t>* msn, const char** why);
+
+// ---- the world stream (T6) ----
+
+/// <summary>What a stable key names (network-recon §10.3).</summary>
+enum class KeyKind : uint8_t { Aircraft = 1, Ground = 2, Placed = 3 };
+
+#pragma pack(push, 1)
+/// <summary>
+/// One moving object, quantised: position in centimetres (int32, world frame, about 21,000 km either way), velocity in
+/// 0.05 m/s (about 1,600 m/s), angles pitch/heading/roll in 2^-16 turns, rates in 0.001 rad/s (32 rad/s).
+/// </summary>
+struct WorldObjState {
+    uint8_t kind;   // KeyKind
+    uint16_t a;     // slot index, or area index
+    uint16_t b;     // member index, or placed index
+    int32_t pos[3];
+    int16_t vel[3];
+    int16_t ang[3];
+    int16_t rates[3];
+};
+struct WorldStatesHead {
+    Header h;
+    uint32_t seq;      // per receiver stream, increasing
+    uint32_t host_ms;  // host game time in ms when sampled
+    uint8_t count;
+};
+/// <summary>A world event; value depends on the event.</summary>
+struct WorldEventRec {
+    uint8_t event;  // kEvent*
+    uint8_t kind;   // KeyKind
+    uint16_t a, b;
+    int16_t value;
+};
+struct WorldEventsHead {
+    Header h;
+    uint32_t seq;
+    uint32_t host_ms;
+    uint8_t count;
+};
+#pragma pack(pop)
+static_assert(sizeof(WorldObjState) == 35);   // 0:1 kind, 1:2 a, 3:2 b, 5:12 pos, 17:6 vel, 23:6 ang, 29:6 rates
+static_assert(sizeof(WorldStatesHead) == 13);  // 4:4 seq, 8:4 host ms, 12:1 count
+static_assert(sizeof(WorldEventRec) == 8);
+static_assert(sizeof(WorldEventsHead) == 13);
+inline constexpr size_t kWorldStatesMax = 28;  // 13 + 28 * 35 = 993 bytes: under ENet's 1,024 and one datagram
+inline constexpr size_t kWorldEventsMax = 64;  // 13 + 64 * 8 = 525 bytes
+inline constexpr size_t kWorldStatesBytes = sizeof(WorldStatesHead) + kWorldStatesMax * sizeof(WorldObjState);
+inline constexpr size_t kWorldEventsBytes = sizeof(WorldEventsHead) + kWorldEventsMax * sizeof(WorldEventRec);
+static_assert(kWorldStatesBytes == 993 && kWorldStatesBytes < 1024 && kWorldEventsBytes == 525);
+/// <summary>The largest world message the cores carry.</summary>
+inline constexpr size_t kWorldMaxMessage = 1000;  // the cores' world queue entries
+static_assert(kWorldStatesBytes <= kWorldMaxMessage && kWorldEventsBytes <= kWorldMaxMessage);
+
+inline constexpr uint8_t kEventDestroyed = 1;     // value: unused
+inline constexpr uint8_t kEventAwake = 2;         // the object woke (formation start, scramble)
+inline constexpr uint8_t kEventAsleep = 3;        // the object went to sleep (landed)
+inline constexpr uint8_t kEventPlacedDamage = 4;  // value: the placed record's damage 0..100 (a delta of its state)
+inline constexpr uint8_t kEventDamageLevel = 5;   // value: the object's damage level 0..5
+
+/// <summary>An unquantised object state (world metres, m/s, radians).</summary>
+struct ObjPose {
+    double pos[3];
+    float vel[3];
+    float ang[3];
+    float rates[3];
+};
+/// <summary>Quantises (clamping to the field's range; not finite gives 0).</summary>
+void quantise(const ObjPose& p, WorldObjState* q);
+/// <summary>Back to metres, m/s and radians (angles in -pi..pi).</summary>
+void dequantise(const WorldObjState& q, ObjPose* p);
+
+/// <summary>Encodes n (1..kWorldStatesMax) states; returns the byte count or 0.</summary>
+size_t encode_world_states(uint32_t seq, uint32_t host_ms, const WorldObjState* s, size_t n, uint8_t* out, size_t cap);
+/// <summary>Checks the header, the count and the length; *states points into data.</summary>
+Status decode_world_states(const uint8_t* data, size_t len, WorldStatesHead& head, const WorldObjState** states);
+size_t encode_world_events(uint32_t seq, uint32_t host_ms, const WorldEventRec* e, size_t n, uint8_t* out, size_t cap);
+Status decode_world_events(const uint8_t* data, size_t len, WorldEventsHead& head, const WorldEventRec** events);
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>
 class MissionAssembly {
