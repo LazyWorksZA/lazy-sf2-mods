@@ -35,6 +35,12 @@ void set_display_monitor(int number);
 MouseMode mouse_mode();
 void set_mouse_mode(MouseMode mode);
 
+/// <summary>Options.ini [ControlOptions] PilotTwist (Options &gt; Controls &gt; Pilot Twist): 1 = on, else off (default).</summary>
+bool pilot_twist();
+void set_pilot_twist(bool on);
+/// <summary>For the module watch: the loaded value only, never loads. -1 = not loaded yet, 0 = off, 1 = on.</summary>
+int pilot_twist_peek();
+
 /// <summary>Options.ini [OtherOptions] TacviewRecording (0 or 1, default 0 = off), loaded with the other settings.</summary>
 void set_tacview_recording(bool on);  // the Options page, on Exit
 /// <summary>

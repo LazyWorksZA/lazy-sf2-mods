@@ -8,6 +8,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 ### Player features
 
 - **Tacview structures.** Recordings now show the placed buildings and bridges (hangars, bunkers, factories, town buildings) of the target areas the mission populates, as static objects on the ground, written once per recording; those the game already shows as live objects (guns, SAM sites, radars, mission targets) are not doubled. In single missions only the buildings the game actually draws are recorded, and a building the game destroys gets Tacview's destroyed event and an explosion.
+- **Pilot Twist** (Options › Controls, default Off): in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 20 degrees further, as if you twist in the seat, and leans you a few centimetres toward that side.
 
 ### Developer tools (off unless enabled)
 

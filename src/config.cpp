@@ -18,6 +18,7 @@ std::atomic<DisplayMode> g_display{DisplayMode::Fullscreen};
 std::atomic<int> g_monitor{0};
 std::atomic<MouseMode> g_mouse{MouseMode::Cursor};
 std::atomic<int> g_tacview{-1};  // -1 = not loaded yet
+std::atomic<int> g_pilot_twist{-1};  // -1 = not loaded yet
 
 // Saved Games\ThirdWire\<exe name>, e.g. ...\StrikeFighters2 (the game's own per-user folder), or empty.
 std::wstring game_data_path() {
@@ -63,6 +64,10 @@ BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
         g_mouse.load() == MouseMode::Cursor ? "match the Windows cursor" : "stock");
 
     g_tacview = read_int(path, L"OtherOptions", L"TacviewRecording", 0) == 1 ? 1 : 0;
+
+    const int twist = read_int(path, L"ControlOptions", L"PilotTwist", 0);
+    g_pilot_twist = twist == 1 ? 1 : 0;
+    LOG("config: [ControlOptions] PilotTwist=%d -> %s", twist, twist == 1 ? "on" : "off (stock)");
     return TRUE;
 }
 
@@ -97,6 +102,8 @@ void set_tacview_recording(bool on) {
 
 int tacview_recording_peek() { return g_tacview.load(); }
 
+int pilot_twist_peek() { return g_pilot_twist.load(); }
+
 std::wstring game_data_dir() { return game_data_path(); }
 
 MouseMode mouse_mode() {
@@ -107,6 +114,16 @@ MouseMode mouse_mode() {
 void set_mouse_mode(MouseMode mode) {
     ensure_loaded();
     g_mouse = mode;
+}
+
+bool pilot_twist() {
+    ensure_loaded();
+    return g_pilot_twist.load() == 1;
+}
+
+void set_pilot_twist(bool on) {
+    ensure_loaded();
+    if (g_pilot_twist.exchange(on ? 1 : 0) != (on ? 1 : 0)) LOG("config: Pilot Twist -> %s", on ? "on" : "off");
 }
 
 }  // namespace LazyWorks::SF2Patch::config
