@@ -76,7 +76,8 @@ private:
 /// </summary>
 class ShotLedger {
 public:
-    static constexpr double kGunGrace = 1.0, kStoreWindow = 90.0;
+    // A round's time of flight: about 3 s to the 5 km claim range limit, as rounds slow down.
+    static constexpr double kGunGrace = 3.0, kStoreWindow = 90.0;
     static constexpr int kStoreBudget = 64;  // objects in the blasts of one bomb or cluster, at most
     static constexpr int kLaunches = 16;
     void guns(bool on, double now) {

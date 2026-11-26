@@ -8297,8 +8297,9 @@ void weapon_launch_tests() {
         led.guns(true, 10.0);
         const bool firing = shot(gun, 10.5) == HitVerdict::Ok;
         led.guns(false, 11.0);
-        const bool grace = shot(gun, 11.8) == HitVerdict::Ok && shot(gun, 12.2) == HitVerdict::NoShot;
-        expect(no_trigger && firing && grace, "shots: a gun claim needs the claimer's trigger on, or off at most 1 s");
+        const bool grace = shot(gun, 13.8) == HitVerdict::Ok && shot(gun, 14.2) == HitVerdict::NoShot;
+        expect(no_trigger && firing && grace,
+               "shots: a gun claim needs the claimer's trigger on, or off at most 3 s (a round's time of flight)");
         const bool no_launch = shot(st, 20.0) == HitVerdict::NoShot;
         led.launch(41, 20.0);
         const bool other = shot(st, 21.0) == HitVerdict::NoShot;
