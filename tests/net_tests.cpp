@@ -54,6 +54,8 @@
 #include "net/protocol.h"
 #include "net/stream_format.h"
 #include "net/stream_record.h"
+#include "net/mission_fetch.h"
+#include "net/world_proto.h"
 
 using namespace LazyWorks::SF2Patch::net;
 
@@ -7229,6 +7231,121 @@ void pilot_twist_settings_tests() {
            "settings: the limits themselves are kept");
 }
 
+void world_mission_tests() {
+    std::printf("world mission transfer\n");
+    // Sizes are part of the wire format (v3); a chunk stays under ENet's 1,024-byte packet limit and one datagram.
+    expect(sizeof(MissionRequestMsg) == 8 && sizeof(MissionOfferMsg) == 22 && sizeof(MissionChunkHead) == 12 &&
+               kMissionChunkMax == 972 && kMissionChunkMax < 1200,
+           "mission: message sizes (8, 22, 12 + 960)");
+    uint8_t b[kMissionChunkMax + 8];
+    MissionRequestMsg rq{};
+    rq.have_id = 7;
+    MissionRequestMsg rq2{};
+    expect(encode(rq, b, sizeof(b)) == 8 && peek_world_type(b, 8) == 20 && decode(b, 8, rq2) == Status::Ok &&
+               rq2.have_id == 7 && decode(b, 7, rq2) == Status::Truncated,
+           "mission: request round trip");
+    MsgType mt{};
+    expect(peek_type(b, 8, mt) == Status::BadType, "mission: the v2-style peek_type does not take world types");
+
+    std::vector<uint8_t> msn(70000);
+    for (size_t i = 0; i < msn.size(); ++i) msn[i] = static_cast<uint8_t>((i % 2) ? 0 : "[AircraftMission001]\n"[i / 2 % 21]);
+    const std::string sidecar = "version=1\nseed=12345\ndensity=3\n";
+    std::vector<uint8_t> packed;
+    uint32_t id = 0, raw = 0;
+    expect(pack_mission(sidecar, msn, &packed, &id, &raw) && id != 0 && raw == 16 + sidecar.size() + msn.size() &&
+               packed.size() < msn.size() / 4,
+           "mission: pack compresses a UTF-16 ini");
+    std::string side2;
+    std::vector<uint8_t> msn2;
+    const char* why = "";
+    expect(unpack_mission(packed, id, raw, &side2, &msn2, &why) && side2 == sidecar && msn2 == msn,
+           "mission: unpack gives the same sidecar and file");
+    std::vector<uint8_t> bad = packed;
+    bad[bad.size() / 2] ^= 0x5a;
+    expect(!unpack_mission(bad, id, raw, &side2, &msn2, &why), "mission: a corrupted package is refused (CRC)");
+    expect(!unpack_mission(packed, id, raw + 1, &side2, &msn2, &why), "mission: a wrong unpacked size is refused");
+
+    MissionOfferMsg o{};
+    o.status = kOfferOk;
+    o.mission_id = id;
+    o.packed_bytes = static_cast<uint32_t>(packed.size());
+    o.raw_bytes = raw;
+    o.chunk_bytes = kMissionChunkData;
+    o.chunk_count = static_cast<uint16_t>(mission_chunk_count(packed.size()));
+    MissionOfferMsg o2{};
+    expect(encode(o, b, sizeof(b)) == 22 && decode(b, 22, o2) == Status::Ok && o2.chunk_count == o.chunk_count,
+           "mission: offer round trip");
+    MissionAssembly as;
+    expect(as.begin(o) && as.count() == o.chunk_count, "mission: assembly accepts the offer");
+    MissionOfferMsg wrong = o;
+    wrong.chunk_count++;
+    MissionAssembly as2;
+    expect(!as2.begin(wrong), "mission: an offer with an inconsistent chunk count is refused");
+    // Last chunk first, then the rest in order, one duplicate.
+    bool order_ok = true;
+    for (int k = 0; k <= o.chunk_count; ++k) {
+        const uint16_t i = static_cast<uint16_t>(k == 0 ? o.chunk_count - 1 : k - 1);
+        const size_t n = encode_mission_chunk(id, i, packed.data(), packed.size(), b, sizeof(b));
+        MissionChunkHead ch{};
+        const uint8_t* pl = nullptr;
+        order_ok = order_ok && n > 12 && n <= kMissionChunkMax && decode_mission_chunk(b, n, ch, &pl) == Status::Ok;
+        const MissionAssembly::Add r = as.add(ch, pl);
+        if (k == o.chunk_count) order_ok = order_ok && r == MissionAssembly::Add::Duplicate;
+        else if (k == o.chunk_count - 1) order_ok = order_ok && r == MissionAssembly::Add::Done;
+        else order_ok = order_ok && r == MissionAssembly::Add::Ok;
+    }
+    expect(order_ok && as.complete() && as.bytes() == packed, "mission: chunks reassemble out of order, duplicates ignored");
+    expect(encode_mission_chunk(id, o.chunk_count, packed.data(), packed.size(), b, sizeof(b)) == 0,
+           "mission: no chunk past the end");
+    {
+        const size_t n = encode_mission_chunk(id, 0, packed.data(), packed.size(), b, sizeof(b));
+        MissionChunkHead ch{};
+        const uint8_t* pl = nullptr;
+        expect(decode_mission_chunk(b, n - 1, ch, &pl) == Status::Truncated &&
+                   decode_mission_chunk(b, n + 1, ch, &pl) == Status::Oversized,
+               "mission: chunk length must match its head");
+        ch.mission_id = id + 1;
+        MissionAssembly as3;
+        as3.begin(o);
+        decode_mission_chunk(b, n, ch, &pl);
+        ch.mission_id = id + 1;
+        expect(as3.add(ch, pl) == MissionAssembly::Add::Bad, "mission: a chunk of another mission is refused");
+    }
+
+    // Loopback: the host core answers a fetch with "none", then sends the mission once it is set.
+    if (enet_initialize() != 0) {
+        expect(false, "mission loopback: enet_initialize");
+        return;
+    }
+    {
+        HostCore core;
+        static std::atomic<int> none_seen{0};
+        none_seen = 0;
+        core.start("127.0.0.1", 0, [](const char* line) {
+            if (std::strstr(line, "none yet")) none_seen.fetch_add(1);
+        });
+        for (int i = 0; i < 2000 && core.state() != HostCore::State::Running; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        MissionFetch fetch;
+        const bool started = fetch.start("127.0.0.1", core.port(), nullptr);
+        for (int i = 0; i < 300 && none_seen.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        expect(started && none_seen.load() >= 1 && fetch.state() == MissionFetch::State::Running,
+               "mission loopback: the host says none yet, the fetch keeps waiting");
+        core.set_mission(packed, id, raw);
+        for (int i = 0; i < 1000 && fetch.state() == MissionFetch::State::Running; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::vector<uint8_t> got;
+        MissionOfferMsg go{};
+        expect(fetch.state() == MissionFetch::State::Done && fetch.take(&got, &go) && got == packed &&
+                   go.mission_id == id && go.seat >= 1 && !fetch.take(&got, &go),
+               "mission loopback: the fetch receives the packed mission once, with a seat");
+        expect(core.missions_sent() == 1, "mission loopback: the host counts one mission sent");
+        fetch.stop();
+        core.stop(false);
+    }
+    enet_deinitialize();
+}
+
 void world_seat_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     std::printf("world seat\n");
@@ -7400,8 +7517,8 @@ int main() {
         expect(n == 56 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
-        expect(kVersion == 2 && sizeof(WelcomeMsg) == 58 && sizeof(PeerInfoMsg) == 54 && sizeof(PeerLeftMsg) == 7,
-               "v2 sizes");
+        expect(kVersion == 3 && sizeof(WelcomeMsg) == 58 && sizeof(PeerInfoMsg) == 54 && sizeof(PeerLeftMsg) == 7,
+               "v3 sizes");
     }
 
     loopback();
@@ -7441,6 +7558,7 @@ int main() {
     world_files_tests();
     world_seat_tests();
     world_remote_tests();
+    world_mission_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

@@ -312,11 +312,20 @@ bool client_welcomed();
 /// sidecar's seed and options forced. Both write world_NNN.manifest.txt after the mission's objects are created.
 /// LAZYSF2_WORLD_SEED=n fixes the seed for a save. LAZYSF2_WORLD_SEAT=n puts the player on member n (n = 1 is "x-2") of
 /// the player flight in every single mission. LAZYSF2_WORLD_REMOTE=1 makes every mission object but the player's
-/// REMOTEOBJECT after the start and blocks local damage to REMOTEOBJECT objects (the client's world). world_install() reads the variables (DllMain, after
+/// REMOTEOBJECT after the start and blocks local damage to REMOTEOBJECT objects (the client's world).
+/// LAZYSF2_WORLD_JOIN=1 (client mode) fetches the host's mission in menus and flies it at the next Accept; a host
+/// with LAZYSF2_WORLD_SAVE serves the mission it flies. world_install() reads the variables (DllMain, after
 /// install_probe_hooks()); world_on_modules_loaded() hooks SingleMissionScreen.dll and SingleMission.dll images.
 /// </summary>
 void world_install();
 void world_on_modules_loaded();
+/// <summary>
+/// Host mode: the mission package (net/world_proto.h) to serve to clients that ask for it (T5). Any thread; kept
+/// until replaced, and handed to the network core once it runs. No-op without LAZYSF2_HOST.
+/// </summary>
+void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw);
+/// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>
+bool client_connect_target(char* host, size_t cap, uint16_t* port);
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>
 inline bool env_set(const wchar_t* name) {
     wchar_t b[2];

@@ -16,8 +16,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "net/protocol.h"
 
@@ -118,6 +120,13 @@ public:
     /// </summary>
     void reset_host_time() { host_time_valid_.store(false, std::memory_order_release); }
     uint32_t rtt_ms(uint8_t slot) const;  // ENet's smoothed round trip time, 0 for a bad slot
+    /// <summary>
+    /// The mission package (world_proto.h pack_mission) that the network thread sends, offer and chunks, to any peer
+    /// that asks with a MissionRequest, in menus as in flight. Any thread; replaces the previous one. Empty = none.
+    /// </summary>
+    void set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw);
+    /// <summary>Missions sent in full since start (offers with chunks).</summary>
+    uint32_t missions_sent() const { return n_missions_.load(std::memory_order_relaxed); }
     HostCounters counters() const;
 
 private:
@@ -168,6 +177,14 @@ private:
     size_t in_head_ = 0, in_n_ = 0;
     size_t in_states_[kMaxClients] = {};  // States per slot currently in the ring (under in_mx_)
     std::atomic<uint32_t> in_count_{0};  // mirrors in_n_ for the lock-free emptiness check
+
+    struct MissionBlob {
+        std::vector<uint8_t> packed;
+        uint32_t id = 0, raw = 0;
+    };
+    std::mutex mission_mx_;
+    std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer
+    std::atomic<uint32_t> n_missions_{0};
 
     std::mutex out_mx_;
     OutMsg out_[kOutCap];

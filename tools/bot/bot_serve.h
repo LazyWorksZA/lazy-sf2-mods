@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "bot_core.h"
 
@@ -31,6 +32,8 @@ struct ServeConfig {
     std::function<void(const char*)> log;    // may be empty; also called from HostCore's and the recorder's threads
     const std::atomic<bool>* cancel = nullptr;
     std::atomic<uint16_t>* port_out = nullptr;  // set to the bound port once listening
+    std::vector<uint8_t> mission;  // non-empty: a packed mission (net/world_proto.h) served to clients that ask
+    uint32_t mission_id = 0, mission_raw = 0;
 };
 
 struct ServeResult {
@@ -47,6 +50,7 @@ struct ServeResult {
     double jet_start[3] = {};
     double jet_start_heading = 0, jet_start_time = 0;  // host time
     double host_time_end = 0;
+    uint32_t missions_sent = 0;  // missions sent in full (T5)
 };
 
 /// <summary>

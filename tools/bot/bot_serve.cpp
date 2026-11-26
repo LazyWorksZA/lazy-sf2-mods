@@ -384,6 +384,11 @@ ServeResult run_serve(const ServeConfig& cfg) {
     Serve& sv = *s;
     sv.peers.set_host(cfg.callsign.c_str(), cfg.aircraft.c_str());
     sv.core.set_host_time(sv.host_t);
+    if (!cfg.mission.empty()) {
+        sv.core.set_mission(cfg.mission, cfg.mission_id, cfg.mission_raw);
+        sv.say("bot serve: serving mission 0x%08x (%zu bytes packed)", static_cast<unsigned>(cfg.mission_id),
+               cfg.mission.size());
+    }
     if (!sv.core.start(addr, cfg.port, core_log)) {
         res.code = 2;
         return res;
@@ -484,6 +489,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
+    sv.res.missions_sent = sv.core.missions_sent();
     sv.core.stop(false);
     // Waits at most 1 s for the writer, then detaches it (StreamWriter has no joining close): a final flush slower than
     // that would outlive the Serve that owns its ring. Accepted for a developer tool.

@@ -1,5 +1,7 @@
 #include "net/host_core.h"
 
+#include "net/world_proto.h"
+
 #include <enet/enet.h>
 
 #include <chrono>
@@ -181,6 +183,19 @@ HostCounters HostCore::counters() const {
     return c;
 }
 
+void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw) {
+    std::shared_ptr<const MissionBlob> b;
+    if (!packed.empty()) {
+        auto nb = std::make_shared<MissionBlob>();
+        nb->packed = std::move(packed);
+        nb->id = id;
+        nb->raw = raw;
+        b = std::move(nb);
+    }
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    mission_ = std::move(b);
+}
+
 // The network thread. Everything below runs on it, and only it touches ENet.
 void HostCore::run() {
     char line[320];
@@ -224,6 +239,7 @@ void HostCore::run() {
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
     uint32_t gens[kMaxClients] = {};
+    uint32_t mission_asks[kMaxClients] = {};
     uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
@@ -235,13 +251,70 @@ void HostCore::run() {
         hello_seen[slot] = false;
         bye_seen[slot] = false;
         version_refused[slot] = false;
+        mission_asks[slot] = 0;
         rtt_[slot].store(0, std::memory_order_relaxed);
     };
     auto drop = [&](std::atomic<uint32_t>& counter) { counter.fetch_add(1, std::memory_order_relaxed); };
 
+    auto send_raw = [&](int slot, const uint8_t* data, size_t n) {
+        if (!peers[slot] || !n) return false;
+        ENetPacket* p = enet_packet_create(data, n, ENET_PACKET_FLAG_RELIABLE);
+        if (!p) return false;
+        if (enet_peer_send(peers[slot], kChannelReliable, p) != 0) {
+            enet_packet_destroy(p);
+            return false;
+        }
+        return true;
+    };
+    // A MissionRequest is answered here, in any phase (before a Hello too, and while the game is in menus): the offer
+    // and every chunk are handed to ENet at once, which paces them on the reliable channel.
+    auto handle_world = [&](int slot, uint8_t channel, uint8_t wt, const uint8_t* data, size_t len) {
+        MissionRequestMsg rq;
+        if (wt != static_cast<uint8_t>(WorldType::MissionRequest) || channel != kChannelReliable ||
+            decode(data, len, rq) != Status::Ok)
+            return drop(n_format_);
+        if (++mission_asks[slot] > 8) return drop(n_state_);  // per connection
+        std::shared_ptr<const MissionBlob> b;
+        {
+            std::lock_guard<std::mutex> lock(mission_mx_);
+            b = mission_;
+        }
+        MissionOfferMsg o{};
+        o.chunk_bytes = static_cast<uint16_t>(kMissionChunkData);
+        o.seat = static_cast<uint8_t>(slot + 1);  // a suggestion: client 1 flies #2, and so on (network-recon §10.14)
+        if (!b) {
+            o.status = kOfferNone;
+        } else if (b->packed.size() > kMissionMaxPacked) {
+            o.status = kOfferTooBig;
+        } else {
+            o.status = kOfferOk;
+            o.mission_id = b->id;
+            o.packed_bytes = static_cast<uint32_t>(b->packed.size());
+            o.raw_bytes = b->raw;
+            o.chunk_count = static_cast<uint16_t>(mission_chunk_count(b->packed.size()));
+        }
+        uint8_t out[kMissionChunkMax];
+        if (!send_raw(slot, out, encode(o, out, sizeof(out)))) return;
+        if (o.status != kOfferOk) {
+            say("net: peer %u asked for the mission: %s", static_cast<unsigned>(slot + 1),
+                o.status == kOfferNone ? "none yet" : "too big to send");
+            return;
+        }
+        size_t sent = 0;
+        for (uint16_t i = 0; i < o.chunk_count; ++i)
+            if (send_raw(slot, out, encode_mission_chunk(o.mission_id, i, b->packed.data(), b->packed.size(), out,
+                                                         sizeof(out))))
+                ++sent;
+        n_missions_.fetch_add(1, std::memory_order_relaxed);
+        say("net: mission 0x%08x sent to peer %u: %u bytes in %u of %u chunks (suggested seat %u)",
+            static_cast<unsigned>(o.mission_id), static_cast<unsigned>(slot + 1), static_cast<unsigned>(o.packed_bytes),
+            static_cast<unsigned>(sent), static_cast<unsigned>(o.chunk_count), static_cast<unsigned>(o.seat));
+    };
+
     auto handle_packet = [&](int slot, uint8_t channel, const uint8_t* data, size_t len) {
         n_received_.fetch_add(1, std::memory_order_relaxed);
         if (len > kMaxPacket) return drop(n_format_);
+        if (const uint8_t wt = peek_world_type(data, len)) return handle_world(slot, channel, wt, data, len);
         MsgType type{};
         const Status ps = peek_type(data, len, type);
         if (ps == Status::BadVersion && channel == kChannelReliable && !version_refused[slot] && peers[slot]) {

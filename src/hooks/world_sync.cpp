@@ -20,6 +20,8 @@
 #include "hooks/world_files.h"
 #include "hooks/world_logic.h"
 #include "log.h"
+#include "net/mission_fetch.h"
+#include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -75,6 +77,9 @@ constexpr size_t kAircraftData = 0x380, kGroundTypeRec = 0x360, kTypeName = 0x04
 enum class Mode { Off, Save, Load };
 Mode g_mode = Mode::Off;          // set once in world_install()
 std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
+bool g_join = false;              // LAZYSF2_WORLD_JOIN=1 (with LAZYSF2_CONNECT): fetch the host's mission in menus
+bool g_seat_from_env = false;     // LAZYSF2_WORLD_SEAT was given: it wins over the host's suggestion
+net::MissionFetch* g_fetch = nullptr;  // never freed (no join at DLL unload)
 bool g_remote = false;            // LAZYSF2_WORLD_REMOTE=1
 int g_seat = -1;                  // LAZYSF2_WORLD_SEAT: the player's member index, or -1 (stock)
 bool g_seed_from_env = false;
@@ -430,6 +435,31 @@ bool read_text(const std::wstring& path, std::string* out) {
     return ok;
 }
 
+bool read_bytes(const std::wstring& path, std::vector<uint8_t>* out) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    bool ok = GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart <= net::kMissionMaxRaw;
+    if (ok) {
+        out->resize(static_cast<size_t>(size.QuadPart));
+        DWORD got = 0;
+        ok = ReadFile(f, out->data(), static_cast<DWORD>(out->size()), &got, nullptr) && got == out->size();
+    }
+    CloseHandle(f);
+    return ok;
+}
+
+bool write_bytes(const std::wstring& path, const std::vector<uint8_t>& data) {
+    if (path.size() >= MAX_PATH) return false;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok = WriteFile(f, data.data(), static_cast<DWORD>(data.size()), &written, nullptr) &&
+                    written == data.size();
+    CloseHandle(f);
+    return ok;
+}
+
 bool file_exists(const std::wstring& path) {
     const DWORD a = GetFileAttributesW(path.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
@@ -568,7 +598,44 @@ void accept_save(const Ctx& c, void* page) {
     ReleaseSRWLockExclusive(&g_lock);
 }
 
+// Join: a mission fetched from the host becomes the file to load (written to the probe folder as world_NNN.msn and
+// its sidecar, so Load reads it by path as for LAZYSF2_WORLD_LOAD). Menu thread.
+void take_fetched_mission() {
+    if (!g_fetch) return;
+    std::vector<uint8_t> packed, msn;
+    net::MissionOfferMsg offer{};
+    if (!g_fetch->take(&packed, &offer)) {
+        static bool logged = false;
+        if (g_load_path.empty() && !logged) {
+            logged = true;
+            LOG("world: join: no mission from the host yet; this Accept flies the generated mission");
+        }
+        return;
+    }
+    std::string sidecar;
+    const char* why = "";
+    if (!net::unpack_mission(packed, offer.mission_id, offer.raw_bytes, &sidecar, &msn, &why)) {
+        LOG("world: join: the host's mission 0x%08lx is unusable (%s)", static_cast<unsigned long>(offer.mission_id), why);
+        return;
+    }
+    const std::wstring dir = probe_output_dir();
+    const int n = next_number(dir);
+    const std::wstring msn_path = numbered(dir, n, L".msn");
+    const std::wstring side_path = world_companion_path(msn_path, L".sidecar.txt");
+    if (!write_bytes(msn_path, msn) || !write_text(side_path, sidecar, true)) {
+        LOG("world: ERR join: could not write %ls or its sidecar", msn_path.c_str());
+        return;
+    }
+    g_load_path = msn_path;
+    if (!g_seat_from_env && offer.seat >= 1 && offer.seat < kWorldMaxMembers) g_seat = offer.seat;
+    LOG("world: join: the host's mission 0x%08lx is %ls (%zu bytes); seat %d (%s)",
+        static_cast<unsigned long>(offer.mission_id), msn_path.c_str(), msn.size(), g_seat,
+        g_seat_from_env ? "LAZYSF2_WORLD_SEAT" : "the host's suggestion");
+}
+
 void accept_load(const Ctx& c, void* page) {
+    if (g_join) take_fetched_mission();
+    if (g_load_path.empty()) return;
     const std::wstring side_path = world_companion_path(g_load_path, L".sidecar.txt");
     std::string text, err;
     WorldSidecar s;
@@ -771,6 +838,21 @@ void write_manifest(const Ctx& c, const Armed& a, int rnd_index, int rnd_seed) {
         format_manifest_counts(v).c_str() + 2, v.size(), player_key.c_str(), empty_formations);
 }
 
+// Host: the saved file and its final sidecar, packed, for clients that ask (T5).
+void publish_mission(const Armed& a) {
+    std::vector<uint8_t> msn, packed;
+    uint32_t id = 0, raw = 0;
+    if (!read_bytes(a.msn_path, &msn)) {
+        LOG("world: ERR could not read %ls back to serve it", a.msn_path.c_str());
+        return;
+    }
+    if (!net::pack_mission(format_sidecar(a.sidecar), msn, &packed, &id, &raw)) {
+        LOG("world: the mission is too big to serve (%zu bytes)", msn.size());
+        return;
+    }
+    host_publish_mission(packed.data(), packed.size(), id, raw);
+}
+
 int __fastcall h_Start(void* msn) {
     Armed a;
     AcquireSRWLockExclusive(&g_lock);
@@ -811,6 +893,7 @@ int __fastcall h_Start(void* msn) {
         else
             LOG("world: sidecar %ls now holds density %d and mission start %d", a.sidecar_path.c_str(),
                 g_seen_density, g_seen_start);
+        publish_mission(a);
     }
     write_manifest(c, a, idx, sd);
     return result;
@@ -1180,6 +1263,7 @@ void world_install() {
     wchar_t seat[16] = {};
     if (GetEnvironmentVariableW(L"LAZYSF2_WORLD_SEAT", seat, 16) > 0) {
         g_seat = parse_seat(seat);
+        g_seat_from_env = g_seat >= 0;
         if (g_seat < 0)
             LOG("world: LAZYSF2_WORLD_SEAT is not a member index 1..47; stock seat");
         else
@@ -1192,6 +1276,21 @@ void world_install() {
             "and local damage to REMOTEOBJECT objects is blocked");
     }
     install_save_load();
+    if (env_set(L"LAZYSF2_WORLD_JOIN")) {
+        char host[64] = {};
+        uint16_t port = 0;
+        if (g_mode != Mode::Off) {
+            LOG("world: join off (LAZYSF2_WORLD_SAVE or LAZYSF2_WORLD_LOAD is set too)");
+        } else if (!client_connect_target(host, sizeof(host), &port)) {
+            LOG("world: join off (it needs client mode: LAZYSF2_CONNECT)");
+        } else {
+            g_join = true;
+            g_mode = Mode::Load;  // the fetched file is loaded at the New page's Accept, as for LAZYSF2_WORLD_LOAD
+            if (g_seat < 0) g_seat = 1;  // until the host suggests one
+            LOG("world: join mode: the host's mission is fetched from %s:%u in menus and flown at the next Accept",
+                host, static_cast<unsigned>(port));
+        }
+    }
 }
 
 void install_save_load() {
@@ -1231,7 +1330,16 @@ void install_save_load() {
     LOG("world: load mode: each New-page Accept loads %ls with its sidecar's seed and options", full);
 }
 
+static void fetch_log(const char* line) { LOG("%s", line); }
+
 void world_on_modules_loaded() {
+    if (g_join && !g_fetch) {
+        char host[64] = {};
+        uint16_t port = 0;
+        g_fetch = new (std::nothrow) net::MissionFetch;
+        if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !g_fetch->start(host, port, fetch_log))
+            LOG("world: join: could not start the mission fetch");
+    }
     if (g_mode == Mode::Off && g_seat < 0 && !g_remote) return;
     static const HookDef kSms[] = {
         {kRvaNewEvent, reinterpret_cast<void*>(&h_NewEvent), reinterpret_cast<void**>(&o_NewEvent),

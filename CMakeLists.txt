@@ -79,6 +79,8 @@ add_library(lazysf2 SHARED
     src/hooks/remote_avatar.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
+    src/net/world_proto.cpp
+    src/net/mission_fetch.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
     src/net/client_core.cpp
@@ -105,6 +107,8 @@ target_link_options(lazysf2 PRIVATE /DELAYLOAD:ws2_32.dll)
 add_executable(lazysf2-net-tests
     tests/net_tests.cpp
     src/net/protocol.cpp
+    src/net/world_proto.cpp
+    src/net/mission_fetch.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
     src/net/client_core.cpp
@@ -139,6 +143,8 @@ add_executable(lazysf2-bot
     tools/bot/bot_client.cpp
     tools/bot/bot_serve.cpp
     src/net/protocol.cpp
+    src/net/world_proto.cpp
+    src/net/mission_fetch.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
     src/net/remote_jet.cpp
@@ -149,7 +155,7 @@ target_compile_features(lazysf2-bot PRIVATE cxx_std_20)
 target_compile_definitions(lazysf2-bot PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(lazysf2-bot PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2-bot PRIVATE src tools/bot)
-target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet ws2_32 winmm)
+target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet miniz::miniz ws2_32 winmm)
 set_target_properties(lazysf2-bot PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
 
 # Converts a recorded host stream to Tacview ACMI text (console, developer tool, not shipped).

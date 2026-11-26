@@ -788,6 +788,13 @@ void client_install() {
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
 }
 
+bool client_connect_target(char* host, size_t cap, uint16_t* port) {
+    if (!g_enabled || cap == 0) return false;
+    std::snprintf(host, cap, "%s", g_host);
+    *port = g_port;
+    return true;
+}
+
 void client_on_modules_loaded() {
     static std::atomic<bool> once{false};
     if (!g_enabled || once.exchange(true)) return;

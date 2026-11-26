@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "hooks/hooks.h"
 #include "hooks/remote_avatar.h"
@@ -47,6 +49,11 @@ char g_callsign[17] = "HOST";  // LAZYSF2_CALLSIGN, printable ASCII; the wire fi
 // The big objects live on the heap, created in host_on_modules_loaded() only when host mode is on (as globals
 // they would bloat the DLL's .data). Never freed: a destructor at DLL unload could join a thread under the loader lock.
 net::HostCore* g_core = nullptr;
+// The published mission (T5), kept here because it can come before the core exists.
+std::mutex g_mission_mx;
+std::vector<uint8_t> g_mission;  // under g_mission_mx
+uint32_t g_mission_id = 0, g_mission_raw = 0;
+std::atomic<bool> g_core_started{false};
 net::HostPeers* g_peers = nullptr;  // who is welcomed, and the fan-out of States, PeerInfos and PeerLefts
 net::StreamWriter* g_stream = nullptr;  // the recording of the session (stream_record.h): written by its own thread
 double g_now = 0;            // host game time at the latest step, for records made outside a step
@@ -723,7 +730,22 @@ void host_on_modules_loaded() {
     if (!g_core->start(g_addr, g_port, core_log)) {
         g_running.store(false);
         LOG("net: host off (could not start the network thread)");
+        return;
     }
+    std::lock_guard<std::mutex> lock(g_mission_mx);
+    g_core_started.store(true);
+    if (!g_mission.empty()) g_core->set_mission(g_mission, g_mission_id, g_mission_raw);
+}
+
+void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw) {
+    if (!g_enabled) return;
+    std::lock_guard<std::mutex> lock(g_mission_mx);
+    g_mission.assign(packed, packed + n);
+    g_mission_id = id;
+    g_mission_raw = raw;
+    if (g_core_started.load()) g_core->set_mission(g_mission, id, raw);
+    LOG("net: host serves mission 0x%08lx (%zu bytes packed, %lu unpacked) to clients that ask",
+        static_cast<unsigned long>(id), n, static_cast<unsigned long>(raw));
 }
 
 void host_shutdown() {

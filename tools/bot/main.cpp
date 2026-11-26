@@ -9,8 +9,13 @@
 #include <cstring>
 #include <string>
 
+#include <thread>
+#include <vector>
+
 #include "bot_client.h"
 #include "bot_serve.h"
+#include "net/mission_fetch.h"
+#include "net/world_proto.h"
 
 namespace {
 
@@ -21,7 +26,8 @@ void usage() {
         "            [--loss PERCENT] [--jitter MS] [--lag MS] [--log-remote] [--drop] [--log FILE]\n"
         "lazysf2-bot --serve PORT [--bind ADDR] [--callsign BOTHOST] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
         "            [--start X,Y,Z,HEADING] [--lag MS] [--pause-at S --pause-for S] [--record DIR] [--duration SECONDS]\n"
-        "            [--log FILE]\n"
+        "            [--mission world_NNN.msn] [--log FILE]\n"
+        "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
         "(default 150,50,0); before the first host State it flies straight on from the Welcome's join position.\n"
@@ -82,6 +88,78 @@ BOOL WINAPI on_ctrl(DWORD type) {
 
 }  // namespace
 
+bool read_file(const std::string& path, std::vector<uint8_t>* out) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    bool ok = n > 0 && n <= static_cast<long>(LazyWorks::SF2Patch::net::kMissionMaxRaw);
+    if (ok) {
+        out->resize(static_cast<size_t>(n));
+        ok = std::fread(out->data(), 1, out->size(), f) == out->size();
+    }
+    std::fclose(f);
+    return ok;
+}
+
+bool write_file(const std::string& path, const void* data, size_t n) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    const bool ok = std::fwrite(data, 1, n, f) == n;
+    std::fclose(f);
+    return ok;
+}
+
+// world_NNN.msn -> world_NNN.sidecar.txt (the mod's companion rule).
+std::string sidecar_path(const std::string& msn) {
+    std::string base = msn;
+    if (base.size() >= 4 && _stricmp(base.c_str() + base.size() - 4, ".msn") == 0) base.resize(base.size() - 4);
+    return base + ".sidecar.txt";
+}
+
+void fetch_log(const char* line) { log_line(line); }
+
+// --fetch: asks a host for its mission, as the game's join does, and writes DIR\world_fetched.msn and its sidecar.
+int run_fetch(const std::string& spec, const std::string& dir, double duration) {
+    namespace net = LazyWorks::SF2Patch::net;
+    const size_t colon = spec.rfind(':');
+    const int port = colon == std::string::npos ? 0 : std::atoi(spec.c_str() + colon + 1);
+    if (colon == std::string::npos || port <= 0 || port > 65535 || dir.empty()) return 1;
+    net::MissionFetch fetch;
+    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), fetch_log)) return 2;
+    const double limit = duration > 0 ? duration : 60.0;
+    for (int i = 0; i < static_cast<int>(limit * 50) && !g_cancel.load(); ++i) {
+        if (fetch.state() != net::MissionFetch::State::Running) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    fetch.stop();
+    std::vector<uint8_t> packed, msn;
+    net::MissionOfferMsg offer{};
+    std::string sidecar;
+    const char* why = "";
+    if (!fetch.take(&packed, &offer)) {
+        log_line("bot fetch: no mission received");
+        return 3;
+    }
+    if (!net::unpack_mission(packed, offer.mission_id, offer.raw_bytes, &sidecar, &msn, &why)) {
+        char b[160];
+        std::snprintf(b, sizeof(b), "bot fetch: the mission is unusable (%s)", why);
+        log_line(b);
+        return 3;
+    }
+    const std::string out = dir + "\\world_fetched.msn";
+    if (!write_file(out, msn.data(), msn.size()) || !write_file(sidecar_path(out), sidecar.data(), sidecar.size())) {
+        log_line("bot fetch: cannot write the files");
+        return 3;
+    }
+    char b[400];
+    std::snprintf(b, sizeof(b), "bot fetch: wrote %s (%zu bytes) and its sidecar; seat %u suggested", out.c_str(),
+                  msn.size(), static_cast<unsigned>(offer.seat));
+    log_line(b);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     namespace bot = LazyWorks::SF2Patch::bot;
     bot::BotConfig cfg;
@@ -94,6 +172,7 @@ int main(int argc, char** argv) {
     bool serve = false, script_given = false;
     bool client_only = false, serve_only = false;  // options of one mode only
     double pause_at = -1, pause_for = -1;
+    std::string fetch_spec, fetch_out, mission_path;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto val = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -102,7 +181,8 @@ int main(int argc, char** argv) {
         static const char* const kNeedValue[] = {"--host",  "--callsign", "--aircraft", "--script",   "--rate",
                                                  "--duration", "--loss",   "--jitter",   "--log",      "--lag",
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
-                                                 "--pause-at", "--pause-for"};
+                                                 "--pause-at", "--pause-for", "--mission", "--fetch",
+                                                 "--out"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -179,6 +259,13 @@ int main(int argc, char** argv) {
             serve_only = true;
         } else if (a == "--log" && (v = val())) {
             log_path = v;
+        } else if (a == "--mission" && (v = val())) {
+            mission_path = v;
+            serve_only = true;
+        } else if (a == "--fetch" && (v = val())) {
+            fetch_spec = v;
+        } else if (a == "--out" && (v = val())) {
+            fetch_out = v;
         } else {
             ok = false;
         }
@@ -214,6 +301,23 @@ int main(int argc, char** argv) {
     }
     SetConsoleCtrlHandler(on_ctrl, TRUE);
     int code = 0;
+    if (!fetch_spec.empty()) {
+        code = run_fetch(fetch_spec, fetch_out, cfg.duration);
+        if (code == 1) usage();
+        if (g_logfile) std::fclose(g_logfile);
+        g_logfile = nullptr;
+        g_done.store(true);
+        return code;
+    }
+    if (!mission_path.empty()) {
+        std::vector<uint8_t> msn, side;
+        if (!read_file(mission_path, &msn) || !read_file(sidecar_path(mission_path), &side) ||
+            !LazyWorks::SF2Patch::net::pack_mission(std::string(side.begin(), side.end()), msn, &scfg.mission,
+                                                    &scfg.mission_id, &scfg.mission_raw)) {
+            std::printf("cannot read or pack %s and its sidecar\n", mission_path.c_str());
+            return 1;
+        }
+    }
     if (serve) {
         code = bot::run_serve(scfg).code;
     } else {
