@@ -91,6 +91,7 @@ Multiplayer comes in this order:
 Smaller items:
 
 - A "Head Tracking…" button in Options that opens a settings popup (twist and lean amounts), replacing the single on/off row.
+- Toe brakes: use rudder pedals' toe-brake axes for the wheel brakes (the game only has a toggle key), later with differential braking for steering on the ground.
 - Device-aware bindings: controls stay bound to the right device when a HOTAS or stick is unplugged at start-up.
 - Ramp starts, using the airfields' parking spots.
 - Esc in flight pauses first instead of ending the flight.
