@@ -4,9 +4,10 @@ These are quality-of-life mods for **Strike Fighters 2**, the merged install wit
 
 - **Display Mode and Screen** in the game's own **Options → Graphics**: Borderless or stock exclusive Fullscreen, on the monitor of your choice.
 - **Mouse Pointer** in **Options → Controls**. The game normally builds its own pointer from raw mouse movement, so it never quite lines up with Windows' pointer and feels off (and wanders over remote desktop). "Match Windows cursor", the default, puts the game's pointer exactly on Windows' pointer.
-- **Tacview Recording** in **Options → Gameplay** (default Off). Every flight, single-player included, is recorded to a compact Tacview file (`.zip.acmi`, which Tacview opens directly): aircraft, weapons, ground units, ships, flares, chaff, tracers and explosions. Each theatre's terrain, ground texture and airfields are exported for Tacview too, and a small Tacview add-on shows the right theatre for each recording. See [`INSTALL.md`](INSTALL.md).
+- **Tacview Recording** in **Options → Gameplay** (default Off). Every flight, single-player included, is recorded to a compact Tacview file (`.zip.acmi`, which Tacview opens directly): aircraft, weapons, ground units, ships, flares, chaff, tracers and explosions. Buildings and bridges are recorded too, with their destruction. Each theatre's terrain, ground texture and airfields are exported for Tacview, and a small Tacview add-on, which the installer turns on, shows the right theatre for each recording (if you installed with a different administrator account, enable **Lazy SF2 Patch** in Tacview's Add-ons menu). See [`INSTALL.md`](INSTALL.md).
 - **Fixes:** Alt-Tab back into Fullscreen works again (a stock bug), display scaling other than 100% no longer breaks the picture, the Windows key works in Borderless, and lock/unlock recovers.
-- **Installer:** a normal MSI wizard (license and third-party notices included) that copies one DLL into the game folder. No app, window or shortcut is left behind. Uninstall it from *Installed apps*.
+- **Pilot Twist** in **Options → Controls** (default Off): looking far to the side or behind turns the cockpit view a little further and leans you toward that side.
+- **Installer:** a normal MSI wizard (license and third-party notices included) that copies one DLL into the game folder and turns on the Tacview add-on. No app, window or shortcut is left behind. Uninstall it from *Installed apps*.
 - **Later: multiplayer.** The long-term goal is to bring multiplayer back. See `docs/SF2 Network Layer — Claude Code Brief.md`.
 
 > **Status:** the borderless brief is done, and Tacview recording is in. Multiplayer is in progress (developer-only so far).
@@ -66,6 +67,12 @@ The release notes also list each file's SHA-256.
 - Tacview Recording: aircraft, weapons, ground objects, ships, countermeasures, tracers and explosions; each theatre's terrain, ground texture and airfields; the Lazy SF2 Patch Tacview add-on.
 - Releases built on GitHub Actions with build provenance.
 
+**Done (v1.1.0)**
+
+- Tacview: buildings and bridges in recordings, with destruction; a sharper (8000 × 8000) ground texture; the add-on turned on by the installer; old pre-rename files cleaned up.
+- Pilot Twist: the cockpit view twists further and leans a little when looking far to the side or behind.
+- Developer tools: automatic probe world snapshot a few seconds into each flight.
+
 **Now: multiplayer** (the [network brief](docs/SF2%20Network%20Layer%20%E2%80%94%20Claude%20Code%20Brief.md))
 
 Multiplayer comes in this order:
@@ -83,7 +90,6 @@ Multiplayer comes in this order:
 
 Smaller items:
 
-- Pilot Twist: the cockpit view twists further and leans a little when looking far to the side or behind (built, in testing).
 - A "Head Tracking…" button in Options that opens a settings popup (twist and lean amounts), replacing the single on/off row.
 - Device-aware bindings: controls stay bound to the right device when a HOTAS or stick is unplugged at start-up.
 - Ramp starts, using the airfields' parking spots.
@@ -92,11 +98,10 @@ Smaller items:
 - Voice commands to wingmen through a FoxVox plugin.
 - Tougher AI air combat: enemy pilots that are harder to out-turn and out-fly (needs recon on the AI skill settings and manoeuvre logic).
 - Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
-- Tacview: buildings and bridges in recordings, with destruction (in testing); non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
+- Tacview: non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
 
 **Developer tools**
 
-- Automatic probe world snapshot a few seconds into each flight (in progress).
 - Render probe: fix its aircraft LOD/cull readings.
 
 **Later**
