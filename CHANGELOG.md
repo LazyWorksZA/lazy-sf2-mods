@@ -5,6 +5,8 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+## 1.1.3 (2026-11-26)
+
 ### Tacview
 
 - **Tacview: radar and weapon locks are recorded; Tacview draws lock lines.** When an aircraft (yours or the AI's) tracks or locks another aircraft with its radar, the recording names the target, and clears it when the lock is lost. A guided missile names the aircraft it is guiding to.
