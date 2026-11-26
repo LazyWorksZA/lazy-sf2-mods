@@ -2950,6 +2950,36 @@ void texture_tests() {
                "ini: number lists");
     }
 
+    // names: cp1252 and UTF-8 sources reach ACMI text as UTF-8
+    {
+        using LazyWorks::SF2Patch::acmi::append_escaped;
+        const auto by = [](std::initializer_list<int> v) {
+            std::string s;
+            for (int c : v) s += static_cast<char>(c);
+            return s;
+        };
+        const auto nm = [&](const std::string& cp1252) {
+            const auto b = ansi(by({'[', 'A', ']', 13, 10, 'N', 'a', 'm', 'e', '='}) + cp1252 + by({13, 10}));
+            const Ini i = parse_ini(b.data(), b.size());
+            const std::string* v = i.get("a", "name");
+            return v ? *v : std::string("<none>");
+        };
+        expect(nm(by({'M', 0xf6, 'n', 'c', 'h', 'h', 'o', 'f'})) == by({'M', 0xc3, 0xb6, 'n', 'c', 'h', 'h', 'o', 'f'}),
+               "names: cp1252 o-umlaut becomes UTF-8");
+        expect(nm(by({0xc6, 'r', 0xf8})) == by({0xc3, 0x86, 'r', 0xc3, 0xb8}), "names: cp1252 AE and o-slash become UTF-8");
+        expect(nm(by({'Z', 0xfc, 'r', 'i', 'c', 'h'})) == by({'Z', 0xc3, 0xbc, 'r', 'i', 'c', 'h'}),
+               "names: cp1252 u-umlaut becomes UTF-8");
+        expect(nm(by({'E', 0x80})) == by({'E', 0xe2, 0x82, 0xac}), "names: cp1252 0x80 is the euro sign");
+        expect(nm(by({'Z', 0xc3, 0xbc, 'r'})) == by({'Z', 0xc3, 0xbc, 'r'}), "names: UTF-8 without a BOM is not encoded twice");
+        std::string o;
+        append_escaped(o, by({'B', 0xc3, 0xbc, 'c', 'k', ',', ' ', 0xc3, 0x84}).c_str());
+        expect(o == by({'B', 0xc3, 0xbc, 'c', 'k', 92, ',', ' ', 0xc3, 0x84}),
+               "names: valid UTF-8 passes through the ACMI escape, comma escaped");
+        o.clear();
+        append_escaped(o, by({'a', 0xfc, 'b', 0xc3, 'c', 0xc0, 0x80, 0xed, 0xa0, 0x80, 10}).c_str());
+        expect(o == "a?b?c??????", "names: invalid bytes and control characters become '?'");
+    }
+
     // airfields
     {
         const auto targets = utf16le(

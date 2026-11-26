@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Fixed
+
+- Airfield names with accented letters (such as ü or ö) show correctly in Tacview.
+
 ## 1.1.2 (2026-11-26)
 
 ### Fixed

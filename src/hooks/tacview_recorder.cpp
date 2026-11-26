@@ -147,13 +147,21 @@ struct SnapCtx {
     size_t n_air = 0;
 };
 
+/// Aircraft names are UTF-16: stored as UTF-8, cut before a character that would not fit.
 void copy_name(char* dst, const wchar_t* src) {
-    size_t k = 0;
-    for (; k < acmi::kRecNameChars && src[k]; ++k) {
-        const wchar_t ch = src[k];
-        dst[k] = (ch >= 0x20 && ch < 0x7f) ? static_cast<char>(ch) : '?';
+    std::string u;
+    for (size_t k = 0; src[k] && k < acmi::kRecNameChars; ++k) {
+        uint32_t cp = src[k];
+        if (cp >= 0xd800 && cp < 0xdc00 && src[k + 1] >= 0xdc00 && src[k + 1] < 0xe000) {
+            cp = 0x10000 + ((cp - 0xd800) << 10) + (src[k + 1] - 0xdc00);
+            ++k;
+        }
+        if (cp < 0x20 || cp == 0x7f) cp = '?';
+        acmi::append_utf8_cp(u, cp);
     }
-    dst[k] = '\0';
+    const size_t n = acmi::utf8_prefix(u, acmi::kRecNameChars);
+    std::memcpy(dst, u.data(), n);
+    dst[n] = '\0';
 }
 
 // Under both tables' shared locks (the weapons' nested in the aircraft's): no allocation, I/O or logging.

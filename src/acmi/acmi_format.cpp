@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace LazyWorks::SF2Patch::acmi {
 
@@ -42,15 +43,61 @@ double norm_deg(double d) {
     return d + 0.0;                // -0.0 becomes +0.0
 }
 
+size_t utf8_seq_len(const unsigned char* s, size_t avail) {
+    if (avail < 2 || s[0] < 0xc2 || s[0] > 0xf4) return 0;
+    const size_t n = s[0] < 0xe0 ? 2 : s[0] < 0xf0 ? 3 : 4;
+    if (avail < n) return 0;
+    for (size_t i = 1; i < n; ++i)
+        if ((s[i] & 0xc0) != 0x80) return 0;
+    if (s[0] == 0xe0 && s[1] < 0xa0) return 0;   // overlong
+    if (s[0] == 0xed && s[1] >= 0xa0) return 0;  // surrogate
+    if (s[0] == 0xf0 && s[1] < 0x90) return 0;   // overlong
+    if (s[0] == 0xf4 && s[1] >= 0x90) return 0;  // above U+10FFFF
+    return n;
+}
+
+void append_utf8_cp(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xc0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3f));
+    } else if (cp >= 0xd800 && cp < 0xe000) {
+        out += '?';
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xe0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+        out += static_cast<char>(0x80 | (cp & 0x3f));
+    } else if (cp <= 0x10ffff) {
+        out += static_cast<char>(0xf0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3f));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+        out += static_cast<char>(0x80 | (cp & 0x3f));
+    } else {
+        out += '?';
+    }
+}
+
 void append_escaped(std::string& out, const char* s) {
     if (!s) return;
-    for (; *s; ++s) {
-        const unsigned char c = static_cast<unsigned char>(*s);
-        if (c < 0x20 || c > 0x7e) {
+    const size_t len = std::strlen(s);
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c >= 0x80) {
+            const size_t n = utf8_seq_len(reinterpret_cast<const unsigned char*>(s) + i, len - i);
+            if (n) {
+                out.append(s + i, n);
+                i += n - 1;
+            } else {
+                out += '?';
+            }
+            continue;
+        }
+        if (c < 0x20 || c == 0x7f) {
             out += '?';
             continue;
         }
-        if (c == ',') out += '\\';
+        if (c == ',') out += static_cast<char>(92);
         out += static_cast<char>(c);
     }
 }
