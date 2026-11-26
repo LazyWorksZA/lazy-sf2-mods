@@ -70,7 +70,8 @@ The test project is only for development: it is not published or shipped.
 | `tools/ghidra/*.java` | Cross-references from strings, wide tags, imports and addresses; vtable dump; decompile everything. Write output to `decomp` in the recon scratch folder. |
 | `tools/catx.py` | Lists and extracts `.cat` archives. It refuses to extract into the repo. |
 | `tools/recon/` | Inventory of PE imports and exports, a Process Monitor filter generator, and a capture summariser. |
-| `tools/test/sf2drive.ps1` | Unattended game checks: start (optionally with DXVK logs and HUD), focus, screenshot, switch away and back, stop, and `run -Seconds N -Shots DIR`, a full Single Mission flight (Strike by default, `-MissionType`) from launch to quit that prints the new `lazysf2.log` lines. It sends input to the desktop, so use it only with the user's OK. |
+| `tools/test/sf2drive.ps1` | Unattended game checks: start (optionally with DXVK logs and HUD), focus, screenshot (full size plus a 1280 px `-small` copy), key chords (`key -Key ctrl+shift+t`), `hold -Key <chord> -Ms N [-Out png]` (screenshot while held), switch away and back, stop, and `run -Seconds N -Shots DIR`, a full Single Mission flight (Strike by default, `-MissionType`) from launch to quit that prints the new `lazysf2.log` lines. It sends input to the desktop, so use it only with the user's OK. |
+| `tools/test/tvshot.ps1` | Opens a Tacview recording and captures zoom-step screenshots of its window (`-Recording`, `-Out`, `-Zoom`, `-ZoomOut`, `-Tacview`, `-Settle`, `-Keep`), then prints the add-on lines from Tacview's trace log. Exits 2 if Tacview is already running. It sends input to the desktop, so use it only with the user's OK. |
 | `tools/gen_winmm_proxy.py` | Regenerates `src/proxy/winmm.def` and `winmm_exports.inc` from the system `winmm.dll`. |
 
 **Gotcha:** Ghidra's `.bat` breaks on `(x86)` in a path, so import the game through a junction whose path has no parentheses.
