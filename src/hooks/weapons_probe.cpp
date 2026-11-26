@@ -39,6 +39,7 @@ constexpr DWORD kObjServiceRva = 0xb7b88, kMissileClassRva = 0xa7700, kMissileGr
 constexpr DWORD kBoStamp = 0x51d22099, kBoSize = 0x32000, kBulletInitRva = 0x17a0;
 // MissileObject.dll
 constexpr DWORD kMissileVtRva = 0x2f68c, kLinkVtRva = 0x2f624, kGuidanceVtRva = 0x2f58c, kWeaponMgrVtRva = 0x2f9dc,
+                kCoreVtRva = 0x2f660,
                 kMoRemoteMaskRva = 0x40800, kMoWeaponMgrRva = 0x3e16c, kMoWldPtrRva = 0x4054c;
 // WorldManager.dll: the static WLD object and its vtable.
 constexpr DWORD kWldRva = 0x192b8, kWldVtRva = 0x13254;
@@ -47,6 +48,7 @@ constexpr DWORD kWldRva = 0x192b8, kWldVtRva = 0x13254;
 constexpr size_t kCreateSlot = 0x30 / 4, kByIdSlot = 0x3c / 4;
 constexpr size_t kWldExplosionSlot = 0x40 / 4, kWldHitSlot = 0x44 / 4;
 constexpr size_t kLinkReleaseSlot = 2, kLinkShooterSlot = 3, kLinkSlot6 = 6, kGuidanceSetTargetSlot = 0;
+constexpr size_t kCoreSetVelocitySlot = 7;  // world velocity, float[3] (as the aircraft's firing code sets it)
 constexpr size_t kQiSlot = 0, kBlastSlot = 0x18 / 4;
 constexpr int kDamageIid = 9;
 
@@ -58,7 +60,10 @@ constexpr int32_t kDestroyedLevel = 5;
 // Missile object.
 constexpr size_t kMOffLink = 0x14, kMOffPos = 0x20, kMOffShooter = 0x100, kMOffGuidance = 0x148,
                  kMOffData = 0x14c, kMOffWarhead = 0x150, kMOffSeeker = 0x178, kMOffTargetId = 0x198,
-                 kMOffNoDamage = 0x1ac;
+                 kMOffNoDamage = 0x1ac, kMOffCore = 0x10, kMOffWorldVel = 0x38, kMOffBodyVel = 0xa0,
+                 kMOffMatrix = 0xc4, kMOffTime = 0x180;
+// Seeker/state flags at +0x178 (network-recon §9.3, motor bits from +0x6610).
+constexpr uint32_t kSeekMotorBurning = 0x1, kSeekMotorPhase = 0x4, kSeekTracking = 0x8, kSeekLockKept = 0x1000000;
 constexpr size_t kDescSize = 0xc8;
 // Weapon data record and manager.
 constexpr size_t kWOffType = 0x298, kWOffWarhead = 0x380, kWOffGuidance = 0x398, kWNameChars = 64;
@@ -497,6 +502,10 @@ size_t candidates(Candidate* c) {
 }
 
 // --- Target watch ---
+double speed_of(const float v[3]) {
+    return std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+}
+
 
 struct TargetState {
     bool ok = false;
@@ -612,14 +621,27 @@ void watch_frame() {
         if (flying) {
             void* m = missile_by_id(e, g_watch.missile_id);
             uint32_t seeker = 0, tid = 0, nodmg = 0, flags = 0;
+            float wv[3] = {}, bv[3] = {}, rows[9] = {}, life = 0;
             rd(m, kMOffSeeker, &seeker);
             rd(m, kMOffTargetId, &tid);
             rd(m, kMOffNoDamage, &nodmg);
             rd(m, kOffFlags, &flags);
-            LOG("wprobe: t=%.1fs missile at (%.0f, %.0f, %.0f) range %.0f m, its target +0x198 0x%08x, seeker +0x178 "
-                "0x%08x, no-damage +0x1ac %u, flags 0x%08x | target level %d, warnings 0x%08x",
-                t, g_watch.missile_pos[0], g_watch.missile_pos[1], g_watch.missile_pos[2],
-                distance(g_watch.missile_pos, now.pos), tid, seeker, nodmg, flags, now.level, now.warn);
+            rd(m, kMOffWorldVel, &wv);
+            rd(m, kMOffBodyVel, &bv);
+            rd(m, kMOffMatrix, &rows);
+            rd(m, kMOffTime, &life);
+            const double los[3] = {now.pos[0] - g_watch.missile_pos[0], now.pos[1] - g_watch.missile_pos[1],
+                                   now.pos[2] - g_watch.missile_pos[2]};
+            const double fwd[3] = {rows[3], rows[4], rows[5]};
+            const double vel[3] = {wv[0], wv[1], wv[2]};
+            LOG("wprobe: t=%.1fs missile alt %.0f m, speed %.0f m/s, range %.0f m | nose-to-target %.1f deg, "
+                "velocity-to-target %.1f deg, body V (%.0f, %.0f, %.0f) | its time +0x180 %.2f s, seeker +0x178 0x%08x "
+                "(motor phase %d burning %d tracking %d lock %d), its target +0x198 0x%08x | no-damage %u, flags 0x%08x "
+                "| target level %d, warnings 0x%08x",
+                t, g_watch.missile_pos[2], speed_of(wv), distance(g_watch.missile_pos, now.pos), angle_deg(fwd, los),
+                angle_deg(vel, los), bv[0], bv[1], bv[2], life, seeker, (seeker & kSeekMotorPhase) ? 1 : 0,
+                (seeker & kSeekMotorBurning) ? 1 : 0, (seeker & kSeekTracking) ? 1 : 0,
+                (seeker & kSeekLockKept) ? 1 : 0, tid, nodmg, flags, now.level, now.warn);
         } else {
             LOG("wprobe: t=%.0fs target level %d, attacker 0x%08x, active %d, warnings 0x%08x", t, now.level,
                 now.attacker, now.active, now.warn);
@@ -635,7 +657,7 @@ void watch_frame() {
 /// the shooter REMOTEOBJECT around the release if remote. Returns the missile id, or 0xffffffff after logging why.
 /// </summary>
 uint32_t launch_missile(const Env& e, const Chosen& w, void* shooter, uint32_t target_id, const LaunchPose& pose,
-                        double speed, bool remote) {
+                        const float body_vel[3], double speed, bool remote) {
     alignas(8) unsigned char desc[kDescSize] = {};
     const int16_t one = 1;
     const int32_t minus1 = -1;
@@ -645,7 +667,7 @@ uint32_t launch_missile(const Env& e, const Chosen& w, void* shooter, uint32_t t
     memcpy(desc + 0x0c, &minus1, 4);
     memcpy(desc + 0x10, pose.pos, sizeof(pose.pos));
     memcpy(desc + 0x28, pose.angles, sizeof(pose.angles));
-    memcpy(desc + 0x34, pose.vel, sizeof(pose.vel));
+    memcpy(desc + 0x34, body_vel, 3 * sizeof(float));  // body frame (right, forward, up), not world
     auto create = reinterpret_cast<CreateObject_t>(vslot(e.obj, kCreateSlot));
     uint32_t id = 0xffffffffu;
     if (DWORD x = seh_create(create, e.obj, e.mcls, e.mgrp, desc, &id)) {
@@ -669,6 +691,27 @@ uint32_t launch_missile(const Env& e, const Chosen& w, void* shooter, uint32_t t
     if (!data) {
         LOG("wprobe: the missile has no weapon data (Init refused the id); not launching");
         return 0xffffffffu;
+    }
+    // As the aircraft's firing code does: the world velocity through the core interface (slot 7).
+    void* core = static_cast<char*>(m) + kMOffCore;
+    if (vtable_is(core, e.mo, kCoreVtRva)) {
+        if (DWORD cx = seh_ptr(reinterpret_cast<SetPtr_t>(vslot(core, kCoreSetVelocitySlot)), core,
+                               const_cast<float*>(pose.vel))) {
+            LOG("wprobe: core SetVelocity faulted (0x%08lx); not releasing", cx);
+            return 0xffffffffu;
+        }
+    } else {
+        LOG("wprobe: core interface vtable +0x%lx, expected +0x%lx; world velocity left from the descriptor",
+            vtable_rva(core, e.mo), static_cast<unsigned long>(kCoreVtRva));
+    }
+    {
+        float wv[3] = {}, bv[3] = {}, rows[9] = {};
+        rd(m, kMOffWorldVel, &wv);
+        rd(m, kMOffBodyVel, &bv);
+        rd(m, kMOffMatrix, &rows);
+        LOG("wprobe: missile state before release: world V (%.0f, %.0f, %.0f), body V (%.0f, %.0f, %.0f), forward row "
+            "(%.3f, %.3f, %.3f)",
+            wv[0], wv[1], wv[2], bv[0], bv[1], bv[2], rows[3], rows[4], rows[5]);
     }
     DWORD x = seh_ptr(reinterpret_cast<SetPtr_t>(vslot(link, kLinkShooterSlot)), link, shooter);
     if (!x) x = seh_u32(reinterpret_cast<SetU32_t>(vslot(guid, kGuidanceSetTargetSlot)), guid, target_id);
@@ -706,10 +749,6 @@ uint32_t launch_missile(const Env& e, const Chosen& w, void* shooter, uint32_t t
                : "",
         mflags, seeker, nodmg, nodmg ? "visual only" : "live", shooter_back);
     return id;
-}
-
-double speed_of(const float v[3]) {
-    return std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
 }
 
 void do_launch(WeaponsProbeAction a) {
@@ -761,7 +800,8 @@ void do_launch(WeaponsProbeAction a) {
         remote ? "shooter REMOTEOBJECT for the release" : "live", shooter_how, sname, sp.id, side_name(sp.side),
         distance(sp.pos, tp.pos), tname, tp.id, side_name(tp.side), tp.is_player ? ", the player" : "",
         speed_of(tp.vel), pose.range, speed, w.name, w.w.id, w.w.data_type, w.w.guidance, w.how);
-    const uint32_t id = launch_missile(e, w, sp.obj, tp.id, pose, speed, remote);
+    const float body[3] = {0.f, static_cast<float>(speed), 0.f};  // the pose flies along its nose
+    const uint32_t id = launch_missile(e, w, sp.obj, tp.id, pose, body, speed, remote);
     if (id == 0xffffffffu) return;
     start_watch(a == WeaponsProbeAction::LiveAtPlayer ? "live launch at the player"
                 : a == WeaponsProbeAction::RemoteAtAi ? "remote launch at an AI"
@@ -792,7 +832,9 @@ void do_rocket() {
     LOG("wprobe: rocket: the player 0x%08x fires \"%s\" id %d type %d guidance %d (%s) %.0f m ahead of its nose, at "
         "its velocity, no target",
         pp.id, w.name, w.w.id, w.w.data_type, w.w.guidance, w.how, kRocketOffset);
-    const uint32_t id = launch_missile(e, w, pp.obj, 0xffffffffu, pose, speed, false);
+    float body[3];
+    body_from_world(m, pose.vel, body);  // the rocket takes the player's attitude, so the player's matrix
+    const uint32_t id = launch_missile(e, w, pp.obj, 0xffffffffu, pose, body, speed, false);
     if (id == 0xffffffffu) return;
     start_watch("rocket ahead of the player", pp, id);
 }

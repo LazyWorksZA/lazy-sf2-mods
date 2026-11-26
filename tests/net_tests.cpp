@@ -3810,6 +3810,18 @@ void weapons_probe_tests() {
         const float still[3] = {0, 0, 0};
         tail_point(tgt, still, 2000, tail);
         expect(tail[0] == 1000 && tail[1] == 4000, "tail: a stationary target is approached from the north");
+        // Facing east (heading 90): right is south, forward east, up up.
+        const float rows[9] = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+        const float east[3] = {300, 0, 0};
+        float body[3];
+        body_from_world(rows, east, body);
+        expect(body[0] == 0 && body[1] == 300 && body[2] == 0, "body: flying east while facing east is straight ahead");
+        const float south[3] = {0, -300, 0};
+        body_from_world(rows, south, body);
+        expect(body[0] == 300 && body[1] == 0, "body: flying south while facing east is to the right (round 2's error)");
+        const double ax[3] = {1, 0, 0}, ay[3] = {0, 5, 0}, z0[3] = {0, 0, 0};
+        expect(std::fabs(angle_deg(ax, ay) - 90) < 1e-9 && std::fabs(angle_deg(ax, ax)) < 1e-6 && angle_deg(ax, z0) == -1,
+               "angle: 90, 0, and -1 for a zero vector");
     }
     {
         const wchar_t* names[] = {L"GUNSLINGER", L"GUNSLINGER 2", L"BEAGLE 11", L"GUNSLINGERX 1", L"GUNSLINGER 3"};

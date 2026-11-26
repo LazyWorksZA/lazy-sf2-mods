@@ -58,6 +58,26 @@ inline void tail_point(const double target[3], const float vel[3], double dist, 
     out[2] = target[2];
 }
 
+/// <summary>
+/// A world vector in the body frame of a rotation matrix whose rows are right, forward and up (the aircraft and
+/// missile convention): the missile descriptor's velocity is body frame (MissileObject body setter +0x15f50).
+/// </summary>
+inline void body_from_world(const float rows[9], const float world[3], float body[3]) {
+    for (int r = 0; r < 3; ++r) {
+        body[r] = rows[3 * r] * world[0] + rows[3 * r + 1] * world[1] + rows[3 * r + 2] * world[2];
+    }
+}
+
+/// <summary>Angle between two vectors in degrees; -1 if either is (near) zero.</summary>
+inline double angle_deg(const double a[3], const double b[3]) {
+    const double la = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    const double lb = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+    if (la < 1e-9 || lb < 1e-9) return -1.0;
+    double c = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    c = c > 1.0 ? 1.0 : (c < -1.0 ? -1.0 : c);
+    return std::acos(c) * 57.29577951308232;
+}
+
 /// <summary>One aircraft as the probe's target and shooter choice sees it.</summary>
 struct Candidate {
     double pos[3];
