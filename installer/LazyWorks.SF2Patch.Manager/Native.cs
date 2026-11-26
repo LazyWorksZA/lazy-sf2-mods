@@ -87,16 +87,34 @@ static class Native
     public static void Message(string text, bool warning) =>
         MessageBoxW(IntPtr.Zero, text, "Lazy SF2 Patch", warning ? 0x30u : 0x40u);
 
-    /// <summary>The standard folder picker. Null when cancelled or unavailable.</summary>
-    public static string? PickFolder(string title)
+    // FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT
+    const uint FolderOptions = 0x20 | 0x40 | 0x2000000;
+
+    static IFileOpenDialog CreateFolderDialog(string title)
     {
+        var dlg = (IFileOpenDialog)new FileOpenDialogCoClass();
+        dlg.GetOptions(out uint opts);
+        dlg.SetOptions(opts | FolderOptions);
+        dlg.SetTitle(title);
+        return dlg;
+    }
+
+    /// <summary>For tests: builds the folder dialog (no Show) and returns its options, so a wrong interface layout fails.</summary>
+    internal static uint ProbeFolderDialog()
+    {
+        var dlg = CreateFolderDialog("probe");
+        try { dlg.GetOptions(out uint opts); return opts; }
+        finally { Marshal.ReleaseComObject(dlg); }
+    }
+
+    /// <summary>The standard folder picker. Null when cancelled; <paramref name="error"/> is set when it could not be shown.</summary>
+    public static string? PickFolder(string title, out string? error)
+    {
+        error = null;
         IFileOpenDialog? dlg = null;
         try
         {
-            dlg = (IFileOpenDialog)new FileOpenDialogCoClass();
-            dlg.GetOptions(out uint opts);
-            dlg.SetOptions(opts | 0x20 | 0x40 | 0x1000000);  // PICKFOLDERS | FORCEFILESYSTEM | DONTADDTORECENT
-            dlg.SetTitle(title);
+            dlg = CreateFolderDialog(title);
             if (dlg.Show(IntPtr.Zero) != 0) return null;  // cancelled (HRESULT_FROM_WIN32(ERROR_CANCELLED)) or failed
             dlg.GetResult(out IShellItem item);
             try
@@ -106,7 +124,7 @@ static class Native
             }
             finally { Marshal.ReleaseComObject(item); }
         }
-        catch (Exception e) when (e is COMException or InvalidCastException) { return null; }
+        catch (Exception e) { error = $"{e.GetType().Name}: {e.Message}"; return null; }
         finally { if (dlg != null) Marshal.ReleaseComObject(dlg); }
     }
 

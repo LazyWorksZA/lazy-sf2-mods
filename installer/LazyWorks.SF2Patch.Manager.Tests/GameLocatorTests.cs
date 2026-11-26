@@ -50,6 +50,22 @@ sealed class FakeGameEnvironment : IGameEnvironment
     public (uint TimeDateStamp, uint SizeOfImage)? ReadPeStamp(string exePath) => Stamps.TryGetValue(exePath, out var s) ? s : null;
 }
 
+public sealed class FolderDialogTests
+{
+    [Fact]
+    public void The_folder_dialog_can_be_created_and_configured_on_an_STA_thread()
+    {
+        uint opts = 0;
+        Exception? error = null;
+        var t = new Thread(() => { try { opts = Native.ProbeFolderDialog(); } catch (Exception e) { error = e; } });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        Assert.Null(error);
+        Assert.Equal(0x20u | 0x40u, opts & (0x20u | 0x40u));
+    }
+}
+
 public sealed class GameLocatorTests
 {
     const string Sf2Key = @"SOFTWARE\ThirdWire\Strike Fighters 2";

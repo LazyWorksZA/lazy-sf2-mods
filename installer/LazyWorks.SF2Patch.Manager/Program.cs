@@ -73,7 +73,13 @@ static class Program
         {
             var (heading, text, icon, choose) = Describe(game, result);
             if (Native.Show(heading, text, icon, choose) != Native.ButtonChoose) return result;
-            string? picked = Native.PickFolder("Choose your Strike Fighters 2 folder (the one with StrikeFighters2.exe)");
+            string? picked = Native.PickFolder("Choose your Strike Fighters 2 folder (the one with StrikeFighters2.exe)", out string? error);
+            if (error != null)
+            {
+                Log($"folder picker failed: {error}");
+                Native.Show("The folder chooser could not be opened", error + "\n\nInstall winmm.dll by hand instead (see INSTALL.md).", Native.Icon.Error, null);
+                continue;
+            }
             if (picked == null) continue;
             var check = GameLocator.CheckFolder(Env, picked);
             Log($"chosen folder {picked}: {check}");
