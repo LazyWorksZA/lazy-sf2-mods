@@ -2,7 +2,7 @@
 
 These are instructions for AI coding agents, and for humans, working on this repository. Read this file before changing anything.
 
-This is the repo's **only** instructions file. Don't add a `CLAUDE.md` or tool-specific copies. Claude Code reads `AGENTS.md` natively, but only when no `CLAUDE.md` exists. Put new conventions here.
+This is the repo's **only** rules file. Don't add a `CLAUDE.md` or tool-specific copies. Claude Code reads `AGENTS.md` natively, but only when no `CLAUDE.md` exists. Put new conventions and rules here. Step-by-step procedures live in skills (see Skills below); they must not add or override rules.
 
 ## What this is
 
@@ -71,7 +71,8 @@ The test project is only for development: it is not published or shipped.
 | `tools/ghidra/*.java` | Cross-references from strings, wide tags, imports and addresses; vtable dump; decompile everything. Write output to `decomp` in the recon scratch folder. |
 | `tools/catx.py` | Lists and extracts `.cat` archives. It refuses to extract into the repo. |
 | `tools/recon/` | Inventory of PE imports and exports, a Process Monitor filter generator, and a capture summariser. |
-| `tools/test/sf2drive.ps1` | Unattended game checks: start (optionally with DXVK logs and HUD), focus, screenshot, switch away and back, stop, and `run -Seconds N -Shots DIR`, a full Single Mission flight (Strike by default, `-MissionType`) from launch to quit that prints the new `lazysf2.log` lines. It sends input to the desktop, so use it only with the user's OK. |
+| `tools/test/sf2drive.ps1` | Unattended game checks: start (optionally with DXVK logs and HUD), focus, screenshot (full size plus a 1280 px `-small` copy), key chords (`key -Key ctrl+shift+t`), `hold -Key <chord> -Ms N [-Out png]` (screenshot while held), switch away and back, stop, and `run -Seconds N -Shots DIR`, a full Single Mission flight (Strike by default, `-MissionType`) from launch to quit that prints the new `lazysf2.log` lines. It sends input to the desktop, so use it only with the user's OK. |
+| `tools/test/tvshot.ps1` | Opens a Tacview recording and captures zoom-step screenshots of its window (`-Recording`, `-Out`, `-Zoom`, `-ZoomOut`, `-Tacview`, `-Settle`, `-Keep`), then prints the add-on lines from Tacview's trace log. Exits 2 if Tacview is already running. It sends input to the desktop, so use it only with the user's OK. |
 | `tools/gen_winmm_proxy.py` | Regenerates `src/proxy/winmm.def` and `winmm_exports.inc` from the system `winmm.dll`. |
 
 **Gotcha:** Ghidra's `.bat` breaks on `(x86)` in a path, so import the game through a junction whose path has no parentheses.
@@ -84,10 +85,20 @@ The test project is only for development: it is not published or shipped.
 - Log every hook install and every behaviour change once, with `LOG(...)`. Don't log every frame.
 - **Comments stay minimal.** Use `///` XML doc comments (`<summary>`, and `<param>`/`<returns>` only when they add something) on functions and types whose purpose isn't obvious. Don't restate the code. Keep short "why" comments for threading, lifetime and other non-obvious constraints. How the game works inside belongs in `lazy-sf2-recon`; point to it (`// See lazy-sf2-recon: recon-notes §4.3.`) instead of explaining it in the code.
 
+## Skills
+
+Procedures live in `.claude/skills/*/SKILL.md`, in the open Agent Skills format (a folder with a `SKILL.md`: YAML `name` and `description`, then plain markdown). Any agent or person can read them. They follow the rules in this file.
+
+- `live-test`: build, install, drive and check a build against the real game, including Tacview and network runs.
+- `review-task`: review a branch or task with a fresh-context reviewer and run the fix loop.
+- `cut-release`: the release checklist, from release branch to tagged GitHub release.
+
 ## Workflow
 
 - **GitHub flow, without pull requests.** Do each piece of work on its own branch off `master`, and commit there. **Never commit to `master` directly.** Merge into `master` and push it **only when the user explicitly says so**. Don't open pull requests.
 - Delete branches after they are merged.
+- **Scripts that contain Windows paths go in a file.** Write the script to a file, then run it. Don't inline it in a shell heredoc or a quoted `-Command` string: backslashes get mangled (`\\` collapses, `\L` turns into something else). The same applies to Python that edits paths.
+- **Live tests use the scripts in `tools/test/`** (`sf2drive.ps1`, `tvshot.ps1`), not ad-hoc input or screenshot code. Read the `-small.png` copies; the full-size shots are for the user.
 - Each branch adds its user-visible changes to `CHANGELOG.md` under **Unreleased**, in the same branch.
 - End commit messages with the `Co-Authored-By` lines given in your session instructions, if any.
 - Testing needs the live game. Get the user to drive it, ask specific questions, and read `lazysf2.log` yourself.
