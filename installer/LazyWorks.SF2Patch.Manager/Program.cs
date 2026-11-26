@@ -61,8 +61,9 @@ static class Program
             log($"elevated install: {folder} is not a valid game folder ({c})");
             return ModInstaller.Result.GameNotFound;
         }
+        // The caller saves the choice: its HKCU is the player's, the elevated account's may not be.
         var r = ModInstaller.Install(folder ?? GameLocator.Find(env, log));
-        if (r == ModInstaller.Result.Ok && folder != null) log($"saved game folder in {GameLocator.SaveChoice(env, folder) ?? "(nowhere)"}");
+        log($"elevated install: {folder ?? "(detected folder)"} -> {r}");
         return r;
     }
 
@@ -72,7 +73,8 @@ static class Program
         while (true)
         {
             var (heading, text, icon, choose) = Describe(game, result);
-            if (Native.Show(heading, text, icon, choose) != Native.ButtonChoose) return result;
+            Log($"dialog opened: {heading} (game={game ?? "(not found)"}, result={result})");
+            if (Native.Show(heading, text, icon, choose) != Native.ButtonChoose) { Log("dialog closed"); return result; }
             string? picked = Native.PickFolder("Choose your Strike Fighters 2 folder (the one with StrikeFighters2.exe)", out string? error);
             if (error != null)
             {
@@ -80,11 +82,12 @@ static class Program
                 Native.Show("The folder chooser could not be opened", error + "\n\nInstall winmm.dll by hand instead (see INSTALL.md).", Native.Icon.Error, null);
                 continue;
             }
-            if (picked == null) continue;
+            if (picked == null) { Log("folder picker cancelled"); continue; }
+            Log($"folder chosen: {picked}");
             var check = GameLocator.CheckFolder(Env, picked);
-            Log($"chosen folder {picked}: {check}");
             if (check != GameLocator.Check.Ok)
             {
+                Log($"folder refused: {picked}: {check}");
                 Native.Message(check == GameLocator.Check.NoExe
                     ? $"{GameLocator.ExeName} isn't in\n{picked}\n\nChoose the folder that contains it. The Lazy SF2 Patch is for the July 2013 version of Strike Fighters 2 (the merged install)."
                     : check == GameLocator.Check.Unsafe
@@ -94,7 +97,7 @@ static class Program
             }
             game = picked;
             result = InstallChosen(picked);
-            Log($"chosen folder install -> {result}");
+            Log($"install into chosen folder -> {result}");
         }
     }
 
@@ -113,8 +116,10 @@ static class Program
         var r = ModInstaller.Install(dir);
         if (r == ModInstaller.Result.AccessDenied)
         {
-            // The elevated copy checks the folder again and saves it (HKLM) itself.
-            return RunElevated("--elevated-install " + QuoteArg(dir)) ?? r;
+            Log("folder needs administrator rights: starting the elevated install (UAC)");
+            // The elevated copy checks the folder again; this process saves the choice in the player's HKCU.
+            r = RunElevated("--elevated-install " + QuoteArg(dir)) ?? r;
+            Log($"elevated install result: {r}");
         }
         if (r == ModInstaller.Result.Ok) Log($"saved game folder in {GameLocator.SaveChoice(Env, dir) ?? "(nowhere)"}");
         return r;

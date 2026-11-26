@@ -94,10 +94,10 @@ public static class GameLocator
                                 && !n.Equals("Strike Fighters 2", StringComparison.OrdinalIgnoreCase))
                     .Select(n => env.GetString(RegistryHive.LocalMachine, view, ThirdWire + "\\" + n, "Path")));
         }
-        yield return ($"saved folder (HKLM\\{SavedKey}\\{SavedValue}, then HKCU)", () =>
+        yield return ($"saved folder (HKCU\\{SavedKey}\\{SavedValue}, then HKLM)", () =>
         [
-            env.GetString(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey, SavedValue),
             env.GetString(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey, SavedValue),
+            env.GetString(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey, SavedValue),
         ]);
     }
 
@@ -161,17 +161,17 @@ public static class GameLocator
         return (exe >= 0 ? v[..(exe + 4)] : v).TrimEnd('\\', '/');
     }
 
-    /// <summary>Remembers the folder the player chose: HKLM when allowed (elevated), else HKCU. Returns where it went.</summary>
-    public static string? SaveChoice(IGameEnvironment env, string dir)
-    {
-        if (env.SetString(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey, SavedValue, dir)) return "HKLM";
-        return env.SetString(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey, SavedValue, dir) ? "HKCU" : null;
-    }
+    /// <summary>
+    /// Remembers the folder the player chose, in HKCU (the hooks run as the installing user). Returns "HKCU", or
+    /// null if the write failed.
+    /// </summary>
+    public static string? SaveChoice(IGameEnvironment env, string dir) =>
+        env.SetString(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey, SavedValue, dir) ? "HKCU" : null;
 
-    /// <summary>The folder saved by <see cref="SaveChoice"/>, if any (HKLM first), whether or not it is still valid.</summary>
+    /// <summary>The folder saved by <see cref="SaveChoice"/>, if any (HKCU, then an HKLM value for compatibility), whether or not it is still valid.</summary>
     public static string? SavedChoice(IGameEnvironment env) =>
-        env.GetString(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey, SavedValue)
-        ?? env.GetString(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey, SavedValue);
+        env.GetString(RegistryHive.CurrentUser, RegistryView.Registry64, SavedKey, SavedValue)
+        ?? env.GetString(RegistryHive.LocalMachine, RegistryView.Registry64, SavedKey, SavedValue);
 }
 
 /// <summary>The real registry and file system.</summary>

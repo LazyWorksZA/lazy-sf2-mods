@@ -208,9 +208,9 @@ public sealed class GameLocatorTests
     }
 
     [Fact]
-    public void Saved_folder_round_trips_through_hklm()
+    public void Saved_folder_round_trips_through_hkcu()
     {
-        Assert.Equal("HKLM", GameLocator.SaveChoice(_env, Game(@"G:\mine")));
+        Assert.Equal("HKCU", GameLocator.SaveChoice(_env, Game(@"G:\mine")));
         Assert.Equal(@"G:\mine", GameLocator.SavedChoice(_env));
         Assert.Equal(@"G:\mine", Find());
     }
@@ -246,7 +246,7 @@ public sealed class GameLocatorTests
     }
 
     [Fact]
-    public void Saved_folder_goes_to_hkcu_when_hklm_is_denied()
+    public void Saved_folder_goes_to_hkcu_whatever_hklm_allows()
     {
         _env.HklmWritable = false;
         Assert.Equal("HKCU", GameLocator.SaveChoice(_env, Game(@"G:\mine")));
