@@ -2,7 +2,7 @@
 
 These are instructions for AI coding agents, and for humans, working on this repository. Read this file before changing anything.
 
-This is the repo's **only** instructions file. Don't add a `CLAUDE.md` or tool-specific copies. Claude Code reads `AGENTS.md` natively, but only when no `CLAUDE.md` exists. Put new conventions here.
+This is the repo's **only** rules file. Don't add a `CLAUDE.md` or tool-specific copies. Claude Code reads `AGENTS.md` natively, but only when no `CLAUDE.md` exists. Put new conventions and rules here. Step-by-step procedures live in skills (see Skills below); they must not add or override rules.
 
 ## What this is
 
@@ -83,6 +83,14 @@ The test project is only for development: it is not published or shipped.
 - Settings go in `src/config.*`. Defaults must give stock behaviour, unless the brief says a feature is always on.
 - Log every hook install and every behaviour change once, with `LOG(...)`. Don't log every frame.
 - **Comments stay minimal.** Use `///` XML doc comments (`<summary>`, and `<param>`/`<returns>` only when they add something) on functions and types whose purpose isn't obvious. Don't restate the code. Keep short "why" comments for threading, lifetime and other non-obvious constraints. How the game works inside belongs in `lazy-sf2-recon`; point to it (`// See lazy-sf2-recon: recon-notes §4.3.`) instead of explaining it in the code.
+
+## Skills
+
+Procedures live in `.claude/skills/*/SKILL.md`, in the open Agent Skills format (a folder with a `SKILL.md`: YAML `name` and `description`, then plain markdown). Any agent or person can read them. They follow the rules in this file.
+
+- `live-test`: build, install, drive and check a build against the real game, including Tacview and network runs.
+- `review-task`: review a branch or task with a fresh-context reviewer and run the fix loop.
+- `cut-release`: the release checklist, from release branch to tagged GitHub release.
 
 ## Workflow
 
