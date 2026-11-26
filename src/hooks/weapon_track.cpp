@@ -28,6 +28,7 @@ constexpr size_t kFlagsOffset = 0x0c;
 constexpr size_t kParentOffset = 0x100;  // pointer to the shooter's object, set before the release
 constexpr size_t kDataOffset = 0x14c;    // pointer to the weapon data
 constexpr size_t kDataTypeOffset = 0x298;  // int, the ini's WeaponDataType
+constexpr size_t kGuidanceOffset = 0x398;  // short, the ini's GuidanceType
 constexpr size_t kMaxTracked = 256;
 constexpr size_t kNameChars = 63;
 
@@ -61,6 +62,7 @@ Dtor_t o_Dtor = nullptr;
 struct WeaponInfo {
     const void* parent = nullptr;
     int32_t data_type = 0;
+    int32_t guidance = 0;
     char name[kNameChars + 1] = {};
 };
 bool read_weapon_info(const void* obj, WeaponInfo* out) {
@@ -70,6 +72,7 @@ bool read_weapon_info(const void* obj, WeaponInfo* out) {
         const char* data = *reinterpret_cast<const char* const*>(b + kDataOffset);
         if (!data) return false;  // Init did not find the weapon data: not a usable weapon
         out->data_type = *reinterpret_cast<const int32_t*>(data + kDataTypeOffset);
+        out->guidance = *reinterpret_cast<const int16_t*>(data + kGuidanceOffset);
         // The data starts with the type name as a UTF-16 string of at most 64 characters.
         const wchar_t* w = reinterpret_cast<const wchar_t*>(data);
         size_t k = 0;
@@ -100,7 +103,7 @@ void __fastcall h_Release(void* self, void* edx, int* attached) {
     if (!read_weapon_info(obj, &info)) return;
     // Before taking our lock: the aircraft table has its own, and nothing may hold both in the other order.
     const uint64_t parent_seq = aircraft_seq_for_object(info.parent);
-    const uint8_t cls = static_cast<uint8_t>(classify_weapon_type(info.data_type));
+    const uint8_t cls = static_cast<uint8_t>(classify_weapon(info.data_type, info.guidance));
     bool full = false;
     uint64_t seq = 0;
     size_t live = 0;
@@ -130,7 +133,7 @@ void __fastcall h_Release(void* self, void* edx, int* attached) {
         if (!g_skip_logged.exchange(true))
             LOG("weapons: table full (%zu); further weapons are not tracked this flight", kMaxTracked);
     } else if (g_for_probe.load()) {
-        LOG("weapons: + %p \"%s\" type %d class %u seq %llu parent seq %llu (%zu live)", obj, info.name, info.data_type,
+        LOG("weapons: + %p \"%s\" type %d guidance %d class %u seq %llu parent seq %llu (%zu live)", obj, info.name, info.data_type, info.guidance,
             static_cast<unsigned>(cls), static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(parent_seq), live);
     }

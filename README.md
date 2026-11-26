@@ -91,6 +91,7 @@ Multiplayer comes in this order:
 Smaller items:
 
 - A "Head Tracking…" button in Options that opens a settings popup (twist and lean amounts), replacing the single on/off row.
+- Toe brakes: use rudder pedals' toe-brake axes for the wheel brakes (the game only has a toggle key), later with differential braking for steering on the ground.
 - Device-aware bindings: controls stay bound to the right device when a HOTAS or stick is unplugged at start-up.
 - Ramp starts, using the airfields' parking spots.
 - Esc in flight pauses first instead of ending the flight.
@@ -98,6 +99,8 @@ Smaller items:
 - Voice commands to wingmen through a FoxVox plugin.
 - Tougher AI air combat: enemy pilots that are harder to out-turn and out-fly (needs recon on the AI skill settings and manoeuvre logic).
 - Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
+- Tacview: sharp ground everywhere at low level. The add-on streams the game's own ground tiles at native resolution around the camera (prototype works: about 0.16 ms a tile, no extra load time).
+- Tacview: draw whole aerodromes (taxiways, aprons and ramps), not just runways.
 - Tacview: non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
 
 **Developer tools**

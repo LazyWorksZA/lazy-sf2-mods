@@ -390,7 +390,8 @@ bool game_in_front() {
 DWORD WINAPI hotkey_thread(LPVOID) {
     bool was_down = false, puppet_was_down = false, missile_was_down = false, rec_was_down = false,
          replay_was_down = false, rate_was_down = false, jump_was_down = false, nudge_was_down = false,
-         twist_was_down = false, hold_was_down = false;
+         twist_was_down = false, hold_was_down = false, destroy_was_down = false, place_was_down = false,
+         lock_was_down = false, ai_lock_was_down = false;
     for (;;) {
         Sleep(50);
         const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
@@ -425,6 +426,18 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         const bool hold_down = mods && (GetAsyncKeyState('H') & 0x8000);
         if (hold_down && !hold_was_down) pilot_twist_dev_cycle_hold();
         hold_was_down = hold_down;
+        const bool destroy_down = mods && (GetAsyncKeyState('X') & 0x8000);
+        if (destroy_down && !destroy_was_down) tacview_destroy_nearest_request();
+        destroy_was_down = destroy_down;
+        const bool place_down = mods && (GetAsyncKeyState('A') & 0x8000);
+        if (place_down && !place_was_down) lock_probe_request(1);
+        place_was_down = place_down;
+        const bool lock_down = mods && (GetAsyncKeyState('O') & 0x8000);
+        if (lock_down && !lock_was_down) lock_probe_request(2);
+        lock_was_down = lock_down;
+        const bool ai_lock_down = mods && (GetAsyncKeyState('I') & 0x8000);
+        if (ai_lock_down && !ai_lock_was_down) lock_probe_request(3);
+        ai_lock_was_down = ai_lock_down;
     }
 }
 
@@ -499,6 +512,7 @@ void probe_on_modules_loaded() {
     recorder_on_modules_loaded();  // registers its step callback (once)
     replay_on_modules_loaded();    // likewise
     player_jump_on_modules_loaded();
+    lock_probe_on_modules_loaded();
     step_order_on_modules_loaded();
     g_snapshot = scan_highest_snapshot();
     if (sim_register_step_callback(auto_step)) {

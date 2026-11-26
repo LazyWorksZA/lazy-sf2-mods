@@ -23,6 +23,7 @@ std::atomic<int> g_tacview{-1};  // -1 = not loaded yet
 std::atomic<int> g_pilot_twist{-1};  // -1 = not loaded yet
 std::atomic<double> g_twist_angle{kPilotTwistAngleDefault};
 std::atomic<double> g_twist_lean{kPilotTwistLeanDefault};
+std::atomic<BackgroundMode> g_background{BackgroundMode::Pause};
 
 // Saved Games\ThirdWire\<exe name>, e.g. ...\StrikeFighters2 (the game's own per-user folder), or empty.
 std::wstring game_data_path() {
@@ -92,6 +93,18 @@ BOOL CALLBACK load(PINIT_ONCE, PVOID, PVOID*) {
                                 kPilotTwistAngleMax, "degrees");
     g_twist_lean = read_number(path, L"ControlOptions", L"PilotTwistLean", kPilotTwistLeanDefault, 0.0,
                                kPilotTwistLeanMax, "cm");
+
+    wchar_t bg[32] = {};
+    const bool bg_present = !path.empty() && GetPrivateProfileStringW(L"OtherOptions", L"BackgroundMode", L"", bg,
+                                                                      static_cast<DWORD>(std::size(bg)), path.c_str()) > 0;
+    const int b = parse_choice_setting(bg_present ? bg : nullptr, 2);
+    g_background = b < 0 ? BackgroundMode::Pause : static_cast<BackgroundMode>(b);
+    static constexpr const char* kBgNames[] = {"pause (stock)", "keep running", "keep running with sound"};
+    if (!bg_present)
+        LOG("config: [OtherOptions] BackgroundMode not set -> pause (stock)");
+    else
+        LOG("config: [OtherOptions] BackgroundMode=%ls -> %s%s", bg, kBgNames[static_cast<int>(g_background.load())],
+            b < 0 ? " (invalid; use 0, 1 or 2)" : "");
     return TRUE;
 }
 
@@ -143,6 +156,11 @@ bool background_sim() {
         return !off;
     }();
     return on;
+}
+
+BackgroundMode background_mode() {
+    ensure_loaded();
+    return g_background.load();
 }
 
 MouseMode mouse_mode() {

@@ -47,6 +47,7 @@
 #include "net/remote_jet.h"
 #include <miniz.h>
 
+#include "acmi/object_types.h"
 #include "bot_core.h"
 #include "net/clock_sync.h"
 #include "net/client_core.h"
@@ -1761,6 +1762,87 @@ void acmi_tests() {
     expect(!LazyWorks::SF2Patch::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
 }
 
+void focus_logic_tests() {
+    using LazyWorks::SF2Patch::config::BackgroundMode;
+    using LazyWorks::SF2Patch::config::DisplayMode;
+    using LazyWorks::SF2Patch::config::parse_choice_setting;
+    namespace h = LazyWorks::SF2Patch::hooks;
+    std::printf("focus logic\n");
+    constexpr DisplayMode B = DisplayMode::Borderless, F = DisplayMode::Fullscreen;
+    static_assert(h::keep_running(true, false, B));
+    expect(h::bg_decision(false, false, B) == h::BgDecision::NoReason, "bg: Pause and no other reason -> stock pause");
+    expect(h::bg_decision(false, false, F) == h::BgDecision::NoReason, "bg: Pause in Fullscreen -> stock, no Fullscreen log");
+    expect(h::bg_decision(true, false, F) == h::BgDecision::Fullscreen, "bg: option in Fullscreen -> Borderless only");
+    expect(h::bg_decision(false, true, F) == h::BgDecision::Fullscreen, "bg: other reason in Fullscreen -> Borderless only");
+    expect(h::keep_running(false, true, B), "bg: another reason (network session) alone keeps running");
+    int keeping = 0;
+    for (int m = 0; m < 8; ++m) {
+        const bool option = (m & 1) != 0, reason = (m & 2) != 0;
+        const DisplayMode mode = (m & 4) ? B : F;
+        if (h::keep_running(option, reason, mode)) {
+            ++keeping;
+            expect(mode == B && (option || reason), "bg: keeps running only in Borderless with a reason");
+        }
+    }
+    expect(keeping == 3, "bg: three of eight combinations keep running");
+
+    // GLOBALFOCUS: mode 2 only, never the primary buffer or the position-notify music stream.
+    constexpr BackgroundMode S2 = BackgroundMode::KeepRunningWithSound;
+    expect(h::wants_global_focus(S2, B, 0x88), "sound: plain secondary buffer gets it");
+    expect(h::wants_global_focus(S2, B, 0x400b0), "sound: 3D (LOCDEFER) buffer with pitch gets it");
+    expect(!h::wants_global_focus(S2, B, 0x11), "sound: primary buffer never");
+    expect(!h::wants_global_focus(S2, B, 0x10188), "sound: music stream never");
+    expect(!h::wants_global_focus(S2, F, 0x88), "sound: Fullscreen at creation: stock buffer");
+    expect(!h::wants_global_focus(BackgroundMode::KeepRunning, B, 0x88) && !h::wants_global_focus(BackgroundMode::Pause, B, 0x88),
+           "sound: modes 0 and 1 leave buffers stock");
+    expect(h::needs_pacing(true, true, false) && h::needs_pacing(true, false, true), "pace: minimised or occluded");
+    expect(!h::needs_pacing(true, false, false) && !h::needs_pacing(false, true, true), "pace: only while kept running");
+    expect(h::pace_paced_period(6944) == h::kPaceFloorUs && h::pace_paced_period(20000) == 20000,
+           "pace: paced at most 60 Hz, slower measured periods kept");
+
+    // BackgroundMode parsing: 0, 1, 2; anything else is stock (-1).
+    expect(parse_choice_setting(L"0", 2) == 0 && parse_choice_setting(L"1", 2) == 1 && parse_choice_setting(L" 2 ", 2) == 2,
+           "setting: 0, 1, 2 (blanks allowed)");
+    expect(parse_choice_setting(nullptr, 2) == -1 && parse_choice_setting(L"", 2) == -1, "setting: missing -> stock");
+    expect(parse_choice_setting(L"3", 2) == -1 && parse_choice_setting(L"-1", 2) == -1 && parse_choice_setting(L"99", 2) == -1,
+           "setting: out of range -> stock (not clamped)");
+    expect(parse_choice_setting(L"1.5", 2) == -1 && parse_choice_setting(L"on", 2) == -1 && parse_choice_setting(L"1x", 2) == -1,
+           "setting: not a whole number -> stock");
+
+    // Period estimate: 1/8 weight, clamped to 30..240 Hz, hitches ignored.
+    expect(h::pace_update_period(16667, 16667) == 16667, "pace: steady 60 Hz stays");
+    expect(h::pace_update_period(16000, 24000) == 17000, "pace: one slow frame moves 1/8 of the way");
+    expect(h::pace_update_period(16667, 250000) == 16667 && h::pace_update_period(16667, 0) == 16667 &&
+               h::pace_update_period(16667, -5) == 16667,
+           "pace: loading hitches and bad samples are ignored");
+    expect(h::pace_update_period(h::kPaceMinPeriodUs, 1) == h::kPaceMinPeriodUs, "pace: never faster than 240 Hz");
+    expect(h::pace_update_period(h::kPaceMaxPeriodUs, 99000) == h::kPaceMaxPeriodUs, "pace: never slower than 30 Hz");
+    int64_t p = h::kPaceDefaultPeriodUs;
+    for (int i = 0; i < 200; ++i) p = h::pace_update_period(p, 6944);  // 144 Hz monitor
+    expect(p >= 6944 && p <= 6960, "pace: converges on the measured 144 Hz period");
+
+    // Deadlines: first frame free, then one period apart; small lateness catches up, large lateness restarts.
+    constexpr int64_t P = 16667;
+    static_assert(h::pace_step(1000, 0, P).wait_us == 0 && h::pace_step(1000, 0, P).deadline_us == 1000);
+    h::PaceStep s = h::pace_step(1000, 0, P);
+    s = h::pace_step(2000, s.deadline_us, P);
+    expect(s.deadline_us == 1000 + P && s.wait_us == P - 1000, "pace: waits the rest of the period");
+    s = h::pace_step(s.deadline_us + 5000, s.deadline_us, P);  // woke 5 ms late
+    expect(s.deadline_us == 1000 + 2 * P && s.wait_us == P - 5000, "pace: oversleep is taken from the next wait");
+    const int64_t d = s.deadline_us;
+    s = h::pace_step(d + P + 3000, d, P);  // a frame took a period plus 3 ms
+    expect(s.deadline_us == d + P && s.wait_us == 0, "pace: late by less than a period: no wait, catches up");
+    s = h::pace_step(d + 10 * P, d + P, P);  // a long stall
+    expect(s.deadline_us == d + 10 * P && s.wait_us == 0, "pace: late by more than a period: schedule restarts");
+    int64_t now = 1000, dl = 0;  // 0 is the "not started" deadline
+    for (int i = 0; i < 60; ++i) {
+        const h::PaceStep st = h::pace_step(now, dl, P);
+        dl = st.deadline_us;
+        now += st.wait_us + 500;  // each frame's own work takes 0.5 ms
+    }
+    expect(now == 1000 + 59 * P + 500, "pace: 60 frames take 59 periods (the first is free)");
+}
+
 void cursor_clip_tests() {
     using LazyWorks::SF2Patch::hooks::ClipInputs;
     using LazyWorks::SF2Patch::hooks::want_clip;
@@ -1781,27 +1863,25 @@ void cursor_clip_tests() {
     expect(clipping == 1, "clip: exactly one of 32 combinations clips");
 }
 
-void focus_logic_tests() {
+void focus_session_tests() {
     using LazyWorks::SF2Patch::config::DisplayMode;
-    using LazyWorks::SF2Patch::hooks::BgDecision;
-    using LazyWorks::SF2Patch::hooks::bg_decision;
-    using LazyWorks::SF2Patch::hooks::keep_running;
-    std::printf("focus logic\n");
+    namespace h = LazyWorks::SF2Patch::hooks;
+    std::printf("focus session reason\n");
     constexpr DisplayMode B = DisplayMode::Borderless, F = DisplayMode::Fullscreen;
-    static_assert(keep_running(true, true, B, false));
-    expect(keep_running(true, true, B, false), "bg sim: session + option + Borderless -> keep running");
-    expect(bg_decision(false, true, B, false) == BgDecision::NoSession, "bg sim: single-player -> stock pause");
-    expect(bg_decision(true, false, B, false) == BgDecision::OptionOff, "bg sim: option off -> stock pause");
-    expect(bg_decision(true, true, F, false) == BgDecision::Fullscreen, "bg sim: Fullscreen -> Borderless only");
-    expect(bg_decision(true, true, B, true) == BgDecision::Iconic, "bg sim: minimised -> stock pause");
-    expect(bg_decision(false, false, F, true) == BgDecision::NoSession, "bg sim: no session wins over every other reason");
+    // BackgroundMode Pause (player_option false): the session alone decides.
+    static_assert(h::keep_running(false, h::session_reason(true, true), B));
+    expect(h::keep_running(false, h::session_reason(true, true), B), "bg sim: session + option + Borderless -> keep running");
+    expect(h::bg_decision(false, h::session_reason(false, true), B) == h::BgDecision::NoReason, "bg sim: single-player -> stock pause");
+    expect(h::bg_decision(false, h::session_reason(true, false), B) == h::BgDecision::NoReason, "bg sim: LAZYSF2_BG_SIM=0 -> stock pause");
+    expect(h::bg_decision(false, h::session_reason(true, true), F) == h::BgDecision::Fullscreen, "bg sim: Fullscreen -> Borderless only");
+    expect(h::keep_running(true, h::session_reason(true, false), B), "bg sim: LAZYSF2_BG_SIM=0 leaves BackgroundMode in charge");
     int keeping = 0;
-    for (int m = 0; m < 16; ++m) {
-        const bool v = keep_running((m & 1) != 0, (m & 2) != 0, (m & 4) ? B : F, (m & 8) != 0);
+    for (int m = 0; m < 8; ++m) {
+        const bool v = h::keep_running(false, h::session_reason((m & 1) != 0, (m & 2) != 0), (m & 4) ? B : F);
         if (v) ++keeping;
         if (v) expect(m == 1 + 2 + 4, "bg sim: only one input combination keeps running");
     }
-    expect(keeping == 1, "bg sim: exactly one of 16 combinations keeps running");
+    expect(keeping == 1, "bg sim: exactly one of 8 combinations keeps running (BackgroundMode Pause)");
 }
 
 void tracker_logic_tests() {
@@ -2483,13 +2563,13 @@ void tacview_tests() {
         const auto ls = lines_of(out);
         expect(ls.size() == 6, "tacview world: five objects");
         expect(ls[1].rfind("2000001,T=", 0) == 0 &&
-                   ls[1].find(",Name=SA-2 Site,Type=Ground+Static+Building,Coalition=Enemies,Color=Red") != std::string::npos &&
+                   ls[1].find(",Name=SA-2 Site,Type=Ground+AntiAircraft,Coalition=Enemies,Color=Red") != std::string::npos &&
                    ls[1].find("Pilot") == std::string::npos,
                "tacview world: building id 0x2000000+seq, type name, coalition");
         expect(ls[2].rfind("2000002,T=", 0) == 0 &&
-                   ls[2].find(",Name=M113" + std::string(1, 92) + ",APC,Type=Ground+Vehicle,Coalition=Allies") != std::string::npos,
+                   ls[2].find(",Name=M113" + std::string(1, 92) + ",APC,Type=Ground+Heavy+Armor+Vehicle,Coalition=Allies") != std::string::npos,
                "tacview world: vehicle type and escaped name");
-        expect(ls[3].find(",Name=Frigate,Type=Sea+Watercraft,Coalition=Neutrals") != std::string::npos &&
+        expect(ls[3].find(",Name=Frigate,Type=Sea+Watercraft+Warship,Coalition=Neutrals") != std::string::npos &&
                    ls[3].rfind("2000003,T=", 0) == 0,
                "tacview world: ship type");
         expect(ls[4].rfind("3000001,T=", 0) == 0 && ls[4].find("Type=Misc+Decoy+Flare") != std::string::npos &&
@@ -2610,11 +2690,13 @@ void tacview_tests() {
     // Weapon type classification and the ring slot size.
     {
         using LazyWorks::SF2Patch::hooks::WeaponClass;
-        using LazyWorks::SF2Patch::hooks::classify_weapon_type;
-        expect(classify_weapon_type(0) == WeaponClass::Bomb && classify_weapon_type(1) == WeaponClass::Missile &&
-                   classify_weapon_type(7) == WeaponClass::Missile && classify_weapon_type(2) == WeaponClass::Rocket &&
-                   classify_weapon_type(-5) == WeaponClass::Missile,
-               "weapon class: 0 bomb, 1 and 7 missile, 2 rocket, anything else a missile");
+        using LazyWorks::SF2Patch::hooks::classify_weapon;
+        expect(classify_weapon(0, 0) == WeaponClass::Bomb && classify_weapon(0, 4) == WeaponClass::Bomb &&
+                   classify_weapon(1, 4) == WeaponClass::Bomb && classify_weapon(1, 5) == WeaponClass::Bomb &&
+                   classify_weapon(1, 0) == WeaponClass::Rocket && classify_weapon(1, 10) == WeaponClass::Missile &&
+                   classify_weapon(1, 13) == WeaponClass::Missile && classify_weapon(7, 0) == WeaponClass::Missile &&
+                   classify_weapon(7, 9) == WeaponClass::Missile && classify_weapon(-5, 0) == WeaponClass::Missile,
+               "weapon class: type 0 bomb, type 1 guidance 0 rocket, guided bombs bombs, other guided a missile");
         expect(sizeof(TacviewRec) == 168, "tacview: ring slot is 168 bytes");
     }
 
@@ -2858,6 +2940,88 @@ void tacview_tests() {
         expect(s == "a\\,b?c?", "acmi format: comma escaped, control and non-ASCII bytes replaced");
         expect(norm_deg(-90.0) == 270.0 && norm_deg(360.0) == 0.0 && norm_deg(359.999) == 0.0,
                "acmi format: heading normalised");
+    }
+    // Lock lines: the formatter, then change-only writing in the core.
+    {
+        std::string s;
+        append_lock(s, 0x10002, 1);
+        append_lock(s, 0x1000005, 0);
+        expect(s == "10002,LockedTarget=1,LockedTargetMode=1\n1000005,LockedTargetMode=0,LockedTarget=\n",
+               "acmi format: lock and lock-lost lines");
+    }
+    {
+        TacviewCore core{TacviewCoreConfig{}};
+        auto locked = [](TacviewRec r, uint64_t target) {
+            r.lock_mode = 1;
+            r.lock_seq = static_cast<uint32_t>(target);
+            return r;
+        };
+        auto frame = [&](double t, uint64_t ai_target, bool with_second) {
+            std::string o;
+            core.add(make_rec(1, true, AircraftSide::Friendly, "P", t, 0, 0, 1000, 0, 0, 0));
+            TacviewRec ai = make_rec(2, false, AircraftSide::Enemy, "E", t, 0, 3000, 1000, 0, 0, 0);
+            core.add(ai_target ? locked(ai, ai_target) : ai);
+            if (with_second) core.add(make_rec(3, false, AircraftSide::Enemy, "E2", t, 0, 5000, 1000, 0, 0, 0));
+            core.end_frame(t, o);
+            return o;
+        };
+        const std::string f1 = frame(1.0, 1, false);
+        expect(f1.find("10002,LockedTarget=1,LockedTargetMode=1\n") != std::string::npos,
+               "tacview locks: an AI's lock on the player names id 1");
+        expect(f1.rfind("10002,LockedTarget") > f1.rfind("10002,T="), "tacview locks: the lock line follows the transforms");
+        expect(frame(1.1, 1, false).find("LockedTarget") == std::string::npos, "tacview locks: an unchanged lock writes nothing");
+        expect(frame(1.2, 3, true).find("10002,LockedTarget=10003,LockedTargetMode=1\n") != std::string::npos,
+               "tacview locks: a new target is written once described (same frame, later in the list)");
+        expect(frame(1.3, 0, true).find("10002,LockedTargetMode=0,LockedTarget=\n") != std::string::npos,
+               "tacview locks: a lost lock is cleared");
+        expect(frame(1.4, 0, true).find("LockedTarget") == std::string::npos, "tacview locks: no lock, nothing more");
+        expect(frame(1.5, 99, true).find("LockedTarget") == std::string::npos, "tacview locks: an unknown target counts as no lock");
+        expect(frame(1.6, 2, true).find("LockedTarget") == std::string::npos, "tacview locks: a lock on itself is ignored");
+        expect(core.stats().lock_changes == 3, "tacview locks: three lock changes counted");
+    }
+    {  // a missile's target
+        TacviewCore core{TacviewCoreConfig{}};
+        std::string out;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 0, 0, 1000, 0, 0, 0));
+        core.add(make_rec(2, false, AircraftSide::Enemy, "E", 1.0, 0, 3000, 1000, 0, 0, 0));
+        TacviewRec m = make_rec(7, false, AircraftSide::Unknown, "AIM-9B", 1.0, 0, 100, 1000, 0, 0, 0);
+        m.obj_class = TacviewRec::kMissile;
+        m.parent_seq = 1;
+        m.lock_mode = 1;
+        m.lock_seq = 2;
+        core.add(m);
+        core.end_frame(1.0, out);
+        expect(out.find("1000007,LockedTarget=10002,LockedTargetMode=1\n") != std::string::npos,
+               "tacview locks: a missile's target is written on the weapon");
+    }
+    {  // the target leaves while the locker still names it; a frame of other series keeps the lock
+        TacviewCore core{TacviewCoreConfig{}};
+        auto ai = [](double t, uint64_t target) {
+            TacviewRec r = make_rec(2, false, AircraftSide::Enemy, "E", t, 0, 3000, 1000, 0, 0, 0);
+            r.lock_mode = target ? 1 : 0;
+            r.lock_seq = static_cast<uint32_t>(target);
+            return r;
+        };
+        std::string o1;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 0, 0, 1000, 0, 0, 0));
+        core.add(make_rec(3, false, AircraftSide::Enemy, "E2", 1.0, 0, 5000, 1000, 0, 0, 0));
+        core.add(ai(1.0, 3));
+        core.end_frame(1.0, o1);
+        expect(o1.find("10002,LockedTarget=10003,LockedTargetMode=1\n") != std::string::npos, "tacview locks: lock written");
+        std::string o2;  // a weapons-only frame: aircraft not sampled
+        core.end_frame(1.05, o2, TacviewRec::kSeriesWeapon);
+        expect(o2.find("LockedTarget") == std::string::npos, "tacview locks: a frame of other series keeps the lock");
+        std::string o3;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.1, 0, 0, 1000, 0, 0, 0));
+        core.add(ai(1.1, 3));
+        core.end_frame(1.1, o3, TacviewRec::kSeriesAircraft);
+        expect(o3.find("-10003\n") != std::string::npos && o3.find("10002,LockedTargetMode=0,LockedTarget=\n") != std::string::npos,
+               "tacview locks: the target removed while still named writes a clear");
+        std::string o4;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.2, 0, 0, 1000, 0, 0, 0));
+        core.add(ai(1.2, 3));
+        core.end_frame(1.2, o4, TacviewRec::kSeriesAircraft);
+        expect(o4.find("LockedTarget") == std::string::npos, "tacview locks: the clear is written once");
     }
 }
 
@@ -3192,6 +3356,51 @@ void texture_tests() {
         expect(parse_numbers("-1066.00, 2392.5", v, 2) && v[0] == -1066.0 && v[1] == 2392.5 && !parse_numbers("1", v, 2) &&
                    !parse_numbers("x,2", v, 2),
                "ini: number lists");
+    }
+
+    // names: cp1252 and UTF-8 sources reach ACMI text as UTF-8
+    {
+        using LazyWorks::SF2Patch::acmi::append_escaped;
+        const auto by = [](std::initializer_list<int> v) {
+            std::string s;
+            for (int c : v) s += static_cast<char>(c);
+            return s;
+        };
+        const auto nm = [&](const std::string& cp1252) {
+            const auto b = ansi(by({'[', 'A', ']', 13, 10, 'N', 'a', 'm', 'e', '='}) + cp1252 + by({13, 10}));
+            const Ini i = parse_ini(b.data(), b.size());
+            const std::string* v = i.get("a", "name");
+            return v ? *v : std::string("<none>");
+        };
+        expect(nm(by({'M', 0xf6, 'n', 'c', 'h', 'h', 'o', 'f'})) == by({'M', 0xc3, 0xb6, 'n', 'c', 'h', 'h', 'o', 'f'}),
+               "names: cp1252 o-umlaut becomes UTF-8");
+        expect(nm(by({0xc6, 'r', 0xf8})) == by({0xc3, 0x86, 'r', 0xc3, 0xb8}), "names: cp1252 AE and o-slash become UTF-8");
+        expect(nm(by({'Z', 0xfc, 'r', 'i', 'c', 'h'})) == by({'Z', 0xc3, 0xbc, 'r', 'i', 'c', 'h'}),
+               "names: cp1252 u-umlaut becomes UTF-8");
+        expect(nm(by({'E', 0x80})) == by({'E', 0xe2, 0x82, 0xac}), "names: cp1252 0x80 is the euro sign");
+        expect(nm(by({'Z', 0xc3, 0xbc, 'r'})) == by({'Z', 0xc3, 0xbc, 'r'}), "names: UTF-8 without a BOM is not encoded twice");
+        std::string o;
+        append_escaped(o, by({'B', 0xc3, 0xbc, 'c', 'k', ',', ' ', 0xc3, 0x84}).c_str());
+        expect(o == by({'B', 0xc3, 0xbc, 'c', 'k', 92, ',', ' ', 0xc3, 0x84}),
+               "names: valid UTF-8 passes through the ACMI escape, comma escaped");
+        o.clear();
+        append_escaped(o, by({'a', 0xfc, 'b', 0xc3, 'c', 0xc0, 0x80, 0xed, 0xa0, 0x80, 10}).c_str());
+        expect(o == "a?b?c??????", "names: invalid bytes and control characters become '?'");
+        o.clear();
+        append_escaped(o, by({'a', 0xc3}).c_str());
+        expect(o == "a?", "names: a truncated UTF-8 sequence becomes '?'");
+        o.clear();
+        append_escaped(o, by({0xf0, 0x9f, 0x98, 0x80, 'x'}).c_str());
+        expect(o == by({0xf0, 0x9f, 0x98, 0x80, 'x'}), "names: a 4-byte UTF-8 sequence passes through");
+        o.clear();
+        append_escaped(o, by({0xf0, 0x9f, 0x98}).c_str());
+        expect(o == "???", "names: a truncated 4-byte sequence becomes '?' per byte");
+        o.clear();
+        LazyWorks::SF2Patch::acmi::append_utf8_cp(o, 0x1f600);
+        LazyWorks::SF2Patch::acmi::append_utf8_cp(o, 0xd800);
+        LazyWorks::SF2Patch::acmi::append_utf8_cp(o, 0xfc);
+        expect(o == by({0xf0, 0x9f, 0x98, 0x80, '?', 0xc3, 0xbc}), "names: append_utf8_cp (what copy_name uses) writes 4-byte, rejects surrogates");
+        expect(nm("Plain Name") == "Plain Name", "names: an ASCII-only ini is unchanged");
     }
 
     // airfields
@@ -3617,8 +3826,8 @@ void structure_tests() {
     const auto l1 = lines_of(o1);
     expect(l1.size() == 4 && l1[0] == "#1.000" && l1[1] == want2, "structures: one line each, id 0x7000000+seq, Ground+Static+Building, no coalition");
     expect(o1.find("7000001,") == std::string::npos, "structures: one within 15 m of a live ground object is skipped");
-    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Bridge\n") != std::string::npos,
-           "structures: a bridge is Ground+Static+Bridge");
+    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Building\n") != std::string::npos,
+           "structures: a bridge is a building (the SDK has no Bridge tag)");
     expect(o1.find("7000004,T=") != std::string::npos, "structures: vehicles do not hide them");
     // The next chunk: a repeat writes nothing; a new one is added; the earlier ones stay.
     std::string o2;
@@ -3778,6 +3987,11 @@ void structure_tests() {
                    find_near(pts, 4, 10.4, 0, 2.0, taken) == 3 && find_near(pts, 4, 0.5, 0, 2.0, taken) == 0 &&
                    find_near(pts, 4, 50, 0, 2.0, nullptr) == 4 && find_near(pts, 0, 0, 0, 2.0, nullptr) == 0,
                "find_near: the nearest within the tolerance, never a taken one; n when none");
+        // The destroy hotkey: the nearest standing structure at any distance; none when all are skipped.
+        const uint8_t all[4] = {1, 1, 1, 1};
+        expect(find_near(pts, 4, 1e6, 0, HUGE_VAL, nullptr) == 2 && find_near(pts, 4, 1e6, 0, HUGE_VAL, taken) == 2 &&
+                   find_near(pts, 4, 9.0, 0.6, HUGE_VAL, taken) == 3 && find_near(pts, 4, 1e6, 0, HUGE_VAL, all) == 4,
+               "find_near: an infinite tolerance takes the nearest free point at any distance");
     }
 
     TacviewWriter w(64);
@@ -6547,10 +6761,14 @@ void client_logic_tests() {
         const float fast[3] = {0, 200, 0}, slow[3] = {30, 30, 0};
         expect(cl::airborne(up, fast) && !cl::airborne(low, fast) && !cl::airborne(up, slow),
                "airborne: above 500 m and faster than 50 m/s");
-        expect(cl::connect_due(true, true, true, false, 10.0, 10.0) && !cl::connect_due(false, true, true, false, 10, 0) &&
-                   !cl::connect_due(true, false, true, false, 10, 0) && !cl::connect_due(true, true, false, false, 10, 0) &&
-                   !cl::connect_due(true, true, true, true, 10, 0) && !cl::connect_due(true, true, true, false, 9.9, 10.0),
-               "connect: player known, airborne, no core, not blocked, retry time reached");
+        expect(cl::connect_due(true, true, false, 10.0, 10.0) && !cl::connect_due(false, true, false, 10, 0) &&
+                   !cl::connect_due(true, false, false, 10, 0) && !cl::connect_due(true, true, true, 10, 0) &&
+                   !cl::connect_due(true, true, false, 9.9, 10.0),
+               "connect: player known, no core, not blocked, retry time reached; airborne not needed");
+        expect(cl::wait_reason(true, true, false) && cl::wait_reason(true, false, true) &&
+                   !cl::wait_reason(true, false, false) &&
+                   std::string(cl::wait_reason(false, true, true)) == "player not known yet",
+               "connect: the waiting reason names what holds it back");
     }
     {
         expect(cl::join_action(false, true, true, false, 5000) == JoinAction::NoJoin,
@@ -6591,6 +6809,32 @@ void client_logic_tests() {
         cl::join_target(w, 60.0, t);
         expect(on && back && std::fabs(t[1] - 2400) < 1e-6,
                "join target: carried on with the join velocity, never backwards, at most 2 s");
+    }
+    {
+        WelcomeMsg w{};
+        w.spawn_pos[1] = 2000;
+        w.spawn_vel[1] = 200;
+        w.spawn_vel[2] = 20;
+        w.spawn_heading = 0.5f;
+        w.host_game_time = 50;
+        const cl::JoinPose a = cl::join_pose(w, nullptr, 50.5);
+        const bool wel = !a.from_state && a.vel[1] == 200 && a.vel[2] == 20 && std::fabs(a.pos[1] - 2100) < 1e-6 &&
+                         a.ang[1] == 0.5f && a.ang[2] == 0 && std::fabs(a.ang[0] - std::atan2(20.0, 200.0)) < 1e-6;
+        StateMsg st{};
+        st.game_time = 51;
+        st.pos[0] = 10;
+        st.vel[0] = 100;
+        st.vel[2] = -5;
+        st.ang[0] = 0.1f;
+        st.ang[1] = 1.0f;
+        st.ang[2] = 0.3f;
+        const cl::JoinPose b = cl::join_pose(w, &st, 51.5);
+        const bool sta = b.from_state && std::fabs(b.pos[0] - 60) < 1e-6 && b.vel[0] == 100 && b.vel[2] == -5 &&
+                         b.ang[0] == 0.1f && b.ang[1] == 1.0f && b.ang[2] == 0.3f;
+        st.game_time = 49;  // older than the Welcome: the Welcome wins
+        const cl::JoinPose c = cl::join_pose(w, &st, 50.5);
+        expect(wel && sta && !c.from_state && c.vel[1] == 200,
+               "join pose: the Welcome's velocity and climb, or a newer State's velocity, angles and carried position");
     }
     {
         float v[3] = {0, 100, 7};
@@ -8375,7 +8619,42 @@ void weapon_launch_tests() {
            "loopback: the client's launch reaches the host with its weapon's name");
 }
 
+static void object_type_tests() {
+    using namespace LazyWorks::SF2Patch::acmi;
+    auto tags = [](uint8_t cls, const char* name) { return std::string(ground_type_tags(cls, name)); };
+    const uint8_t V = TacviewRec::kGroundVehicle, S = TacviewRec::kGroundStatic, H = TacviewRec::kShip;
+    expect(tags(V, "Foo Truck") == "Ground+Medium+Vehicle" && tags(V, "Fuel Tanker") == "Ground+Medium+Vehicle",
+           "types: truck and tanker are medium vehicles, not tanks");
+    expect(tags(V, "Zork Jeep") == "Ground+Light+Vehicle" && tags(V, "Staff Car") == "Ground+Light+Vehicle", "types: jeep and car");
+    expect(tags(V, "Zork Main Battle Tank") == "Ground+Heavy+Armor+Vehicle+Tank" && tags(V, "Zork MBT") == "Ground+Heavy+Armor+Vehicle+Tank",
+           "types: tank");
+    expect(tags(V, "Zork APC") == "Ground+Heavy+Armor+Vehicle" && tags(V, "Zork Howitzer") == "Ground+Heavy+Armor+Vehicle",
+           "types: APC and artillery are armor");
+    expect(tags(V, "Zork AAA Gun") == "Ground+AntiAircraft" && tags(V, "SA-13 Launcher") == "Ground+AntiAircraft" &&
+               tags(V, "Mosa-13") == "Ground+Vehicle",
+           "types: anti-aircraft, and a lookalike is not");
+    expect(tags(V, "Zork Rifle Squad") == "Ground+Light+Human+Infantry" && tags(V, "Zorkmobile") == "Ground+Vehicle",
+           "types: infantry; unknown is a plain vehicle");
+    expect(tags(H, "Zork Carrier") == "Sea+Watercraft+AircraftCarrier" && tags(H, "Zork Destroyer") == "Sea+Watercraft+Warship" &&
+               tags(H, "Zork Submarine") == "Sea+Watercraft+Submarine" && tags(H, "Zork Barge") == "Sea+Watercraft",
+           "types: ship classes");
+    expect(tags(S, "Zork Hangar") == "Ground+Static+Building" && tags(S, "Zork Fuel Tank") == "Ground+Static+Container" &&
+               tags(S, "Zork Radar") == "Ground+AntiAircraft" && tags(S, "Zork Flak Tower") == "Ground+AntiAircraft",
+           "types: static objects");
+    expect(tags(TacviewRec::kStorage, "Zork") == "Ground+Static+Container" && tags(TacviewRec::kBridge, "Fuel Bridge") == "Ground+Static+Building" &&
+               tags(TacviewRec::kStructure, "Zork Storage Tank") == "Ground+Static+Container" &&
+               tags(TacviewRec::kStructure, "Zork Bunker") == "Ground+Static+Building",
+           "types: structures: the class decides, the name refines");
+    expect(tags(V, "Zork Personnel Carrier") == "Ground+Heavy+Armor+Vehicle" && tags(V, "Zork Caravan") == "Ground+Vehicle" &&
+               tags(V, "Bush Wagon") == "Ground+Vehicle" && tags(V, "Samson Mk2") == "Ground+Vehicle" &&
+               tags(S, "Zork Police Pole") == "Ground+Static+Building" && tags(V, "Zork Trucks") == "Ground+Medium+Vehicle",
+           "types: whole words only, armor before car");
+    expect(is_storage_category("FUEL_STORAGE") && is_storage_category("Oil") && !is_storage_category("POLE") && !is_storage_category("POLICE") && !is_storage_category("BRIDGE") && !is_storage_category("BUILDING"),
+           "types: storage category");
+}
+
 int main() {
+    object_type_tests();
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
     bool ok = protocol_selftest(&why);
@@ -8428,6 +8707,7 @@ int main() {
     tracker_logic_tests();
     cursor_clip_tests();
     focus_logic_tests();
+    focus_session_tests();
     tacview_tests();
     terrain_tests();
     texture_tests();
