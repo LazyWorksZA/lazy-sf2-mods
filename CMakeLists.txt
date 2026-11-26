@@ -130,8 +130,10 @@ add_executable(lazysf2-bot
     tools/bot/main.cpp
     tools/bot/bot_client.cpp
     src/net/protocol.cpp
+    src/net/remote_jet.cpp
 )
 target_compile_features(lazysf2-bot PRIVATE cxx_std_20)
+target_compile_definitions(lazysf2-bot PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(lazysf2-bot PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2-bot PRIVATE src tools/bot)
 target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet ws2_32 winmm)

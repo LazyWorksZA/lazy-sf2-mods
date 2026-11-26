@@ -24,7 +24,8 @@ inline constexpr double kClimbPitch = 30.0 * kPi / 180.0;
 inline constexpr double kClimbTime = 10.0;  // seconds
 inline constexpr double kStep = 0.005;      // integration sub-step, seconds
 
-enum class Script { Straight, Orbit, Breaks, Climb };
+/// <summary>Formation flies on the host's predicted jet (bot_client.cpp); Flight flies it as Straight.</summary>
+enum class Script { Straight, Orbit, Breaks, Climb, Formation };
 
 inline bool parse_script(const char* name, Script* out) {
     if (!name) return false;
@@ -32,8 +33,42 @@ inline bool parse_script(const char* name, Script* out) {
     else if (!std::strcmp(name, "orbit")) *out = Script::Orbit;
     else if (!std::strcmp(name, "breaks")) *out = Script::Breaks;
     else if (!std::strcmp(name, "climb")) *out = Script::Climb;
+    else if (!std::strcmp(name, "formation")) *out = Script::Formation;
     else return false;
     return true;
+}
+
+inline const char* script_name(Script s) {
+    switch (s) {
+        case Script::Straight: return "straight";
+        case Script::Orbit: return "orbit";
+        case Script::Breaks: return "breaks";
+        case Script::Climb: return "climb";
+        case Script::Formation: return "formation";
+    }
+    return "?";
+}
+
+/// <summary>
+/// The formation point of a lead at lead[3] with heading h (from +y towards +x): off = (right, back, up) in the lead's
+/// heading frame. Right is (cos h, -sin h), ahead (sin h, cos h): the same frame as net::join_position.
+/// </summary>
+inline void formation_point(const double lead[3], double h, const double off[3], double out[3]) {
+    const double sh = std::sin(h), ch = std::cos(h);
+    out[0] = lead[0] + off[0] * ch - off[1] * sh;
+    out[1] = lead[1] - off[0] * sh - off[1] * ch;
+    out[2] = lead[2] + off[2];
+}
+
+/// <summary>
+/// The velocity of that point: the lead's, plus the offset turning with the lead's heading rate (the outside of a
+/// turn is faster). The derivative of formation_point along a turn.
+/// </summary>
+inline void formation_velocity(const double v[3], double h, double heading_rate, const double off[3], double out[3]) {
+    const double sh = std::sin(h), ch = std::cos(h);
+    out[0] = v[0] + heading_rate * (-off[0] * sh - off[1] * ch);
+    out[1] = v[1] + heading_rate * (-off[0] * ch + off[1] * sh);
+    out[2] = v[2];
 }
 
 inline double wrap_pi(double a) {  // into (-pi, pi]
@@ -103,7 +138,8 @@ private:
         *bank = 0.0;
         *pitch = 0.0;
         switch (script_) {
-            case Script::Straight: break;
+            case Script::Straight:
+            case Script::Formation: break;
             case Script::Orbit: *bank = bank_for_load(3.0); break;
             case Script::Breaks: {
                 const long seg = static_cast<long>(std::floor(tau / kBreakPeriod));

@@ -1,4 +1,7 @@
 // lazysf2-bot: a headless synthetic client for the host mode. Developer tool, not shipped.
+#include <windows.h>
+
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,14 +14,18 @@ namespace {
 
 void usage() {
     std::printf(
-        "lazysf2-bot --host ADDR:PORT [--callsign BOT1] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
-        "            [--rate HZ] [--duration SECONDS] [--loss PERCENT] [--jitter MS] [--drop] [--log FILE]\n"
-        "Defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter.\n"
+        "lazysf2-bot --host ADDR:PORT [--callsign BOT1] [--aircraft F-4E]\n"
+        "            [--script straight|orbit|breaks|climb|formation] [--offset R,B,U] [--rate HZ] [--duration SECONDS]\n"
+        "            [--loss PERCENT] [--jitter MS] [--lag MS] [--log-remote] [--drop] [--log FILE]\n"
+        "Defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
+        "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
+        "(default 150,50,0); before the first host State it flies straight on from the Welcome's join position.\n"
         "--jitter delays each State by a random 0..MS before it is sent, so States can overtake each other: on the\n"
         "sequenced (unreliable) channel a late State is dropped by the host, so jitter also acts as extra loss.\n"
-        "--drop exits without Bye (tests the host's 5 s timeout). Exit code 0 ok, 1 bad arguments, 2 cannot connect\n"
-        "(bad address, refused), 3 no ENet connection within 4 s, or no Welcome within 15 s of connecting, 4 the host\n"
-        "closed the connection or went silent for 4 s.\n");
+        "--lag holds every packet sent and every packet received for MS (a fixed delay each way).\n"
+        "--log-remote logs one line per second per remote jet. --drop exits without Bye (tests the host's 5 s timeout).\n"
+        "Exit code 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no ENet connection within\n"
+        "4 s, or no Welcome within 15 s of connecting, 4 the host closed the connection or went silent for 4 s.\n");
 }
 
 bool to_double(const char* s, double* out) {
@@ -27,7 +34,21 @@ bool to_double(const char* s, double* out) {
     return end && end != s && !*end && std::isfinite(*out);
 }
 
+/// <summary>"a,b,c" (n numbers, comma separated) into out.</summary>
+bool to_doubles(const char* s, double* out, int n) {
+    std::string rest = s;
+    for (int i = 0; i < n; ++i) {
+        const size_t comma = rest.find(',');
+        if ((i + 1 < n) != (comma != std::string::npos)) return false;
+        const std::string part = i + 1 < n ? rest.substr(0, comma) : rest;
+        if (!to_double(part.c_str(), &out[i])) return false;
+        if (i + 1 < n) rest = rest.substr(comma + 1);
+    }
+    return true;
+}
+
 FILE* g_logfile = nullptr;
+std::atomic<bool> g_cancel{false};
 
 void log_line(const char* line) {
     std::printf("%s\n", line);
@@ -38,19 +59,27 @@ void log_line(const char* line) {
     }
 }
 
+BOOL WINAPI on_ctrl(DWORD type) {
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT && type != CTRL_CLOSE_EVENT) return FALSE;
+    g_cancel.store(true);  // the run ends with a Bye
+    return TRUE;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    LazyWorks::SF2Patch::bot::BotConfig cfg;
+    namespace bot = LazyWorks::SF2Patch::bot;
+    bot::BotConfig cfg;
     cfg.log = log_line;
+    cfg.cancel = &g_cancel;
     const char* log_path = nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto val = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         const char* v = nullptr;
         bool ok = true;
-        static const char* const kNeedValue[] = {"--host", "--callsign", "--aircraft", "--script",
-                                                 "--rate", "--duration", "--loss",     "--jitter", "--log"};
+        static const char* const kNeedValue[] = {"--host", "--callsign", "--aircraft", "--script", "--rate", "--duration",
+                                                 "--loss", "--jitter",   "--log",      "--lag",    "--offset"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -60,6 +89,8 @@ int main(int argc, char** argv) {
         }
         if (a == "--drop") {
             cfg.drop = true;
+        } else if (a == "--log-remote") {
+            cfg.log_remote = true;
         } else if (a == "--help" || a == "-h") {
             usage();
             return 0;
@@ -70,7 +101,7 @@ int main(int argc, char** argv) {
         } else if (a == "--aircraft" && (v = val())) {
             cfg.aircraft = v;
         } else if (a == "--script" && (v = val())) {
-            ok = LazyWorks::SF2Patch::bot::parse_script(v, &cfg.script);
+            ok = bot::parse_script(v, &cfg.script);
         } else if (a == "--rate" && (v = val())) {
             ok = to_double(v, &cfg.rate);
         } else if (a == "--duration" && (v = val())) {
@@ -79,6 +110,10 @@ int main(int argc, char** argv) {
             ok = to_double(v, &cfg.loss_pct);
         } else if (a == "--jitter" && (v = val())) {
             ok = to_double(v, &cfg.jitter_ms);
+        } else if (a == "--lag" && (v = val())) {
+            ok = to_double(v, &cfg.lag_ms);
+        } else if (a == "--offset" && (v = val())) {
+            ok = to_doubles(v, cfg.offset, 3);
         } else if (a == "--log" && (v = val())) {
             log_path = v;
         } else {
@@ -94,7 +129,8 @@ int main(int argc, char** argv) {
         std::printf("cannot open the log file %s\n", log_path);
         return 1;
     }
-    const LazyWorks::SF2Patch::bot::BotResult res = LazyWorks::SF2Patch::bot::run_bot(cfg);
+    SetConsoleCtrlHandler(on_ctrl, TRUE);
+    const int code = bot::run_bot(cfg).code;
     if (g_logfile) std::fclose(g_logfile);
-    return res.code;
+    return code;
 }

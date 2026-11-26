@@ -4177,6 +4177,7 @@ struct FakeHost {
     double t0 = ClientCore::wall_now();
     uint32_t theatre = 0;
     bool answer_hello = true, send_jet = false;
+    bot::Flight* flight = nullptr;  // if set, the host's jet flies this (started at host time 1000), not fh_jet's line
     bool welcomed = false, got_hello = false, got_disconnect = false;
     uint8_t slot = 0;  // the newest connection
     uint32_t gen = 0, seq = 0;
@@ -4194,6 +4195,22 @@ struct FakeHost {
         return core.state() == HostCore::State::Running;
     }
     double time() const { return 1000.0 + (ClientCore::wall_now() - t0); }
+    StateMsg host_jet(uint32_t s, double t) {
+        if (!flight) return fh_jet(s, t);
+        flight->advance_to(t);
+        const bot::Flight::Sample f = flight->sample();
+        StateMsg m{};
+        m.client_id = 0;
+        m.seq = s;
+        m.game_time = flight->time();
+        for (int i = 0; i < 3; ++i) {
+            m.pos[i] = f.pos[i];
+            m.vel[i] = f.vel[i];
+            m.ang[i] = f.ang[i];
+            m.rates[i] = f.rates[i];
+        }
+        return m;
+    }
     template <class M>
     void send(const M& m, bool reliable) {  // to the newest connection
         uint8_t b[128];
@@ -4219,7 +4236,7 @@ struct FakeHost {
         peers.flush_relay();
         const double now = time();
         if (send_jet && peers.count() > 0 && tick.due(now)) {
-            const StateMsg s = fh_jet(++seq, now);
+            const StateMsg s = host_jet(++seq, now);
             uint8_t b[128];
             peers.send_state(b, encode(s, b, sizeof(b)), -1);
         }
@@ -4250,7 +4267,7 @@ struct FakeHost {
                     return;
                 }
                 const double now = time();
-                const StateMsg jet = fh_jet(0, now);
+                const StateMsg jet = host_jet(0, now);
                 WelcomeMsg w{};
                 w.client_id = static_cast<uint16_t>(e.slot + 1);
                 join_position(jet.pos, jet.ang[1], e.slot, w.spawn_pos);
@@ -5354,6 +5371,228 @@ void client_core_tests() {
     client_core_concurrency_tests();
 }
 
+// --- The bot as a second player (Task 9) and as a synthetic host (Task 10) ---
+
+void bot_log(const char* l) { std::printf("    [bot] %s\n", l); }
+
+double fh_dist(const double a[3], const double b[3]) {
+    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+void bot_formation_logic_tests() {
+    std::printf("bot: formation geometry\n");
+    const double off[3] = {150.0, 50.0, 0.0};
+    bool same = true;
+    for (double h = -3.1; h <= 3.1; h += 0.29) {
+        const double p[3] = {1000.0, -2000.0, 3000.0};
+        double a[3], b[3];
+        bot::formation_point(p, h, off, a);
+        join_position(p, h, 0, b);
+        for (int i = 0; i < 3; ++i) same = same && std::fabs(a[i] - b[i]) < 1e-9;
+    }
+    expect(same, "the default offset is the Welcome's join position for client 1, at any heading");
+    {  // along a 6 g turn the formation velocity is the derivative of the formation point
+        bot::Flight f;
+        const double spawn[3] = {0.0, 0.0, 2000.0};
+        f.start(bot::Script::Breaks, spawn, 0.4, 0.0);
+        f.advance_to(2.0);  // well into the right turn
+        const double up[3] = {150.0, 50.0, 30.0};
+        auto at = [&](double t, double out[3]) {
+            bot::Flight g = f;
+            g.advance_to(t);
+            const bot::Flight::Sample s = g.sample();
+            bot::formation_point(s.pos, s.ang[1], up, out);
+        };
+        double p0[3], p1[3];
+        at(2.0, p0);
+        at(2.01, p1);
+        const bot::Flight::Sample s = f.sample();
+        const double v[3] = {s.vel[0], s.vel[1], s.vel[2]};
+        double fv[3];
+        bot::formation_velocity(v, s.ang[1], s.rates[1], up, fv);
+        double worst = 0;
+        for (int i = 0; i < 3; ++i) worst = (std::max)(worst, std::fabs((p1[i] - p0[i]) / 0.01 - fv[i]));
+        char what[160];
+        std::snprintf(what, sizeof(what), "formation velocity matches the point's motion in a turn (worst %.2f m/s; the "
+                      "plain lead velocity is %.1f m/s off)", worst, std::fabs((p1[0] - p0[0]) / 0.01 - v[0]) +
+                      std::fabs((p1[1] - p0[1]) / 0.01 - v[1]));
+        expect(worst < 0.5, what);
+    }
+}
+
+struct FhBotRun {
+    bot::BotResult res;
+    double secs = 0;
+};
+
+// Runs the bot on its own thread against the FakeHost, pumping the host (and each()) on this thread until it exits.
+template <class F>
+FhBotRun fh_run_bot(FakeHost& h, bot::BotConfig cfg, F each) {
+    cfg.host = "127.0.0.1:" + std::to_string(h.core.port());
+    if (!cfg.log) cfg.log = bot_log;
+    FhBotRun out;
+    std::atomic<bool> done{false};
+    const double t0 = ClientCore::wall_now();
+    std::thread th([&] {
+        out.res = bot::run_bot(cfg);
+        done = true;
+    });
+    while (!done) {
+        h.pump();
+        each();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    th.join();
+    out.secs = ClientCore::wall_now() - t0;
+    for (int i = 0; i < 100; ++i) {  // the Bye and the disconnect
+        h.pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return out;
+}
+
+// M1 (Task 8 review): the bot against a host that sends its jet, PeerInfo and, at the end, a Bye signed 0.
+void bot_host_traffic_tests() {
+    std::printf("bot: against a host that sends its jet, PeerInfo and Bye 0\n");
+    FakeHost h;
+    h.send_jet = true;
+    if (!h.start()) return expect(false, "host core running");
+    bot::BotConfig cfg;
+    cfg.script = bot::Script::Straight;
+    cfg.rate = 20.0;
+    cfg.duration = 10.0;
+    cfg.log_remote = true;
+    double first_state = -1;
+    bool bye_sent = false;
+    uint32_t host_sent = 0;
+    const FhBotRun r = fh_run_bot(h, cfg, [&] {
+        if (first_state < 0 && !h.states.empty()) first_state = ClientCore::wall_now();
+        if (!bye_sent && first_state > 0 && ClientCore::wall_now() - first_state > 2.0) {
+            bye_sent = true;
+            host_sent = h.seq;
+            h.bye_and_disconnect(3);
+        }
+    });
+    char what[200];
+    std::printf("    bot: code %d after %.1f s; %u host States of %u sent, %u PeerInfo, %u refused, host Bye %d\n", r.res.code,
+                r.secs, r.res.host_states, host_sent, r.res.peer_infos, r.res.dropped_rx, r.res.host_bye);
+    expect(bye_sent && r.res.code == 4 && r.res.host_bye == 3 && r.secs < 8.0,
+           "the host's Bye 3 (signed 0) is logged and the bot exits 4 (the host closed the connection), at once");
+    std::snprintf(what, sizeof(what), "the host's jet arrives: %u of %u States, from its announced id 0", r.res.host_states,
+                  host_sent);
+    expect(host_sent > 30 && r.res.host_states >= host_sent * 8 / 10 && r.res.peer_infos == 1 && r.res.dropped_rx == 0,
+           what);
+    expect(r.res.sent > 0 && !h.states.empty() && h.byes.empty(), "the bot's own States arrived, and it sent no Bye after the host's");
+    h.core.stop(false);
+}
+
+// Two bots on one host: each hears of the other (PeerInfo), gets its States relayed, and hears it leave (PeerLeft).
+void bot_relay_tests() {
+    std::printf("bot: two bots, relay and PeerLeft\n");
+    FakeHost h;
+    h.send_jet = true;
+    if (!h.start()) return expect(false, "host core running");
+    bot::BotConfig a, b;
+    a.callsign = "ALPHA";
+    b.callsign = "BRAVO";
+    a.rate = b.rate = 20.0;
+    a.duration = 2.0;
+    b.duration = 4.0;
+    a.script = bot::Script::Orbit;
+    b.script = bot::Script::Formation;
+    a.host = b.host = "127.0.0.1:" + std::to_string(h.core.port());
+    a.log = b.log = bot_log;
+    bot::BotResult ra, rb;
+    std::atomic<int> done{0};
+    std::thread ta([&] {
+        ra = bot::run_bot(a);
+        ++done;
+    });
+    std::thread tb([&] {
+        rb = bot::run_bot(b);
+        ++done;
+    });
+    while (done < 2) {
+        h.pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ta.join();
+    tb.join();
+    std::printf("    ALPHA: code %d, %u relayed, %u PeerInfo, %u PeerLeft; BRAVO: code %d, %u relayed, %u PeerInfo, %u PeerLeft\n",
+                ra.code, ra.relayed_states, ra.peer_infos, ra.peer_lefts, rb.code, rb.relayed_states, rb.peer_infos,
+                rb.peer_lefts);
+    expect(ra.code == 0 && rb.code == 0, "both bots exit 0");
+    expect(rb.peer_infos == 2 && rb.peer_lefts == 1, "BRAVO hears of the host and ALPHA, and of ALPHA leaving");
+    expect(rb.relayed_states >= 20 && ra.relayed_states > 0 && rb.dropped_rx < 5,
+           "each bot gets the other's States relayed (a late one after the PeerLeft may be refused)");
+    h.core.stop(false);
+}
+
+// Task 9: the FakeHost flies a script, the bot flies formation on it with --lag 150. Checked from the host side: the
+// bot's States against the host's true path plus the offset.
+void bot_formation_tests() {
+    std::printf("bot: formation on the host's jet, --lag 150\n");
+    for (int k = 0; k < 2; ++k) {
+        const bot::Script hs = k == 0 ? bot::Script::Breaks : bot::Script::Straight;
+        const double bound = k == 0 ? 15.0 : 3.0, duration = k == 0 ? 11.0 : 4.0;
+        FakeHost h;
+        h.send_jet = true;
+        const double spawn[3] = {500.0, -300.0, 1200.0};
+        bot::Flight fly;
+        fly.start(hs, spawn, kFhHeading, 1000.0);
+        h.flight = &fly;
+        if (!h.start()) return expect(false, "host core running");
+        bot::BotConfig cfg;
+        cfg.script = bot::Script::Formation;
+        cfg.rate = 20.0;
+        cfg.duration = duration;
+        cfg.lag_ms = 150.0;
+        cfg.log_remote = true;
+        const FhBotRun r = fh_run_bot(h, cfg, [] {});
+        bot::Flight truth;
+        truth.start(hs, spawn, kFhHeading, 1000.0);
+        std::vector<double> err;
+        const double skip = h.states.empty() ? 0.0 : h.states.front().game_time + 1.0;  // the join
+        bool mono = true;
+        for (size_t i = 0; i < h.states.size(); ++i) {
+            const StateMsg& s = h.states[i];
+            if (i > 0 && !(s.game_time > h.states[i - 1].game_time)) mono = false;
+            if (s.game_time < skip || s.game_time < truth.time()) continue;
+            truth.advance_to(s.game_time);
+            const bot::Flight::Sample t = truth.sample();
+            double want[3];
+            bot::formation_point(t.pos, t.ang[1], cfg.offset, want);
+            err.push_back(fh_dist(s.pos, want));
+        }
+        const double p50 = pct(err, 0.5), p95 = pct(err, 0.95), mx = pct(err, 1.0);
+        std::printf("    host %s: %zu bot States checked, error p50 %.2f p95 %.2f max %.2f m; the bot's own estimate p50 "
+                    "%.2f p95 %.2f m (%u); best rtt %.1f ms, host age p90 %.0f ms, %u of %u host States\n",
+                    bot::script_name(hs), err.size(), p50, p95, mx, r.res.formation_p50, r.res.formation_p95,
+                    r.res.formation_n, r.res.best_rtt * 1000.0, r.res.host_age_p90 * 1000.0, r.res.host_states, h.seq);
+        char what[200];
+        expect(r.res.code == 0 && h.byes.size() == 1 && mono, "the bot flies its time, exits 0 and says Bye");
+        std::snprintf(what, sizeof(what), "%s: the bot's States sit at the host's position + offset, p95 %.2f m <= %.0f m",
+                      bot::script_name(hs), p95, bound);
+        expect(err.size() > duration * 20 * 0.6 && p95 <= bound, what);
+        std::snprintf(what, sizeof(what), "the bot's own formation estimate agrees with the host's view (p95 %.2f vs %.2f m)",
+                      r.res.formation_p95, p95);
+        expect(r.res.formation_n > err.size() / 2 && std::fabs(r.res.formation_p95 - p95) < 0.5 * bound + 1.0, what);
+        std::snprintf(what, sizeof(what), "--lag 150 doubles into the Pings' round trip: best %.1f ms (270..330)",
+                      r.res.best_rtt * 1000.0);
+        expect(r.res.best_rtt > 0.27 && r.res.best_rtt < 0.33, what);
+        expect(r.res.host_age_p90 > 0.13 && r.res.host_age_p90 < 0.26 && r.res.host_states >= h.seq * 85 / 100,
+               "the host's States arrive about 150 ms old, and nearly all of them");
+        h.core.stop(false);
+    }
+}
+
+void bot_two_player_tests() {
+    bot_formation_logic_tests();
+    bot_host_traffic_tests();
+    bot_relay_tests();
+    bot_formation_tests();
+}
+
 void remote_avatar_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     using avatar_logic::flight_base;
@@ -5608,6 +5847,7 @@ int main() {
     }
 
     bot_loopback_tests();
+    bot_two_player_tests();
     stream_tests();
     acmi_tests();
     tracker_logic_tests();
