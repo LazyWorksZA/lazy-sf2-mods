@@ -25,7 +25,7 @@ struct Ini {
 
 /// <summary>
 /// Parses UTF-16LE with a byte-order mark (the stock files) or 8-bit text (mod files; bytes above 0x7f are read as
-/// Latin-1). Values come out as UTF-8. ';' and "//" start a comment.
+/// Windows-1252). Values come out as UTF-8. ';' and "//" start a comment.
 /// </summary>
 Ini parse_ini(const uint8_t* data, size_t n);
 

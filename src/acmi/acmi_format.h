@@ -2,6 +2,7 @@
 // (src/acmi/tacview_core.*). Pure: no Windows or game dependencies. Spec: Tacview "ACMI telemetry file format".
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -47,10 +48,14 @@ std::string num(double v, int decimals);
 /// <summary>Degrees into [0, 360); a value that would print as 360.00 becomes 0, and -0.0 becomes +0.0.</summary>
 double norm_deg(double d);
 /// <summary>
-/// Appends s with ',' escaped by a backslash (spec, "Escaping"). Control characters and non-ASCII bytes become '?',
-/// so a value can never end a line.
+/// Appends s with ',' escaped by a backslash (spec, "Escaping"). Control characters and invalid UTF-8 bytes become '?',
+/// so a value can never end a line. Valid UTF-8 (ACMI text is UTF-8) passes through.
 /// </summary>
 void append_escaped(std::string& out, const char* s);
+/// <summary>The byte length (2 to 4) of the well-formed UTF-8 multi-byte sequence at s, or 0 when there is none (no overlongs, surrogates or values above U+10FFFF).</summary>
+size_t utf8_seq_len(const unsigned char* s, size_t avail);
+/// <summary>Appends code point cp as UTF-8. A surrogate or out-of-range value becomes '?'.</summary>
+void append_utf8_cp(std::string& out, uint32_t cp);
 
 /// <summary>"FileType/FileVersion" lines and the global object (id 0). reference_time is e.g. 2026-11-24T20:15:00Z. A non-empty theater adds Theater=.</summary>
 void append_header(std::string& out, const char* reference_time, double ref_lon, double ref_lat, const char* title,
