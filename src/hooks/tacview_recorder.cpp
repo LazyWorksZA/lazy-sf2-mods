@@ -250,7 +250,10 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         }
         r.side = static_cast<uint8_t>(wl[i].side);
         size_t k = 0;
-        for (; k < acmi::kRecNameChars && wl[i].name[k]; ++k) r.name[k] = wl[i].name[k];
+        while (k < acmi::kRecNameChars && wl[i].name[k]) ++k;
+        // Cut before a UTF-8 continuation byte, as utf8_prefix does (no allocation here).
+        while (k > 0 && wl[i].name[k] && (static_cast<unsigned char>(wl[i].name[k]) & 0xc0) == 0x80) --k;
+        std::memcpy(r.name, wl[i].name, k);
         r.name[k] = '\0';
         ++used;
     }

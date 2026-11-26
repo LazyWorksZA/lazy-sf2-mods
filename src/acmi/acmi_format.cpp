@@ -97,7 +97,7 @@ void append_escaped(std::string& out, const char* s) {
             out += '?';
             continue;
         }
-        if (c == ',') out += static_cast<char>(92);
+        if (c == ',') out += '\\';
         out += static_cast<char>(c);
     }
 }

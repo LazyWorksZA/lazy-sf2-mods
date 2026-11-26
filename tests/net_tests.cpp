@@ -2978,6 +2978,21 @@ void texture_tests() {
         o.clear();
         append_escaped(o, by({'a', 0xfc, 'b', 0xc3, 'c', 0xc0, 0x80, 0xed, 0xa0, 0x80, 10}).c_str());
         expect(o == "a?b?c??????", "names: invalid bytes and control characters become '?'");
+        o.clear();
+        append_escaped(o, by({'a', 0xc3}).c_str());
+        expect(o == "a?", "names: a truncated UTF-8 sequence becomes '?'");
+        o.clear();
+        append_escaped(o, by({0xf0, 0x9f, 0x98, 0x80, 'x'}).c_str());
+        expect(o == by({0xf0, 0x9f, 0x98, 0x80, 'x'}), "names: a 4-byte UTF-8 sequence passes through");
+        o.clear();
+        append_escaped(o, by({0xf0, 0x9f, 0x98}).c_str());
+        expect(o == "???", "names: a truncated 4-byte sequence becomes '?' per byte");
+        o.clear();
+        LazyWorks::SF2Patch::acmi::append_utf8_cp(o, 0x1f600);
+        LazyWorks::SF2Patch::acmi::append_utf8_cp(o, 0xd800);
+        LazyWorks::SF2Patch::acmi::append_utf8_cp(o, 0xfc);
+        expect(o == by({0xf0, 0x9f, 0x98, 0x80, '?', 0xc3, 0xbc}), "names: append_utf8_cp (what copy_name uses) writes 4-byte, rejects surrogates");
+        expect(nm("Plain Name") == "Plain Name", "names: an ASCII-only ini is unchanged");
     }
 
     // airfields

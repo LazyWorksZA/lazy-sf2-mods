@@ -67,6 +67,7 @@ std::string decode_text(const uint8_t* d, size_t n) {
     size_t i = 0;
     if (n >= 3 && d[0] == 0xef && d[1] == 0xbb && d[2] == 0xbf) i = 3;  // a UTF-8 BOM: the rest is taken as it is
     // Game inis are Windows-1252. A file that is well-formed UTF-8 already is taken as it is, not encoded twice.
+    // Per file: cp1252 text that happens to be valid UTF-8 is read as UTF-8, and a mixed file loses its cp1252 characters.
     const bool utf8 = i == 3 || is_multibyte_utf8(d, n);
     t.reserve(n);
     for (; i < n; ++i) {
