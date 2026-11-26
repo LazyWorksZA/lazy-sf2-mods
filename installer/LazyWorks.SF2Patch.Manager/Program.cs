@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Velopack;
 
 namespace LazyWorks.SF2Patch.Manager;
@@ -29,25 +28,78 @@ static class Program
             .OnBeforeUninstallFastCallback(_ => HookUninstall())
             .Run();
 
-        string? game = ModInstaller.FindGameDir();
         switch (args.FirstOrDefault())
         {
-            case "--elevated-install": return (int)ModInstaller.Install(game);
-            case "--elevated-uninstall": return (int)ModInstaller.Uninstall(game);
+            case "--elevated-install": return (int)ElevatedInstall(args.Length > 1 ? args[1] : null);
+            case "--elevated-uninstall": return (int)ModInstaller.Uninstall(ModInstaller.FindGameDir(Log));
         }
 
-        // Started normally: by Velopack right after a per-user install, or by hand. Make sure the mod
-        // is in the game folder (with a UAC prompt if the folder needs it), then say where things are.
+        // Started normally: by Velopack right after a per-user install, from the Start menu, or by hand.
+        // Make sure the mod is in the game folder (with a UAC prompt if the folder needs it), then say
+        // where things are, and offer to choose the folder when the game wasn't found.
         bool firstRun = Environment.GetEnvironmentVariable("VELOPACK_FIRSTRUN") != null;
         using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
         {
             bool elevated = new System.Security.Principal.WindowsPrincipal(id).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
             Log($"start: user={id.Name} system={id.IsSystem} elevated={elevated} firstRun={firstRun} session={Process.GetCurrentProcess().SessionId}");
         }
+        string? game = ModInstaller.FindGameDir(Log);
         var result = Ensure(game);
         File.Delete(PendingInstallMarker);
-        if (!firstRun || result != ModInstaller.Result.Ok) Report(game, result);
-        return (int)result;
+        if (firstRun && result == ModInstaller.Result.Ok) return (int)result;
+        return (int)Interact(game, result);
+    }
+
+    static readonly SystemGameEnvironment Env = new();
+
+    /// <summary>The elevated half of a manual install: the folder came from the command line, so it is checked again.</summary>
+    static ModInstaller.Result ElevatedInstall(string? folder)
+    {
+        if (folder != null && GameLocator.CheckFolder(Env, folder) != GameLocator.Check.Ok)
+        {
+            Log($"elevated install: {folder} is not a valid game folder");
+            return ModInstaller.Result.GameNotFound;
+        }
+        var r = ModInstaller.Install(folder ?? ModInstaller.FindGameDir(Log));
+        if (r == ModInstaller.Result.Ok && folder != null) Log($"saved game folder in {GameLocator.SaveChoice(Env, folder) ?? "(nowhere)"}");
+        return r;
+    }
+
+    /// <summary>Shows the status in a TaskDialog and lets the player choose the game folder, until they close it.</summary>
+    static ModInstaller.Result Interact(string? game, ModInstaller.Result result)
+    {
+        while (true)
+        {
+            var (heading, text, icon, choose) = Describe(game, result);
+            if (Native.Show(heading, text, icon, choose) != Native.ButtonChoose) return result;
+            string? picked = Native.PickFolder("Choose your Strike Fighters 2 folder (the one with StrikeFighters2.exe)");
+            if (picked == null) continue;
+            var check = GameLocator.CheckFolder(Env, picked);
+            Log($"chosen folder {picked}: {check}");
+            if (check != GameLocator.Check.Ok)
+            {
+                Native.Message(check == GameLocator.Check.NoExe
+                    ? $"{GameLocator.ExeName} isn't in\n{picked}\n\nChoose the folder that contains it. The Lazy SF2 Patch is for the July 2013 version of Strike Fighters 2 (the merged install)."
+                    : $"The {GameLocator.ExeName} in\n{picked}\nisn't the July 2013 version of Strike Fighters 2, so the Lazy SF2 Patch can't be used with it.", warning: true);
+                continue;
+            }
+            game = picked;
+            result = InstallChosen(picked);
+            Log($"chosen folder install -> {result}");
+        }
+    }
+
+    /// <summary>Installs into a folder the player chose and remembers it. Elevates (UAC) when the folder needs it.</summary>
+    static ModInstaller.Result InstallChosen(string dir)
+    {
+        var r = ModInstaller.Install(dir);
+        if (r == ModInstaller.Result.AccessDenied)
+        {
+            // The elevated copy saves the folder (HKLM) itself. A trailing backslash would escape the closing quote.
+            return RunElevated("--elevated-install \"" + dir.TrimEnd('\\', '/') + "\"") ?? r;
+        }
+        if (r == ModInstaller.Result.Ok) Log($"saved game folder in {GameLocator.SaveChoice(Env, dir) ?? "(nowhere)"}");
+        return r;
     }
 
     static ModInstaller.Result Ensure(string? game)
@@ -64,22 +116,28 @@ static class Program
         return r == ModInstaller.Result.AccessDenied ? RunElevated("--elevated-install") ?? r : r;
     }
 
-    static void Report(string? game, ModInstaller.Result r)
+    static (string Heading, string Text, Native.Icon Icon, string Choose) Describe(string? game, ModInstaller.Result r) => r switch
     {
-        string text = r switch
-        {
-            ModInstaller.Result.Ok =>
-                $"Lazy SF2 Patch is installed in:\n{game}\n\nSettings are in the game:\n" +
-                "  Options > Graphics: Display Mode, Screen\n  Options > Controls: Mouse Pointer, Pilot Twist\n" +
-                "  Options > Gameplay: Tacview Recording\n\n" +
-                "To remove it, uninstall Lazy SF2 Patch from Windows' Installed apps.",
-            ModInstaller.Result.GameNotFound => "Strike Fighters 2 wasn't found (no installer registry entry).",
-            ModInstaller.Result.Foreign => $"Another winmm.dll is already in\n{game}\nLazySF2 left it untouched.",
-            ModInstaller.Result.AccessDenied => "Administrator rights are needed to copy the mod into the game folder.",
-            _ => "Couldn't copy the mod into the game folder. Is Strike Fighters 2 running? Close it and run Lazy SF2 Patch again.",
-        };
-        MessageBoxW(IntPtr.Zero, text, "Lazy SF2 Patch", r == ModInstaller.Result.Ok ? 0x40u : 0x30u);  // info / warning
-    }
+        ModInstaller.Result.Ok => ("Lazy SF2 Patch is installed",
+            $"Game folder:\n{game}\n\nSettings are in the game:\n" +
+            "  Options > Graphics: Display Mode, Screen\n  Options > Controls: Mouse Pointer, Pilot Twist\n" +
+            "  Options > Gameplay: Tacview Recording\n\n" +
+            "To remove it, uninstall Lazy SF2 Patch from Windows' Installed apps.",
+            Native.Icon.Information, "Use a different game folder..."),
+        ModInstaller.Result.GameNotFound => ("Strike Fighters 2 wasn't found",
+            "The installer looked for the game and didn't find the July 2013 StrikeFighters2.exe.\n\n" +
+            "Choose the folder that contains StrikeFighters2.exe. The places it looked are in lazysf2-setup.log.",
+            Native.Icon.Warning, "Choose the game folder..."),
+        ModInstaller.Result.Foreign => ("Another winmm.dll is already there",
+            $"Another winmm.dll is already in\n{game}\nThe Lazy SF2 Patch left it untouched.",
+            Native.Icon.Warning, "Use a different game folder..."),
+        ModInstaller.Result.AccessDenied => ("Administrator rights are needed",
+            "Administrator rights are needed to copy the mod into the game folder.",
+            Native.Icon.Warning, "Choose the game folder..."),
+        _ => ("Couldn't copy the mod into the game folder",
+            "Is Strike Fighters 2 running? Close it and run Lazy SF2 Patch again.",
+            Native.Icon.Warning, "Use a different game folder..."),
+    };
 
     /// <summary>Runs this exe elevated with one argument and waits. Null if the UAC prompt was declined.</summary>
     static ModInstaller.Result? RunElevated(string arg)
@@ -101,7 +159,7 @@ static class Program
         Log($"{what} hook: user={CurrentUser()}");
         // First, so nothing in the game-folder part can keep it from running.
         TacviewHook(() => TacviewAddOn.Install(new CurrentUserRegistry(), AppData, TacviewAddOn.Content, TacviewRunning()));
-        string? game = ModInstaller.FindGameDir();
+        string? game = ModInstaller.FindGameDir(Log);
         if (game != null && ModInstaller.HasReparsePoint(game)) Log("install hook: refused, reparse point in game path");
         var r = ModInstaller.Install(game);
         Log($"{what} hook: game={game ?? "(not found)"} -> {r}");
@@ -153,11 +211,19 @@ static class Program
     {
         Log($"uninstall hook: user={CurrentUser()}");
         TacviewHook(() => TacviewAddOn.Uninstall(AppData));
-        string? game = ModInstaller.FindGameDir();
-        if (game != null && ModInstaller.HasReparsePoint(game)) Log("uninstall hook: refused, reparse point in game path");
+        // The detected folder and the one the player chose (usually the same).
+        string?[] candidates = [ModInstaller.FindGameDir(Log), GameLocator.SavedChoice(Env)];
+        foreach (string game in candidates.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+            UninstallFrom(game);
+        GameLocator.ForgetChoice(Env, Log);
+    }
+
+    static void UninstallFrom(string game)
+    {
+        if (ModInstaller.HasReparsePoint(game)) Log("uninstall hook: refused, reparse point in game path");
         var r = ModInstaller.Uninstall(game);
-        Log($"uninstall hook: game={game ?? "(not found)"} -> {r}");
-        if (r != ModInstaller.Result.AccessDenied || game == null) return;
+        Log($"uninstall hook: game={game} -> {r}");
+        if (r != ModInstaller.Result.AccessDenied) return;
 
         // No UI is allowed here, but Windows' own UAC prompt is: delete exactly the manifest's files
         // with an elevated cmd that doesn't depend on our files (Velopack removes them next).
@@ -199,7 +265,4 @@ static class Program
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    static extern int MessageBoxW(IntPtr hwnd, string text, string caption, uint type);
 }

@@ -6,4 +6,6 @@ The new settings are in the game:
 - Options > Graphics: Display Mode, Screen
 - Options > Controls: Mouse Pointer
 
+If the game was not found, open Lazy SF2 Patch from the Start menu and choose the game folder.
+
 To remove the Lazy SF2 Patch, uninstall it from Windows' Installed apps.

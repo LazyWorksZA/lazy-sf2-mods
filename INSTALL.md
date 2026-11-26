@@ -6,9 +6,11 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 
 1. Run **`Lazy-SF2-Patch-<version>.msi`** from the Releases page. It's a normal installer wizard: a welcome page, the license (ours plus the [third-party notices](THIRD_PARTY_NOTICES.md)), an administrator prompt, and a finish page.
    - If the .NET 10 runtime is missing, the installer adds it.
-2. The installer finds Strike Fighters 2 through the game's own registry entry and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
+2. The installer finds Strike Fighters 2 (through the game's own registry entry and other places Windows records installs) and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
    - If Tacview is installed, it also puts the mod's Tacview add-on in place for your Windows account and turns it on in Tacview (see [Tacview terrain](#tacview-terrain)). Close Tacview before installing.
-3. That's all. There's no app, window or shortcut. Start the game as usual; the settings are in the game (below).
+3. That's all. Start the game as usual; the settings are in the game (below).
+
+**If the installer didn't find your game:** open the Start menu, run **Lazy SF2 Patch**, and click **Choose the game folder...**. Pick the folder that contains `StrikeFighters2.exe` (the July 2013 version). The helper copies `winmm.dll` there, asks for administrator rights if the folder needs them, and remembers the folder (`HKLM\SOFTWARE\LazyWorks\LazySF2Patch`, value `GameDir`) for updates and uninstall. Or copy `winmm.dll` from the release into the game folder yourself (next to `StrikeFighters2.exe`) and list nothing else: that is all the mod needs. What the installer tried is in `lazysf2-setup.log` in its install folder.
 
 **Uninstall** the Lazy SF2 Patch from Windows' *Installed apps*. That removes exactly the files the mod added to the game folder, and the Tacview add-on. Tacview's on/off switch for the add-on stays, so a later install or upgrade keeps your choice.
 
