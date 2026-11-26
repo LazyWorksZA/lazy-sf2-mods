@@ -61,6 +61,19 @@ size_t encode(const MissionRequestMsg& m, uint8_t* o, size_t c) {
 size_t encode(const MissionOfferMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::MissionOffer, o, c); }
 size_t encode(const WorldSnapshotMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::WorldSnapshot, o, c); }
 Status decode(const uint8_t* d, size_t n, WorldSnapshotMsg& out) { return decode_fixed(d, n, WorldType::WorldSnapshot, out); }
+size_t encode_hit(const HitMsg& m, WorldType t, uint8_t* o, size_t c) {
+    if (t != WorldType::HitClaim && t != WorldType::HitApply) return 0;
+    return encode_fixed(m, t, o, c);
+}
+Status decode_hit(const uint8_t* d, size_t n, WorldType t, HitMsg& out) {
+    if (t != WorldType::HitClaim && t != WorldType::HitApply) return Status::BadType;
+    HitMsg m;
+    const Status s = decode_fixed(d, n, t, m);
+    if (s != Status::Ok) return s;
+    if (m.slot < 4 || m.slot > 6) return Status::BadType;
+    out = m;
+    return Status::Ok;
+}
 size_t encode(const AvatarStateMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::AvatarState, o, c); }
 Status decode(const uint8_t* d, size_t n, AvatarStateMsg& out) { return decode_fixed(d, n, WorldType::AvatarState, out); }
 Status decode(const uint8_t* d, size_t n, MissionRequestMsg& out) {

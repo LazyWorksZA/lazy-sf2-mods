@@ -36,6 +36,8 @@ bool jet_read_controls_at(const void* obj, uintptr_t ao, JetControls* out) {
         const float* in = *reinterpret_cast<const float* const*>(o + jet::kInputs);
         if (!in) return false;
         c.throttle = in[jet::kInputThrottle];
+        if (in[jet::kInputGun1] > 0.0f) c.guns |= 1;
+        if (in[jet::kInputGun2] > 0.0f) c.guns |= 2;
         const int n = engine_count(o);
         c.engine_count = static_cast<uint8_t>(n);
         for (int i = 0; i < n; ++i) {
@@ -51,15 +53,17 @@ bool jet_read_controls_at(const void* obj, uintptr_t ao, JetControls* out) {
     return true;
 }
 
-JetWriteResult jet_write_controls_at(void* obj, uintptr_t ao, const JetControls& c, bool throttle) {
+JetWriteResult jet_write_controls_at(void* obj, uintptr_t ao, const JetControls& c, bool inputs) {
     JetWriteResult r;
     if (!ao || !obj) return r;
     __try {
         BYTE* o = static_cast<BYTE*>(obj);
-        if (throttle) {
+        if (inputs) {
             float* in = *reinterpret_cast<float* const*>(o + jet::kInputs);
             if (!in) return r;
             for (size_t k = jet::kInputThrottle; k <= jet::kInputThrottleLast; ++k) in[k] = c.throttle;
+            in[jet::kInputGun1] = (c.guns & 1) ? 1.0f : 0.0f;
+            in[jet::kInputGun2] = (c.guns & 2) ? 1.0f : 0.0f;
         }
         r.ok = true;
         const int n = engine_count(o) < c.engine_count ? engine_count(o) : c.engine_count;

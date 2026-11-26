@@ -170,7 +170,7 @@ struct Serve {
         if (jet_t0 < 0) jet_t0 = host_t;
         float thr = 0;
         AvatarStateMsg m{};
-        jet_script_at(cfg.jet, host_t - jet_t0, &thr, &m.engines);
+        jet_script_at(cfg.jet, host_t - jet_t0, &thr, &m.engines, &m.guns);
         m.throttle = throttle_to_wire(thr);
         m.engine_count = 8;  // the script switches all of them
         if (jet_have && !avatar_state_due(jet_last, m, host_t - jet_sent_at)) return;
@@ -180,12 +180,48 @@ struct Serve {
         const size_t n = encode(m, buf, sizeof(buf));
         if (!n || !core.send_world(c.slot, c.gen, buf, n, true)) return;  // tried again next step
         ++res.jet_states_sent;
-        if (!jet_have || m.engines != jet_last.engines || throttle_moved(jet_last.throttle, m.throttle))
-            say("bot serve: jet controls: throttle %u/255, engines 0x%02x at +%.1f s", static_cast<unsigned>(m.throttle),
-                static_cast<unsigned>(m.engines), host_t - jet_t0);
+        if (!jet_have || m.engines != jet_last.engines || m.guns != jet_last.guns ||
+            throttle_moved(jet_last.throttle, m.throttle))
+            say("bot serve: jet controls: throttle %u/255, engines 0x%02x, guns %u at +%.1f s",
+                static_cast<unsigned>(m.throttle), static_cast<unsigned>(m.engines), static_cast<unsigned>(m.guns),
+                host_t - jet_t0);
         jet_last = m;
         jet_have = true;
         jet_sent_at = host_t;
+    }
+
+    // --hit: a scripted HitApply on the client's jet.
+    double hit_t0 = -1, hit_next = 0;
+    uint16_t hit_seq = 0;
+    void hit_tick() {
+        if (!c.on) {
+            hit_t0 = -1;
+            return;
+        }
+        if (hit_t0 < 0) {
+            hit_t0 = host_t;
+            hit_next = host_t + cfg.hit_every;
+        }
+        if (host_t < hit_next) return;
+        hit_next += cfg.hit_every;
+        HitMsg m{};
+        m.seq = ++hit_seq;
+        m.target_kind = cfg.hit_kind;
+        m.target_a = cfg.hit_a;
+        m.target_b = cfg.hit_b;
+        m.shooter_kind = 1;
+        m.shooter_a = cfg.hit_a;
+        m.shooter_b = static_cast<uint16_t>(cfg.host_member);
+        m.slot = 4;
+        m.energy = 20000;
+        const int16_t from[3] = {0, -300, 0}, to[3] = {0, 100, 0};  // 3 m behind to 1 m ahead of the jet's centre
+        std::memcpy(m.p0, from, sizeof(from));
+        std::memcpy(m.p1, to, sizeof(to));
+        uint8_t buf[sizeof(HitMsg)];
+        const size_t n = encode_hit(m, WorldType::HitApply, buf, sizeof(buf));
+        if (n && core.send_world(c.slot, c.gen, buf, n, true)) ++res.hits_sent;
+        say("bot serve: scripted gun hit %u on %c %u.%u (20 kJ kinetic)", static_cast<unsigned>(res.hits_sent),
+            cfg.hit_kind == 1 ? 'A' : 'G', static_cast<unsigned>(cfg.hit_a), static_cast<unsigned>(cfg.hit_b));
     }
 
     template <typename... A>
@@ -305,13 +341,28 @@ struct Serve {
             AvatarStateMsg m{};
             if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
             const bool first = res.jet_states_rx == 0;
-            if (first || m.engines != res.last_rx_engines || throttle_moved(res.last_rx_throttle, m.throttle))
-                say("bot serve: client %u jet: throttle %u/255, engines 0x%02x, radar mode %u, config 0x%04x",
+            if (first || m.engines != res.last_rx_engines || m.guns != res.last_rx_guns ||
+                throttle_moved(res.last_rx_throttle, m.throttle))
+                say("bot serve: client %u jet: throttle %u/255, engines 0x%02x, guns %u, radar mode %u, config 0x%04x",
                     static_cast<unsigned>(m.peer), static_cast<unsigned>(m.throttle), static_cast<unsigned>(m.engines),
-                    static_cast<unsigned>(m.radar_mode), static_cast<unsigned>(m.config));
+                    static_cast<unsigned>(m.guns), static_cast<unsigned>(m.radar_mode), static_cast<unsigned>(m.config));
             ++res.jet_states_rx;
             res.last_rx_throttle = m.throttle;
             res.last_rx_engines = m.engines;
+            res.last_rx_guns = m.guns;
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::HitClaim)) {
+            HitMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen ||
+                decode_hit(e.data, e.len, WorldType::HitClaim, m) != Status::Ok)
+                return;
+            ++res.hit_claims_rx;
+            if (res.hit_claims_rx == 1 || res.hit_claims_rx % 50 == 0)
+                say("bot serve: client %u gun hit claim %u: %c %u.%u slot %u gun %u, %u J", static_cast<unsigned>(m.peer),
+                    res.hit_claims_rx, m.target_kind == 1 ? 'A' : 'G', static_cast<unsigned>(m.target_a),
+                    static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.slot), static_cast<unsigned>(m.gun),
+                    static_cast<unsigned>(m.energy));
             return;
         }
         MsgType t{};
@@ -569,6 +620,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
 
         if (!cfg.world.empty() || !cfg.world_events.empty()) sv.world_tick();
         if (cfg.jet != JetScript::None) sv.jet_tick();
+        if (cfg.hit) sv.hit_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

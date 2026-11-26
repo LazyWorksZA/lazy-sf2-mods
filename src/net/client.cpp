@@ -818,6 +818,10 @@ void client_install() {
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
 }
 
+bool client_world_send(const uint8_t* data, size_t len) { return g_core && g_session && g_core->send_world(data, len); }
+
+bool client_world_active() { return g_core && g_session && world_client_tag() != 0; }
+
 void* client_avatar_object(int peer) {
     if (!g_rm || peer < 0 || peer >= kSources) return nullptr;
     return g_rm[peer].h.obj;

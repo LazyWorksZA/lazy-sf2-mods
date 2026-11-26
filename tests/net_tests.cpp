@@ -59,6 +59,7 @@
 #include "net/mission_fetch.h"
 #include "net/world_proto.h"
 #include "net/world_stream_logic.h"
+#include "net/hit_logic.h"
 
 using namespace LazyWorks::SF2Patch::net;
 
@@ -8096,8 +8097,16 @@ void jet_mirror_tests() {
            "takeover: the AI's triggers cleared, its three running engines kept for the release");
     JetWriteResult w = LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, c, true);
     expect(w.ok && w.engines_set == 0x02 && av.running(0) == 1 && av.running(1) == 0 && av.running(2) == 1 &&
-               av.in[3] == 0.9f && av.in[7] == 0.9f,
+               av.in[3] == 0.9f && av.in[7] == 0.9f && av.in[12] == 0.0f && av.in[13] == 0.0f,
            "write: throttle into inputs 3..7; the owner's second engine off through slot 22; a third engine left as taken");
+    owner.in[12] = 1.0f;
+    JetControls g;
+    const bool read_guns = LazyWorks::SF2Patch::hooks::jet_read_controls_at(owner.obj.data(), ao, &g) && g.guns == 1;
+    LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, g, true);
+    const bool fires = av.in[12] == 1.0f && av.in[13] == 0.0f;
+    g.guns = 0;
+    LazyWorks::SF2Patch::hooks::jet_write_controls_at(av.obj.data(), ao, g, true);
+    expect(read_guns && fires && av.in[12] == 0.0f, "guns: the owner's trigger read, on and off on the avatar's input 12");
     int32_t failed = 1;
     std::memcpy(av.eng[1].data() + jet::kEngFire, &failed, 4);
     c.engines = 0x03;
@@ -8124,6 +8133,107 @@ void jet_mirror_tests() {
     expect(LazyWorks::SF2Patch::hooks::jet_read_controls_at(odd.obj.data(), ao, &oc) && oc.engines == 0x01,
            "read: such an engine is reported running, so no avatar switches it off");
     VirtualFree(image, 0, MEM_RELEASE);
+}
+
+void hit_claim_tests() {
+    std::printf("gun hits across PCs (Phase 5 T3)\n");
+    HitMsg h{};
+    h.peer = 3;
+    h.seq = 9;
+    h.target_kind = 1;
+    h.target_a = 4;
+    h.target_b = 1;
+    h.slot = 4;
+    h.gun = 12;
+    h.energy = 150000;
+    h.p0[1] = -300;
+    h.p1[1] = 100;
+    uint8_t b[64];
+    HitMsg r{};
+    const size_t n = encode_hit(h, WorldType::HitClaim, b, sizeof(b));
+    expect(sizeof(HitMsg) == 43 && n == 43 && peek_world_type(b, n) == 27 &&
+               decode_hit(b, n, WorldType::HitClaim, r) == Status::Ok && r.peer == 3 && r.gun == 12 &&
+               r.energy == 150000 && r.p0[1] == -300 && decode_hit(b, n, WorldType::HitApply, r) == Status::BadType &&
+               decode_hit(b, n - 1, WorldType::HitClaim, r) == Status::Truncated,
+           "hit: 43 bytes, claim and apply are told apart, size checked");
+    h.slot = 7;
+    const size_t n7 = encode_hit(h, WorldType::HitApply, b, sizeof(b));
+    expect(n7 == 43 && decode_hit(b, n7, WorldType::HitApply, r) == Status::BadType && encode_hit(h, WorldType::AvatarState, b, sizeof(b)) == 0,
+           "hit: only damage slots 4..6, only the two hit types");
+    h.slot = 4;
+    expect(weapon_is_gun(0xffff) && weapon_is_gun(0xffff + 40) && !weapon_is_gun(17) && !weapon_is_gun(0xfffe),
+           "hit: gun rounds carry the gun id + 0xffff, stores a small id");
+    expect(hit_rel_to_wire(1.234) == 123 && hit_rel_to_wire(-1.236) == -124 && hit_rel_to_wire(500.0) == 32767 &&
+               hit_rel_to_wire(std::numeric_limits<double>::quiet_NaN()) == 0 && hit_rel_from_wire(-300) == -3.0,
+           "hit: offsets from the target in cm, clamped to about 327 m");
+    HitRate rate;
+    HitLimits lim;
+    expect(check_hit_claim(h, 800.0, true, rate, 10.0, lim) == HitVerdict::Ok, "check: a gun hit from 800 m is applied");
+    expect(check_hit_claim(h, 800.0, false, rate, 10.0, lim) == HitVerdict::TargetGone &&
+               check_hit_claim(h, 6000.0, true, rate, 10.0, lim) == HitVerdict::TooFar,
+           "check: no live target, or the shooter 6 km away, is refused");
+    HitMsg big = h;
+    big.energy = 5000000;
+    HitMsg off = h;
+    off.p1[0] = 20000;  // 200 m from the target
+    expect(check_hit_claim(big, 800.0, true, rate, 10.0, lim) == HitVerdict::TooMuchEnergy &&
+               check_hit_claim(off, 800.0, true, rate, 10.0, lim) == HitVerdict::OffTarget,
+           "check: 5 MJ, or a round 200 m from the target, is refused");
+    HitRate burst;
+    int ok = 0;
+    for (int i = 0; i < 80; ++i) ok += check_hit_claim(h, 800.0, true, burst, 20.0, lim) == HitVerdict::Ok;
+    const bool later = check_hit_claim(h, 800.0, true, burst, 20.5, lim) == HitVerdict::Ok;
+    expect(ok == 60 && later, "check: at most 60 claims at once per shooter, then 60 a second");
+    std::printf("    estimate: 43 B a hit, about 90 B on the wire; at most 60 a second per shooter while it hits\n"
+                "    (5.4 KB/s at the cap; a 1 s burst of a 20 mm gun on a jet is typically 10..30 hits)\n");
+    float thr = 0;
+    uint8_t eng = 0, guns = 9;
+    bot::jet_script_at(bot::JetScript::Guns, 1.0, &thr, &eng, &guns);
+    const bool quiet = guns == 0 && thr == 0.7f;
+    bot::jet_script_at(bot::JetScript::Guns, 3.5, &thr, &eng, &guns);
+    const bool firing = guns == 1;
+    bot::jet_script_at(bot::JetScript::Ab, 3.5, &thr, &eng, &guns);
+    expect(quiet && firing && guns == 0, "bot --jet guns: a 1 s burst in every 4 s; ab never fires");
+
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    s.cfg.jet = bot::JetScript::Guns;
+    s.cfg.hit = true;
+    s.cfg.hit_kind = 1;
+    s.cfg.hit_a = 3;
+    s.cfg.hit_b = 1;
+    s.cfg.hit_every = 1.0;
+    if (!s.start()) return expect(false, "bot serve listening (--jet guns --hit)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<HitMsg> hits;
+    bool saw_guns = false;
+    int claims = 0;
+    WorldPacket wp[8];
+    serve_run_for(c, 4.5, [&] {
+        const size_t k = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k; ++i) {
+            HitMsg m{};
+            AvatarStateMsg a{};
+            if (decode_hit(wp[i].data, wp[i].len, WorldType::HitApply, m) == Status::Ok) hits.push_back(m);
+            if (decode(wp[i].data, wp[i].len, a) == Status::Ok && a.guns == 1) saw_guns = true;
+        }
+        if (claims < 3 && !c.welcomes.empty()) {
+            HitMsg cl = h;
+            uint8_t cb[sizeof(cl)];
+            if (c.core.send_world(cb, encode_hit(cl, WorldType::HitClaim, cb, sizeof(cb)))) ++claims;
+        }
+        return false;
+    });
+    s.finish();
+    c.core.stop(false);
+    expect(saw_guns, "loopback: the host's gun trigger reaches the client in its jet state");
+    expect(hits.size() >= 3 && hits[0].target_a == 3 && hits[0].target_b == 1 && hits[0].shooter_kind == 1 &&
+               hits[0].slot == 4 && hits[0].energy == 20000,
+           "loopback: --hit sends HitApply for the client's seat, about once a second");
+    expect(claims == 3 && s.res.hit_claims_rx == 3, "loopback: the client's hit claims reach the host");
 }
 
 int main() {
@@ -8203,6 +8313,7 @@ int main() {
     jet_census_tests();
     jet_controls_tests();
     jet_mirror_tests();
+    hit_claim_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

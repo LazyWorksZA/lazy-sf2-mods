@@ -20,8 +20,10 @@ enum class WorldType : uint8_t {
     WorldEvents = 24,     // host to client, reliable, 1..kWorldEventsMax events
     AvatarState = 25,     // each player's own jet, reliable, on change: client to host, host to clients (relayed)
     WorldSnapshot = 26,   // host to a client after its Welcome, reliable: the head of a late-join snapshot
+    HitClaim = 27,        // a shooter's PC to the host, reliable: one hit of its own gun on another PC's object
+    HitApply = 28,        // the host to the PC that owns a player's jet, reliable: damage for that jet
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 26;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 28;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -367,6 +369,51 @@ inline bool avatar_lock_started(const AvatarStateMsg& prev, const AvatarStateMsg
            (prev.radar_mode != 3 || prev.target_a != now.target_a || prev.target_b != now.target_b ||
             prev.target_kind != now.target_kind);
 }
+
+// ---- hits (Phase 5 T3): a shooter's claim, and the damage an owner applies ----
+
+#pragma pack(push, 1)
+/// <summary>
+/// One hit as the game's damage interface took it (network-recon §9.5): slot 4 kinetic (from, to), 5 directed (pos,
+/// velocity), 6 blast (pos). Positions are relative to the target as the sender saw it, in centimetres (about 327 m
+/// either way); a directed hit's velocity is in 0.05 m/s. HitClaim goes from the shooter's PC to the host (the host
+/// sets peer from the connection); HitApply from the host to the PC that owns the target (a player's jet), which
+/// applies it to that jet with the shooter's copy as the attacker.
+/// </summary>
+struct HitMsg {
+    Header h;
+    uint16_t peer;  // HitClaim: the shooter's owner (set by the host); HitApply: 0
+    uint16_t seq;
+    uint8_t target_kind;  // KeyKind
+    uint16_t target_a, target_b;
+    uint8_t shooter_kind;  // KeyKind, 0 = unknown (HitClaim: the host uses the claimer's own jet)
+    uint16_t shooter_a, shooter_b;
+    uint8_t slot;     // damage interface slot 4, 5 or 6
+    uint16_t gun;     // the gun's data id (the weapon id minus 0xffff)
+    uint32_t energy;  // joules
+    uint32_t radius2;  // directed and blast: radius squared in cm^2
+    int16_t p0[3];    // kinetic: from; directed and blast: the position
+    int16_t p1[3];    // kinetic: to; directed: velocity (0.05 m/s); blast: 0
+    uint8_t warhead;  // directed and blast
+    uint8_t flag;     // directed: the last argument
+};
+#pragma pack(pop)
+static_assert(sizeof(HitMsg) == 43);  // 4:2 peer, 6:2 seq, 8:5 target key, 13:5 shooter key, 18:1 slot, 19:2 gun,
+                                      // 21:4 energy, 25:4 r2, 29:6 p0, 35:6 p1, 41:1 warhead, 42:1 flag
+size_t encode_hit(const HitMsg& m, WorldType t, uint8_t* out, size_t cap);
+/// <summary>t is WorldType::HitClaim or HitApply; checks the slot and the size.</summary>
+Status decode_hit(const uint8_t* data, size_t len, WorldType t, HitMsg& out);
+
+/// <summary>The weapon id a gun round's hit carries (BulletObject: gun data id + 0xffff); lower ids are stores.</summary>
+inline constexpr uint32_t kGunWeaponBase = 0xffff;
+inline bool weapon_is_gun(uint32_t weapon) { return weapon >= kGunWeaponBase && weapon < kGunWeaponBase + 0x10000; }
+/// <summary>A relative offset in metres as the wire's centimetres (clamped; not finite gives 0).</summary>
+inline int16_t hit_rel_to_wire(double m) {
+    if (!(m == m) || m > 1e6 || m < -1e6) return 0;
+    const double c = m * 100.0;
+    return static_cast<int16_t>(c > 32767.0 ? 32767 : c < -32768.0 ? -32768 : (c < 0 ? c - 0.5 : c + 0.5));
+}
+inline double hit_rel_from_wire(int16_t c) { return c / 100.0; }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>
 class MissionAssembly {

@@ -379,6 +379,39 @@ void world_avatar_forget(int peer);
 void world_avatar_session_reset();
 /// <summary>Client: the aircraft that shows peer id here (its Phase 4 avatar), or null.</summary>
 void* client_avatar_object(int peer);
+
+// ---- Phase 5: keys, damage and gun hits across PCs (game thread) ----
+/// <summary>The mission key (slot and member, aircraft or ground) of an object id; false if it has none.</summary>
+bool world_key_of_object(uint32_t id, uint8_t* kind, uint16_t* a, uint16_t* b);
+/// <summary>The object a key names here (and its id), or null.</summary>
+void* world_object_of_key(uint8_t kind, uint16_t a, uint16_t b, uint32_t* id);
+/// <summary>The local player's object id, or 0xffffffff.</summary>
+uint32_t world_player_id();
+/// <summary>An object's position, id and whether its damage level is below destroyed. SEH-guarded.</summary>
+bool world_object_state(const void* obj, double pos[3], uint32_t* id, bool* alive);
+/// <summary>Calls the object's damage interface slot 4, 5 or 6 with the call's own arguments, after checking the slot
+/// is a function we read. 0 done, 1 refused, 2 faulted.</summary>
+int world_damage_call(void* obj, int slot, const uint32_t* args);
+/// <summary>
+/// From the damage hooks (hit_claims.cpp): a gun hit on a remote copy by our player becomes a claim to the host
+/// (remote), and on the host a gun hit on a client's avatar goes to that client. True if taken (the call is dropped).
+/// </summary>
+bool hits_on_damage(void* obj, int slot, const uint32_t* args, bool remote);
+/// <summary>Host: a client's claim (checked, then applied here or forwarded to the target's owner).</summary>
+void hits_host_claim(int slot, const uint8_t* data, size_t len);
+/// <summary>Client: a hit on our own jet from the host.</summary>
+void hits_client_apply(const uint8_t* data, size_t len);
+/// <summary>A session starts or ends: the claim rate limits start again.</summary>
+void hits_session_reset();
+/// <summary>Host (host.cpp): the client slot whose avatar obj is, or -1; that slot's avatar; a reliable or unreliable
+/// world message for one client; and whether a shared-world session with clients is running.</summary>
+int host_avatar_slot(const void* obj);
+void* host_avatar_object(int slot);
+bool host_world_send_to(int slot, const uint8_t* data, size_t len, bool reliable);
+bool host_world_active();
+/// <summary>Client (client.cpp): a reliable world message for the host, and whether a shared-world session runs.</summary>
+bool client_world_send(const uint8_t* data, size_t len);
+bool client_world_active();
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>
 bool client_connect_target(char* host, size_t cap, uint16_t* port);
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>

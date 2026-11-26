@@ -550,6 +550,10 @@ void handle_message(const HostEvent& e, void* player, double now) {
         }
         return;
     }
+    if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::HitClaim)) {
+        if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) hits_host_claim(slot, e.data, e.len);
+        return;
+    }
     net::MsgType type{};
     if (net::peek_type(e.data, e.len, type) != net::Status::Ok) return;  // the network thread checked already
     switch (type) {
@@ -864,5 +868,23 @@ void host_shutdown() {
 }
 
 bool host_has_clients() { return g_has_clients.load(std::memory_order_relaxed); }
+
+int host_avatar_slot(const void* obj) {
+    if (!g_av || !obj) return -1;
+    for (int s = 0; s < net::kMaxClients; ++s)
+        if (g_av[s].active && !g_av[s].parked && g_av[s].h.obj == obj) return s;
+    return -1;
+}
+
+void* host_avatar_object(int slot) {
+    if (!g_av || slot < 0 || slot >= net::kMaxClients || !g_av[slot].active || g_av[slot].parked) return nullptr;
+    return g_av[slot].h.obj;
+}
+
+bool host_world_send_to(int slot, const uint8_t* data, size_t len, bool reliable) {
+    return g_running.load(std::memory_order_relaxed) && world_send_to(slot, data, len, reliable);
+}
+
+bool host_world_active() { return g_running.load(std::memory_order_relaxed) && g_nclients > 0 && world_host_streaming(); }
 
 }  // namespace LazyWorks::SF2Patch::hooks

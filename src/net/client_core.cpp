@@ -405,6 +405,7 @@ void ClientCore::run() {
         const WorldEventRec* er = nullptr;
         AvatarStateMsg am;
         WorldSnapshotMsg snm;
+        HitMsg hm;
         const bool ok =
             (wt == static_cast<uint8_t>(WorldType::WorldSnapshot) && channel == kChannelReliable &&
              decode(data, len, snm) == Status::Ok) || (wt == static_cast<uint8_t>(WorldType::WorldStates) && channel == kChannelUnreliable &&
@@ -412,7 +413,9 @@ void ClientCore::run() {
                         (wt == static_cast<uint8_t>(WorldType::WorldEvents) && channel == kChannelReliable &&
                          decode_world_events(data, len, eh, &er) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::AvatarState) && channel == kChannelReliable &&
-                         decode(data, len, am) == Status::Ok);
+                         decode(data, len, am) == Status::Ok) ||
+                        (wt == static_cast<uint8_t>(WorldType::HitApply) && channel == kChannelReliable &&
+                         decode_hit(data, len, WorldType::HitApply, hm) == Status::Ok);
         if (!ok) return drop(n_format_);
         if (!welcomed || len > sizeof(WorldPacket::data)) return drop(n_state_);
         // Reliable world messages (events, jet states) are never dropped: they share the events ring.

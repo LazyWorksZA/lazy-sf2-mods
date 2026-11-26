@@ -1260,18 +1260,25 @@ void remote_after_start(void* msn) {
 void* g_dmg_orig[12] = {};
 const char* const kDmgClass[4] = {"aircraft", "ground object", "vehicle", "ship"};
 
-bool damage_blocked(void* iface, int k, uint32_t shooter) {
-    if (!g_remote_on.load(std::memory_order_acquire)) return false;
-    const uint32_t mask =
-        k < 3 ? g_mask_air.load(std::memory_order_relaxed) : g_mask_ground.load(std::memory_order_relaxed);
-    uint32_t flags = 0;
+// args are the call's arguments (5, 8 or 6 of them); the shooter id is args[3]. A gun hit the hit claims take (a
+// claim sent for a remote target, or a hit forwarded to the PC that owns the target) is dropped here too.
+bool damage_blocked(void* iface, int k, const uint32_t* args) {
+    const uint32_t shooter = args[3];
     BYTE* obj = static_cast<BYTE*>(iface) - kDamageIface;
-    __try {
-        std::memcpy(&flags, obj + kObjFlags, sizeof(flags));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+    bool remote = false;
+    if (g_remote_on.load(std::memory_order_acquire)) {
+        const uint32_t mask =
+            k < 3 ? g_mask_air.load(std::memory_order_relaxed) : g_mask_ground.load(std::memory_order_relaxed);
+        uint32_t flags = 0;
+        __try {
+            std::memcpy(&flags, obj + kObjFlags, sizeof(flags));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        remote = block_damage(true, flags, mask);
     }
-    if (!block_damage(true, flags, mask)) return false;
+    const bool taken = hits_on_damage(obj, 4 + k % 3, args, remote);
+    if (!remote) return taken;
     const uint64_t n = g_blocked.fetch_add(1) + 1;
     if (log_milestone(n))
         LOG("world: remote: blocked %s damage (slot %d) to %s %p from shooter 0x%08lx (%llu blocked so far)",
@@ -1288,18 +1295,21 @@ using Dmg6_t = int(__fastcall*)(void*, void*, uint32_t, uint32_t, uint32_t, uint
 // The originals are void; eax is passed through anyway. A blocked call returns 0 and pops the same arguments.
 template <int K>
 int __fastcall h_dmg5(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t f) {
-    if (damage_blocked(i, K, d)) return 0;
+    const uint32_t args[5] = {a, b, c, d, f};
+    if (damage_blocked(i, K, args)) return 0;
     return reinterpret_cast<Dmg5_t>(g_dmg_orig[K])(i, e, a, b, c, d, f);
 }
 template <int K>
 int __fastcall h_dmg8(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t f, uint32_t g,
                       uint32_t h, uint32_t j) {
-    if (damage_blocked(i, K, d)) return 0;
+    const uint32_t args[8] = {a, b, c, d, f, g, h, j};
+    if (damage_blocked(i, K, args)) return 0;
     return reinterpret_cast<Dmg8_t>(g_dmg_orig[K])(i, e, a, b, c, d, f, g, h, j);
 }
 template <int K>
 int __fastcall h_dmg6(void* i, void* e, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t f, uint32_t g) {
-    if (damage_blocked(i, K, d)) return 0;
+    const uint32_t args[6] = {a, b, c, d, f, g};
+    if (damage_blocked(i, K, args)) return 0;
     return reinterpret_cast<Dmg6_t>(g_dmg_orig[K])(i, e, a, b, c, d, f, g);
 }
 
@@ -1783,6 +1793,10 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         if (g_cs && sn.mission_id != g_flying_id) g_cs->skip_parts = sn.parts;
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::HitApply)) {
+        hits_client_apply(data, len);
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
         net::AvatarStateMsg am;
         if (net::decode(data, len, am) == net::Status::Ok) world_avatar_apply(data, len, client_avatar_object(am.peer));
@@ -2041,6 +2055,7 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
         m.throttle = net::throttle_to_wire(jc.throttle);
         m.engines = jc.engines;
         m.engine_count = jc.engine_count;
+        m.guns = jc.guns;
     } else if (g_atx.have) {
         m.throttle = g_atx.last.throttle;
         m.engines = g_atx.last.engines;
@@ -2053,11 +2068,12 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
     const size_t n = net::encode(m, buf, sizeof(buf));
     if (!n || !send(buf, n)) return;  // tried again next step
     if (!g_atx.have || m.radar_mode != g_atx.last.radar_mode || m.target_a != g_atx.last.target_a ||
-        m.target_b != g_atx.last.target_b || m.engines != g_atx.last.engines)
-        LOG("world: jet state: radar mode %u, target %s%03u.%02u, config 0x%04x, throttle %u/255, engines 0x%02x (sent)",
+        m.target_b != g_atx.last.target_b || m.engines != g_atx.last.engines || m.guns != g_atx.last.guns)
+        LOG("world: jet state: radar mode %u, target %s%03u.%02u, config 0x%04x, throttle %u/255, engines 0x%02x, guns %u "
+            "(sent)",
             static_cast<unsigned>(m.radar_mode), m.target_kind ? "A " : "none ", static_cast<unsigned>(m.target_a),
             static_cast<unsigned>(m.target_b), static_cast<unsigned>(m.config), static_cast<unsigned>(m.throttle),
-            static_cast<unsigned>(m.engines));
+            static_cast<unsigned>(m.engines), static_cast<unsigned>(m.guns));
     g_atx.last = m;
     g_atx.have = true;
     g_atx.sent_at = now;
@@ -2074,6 +2090,7 @@ void world_avatar_session_reset() {
     g_atx = AvatarTx{{}, false, 0, sim_player_epoch(), 0};  // our state goes out again
     for (auto& p : g_arx) p = net::AvatarStateMsg{};
     for (bool& h : g_arx_have) h = false;
+    hits_session_reset();
 }
 
 namespace {
@@ -2082,6 +2099,7 @@ JetControls controls_of(const net::AvatarStateMsg& m) {
     c.throttle = net::throttle_from_wire(m.throttle);
     c.engines = m.engines;
     c.engine_count = m.engine_count > 8 ? 8 : m.engine_count;
+    c.guns = m.guns & 3;
     return c;
 }
 }  // namespace
@@ -2108,9 +2126,11 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
     BYTE* av = static_cast<BYTE*>(avatar);
     write_config(av, m.config);
     const JetWriteResult jw = jet_write_controls(av, controls_of(m));
-    if (!g_arx_have[m.peer] || m.engines != prev.engines || jw.engines_set || jw.engines_refused)
-        LOG("world: jet state of peer %u: throttle %u/255, engines 0x%02x%s (%u switched%s)",
+    if (!g_arx_have[m.peer] || m.engines != prev.engines || m.guns != prev.guns || jw.engines_set ||
+        jw.engines_refused)
+        LOG("world: jet state of peer %u: throttle %u/255, engines 0x%02x, guns %u%s (%u switched%s)",
             static_cast<unsigned>(m.peer), static_cast<unsigned>(m.throttle), static_cast<unsigned>(m.engines),
+            static_cast<unsigned>(m.guns),
             jw.ok ? "" : ", NOT written (input array not readable)", static_cast<unsigned>(std::popcount(jw.engines_set)),
             jw.engines_refused ? ", some engines' class not the one we read" : "");
     const int rm = detect_call(av, ao, kDetectSetMode, kRvaAoSetMode, m.radar_mode);
@@ -2134,6 +2154,126 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
             rt == 0 ? "" : ", target slot unexpected");
     prev = m;
     g_arx_have[m.peer] = true;
+}
+
+// ---- keys and damage for the hit claims (Phase 5 T3, hit_claims.cpp) ----
+
+namespace {
+
+// The running mission's slot table and object manager. Game thread.
+bool world_tables(SlotTable* t, Om* om, uint32_t* player) {
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
+    if (!sm || !omm) return false;
+    const void* msn = at_rva(sm, kRvaMsn);
+    return read_slot_table(msn, t) && read_om(omm, om) && (!player || read_player_obj(msn, player));
+}
+
+// The damage interface functions of slots 4..6 per class module (the ones the damage block hooks; network-recon §9.5).
+struct DmgModule {
+    const wchar_t* name;
+    DWORD stamp, size;
+    DWORD rva[3];
+};
+const DmgModule kDmgModules[4] = {
+    {L"AircraftObject.dll", kAoStamp, kAoSize, {0x69210, 0x693d0, 0x692f0}},
+    {L"GroundObject.dll", kGoStamp, kGoSize, {0x18e60, 0x14780, 0x146a0}},
+    {L"GroundMobileObject.dll", kGmStamp, kGmSize, {0x11500, 0xbf70, 0xbe90}},
+    {L"NavalObject.dll", kNvStamp, kNvSize, {0x35d0, 0x3700, 0x3660}},
+};
+uintptr_t g_dmg_base[4] = {};
+HMODULE g_dmg_checked[4] = {};
+
+// The function slot `slot` (4..6) of the object's damage interface must be one we read. Game thread.
+void* checked_damage_fn(void** vt, int slot) {
+    void* f = vt[slot];
+    for (int i = 0; i < 4; ++i) {
+        HMODULE m = GetModuleHandleW(kDmgModules[i].name);
+        if (m != g_dmg_checked[i]) {
+            g_dmg_checked[i] = m;
+            g_dmg_base[i] = m && is_expected_build(m, kDmgModules[i].stamp, kDmgModules[i].size, "damage interface")
+                                ? reinterpret_cast<uintptr_t>(m)
+                                : 0;
+        }
+        if (g_dmg_base[i] && reinterpret_cast<uintptr_t>(f) == g_dmg_base[i] + kDmgModules[i].rva[slot - 4]) return f;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+bool world_key_of_object(uint32_t id, uint8_t* kind, uint16_t* a, uint16_t* b) {
+    SlotTable t{};
+    Om om;
+    if (id == 0xffffffffu || !world_tables(&t, &om, nullptr)) return false;
+    for (int i = 0; i < t.count; ++i) {
+        SlotRaw s{};
+        if (!read_slot(t, i, &s)) return false;
+        for (int m = 0; m < s.members; ++m)
+            if (s.ids[m] == id) {
+                *kind = static_cast<uint8_t>(i < t.first_ground ? net::KeyKind::Aircraft : net::KeyKind::Ground);
+                *a = static_cast<uint16_t>(i);
+                *b = static_cast<uint16_t>(m);
+                return true;
+            }
+    }
+    return false;
+}
+
+void* world_object_of_key(uint8_t kind, uint16_t a, uint16_t b, uint32_t* id_out) {
+    SlotTable t{};
+    Om om;
+    if ((kind != 1 && kind != 2) || !world_tables(&t, &om, nullptr)) return nullptr;
+    if (a >= t.count || (kind == 1) != (a < t.first_ground)) return nullptr;
+    SlotRaw s{};
+    uint32_t id = 0;
+    BYTE* obj = nullptr;
+    int group = 0;
+    if (!read_slot(t, a, &s) || b >= s.members || !read_member_id(t, a, b, &id) || !resolve_obj(om, id, &obj, &group) ||
+        group == 0)
+        return nullptr;
+    if (id_out) *id_out = id;
+    return obj;
+}
+
+uint32_t world_player_id() {
+    SlotTable t{};
+    Om om;
+    uint32_t player = 0xffffffffu;
+    return world_tables(&t, &om, &player) ? player : 0xffffffffu;
+}
+
+bool world_object_state(const void* obj, double pos[3], uint32_t* id, bool* alive) {
+    __try {
+        const BYTE* o = static_cast<const BYTE*>(obj);
+        std::memcpy(pos, o + kObjPos, 3 * sizeof(double));
+        std::memcpy(id, o + kObjId, 4);
+        int level = 0;
+        std::memcpy(&level, o + kObjDamage, 4);
+        *alive = level < kDestroyedLevel;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int world_damage_call(void* obj, int slot, const uint32_t* args) {
+    if (!obj || slot < 4 || slot > 6) return 1;
+    __try {
+        BYTE* iface = static_cast<BYTE*>(obj) + kDamageIface;
+        void* f = checked_damage_fn(*reinterpret_cast<void***>(iface), slot);
+        if (!f) return 1;
+        if (slot == 4)
+            reinterpret_cast<Dmg5_t>(f)(iface, nullptr, args[0], args[1], args[2], args[3], args[4]);
+        else if (slot == 5)
+            reinterpret_cast<Dmg8_t>(f)(iface, nullptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                                        args[7]);
+        else
+            reinterpret_cast<Dmg6_t>(f)(iface, nullptr, args[0], args[1], args[2], args[3], args[4], args[5]);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
 }
 
 namespace {
@@ -2337,7 +2477,9 @@ void world_on_modules_loaded() {
         hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 2, g_sms,
                    g_sms_bad);
     if (sm_n) hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, sm_defs, sm_n, g_sm, g_sm_bad);
-    if (!g_remote) return;
+    // The damage hooks: on a joined client (the remote block and the hit claims), and on a host that serves its
+    // mission (gun hits on the clients' avatars go to their owners).
+    if (!g_remote && !(g_mode == Mode::Save && env_set(L"LAZYSF2_HOST"))) return;
 #define LZ_DMG(K, ARGS, RVA, ...)                                                                         \
     {RVA, reinterpret_cast<void*>(&h_dmg##ARGS<K>), &g_dmg_orig[K], "world: damage block " #K, {__VA_ARGS__}, 9}
     static const HookDef kAo[] = {

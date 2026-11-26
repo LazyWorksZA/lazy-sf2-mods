@@ -54,6 +54,12 @@ struct ServeConfig {
     /// <summary>The jet's controls (throttle, engines) sent as the host's AvatarState (peer 0) to a welcomed client,
     /// on change, from the client's Welcome on.</summary>
     JetScript jet = JetScript::None;
+    /// <summary>--hit: a scripted gun hit (HitApply, 20 kJ kinetic) on the key every `every` seconds of host time
+    /// from the client's Welcome on, as if the bot's jet (shooter key: its seat in the same slot) had hit it.</summary>
+    bool hit = false;
+    uint8_t hit_kind = 1;
+    uint16_t hit_a = 0, hit_b = 0;
+    double hit_every = 0;
 };
 
 struct ServeResult {
@@ -74,7 +80,9 @@ struct ServeResult {
     uint32_t world_msgs = 0, world_events = 0;  // T6 messages queued
     uint32_t jet_states_sent = 0;  // the jet's AvatarStates queued (--jet)
     uint32_t jet_states_rx = 0;    // the client's AvatarStates received
-    uint8_t last_rx_throttle = 0, last_rx_engines = 0;
+    uint8_t last_rx_throttle = 0, last_rx_engines = 0, last_rx_guns = 0;
+    uint32_t hit_claims_rx = 0;  // the client's HitClaims received
+    uint32_t hits_sent = 0;      // --hit HitApplies queued
 };
 
 /// <summary>

@@ -332,6 +332,21 @@ void HostCore::run() {
             if (!push_in(e, true)) drop(n_queue_);
             return;
         }
+        if (wt == static_cast<uint8_t>(WorldType::HitClaim)) {  // a client's gun hit: to the game thread
+            HitMsg hm;
+            if (channel != kChannelReliable || decode_hit(data, len, WorldType::HitClaim, hm) != Status::Ok)
+                return drop(n_format_);
+            if (!(slot_state_[slot].load(std::memory_order_acquire) & 1)) return drop(n_state_);
+            hm.peer = static_cast<uint16_t>(slot + 1);
+            HostEvent e;
+            e.kind = HostEvent::Message;
+            e.slot = static_cast<uint8_t>(slot);
+            e.gen = gens[slot];
+            e.channel = channel;
+            e.len = static_cast<uint16_t>(encode_hit(hm, WorldType::HitClaim, e.data, sizeof(e.data)));
+            if (!push_in(e, true)) drop(n_queue_);
+            return;
+        }
         MissionRequestMsg rq;
         if (wt != static_cast<uint8_t>(WorldType::MissionRequest) || channel != kChannelReliable ||
             decode(data, len, rq) != Status::Ok)

@@ -28,7 +28,8 @@ void usage() {
         "lazysf2-bot --serve PORT [--bind ADDR] [--callsign BOTHOST] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
         "            [--start X,Y,Z,HEADING] [--lag MS] [--pause-at S --pause-for S] [--record DIR] [--duration SECONDS]\n"
         "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
-        "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--jet none|ab] [--log FILE]\n"
+        "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--jet none|ab|guns|ab+guns]\n"
+        "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
@@ -44,8 +45,9 @@ void usage() {
         "and a second Welcome puts the client on its wing. --pause-at S --pause-for S freezes the host time S seconds\n"
         "after the jet starts. --record writes DIR\\botserve_NNN.lzst. --lag here delays the handling of what arrives\n"
         "and the jet's States, not the Pongs. --jet ab sends the jet's controls (AvatarState) on a 14 s\n"
-        "cycle: idle 4 s, Mil 4 s, full afterburner 4 s, engines off 2 s. Serve exit code 0 ok, 1 bad arguments, 2 cannot\n"
-        "listen.\n");
+        "cycle: idle 4 s, Mil 4 s, full afterburner 4 s, engines off 2 s; guns fires the primary gun 1 s in every 4 s.\n"
+        "--hit A,SLOT,MEMBER,EVERY_S sends a scripted 20 kJ gun hit on that jet (the client's seat) every EVERY_S s.\n"
+        "Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
 }
 
 bool to_double(const char* s, double* out) {
@@ -224,7 +226,7 @@ int main(int argc, char** argv) {
                                                  "--duration", "--loss",   "--jitter",   "--log",      "--lag",
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
                                                  "--pause-at", "--pause-for", "--mission", "--fetch",
-                                                 "--out", "--world", "--world-event", "--seats", "--jet"};
+                                                 "--out", "--world", "--world-event", "--seats", "--jet", "--hit"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -329,6 +331,16 @@ int main(int argc, char** argv) {
         } else if (a == "--seats" && (v = val())) {
             ok = sscanf_s(v, "%d,%d", &scfg.seat_members, &scfg.host_member) == 2 && scfg.seat_members > 0 &&
                  scfg.host_member >= 0 && scfg.host_member < scfg.seat_members;
+            serve_only = true;
+        } else if (a == "--hit" && (v = val())) {
+            char kind = 0;
+            unsigned ha = 0, hb = 0;
+            ok = sscanf_s(v, "%c,%u,%u,%lf", &kind, 1u, &ha, &hb, &scfg.hit_every) == 4 && (kind == 'A' || kind == 'G') &&
+                 scfg.hit_every > 0 && ha < 0x10000 && hb < 0x10000;
+            scfg.hit = ok;
+            scfg.hit_kind = kind == 'A' ? 1 : 2;
+            scfg.hit_a = static_cast<uint16_t>(ha);
+            scfg.hit_b = static_cast<uint16_t>(hb);
             serve_only = true;
         } else if (a == "--jet" && (v = val())) {
             ok = bot::parse_jet_script(v, &scfg.jet);
