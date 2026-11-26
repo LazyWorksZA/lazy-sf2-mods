@@ -92,8 +92,10 @@ int g_force_density = -1, g_force_start = -1;     // Load: forced values (-1 = l
 int g_seen_density = -1, g_seen_start = -1;       // what the getter returned during the start call
 
 // Hooks, per image.
-using NewEvent_t = void(__fastcall*)(void* page, void* edx, int ev);
-using Start_t = void(__fastcall*)(void* msn);
+// The detours return what the originals return: the start returns 1 in eax, and MSN slot 32 (+0x85e0) passes that
+// on to FlightEngine, which drops the flight without it. The event handler's eax is passed on for the same reason.
+using NewEvent_t = int(__fastcall*)(void* page, void* edx, int ev);
+using Start_t = int(__fastcall*)(void* msn);
 using IniGetInt_t = int(__fastcall*)(void* ini, void* edx, const wchar_t* section, const wchar_t* key, int def);
 NewEvent_t o_NewEvent = nullptr;
 Start_t o_Start = nullptr;
@@ -121,8 +123,11 @@ int get_single_msn(HMODULE exe, HMODULE sm, void** out) {
         if (vt != at_rva(exe, kRvaSysVtable)) return 2;
         void* msn = nullptr;
         if (!reinterpret_cast<Get_t>(vt[kSlotGet / sizeof(void*)])(sys, nullptr, L"MSN", &msn) || !msn) return 1;
+        const bool ours = msn == at_rva(sm, kRvaMsn);
+        // Release zeroes the pointer it is given, so compare first.
         reinterpret_cast<Release_t>(vt[kSlotRelease / sizeof(void*)])(sys, nullptr, L"MSN", &msn);
-        if (msn != at_rva(sm, kRvaMsn)) return 1;
+        if (!ours) return 1;
+        msn = at_rva(sm, kRvaMsn);
         void** mvt = *static_cast<void***>(msn);
         if (mvt != at_rva(sm, kRvaMsnVtable)) return 2;
         if (mvt[0] != at_rva(sm, kRvaLoad) || mvt[1] != at_rva(sm, kRvaSave) || mvt[4] != at_rva(sm, kRvaGenerate))
@@ -596,13 +601,14 @@ void accept_load(const Ctx& c, void* page) {
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-void __fastcall h_NewEvent(void* page, void* edx, int ev) {
-    o_NewEvent(page, edx, ev);
-    if (ev != kEventAccept && ev != kEventFly) return;
+int __fastcall h_NewEvent(void* page, void* edx, int ev) {
+    const int r = o_NewEvent(page, edx, ev);
+    if (ev != kEventAccept && ev != kEventFly) return r;
     Ctx c{};
-    if (!resolve(&c, "New page Accept")) return;
+    if (!resolve(&c, "New page Accept")) return r;
     if (g_mode == Mode::Save) accept_save(c, page);
     else if (g_mode == Mode::Load) accept_load(c, page);
+    return r;
 }
 
 int __fastcall h_IniGetInt(void* ini, void* edx, const wchar_t* section, const wchar_t* key, int def) {
@@ -756,7 +762,7 @@ void write_manifest(const Ctx& c, const Armed& a, int rnd_index, int rnd_seed) {
         format_manifest_counts(v).c_str() + 2, v.size(), player_key.c_str(), empty_formations);
 }
 
-void __fastcall h_Start(void* msn) {
+int __fastcall h_Start(void* msn) {
     Armed a;
     AcquireSRWLockExclusive(&g_lock);
     if (g_armed.on && g_armed.msn == msn) {
@@ -767,14 +773,10 @@ void __fastcall h_Start(void* msn) {
     if (!a.on) {
         LOG("world: a single mission starts without an armed world flow (Load page, or no New-page Accept); no "
             "manifest");
-        o_Start(msn);
-        return;
+        return o_Start(msn);
     }
     Ctx c{};
-    if (!resolve(&c, "mission start") || c.msn != msn) {
-        o_Start(msn);
-        return;
-    }
+    if (!resolve(&c, "mission start") || c.msn != msn) return o_Start(msn);
     const bool seeded = call_seed(c.rnd, a.seed);
     // -1 makes the start read the density through the getter, where it is recorded (Save) or forced (Load).
     const bool density_reset = write_density(c.sm, -1);
@@ -785,12 +787,13 @@ void __fastcall h_Start(void* msn) {
         seeded ? "" : " FAILED", density_reset ? "" : ", density reset FAILED",
         g_mode == Mode::Load ? "forcing the sidecar's density and mission start" : "recording density and start");
     g_start_thread.store(GetCurrentThreadId(), std::memory_order_release);
-    o_Start(msn);
+    const int result = o_Start(msn);
     g_start_thread.store(0, std::memory_order_release);
     int idx = -1, sd = -1;
     read_rnd(c.rnd, &idx, &sd);
-    LOG("world: mission objects created: density %d, mission start %d (-1 = not read), RND seed %d index %d",
-        g_seen_density, g_seen_start, sd, idx);
+    LOG("world: mission objects created (start returned %d): density %d, mission start %d (-1 = not read), RND seed "
+        "%d index %d",
+        result, g_seen_density, g_seen_start, sd, idx);
     if (g_mode == Mode::Save) {
         a.sidecar.density = g_seen_density;
         a.sidecar.mission_start = g_seen_start;
@@ -801,6 +804,7 @@ void __fastcall h_Start(void* msn) {
                 g_seen_density, g_seen_start);
     }
     write_manifest(c, a, idx, sd);
+    return result;
 }
 
 // ---- hook installation, per image ----
@@ -810,7 +814,20 @@ struct HookDef {
     void* detour;
     void** original;
     const char* what;
+    unsigned char prologue[9];  // the first bytes of the stock function (prologue_len of them)
+    size_t prologue_len;
 };
+
+// Self-check before hooking: the function must start with the bytes the decompile was read from. Logs them once.
+bool prologue_ok(HMODULE m, const HookDef& d) {
+    const BYTE* f = static_cast<const BYTE*>(at_rva(m, d.rva));
+    char hex[3 * sizeof(d.prologue) + 1] = {};
+    for (size_t i = 0; i < d.prologue_len; ++i) std::snprintf(hex + 3 * i, 4, "%02x ", f[i]);
+    const bool ok = std::memcmp(f, d.prologue, d.prologue_len) == 0;
+    LOG("%s: prologue at +0x%lx is %s%s", d.what, static_cast<unsigned long>(d.rva), hex,
+        ok ? "(as expected)" : "(NOT as expected: not hooked)");
+    return ok;
+}
 
 // Hooks a freshly loaded image once. The DLLs can be unloaded and loaded again, so each new image is re-hooked.
 void hook_image(const wchar_t* name, const char* label, DWORD stamp, DWORD size, const HookDef* defs, size_t n,
@@ -826,8 +843,15 @@ void hook_image(const wchar_t* name, const char* label, DWORD stamp, DWORD size,
         } else {
             // Entries left by an earlier image at this base: removing them restores identical bytes (same build).
             for (size_t i = 0; i < n; ++i) (void)MH_RemoveHook(at_rva(m, defs[i].rva));
-            for (size_t i = 0; i < n; ++i)
-                create_and_enable(at_rva(m, defs[i].rva), defs[i].detour, defs[i].original, defs[i].what);
+            bool all = true;
+            for (size_t i = 0; i < n; ++i) all = prologue_ok(m, defs[i]) && all;
+            if (all) {
+                for (size_t i = 0; i < n; ++i)
+                    create_and_enable(at_rva(m, defs[i].rva), defs[i].detour, defs[i].original, defs[i].what);
+            } else {
+                bad = m;
+                LOG("world: %s not hooked (prologue check); the world tooling stays off for it", label);
+            }
             current = m;
         }
     }
@@ -881,13 +905,13 @@ void world_on_modules_loaded() {
     if (g_mode == Mode::Off) return;
     static const HookDef kSms[] = {
         {kRvaNewEvent, reinterpret_cast<void*>(&h_NewEvent), reinterpret_cast<void**>(&o_NewEvent),
-         "world: SingleMissionScreen New page events"},
+         "world: SingleMissionScreen New page events", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08}, 6},
     };
     static const HookDef kSm[] = {
         {kRvaStart, reinterpret_cast<void*>(&h_Start), reinterpret_cast<void**>(&o_Start),
-         "world: SingleMission mission start"},
+         "world: SingleMission mission start", {0x55, 0x8b, 0xec, 0x81, 0xec, 0x34, 0x02, 0x00, 0x00}, 9},
         {kRvaIniGetInt, reinterpret_cast<void*>(&h_IniGetInt), reinterpret_cast<void**>(&o_IniGetInt),
-         "world: SingleMission ini int getter"},
+         "world: SingleMission ini int getter", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x53}, 7},
     };
     hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 1, g_sms, g_sms_bad);
     hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, kSm, 2, g_sm, g_sm_bad);
