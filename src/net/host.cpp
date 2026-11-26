@@ -1,5 +1,6 @@
 // Host mode (developer tool, part of the probe): remote clients drive AI aircraft as avatars. Inert unless
 // LAZYSF2_HOST is set and the probe is on. Runs on the game thread; the network thread (host_core.cpp) owns ENet.
+// The avatars themselves (taking, writing, giving back) are in hooks/remote_avatar.cpp, the smoothing in RemoteJet.
 #include <windows.h>
 
 #include <atomic>
@@ -9,11 +10,13 @@
 #include <new>
 
 #include "hooks/hooks.h"
+#include "hooks/remote_avatar.h"
 #include "hooks/replay_math.h"
 #include "log.h"
 #include "net/host_core.h"
 #include "net/protocol.h"
 #include "net/receiver_math.h"
+#include "net/remote_jet.h"
 #include "net/stream_format.h"
 #include "net/stream_record.h"
 
@@ -24,13 +27,7 @@ namespace {
 using namespace replay_math;
 using net::HostEvent;
 
-constexpr DWORD kRemoteMaskRva = 0xb7b28;  // AircraftObject.dll global: the REMOTEOBJECT flag mask
-constexpr size_t kOffFlags = 0xc, kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffMatrix = 0xdc,
-                 kOffAngles = 0x100;
-constexpr int kRing = 16;      // received samples kept per client
-constexpr int kPending = 16;   // samples drained but not yet applied by the avatar's own step
-constexpr double kInitialDelay = 0.1;
-constexpr double kMaxStep = 0.25;  // longest elapsed time the delay ramp counts per step
+constexpr size_t kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffAngles = 0x100;
 constexpr double kSpawnAhead = 300.0, kSpawnRight = 50.0;
 
 // Bye reasons the host sends.
@@ -39,10 +36,6 @@ enum ByeReason : uint8_t { kByeNone = 0, kByeBusy = 1, kByeNoAvatar = 2, kByeSes
 template <typename T>
 void read_at(const void* obj, size_t off, T* out, size_t n) {
     std::memcpy(out, static_cast<const char*>(obj) + off, n * sizeof(T));
-}
-template <typename T>
-void write_at(void* obj, size_t off, const T* in, size_t n) {
-    std::memcpy(static_cast<char*>(obj) + off, in, n * sizeof(T));
 }
 double dist3(const double a[3], const double b[3]) {
     return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
@@ -64,9 +57,7 @@ std::atomic<bool> g_has_clients{false};  // mirrors g_nclients for other threads
 
 struct Avatar {
     bool active = false;
-    void* obj = nullptr;
-    unsigned long long seq = 0;
-    uint32_t set_bits = 0;  // REMOTEOBJECT bits that we set (mask & ~original flags)
+    AvatarHandle h;
     char callsign[17] = {};
     char aircraft[33] = {};
     uint32_t gen = 0;  // the core's connection generation for this slot; stale commands are dropped by the core
@@ -74,37 +65,26 @@ struct Avatar {
     double spawn_heading = 0;
     float hold_vel[3] = {};  // the player's velocity at the spawn: the avatar coasts with it until the first State
     double hold_t0 = 0;
-
-    // Receiver (see replay.cpp for the same structure).
-    Samp ring[kRing];
-    int ring_n = 0;
-    Samp pending[kPending];
-    int pending_n = 0;
-    bool have_seq = false;
-    uint32_t last_seq = 0;
-    double newest_t = 0;
-    double intervals[net::kIntervalWindow] = {};
-    int iv_n = 0, iv_pos = 0;
-    double delay = kInitialDelay;
-    bool have_last_now = false;
-    double last_now = 0;
-    double off_p[3] = {}, off_a[3] = {};
-    double off_t = 0;
-
-    // The one-second window (game time).
-    double win_start = 0;
-    uint32_t rx = 0, flag_clears = 0;
-    double err_max = 0;
+    net::RemoteJet jet{net::JetParams{}};  // the receiver: Predict mode (plan 2.5)
+    bool got_state = false;  // the jet accepted a State
+    bool shown_state = false;  // the avatar has shown one (the join snap was logged)
+    bool coasting = false;   // the jet said Coast: we stopped writing and REMOTEOBJECT coasts the aircraft
+    uint32_t flag_clears = 0;  // in the current one-second window
 };
 Avatar* g_av = nullptr;  // net::kMaxClients entries (see above)
 int g_nclients = 0;
 uint32_t g_newest_gen[net::kMaxClients] = {};  // per slot: the newest connection generation seen in a Connect event
 constexpr double kHoldTimeout = 5.0;  // game seconds from the Welcome to the first State, before the avatar is released
-uint32_t g_mask = 0;         // REMOTEOBJECT mask, read once
 uint32_t g_epoch = 0;        // sim_player_epoch() when the current session started
 uint32_t g_checked_gen = 0;  // g_aircraft_generation at the last liveness check
 double g_next_report = 0;
 unsigned g_send_fail = 0;  // messages the core's out queue refused since the last report
+// The frame-order check (R4), once per player. If the avatars step before the player, sim_game_time() at their step
+// is the previous frame's: they are then shown at that time plus the player's latest dt.
+FrameOrderCheck g_order;
+bool g_order_shift = false;
+float g_player_dt = 0;
+double g_qpc_ms = 0;  // milliseconds per QPC tick
 
 void set_clients(int n) {
     g_nclients = n;
@@ -166,40 +146,24 @@ void request_disconnect(int slot, uint32_t gen) {
     if (!g_core->disconnect(static_cast<uint8_t>(slot), gen)) ++g_send_fail;  // the 5 s silence timeout ends it then
 }
 
-struct LiveCtx {
-    void* obj[net::kMaxClients];
-    unsigned long long seq[net::kMaxClients];
-    bool live[net::kMaxClients] = {};
-};
-void live_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the shared lock: no logging
-    auto& c = *static_cast<LiveCtx*>(vctx);
-    for (size_t i = 0; i < n; ++i) {
-        for (int s = 0; s < net::kMaxClients; ++s) {
-            if (c.obj[s] && list[i].obj == c.obj[s] && list[i].seq == c.seq[s]) c.live[s] = true;
-        }
-    }
+// The handles of the active avatars (empty for free slots), for the liveness check and the picker.
+void handles(AvatarHandle out[net::kMaxClients]) {
+    for (int s = 0; s < net::kMaxClients; ++s) out[s] = g_av[s].active ? g_av[s].h : AvatarHandle{};
 }
+
 // Fills live[] for every active avatar from the probe's table.
 void check_live(bool live[net::kMaxClients]) {
-    LiveCtx c;
-    for (int s = 0; s < net::kMaxClients; ++s) {
-        c.obj[s] = g_av[s].active ? g_av[s].obj : nullptr;
-        c.seq[s] = g_av[s].seq;
-    }
-    probe_with_aircraft(live_cb, &c);
-    for (int s = 0; s < net::kMaxClients; ++s) live[s] = c.live[s];
+    AvatarHandle h[net::kMaxClients];
+    handles(h);
+    avatar_check_live(h, net::kMaxClients, live);
 }
 
 // Frees a slot's avatar. If the aircraft is still live its flags are restored (the AI takes it back).
 void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, net::LeaveReason leave) {
     Avatar& a = g_av[slot];
     if (!a.active) return;
-    if (aircraft_live) {
-        uint32_t flags;
-        read_at(a.obj, kOffFlags, &flags, 1);
-        flags &= ~a.set_bits;  // clear only what we set
-        write_at(a.obj, kOffFlags, &flags, 1);
-    }
+    void* const obj = a.h.obj;
+    avatar_release(a.h, aircraft_live);
     if (bye_reason != kByeNone) {
         send_bye(slot, a.gen, bye_reason);
         request_disconnect(slot, a.gen);
@@ -211,7 +175,7 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
         p.reason = static_cast<uint8_t>(leave);
         rec(net::StreamKind::ClientLeft, g_now, &p, sizeof(p));
     }
-    LOG("net: client %d \"%s\" left (%s); avatar %p %s", slot + 1, a.callsign, why, a.obj,
+    LOG("net: client %d \"%s\" left (%s); avatar %p %s", slot + 1, a.callsign, why, obj,
         aircraft_live ? "given back to the AI" : "is gone, flags not restored");
     a = Avatar{};
     set_clients(g_nclients - 1);
@@ -235,68 +199,6 @@ void release_dead() {
     }
 }
 
-struct PickCtx {
-    // in
-    void* taken_obj[net::kMaxClients];
-    unsigned long long taken_seq[net::kMaxClients];
-    uint32_t mask;
-    double player_pos[3];
-    double spawn[3];
-    float heading;
-    // out
-    bool found = false;
-    void* obj = nullptr;
-    unsigned long long seq = 0;
-    wchar_t name[64] = {};
-    double distance = 0;
-    double from[3] = {};
-    uint32_t orig_flags = 0;
-    float vel[3] = {};  // in: the player's velocity
-};
-
-void pick_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the shared lock: no logging
-    auto& c = *static_cast<PickCtx*>(vctx);
-    size_t best = n;
-    double best_d = 0;
-    for (size_t i = 0; i < n; ++i) {
-        if (list[i].is_player) continue;
-        bool taken = false;
-        for (int s = 0; s < net::kMaxClients; ++s) {
-            if (c.taken_obj[s] == list[i].obj && c.taken_seq[s] == list[i].seq) taken = true;
-        }
-        if (taken) continue;
-        double p[3];
-        read_at(list[i].obj, kOffPos, p, 3);
-        const double d = dist3(p, c.player_pos);
-        if (best == n || d < best_d) {
-            best = i;
-            best_d = d;
-        }
-    }
-    if (best == n) return;
-    c.found = true;
-    c.obj = list[best].obj;
-    c.seq = list[best].seq;
-    c.distance = best_d;
-    read_at(c.obj, kOffPos, c.from, 3);
-    wcsncpy_s(c.name, list[best].name, _TRUNCATE);
-    // REMOTEOBJECT on, rates zero, at the spawn: the aircraft coasts and we are the only writer.
-    char* obj = static_cast<char*>(c.obj);
-    read_at(obj, kOffFlags, &c.orig_flags, 1);
-    const float zero[3] = {};
-    write_at(obj, kOffRates, zero, 3);
-    write_at(obj, kOffVel, c.vel, 3);  // in formation with the player until the first State
-    const uint32_t flags = c.orig_flags | c.mask;
-    write_at(obj, kOffFlags, &flags, 1);
-    write_at(obj, kOffPos, c.spawn, 3);
-    const double a[3] = {0.0, static_cast<double>(c.heading), 0.0};
-    const float af[3] = {0.0f, c.heading, 0.0f};
-    float m[9];
-    build_matrix(a, m);
-    write_at(obj, kOffMatrix, m, 9);
-    write_at(obj, kOffAngles, af, 3);
-}
-
 void reject(int slot, uint32_t gen, uint8_t reason, const char* why) {
     LOG("net: client %d refused: %s", slot + 1, why);
     send_bye(slot, gen, reason);
@@ -309,35 +211,28 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         reject(slot, gen, kByeBusy, "a puppet or replay run is active");
         return;
     }
-    if (!g_mask) {
-        if (const HMODULE m = GetModuleHandleW(L"AircraftObject.dll")) {  // the probe checked its build stamp
-            std::memcpy(&g_mask, reinterpret_cast<const char*>(m) + kRemoteMaskRva, sizeof(g_mask));
-        }
-        if (!g_mask) {
-            reject(slot, gen, kByeNoAvatar, "REMOTEOBJECT mask not set");
-            return;
-        }
-    }
-    PickCtx c;
-    for (int s = 0; s < net::kMaxClients; ++s) {
-        c.taken_obj[s] = g_av[s].active ? g_av[s].obj : nullptr;
-        c.taken_seq[s] = g_av[s].seq;
-    }
-    c.mask = g_mask;
-    float pang[3];
-    read_at(player, kOffPos, c.player_pos, 3);
+    char callsign[17], aircraft[33];
+    sanitize(callsign, sizeof(callsign), h.callsign);
+    sanitize(aircraft, sizeof(aircraft), h.aircraft);
+    double ppos[3];
+    float pang[3], pvel[3];
+    read_at(player, kOffPos, ppos, 3);
     read_at(player, kOffAngles, pang, 3);
-    read_at(player, kOffVel, c.vel, 3);
+    read_at(player, kOffVel, pvel, 3);
     const double hp = pang[1], sh = std::sin(hp), ch = std::cos(hp);
     const double right = kSpawnRight * slot;
-    c.spawn[0] = c.player_pos[0] + kSpawnAhead * sh + right * ch;
-    c.spawn[1] = c.player_pos[1] + kSpawnAhead * ch - right * sh;
-    c.spawn[2] = c.player_pos[2];
-    c.heading = pang[1];
+    const AvatarPick pick{aircraft,
+                          {ppos[0] + kSpawnAhead * sh + right * ch, ppos[1] + kSpawnAhead * ch - right * sh, ppos[2]},
+                          pang[1],
+                          {pvel[0], pvel[1], pvel[2]}};
+    AvatarHandle taken[net::kMaxClients];
+    handles(taken);
     const uint32_t air_gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
-    probe_with_aircraft(pick_cb, &c);
-    if (!c.found) {
-        reject(slot, gen, kByeNoAvatar, "no free AI aircraft to use as an avatar");
+    AvatarHandle got;
+    AvatarInfo info;
+    char why[192];
+    if (!avatar_take(pick, taken, net::kMaxClients, &got, why, sizeof(why), &info)) {
+        reject(slot, gen, kByeNoAvatar, why);
         return;
     }
     if (g_nclients == 0) {
@@ -352,19 +247,16 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         g_stream->open(probe_output_dir(), now, nullptr, core_log);
     }
     Avatar& a = g_av[slot];
-    a = Avatar{};
+    a = Avatar{};  // a fresh RemoteJet: the Welcome resets the receiver
     a.active = true;
     a.gen = gen;
-    std::memcpy(a.hold_vel, c.vel, sizeof(a.hold_vel));
+    std::memcpy(a.hold_vel, pick.vel, sizeof(a.hold_vel));
     a.hold_t0 = now;
-    a.obj = c.obj;
-    a.seq = c.seq;
-    a.set_bits = c.mask & ~c.orig_flags;
-    sanitize(a.callsign, sizeof(a.callsign), h.callsign);
-    sanitize(a.aircraft, sizeof(a.aircraft), h.aircraft);
-    std::memcpy(a.spawn, c.spawn, sizeof(a.spawn));
-    a.spawn_heading = c.heading;
-    a.win_start = now;
+    a.h = got;
+    std::memcpy(a.callsign, callsign, sizeof(a.callsign));
+    std::memcpy(a.aircraft, aircraft, sizeof(a.aircraft));
+    std::memcpy(a.spawn, pick.place, sizeof(a.spawn));
+    a.spawn_heading = pick.heading;
     set_clients(g_nclients + 1);
 
     {
@@ -378,8 +270,8 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     g_core->set_welcomed(static_cast<uint8_t>(slot), gen, true);
     net::WelcomeMsg w{};
     w.client_id = static_cast<uint16_t>(slot + 1);
-    std::memcpy(w.spawn_pos, c.spawn, sizeof(w.spawn_pos));
-    w.spawn_heading = c.heading;
+    std::memcpy(w.spawn_pos, a.spawn, sizeof(w.spawn_pos));
+    w.spawn_heading = pick.heading;
     w.host_game_time = now;
     uint8_t buf[net::kMaxMessage];
     const size_t n = net::encode(w, buf, sizeof(buf));
@@ -391,50 +283,14 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         return;
     }
     rec(net::StreamKind::WelcomeSent, now, buf, n);
-    LOG("net: client %d \"%s\" (%s) joined: avatar %p \"%ls\" (was %.0f m from the player at (%.0f, %.0f, %.0f)), "
-        "spawn (%.0f, %.0f, %.0f) heading %.1f deg",
-        slot + 1, a.callsign, a.aircraft, c.obj, c.name, c.distance, c.from[0], c.from[1], c.from[2], c.spawn[0],
-        c.spawn[1], c.spawn[2], static_cast<double>(c.heading) * 180.0 / kPi);
-}
-
-// A checked State from the network thread. Keeps only samples that are newer than the newest, in both the
-// sequence number and the time, and measures the packet interval for the delay.
-void accept_state(Avatar& a, const net::StateMsg& s) {
-    if (a.have_seq && static_cast<int32_t>(s.seq - a.last_seq) <= 0) return;
-    if (a.ring_n + a.pending_n > 0 && !(s.game_time > a.newest_t)) return;
-    if (a.ring_n + a.pending_n > 0) {
-        const double iv = s.game_time - a.newest_t;
-        if (iv < 2.0) {  // a longer gap is a stall, not a rate
-            a.intervals[a.iv_pos] = iv;
-            a.iv_pos = (a.iv_pos + 1) % net::kIntervalWindow;
-            if (a.iv_n < net::kIntervalWindow) ++a.iv_n;
-        }
+    LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg", slot + 1,
+        a.callsign, a.aircraft, got.obj, why, a.spawn[0], a.spawn[1], a.spawn[2],
+        static_cast<double>(pick.heading) * 180.0 / kPi);
+    if (!avatar_logic::same_type(info.type, a.aircraft)) {
+        LOG("net: client %d: warning: the client flies \"%s\" but its avatar is \"%s\"; both players should fly the "
+            "same type",
+            slot + 1, a.aircraft, info.type[0] ? info.type : "(type unknown)");
     }
-    a.have_seq = true;
-    a.last_seq = s.seq;
-    a.newest_t = s.game_time;
-    Samp p;
-    p.t = s.game_time;
-    for (int i = 0; i < 3; ++i) {
-        p.k.p[i] = s.pos[i];
-        p.k.v[i] = s.vel[i];
-        p.k.a[i] = wrap_pi(s.ang[i]);
-        p.k.w[i] = s.rates[i];
-    }
-    if (a.pending_n == kPending) {
-        std::memmove(&a.pending[0], &a.pending[1], sizeof(Samp) * (kPending - 1));
-        --a.pending_n;
-    }
-    a.pending[a.pending_n++] = p;
-    ++a.rx;
-}
-
-void push_ring(Avatar& a, const Samp& s) {
-    if (a.ring_n == kRing) {
-        std::memmove(&a.ring[0], &a.ring[1], sizeof(Samp) * (kRing - 1));
-        --a.ring_n;
-    }
-    a.ring[a.ring_n++] = s;
 }
 
 // Before the first State: the spawn, moved on with the player's velocity at the time of the Hello (dead reckoning in
@@ -451,10 +307,9 @@ void hold_kin(const Avatar& a, double now, Kin* out) {
 
 void avatar_step(int slot, double now) {
     Avatar& a = g_av[slot];
-    char* obj = static_cast<char*>(a.obj);
 
     // A client that was welcomed but never sends a State would leave the avatar coasting for ever: give it back.
-    if (!a.have_seq && now - a.hold_t0 > kHoldTimeout) {
+    if (!a.got_state && now - a.hold_t0 > kHoldTimeout) {
         LOG("net: client %d \"%s\": no State within %.0f s of the Welcome; releasing the avatar and disconnecting",
             slot + 1, a.callsign, kHoldTimeout);
         const uint32_t gen = a.gen;
@@ -463,82 +318,36 @@ void avatar_step(int slot, double now) {
         return;
     }
 
-    // The game must not take the avatar back: keep REMOTEOBJECT set.
-    uint32_t flags;
-    read_at(obj, kOffFlags, &flags, 1);
-    if ((flags & a.set_bits) != a.set_bits) {
-        flags |= a.set_bits;
-        write_at(obj, kOffFlags, &flags, 1);
-        ++a.flag_clears;
-    }
+    // The game must not take the avatar back: keep REMOTEOBJECT set (also while coasting).
+    if (avatar_keep_remote(a.h)) ++a.flag_clears;
 
-    // 1. The delay: towards 1.5 x the median packet interval, by at most 5% of the elapsed game time.
-    double elapsed = a.have_last_now ? now - a.last_now : 0.0;
-    if (!(elapsed > 0.0)) elapsed = 0.0;
-    if (elapsed > kMaxStep) elapsed = kMaxStep;
-    a.last_now = now;
-    a.have_last_now = true;
-    if (a.iv_n > 0) a.delay = net::ramp_delay(a.delay, net::delay_target(net::median(a.intervals, a.iv_n)), elapsed);
-    const double t_render = now - a.delay;
-
-    // 2. New samples: the state shown under the old ring, so that a change can be turned into an offset. With
-    // an empty ring, that is the state we have been holding at the spawn.
-    bool have_before = false;
-    Kin before{};
-    if (a.pending_n > 0) {
-        if (a.ring_n > 0) {
-            have_before = sample_at(a.ring, a.ring_n, t_render, &before);
-        } else {
-            hold_kin(a, now, &before);
-            have_before = true;
+    const double t = g_order_shift ? now + static_cast<double>(g_player_dt) : now;
+    Kin k{};
+    const net::RemoteJet::Out out = a.jet.shown(t, &k);
+    if (out == net::RemoteJet::Out::Coast) {
+        if (!a.coasting) {
+            a.coasting = true;
+            LOG("net: client %d \"%s\": no State for over %.0f s; the avatar coasts on its velocity", slot + 1,
+                a.callsign, a.jet.params().coast_after);
         }
-        for (int i = 0; i < a.pending_n; ++i) push_ring(a, a.pending[i]);
-        a.pending_n = 0;
+        return;  // REMOTEOBJECT coasts it natively
     }
-
-    Kin shown{};
-    if (a.ring_n == 0) {  // nothing received yet: coast from the spawn with the player's velocity
-        hold_kin(a, now, &shown);
+    if (out == net::RemoteJet::Out::None) {  // nothing received yet: coast from the spawn with the player's velocity
+        hold_kin(a, now, &k);
     } else {
-        Kin raw;
-        sample_at(a.ring, a.ring_n, t_render, &raw);
-        // Correction blending, as in replay.cpp: carry what we showed before minus what we would show now.
-        const double w_now = blend_weight(now - a.off_t, kBlendSeconds);
-        bool jumped = false;
-        if (have_before) {
-            for (int i = 0; i < 3; ++i) {
-                if (std::fabs(before.p[i] - raw.p[i]) >= 1e-6 || std::fabs(angle_diff(before.a[i], raw.a[i])) >= 1e-9)
-                    jumped = true;
-            }
+        if (a.coasting) {
+            a.coasting = false;
+            LOG("net: client %d \"%s\": States again; the avatar is driven", slot + 1, a.callsign);
         }
-        if (jumped) {
-            for (int i = 0; i < 3; ++i) {
-                a.off_p[i] = a.off_p[i] * w_now + (before.p[i] - raw.p[i]);
-                a.off_a[i] = wrap_pi(a.off_a[i] * w_now + angle_diff(before.a[i], raw.a[i]));
-            }
-            a.off_t = now;
+        if (!a.shown_state) {
+            a.shown_state = true;
+            Kin held;
+            hold_kin(a, now, &held);
+            LOG("net: client %d \"%s\": first State shown (%s, %.0f m from the hold position)", slot + 1, a.callsign,
+                out == net::RemoteJet::Out::Snap ? "snap" : "blend", dist3(held.p, k.p));
         }
-        const double w = blend_weight(now - a.off_t, kBlendSeconds);
-        shown = raw;
-        double off2 = 0;
-        for (int i = 0; i < 3; ++i) {
-            shown.p[i] += a.off_p[i] * w;
-            shown.a[i] = wrap_pi(shown.a[i] + a.off_a[i] * w);
-            off2 += (a.off_p[i] * w) * (a.off_p[i] * w);
-        }
-        a.err_max = std::fmax(a.err_max, std::sqrt(off2));
     }
-
-    const float v[3] = {float(shown.v[0]), float(shown.v[1]), float(shown.v[2])};
-    const float ang[3] = {float(shown.a[0]), float(shown.a[1]), float(shown.a[2])};
-    const float rates[3] = {float(shown.w[0]), float(shown.w[1]), float(shown.w[2])};
-    float m[9];
-    build_matrix(shown.a, m);
-    write_at(obj, kOffPos, shown.p, 3);
-    write_at(obj, kOffVel, v, 3);
-    write_at(obj, kOffRates, rates, 3);
-    write_at(obj, kOffMatrix, m, 9);
-    write_at(obj, kOffAngles, ang, 3);
+    avatar_write(a.h, k);
 }
 
 void handle_message(const HostEvent& e, void* player, double now) {
@@ -558,7 +367,8 @@ void handle_message(const HostEvent& e, void* player, double now) {
             net::StateMsg s;
             if (g_av[slot].active && g_av[slot].gen == e.gen && net::decode(e.data, e.len, s) == net::Status::Ok) {
                 rec(net::StreamKind::StateReceived, now, e.data, e.len);
-                accept_state(g_av[slot], s);
+                // now is the drain time (this player step), which stands for the arrival time: at most a frame later.
+                if (g_av[slot].jet.push(s, now)) g_av[slot].got_state = true;
             }
             break;
         }
@@ -616,28 +426,47 @@ void pump(void* player, double now) {
     }
 }
 
-void report(void* player, double now) {
+void report(void* player, double /*now*/) {
     double pp[3];
     read_at(player, kOffPos, pp, 3);
     for (int s = 0; s < net::kMaxClients; ++s) {
         Avatar& a = g_av[s];
         if (!a.active) continue;
         double ap[3];
-        read_at(a.obj, kOffPos, ap, 3);
-        const double span = now - a.win_start;
-        LOG("net: client %d \"%s\" rate %.1f Hz delay %.0f ms rtt %.0f ms err %.2f m (avatar dist %.0f m)", s + 1,
-            a.callsign, span > 0 ? a.rx / span : 0.0, a.delay * 1000.0, static_cast<double>(g_core->rtt_ms(static_cast<uint8_t>(s))),
-            a.err_max, dist3(pp, ap));
+        read_at(a.h.obj, kOffPos, ap, 3);
+        const net::JetStats st = a.jet.take_stats();
+        // "err" is the largest correction offset (the shown path minus the new prediction); every Snap is counted.
+        LOG("net: client %d \"%s\" rate %.1f Hz delay %.0f ms rtt %.0f ms err %.2f m (avatar dist %.0f m) "
+            "age %.0f/%.0f ms horizon %.0f ms snaps %u coast %u accel %.1f g",
+            s + 1, a.callsign, st.rate_hz, st.delay * 1000.0,
+            static_cast<double>(g_core->rtt_ms(static_cast<uint8_t>(s))), st.offset_max, dist3(pp, ap),
+            st.age_p50 * 1000.0, st.age_p90 * 1000.0, st.horizon_max * 1000.0, st.snaps + st.resync_snaps,
+            st.coasting_steps, st.accel_g_max);
+        if (st.dup_or_old || st.restarts || st.resyncs) {
+            LOG("net: client %d: %u old or duplicate State(s), %u source restart(s), %u clock resync(s)", s + 1,
+                st.dup_or_old, st.restarts, st.resyncs);
+        }
         if (a.flag_clears) LOG("net: client %d: the game cleared REMOTEOBJECT %u time(s); set again", s + 1, a.flag_clears);
-        a.win_start = now;
-        a.rx = 0;
         a.flag_clears = 0;
-        a.err_max = 0;
     }
     flush_send_fail();
 }
 
-void on_step(void* aircraft, float /*dt*/, bool is_player) {
+// The frame-order check, fed with every aircraft step while a session runs, until it has a verdict.
+void check_order(void* aircraft, bool is_player) {
+    if (g_order.done()) return;
+    bool is_avatar = false;
+    for (int s = 0; s < net::kMaxClients; ++s) is_avatar = is_avatar || (g_av[s].active && avatar_is(g_av[s].h, aircraft));
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    if (!g_order.step(static_cast<double>(q.QuadPart) * g_qpc_ms, is_player, is_avatar)) return;
+    g_order_shift = g_order.avatar_first();
+    LOG("net: frame order: the player stepped before the avatars in %d of %d frames; %s", g_order.player_first(),
+        g_order.frames(),
+        g_order_shift ? "avatars are shown at the game time plus the player's step" : "the game time is current");
+}
+
+void on_step(void* aircraft, float dt, bool is_player) {
     if (!g_running.load(std::memory_order_relaxed)) return;
     // The player changed (mission end, new flight): the session is over, and the published host time is stale.
     // Check liveness first, so that only aircraft that still exist get their flags written.
@@ -650,12 +479,15 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
                 if (g_av[s].active) release(s, "the player changed", live[s], kByeSessionEnded, net::LeaveReason::HostEnded);
         }
         g_core->reset_host_time();  // no Pongs, and no States passed, until the new player's first step
+        g_order.reset();  // check the order again for the new player
+        g_order_shift = false;
     } else if (g_nclients > 0 && g_aircraft_generation.load(std::memory_order_acquire) != g_checked_gen) {
         release_dead();  // an aircraft was destroyed since the last check: is one of ours gone?
     }
     const double now = sim_game_time();
     g_now = now;
     if (is_player) {
+        g_player_dt = dt;
         pump(aircraft, now);
         if (g_nclients > 0) record_host_state(aircraft, now);
         if (g_nclients > 0 && now >= g_next_report) {
@@ -664,8 +496,9 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         }
     }
     if (g_nclients == 0) return;
+    check_order(aircraft, is_player);
     for (int s = 0; s < net::kMaxClients; ++s) {
-        if (g_av[s].active && g_av[s].obj == aircraft) avatar_step(s, now);
+        if (g_av[s].active && avatar_is(g_av[s].h, aircraft)) avatar_step(s, now);
     }
 }
 
@@ -709,6 +542,9 @@ void host_on_modules_loaded() {
         LOG("net: host off (out of memory)");
         return;  // the step callback stays registered but does nothing: g_running is false
     }
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    g_qpc_ms = 1000.0 / static_cast<double>(f.QuadPart);
     g_checked_gen = g_aircraft_generation.load(std::memory_order_acquire);
     g_epoch = sim_player_epoch();
     g_running.store(true);

@@ -30,6 +30,7 @@
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
+#include "hooks/remote_avatar_logic.h"
 #include "bot_client.h"
 #include "net/receiver_math.h"
 #include "net/remote_jet.h"
@@ -4966,6 +4967,148 @@ void client_core_tests() {
     client_core_concurrency_tests();
 }
 
+void remote_avatar_tests() {
+    using namespace LazyWorks::SF2Patch::hooks;
+    using avatar_logic::flight_base;
+    using avatar_logic::flight_member_no;
+    using avatar_logic::same_type;
+    std::printf("remote avatar picker\n");
+    const auto F = AircraftSide::Friendly, E = AircraftSide::Enemy, U = AircraftSide::Unknown;
+
+    size_t bl = 0;
+    int lead = 0;
+    expect(flight_base(L"DENVER 11", &bl, &lead) == 6 && lead == 11, "flight: \"DENVER 11\" is flight DENVER, lead 11");
+    expect(flight_base(L"GUNSLINGER", &bl, &lead) == 10 && lead == -1, "flight: a bare callsign has no lead number");
+    expect(flight_base(L"VF 123456", &bl, &lead) == 9 && lead == -1, "flight: a long number is part of the name");
+    expect(flight_base(nullptr, &bl, &lead) == 0 && flight_base(L"12", &bl, &lead) == 0, "flight: null or digits only: none");
+    expect(flight_member_no(L"DENVER 12", L"DENVER", 6) == 12 && flight_member_no(L"denver  3", L"DENVER", 6) == 3,
+           "member: the callsign plus a number, any case and spacing");
+    expect(flight_member_no(L"DENVERX 12", L"DENVER", 6) == -1 && flight_member_no(L"DENVER", L"DENVER", 6) == -1 &&
+               flight_member_no(L"DENVER 12A", L"DENVER", 6) == -1 && flight_member_no(L"DEN 12", L"DENVER", 6) == -1 &&
+               flight_member_no(nullptr, L"DENVER", 6) == -1,
+           "member: another name, no number or a suffix is not a member");
+    expect(same_type("F-105D", "f-105d") && !same_type("F-105D", "F-105") && !same_type("", "") &&
+               !same_type(nullptr, "F-4E"),
+           "type: case-insensitive, exact, never empty");
+
+    // The live R2 case: the player DENVER 11, wingmen 12-14 just after it, plus other aircraft nearer than #2.
+    const AvatarCandidate flight[] = {
+        {L"DENVER 11", "F-105D", 10, F, true, false, 0},
+        {L"DENVER 12", "F-105D", 11, F, false, false, 55},
+        {L"DENVER 13", "F-105D", 12, F, false, false, 40},
+        {L"DENVER 14", "F-105D", 13, F, false, false, 70},
+        {L"COLT 21", "F-105D", 20, F, false, false, 30},
+        {L"MIG 31", "MiG-21F", 30, E, false, false, 10},
+    };
+    constexpr size_t nf = sizeof(flight) / sizeof(flight[0]);
+    AvatarRank r;
+    size_t i = pick_avatar(flight, nf, "F-105D", &r);
+    expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 12,
+           "pick: my #2 (DENVER 12), before a nearer #3, a nearer other flight and a nearer enemy");
+    AvatarCandidate f2[nf];
+    std::memcpy(f2, flight, sizeof(flight));
+    f2[1].taken = true;
+    i = pick_avatar(f2, nf, "F-105D", &r);
+    expect(i == 2 && r.tier == AvatarTier::Wingman && r.flight_no == 13, "pick: #2 taken -> #3");
+    f2[2].taken = f2[3].taken = true;
+    i = pick_avatar(f2, nf, "f-105d", &r);
+    expect(i == 4 && r.tier == AvatarTier::SameType, "pick: the whole flight taken -> friendly of the same type");
+    f2[4].taken = true;
+    i = pick_avatar(f2, nf, "F-105D", &r);
+    expect(i == 5 && r.tier == AvatarTier::Nearest, "pick: no friendly left -> the nearest (an enemy)");
+    f2[5].taken = true;
+    expect(pick_avatar(f2, nf, "F-105D", &r) == nf && r.tier == AvatarTier::None, "pick: all taken -> none, never the player");
+
+    // The remote flies another type: friendly, other type, and the player's own flight first within the tier.
+    i = pick_avatar(flight, nf, "F-4E", &r);
+    expect(i == 1 && r.tier == AvatarTier::Friendly && r.flight_no == 12,
+           "pick: other type -> my #2 still, ranked as friendly (other type)");
+    i = pick_avatar(flight, nf, nullptr, &r);
+    expect(i == 1 && r.tier == AvatarTier::Friendly, "pick: unknown wanted type -> my #2 as friendly");
+
+    // Mixed types inside the flight, and a lead number that is not 1.
+    const AvatarCandidate mixed[] = {
+        {L"Enfield 21", "F-4E", 1, F, true, false, 0},
+        {L"ENFIELD 22", "F-4C", 2, F, false, false, 20},
+        {L"ENFIELD 23", "F-4E", 3, F, false, false, 90},
+        {L"RAVEN 11", "F-4E", 4, F, false, false, 15},
+    };
+    i = pick_avatar(mixed, 4, "F-4E", &r);
+    expect(i == 2 && r.tier == AvatarTier::Wingman, "pick: the same-type flight member beats a nearer other-type one");
+    i = pick_avatar(mixed, 4, "F-4C", &r);
+    expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 22, "pick: the wanted type decides the wingman");
+
+    // No player in the list (it was destroyed) and sides unknown (masks not read): the nearest, never a taken one.
+    const AvatarCandidate bare[] = {
+        {L"A 1", "", 5, U, false, false, 300},
+        {L"B 1", nullptr, 6, U, false, false, 100},
+        {L"C 1", "F-4E", 7, U, false, true, 10},
+        {L"D 1", "F-4E", 8, U, false, false, std::numeric_limits<double>::quiet_NaN()},
+    };
+    i = pick_avatar(bare, 4, "F-4E", &r);
+    expect(i == 1 && r.tier == AvatarTier::Nearest, "pick: no player, unknown sides -> the nearest free one");
+    const AvatarCandidate tie[] = {
+        {L"P", "X", 1, F, true, false, 0},
+        {L"Q", "X", 9, F, false, false, 50},
+        {L"R", "X", 3, F, false, false, 50},
+    };
+    expect(pick_avatar(tie, 3, "X", &r) == 2, "pick: equal distance -> the one constructed first");
+    expect(pick_avatar(tie, 1, "X", &r) == 1 && pick_avatar(nullptr, 0, "X", &r) == 0,
+           "pick: only the player, or empty -> none");
+
+    // The incremental picker gives the same answer whatever the order of the list.
+    {
+        size_t order[nf];
+        for (size_t k = 0; k < nf; ++k) order[k] = k;
+        bool same = true;
+        int perms = 0;
+        do {
+            AvatarPicker p(L"DENVER 11", "F-105D");
+            for (size_t k = 0; k < nf; ++k) p.offer(order[k], flight[order[k]]);
+            same = same && p.found() && p.index() == 1;
+            ++perms;
+        } while (std::next_permutation(order, order + nf));
+        expect(same && perms == 720, "pick: the choice does not depend on the list order (720 orders)");
+    }
+
+    std::printf("frame order check\n");
+    {
+        // The player first in every frame: 60 Hz frames of [player, avatar, 3 AI] 0.1 ms apart.
+        FrameOrderCheck c;
+        int fires = 0;
+        for (int fr = 0; fr < 400; ++fr) {
+            const double t0 = fr * 16.7;
+            if (c.step(t0, true, false)) ++fires;
+            if (c.step(t0 + 0.1, false, true)) ++fires;
+            for (int k = 0; k < 3; ++k)
+                if (c.step(t0 + 0.2 + 0.1 * k, false, false)) ++fires;
+        }
+        expect(fires == 1 && c.done() && c.frames() == FrameOrderCheck::kFrames &&
+                   c.player_first() == FrameOrderCheck::kFrames && !c.avatar_first(),
+               "frame order: the player first -> one verdict, no shift");
+    }
+    {
+        // The avatar before the player, with two sub-steps a frame: the avatar is first in every frame.
+        FrameOrderCheck c;
+        for (int fr = 0; fr < 400 && !c.done(); ++fr) {
+            const double t0 = fr * 33.3;
+            for (int sub = 0; sub < 2; ++sub) {
+                c.step(t0 + sub * 0.5, false, true);
+                c.step(t0 + sub * 0.5 + 0.1, true, false);
+            }
+        }
+        expect(c.done() && c.player_first() == 0 && c.avatar_first(), "frame order: the avatar first -> shift");
+    }
+    {
+        // Frames with no avatar step (no client yet) do not count, and nothing is decided early.
+        FrameOrderCheck c;
+        for (int fr = 0; fr < 1000; ++fr) c.step(fr * 16.7, true, false);
+        expect(!c.done() && c.frames() == 0 && !c.avatar_first(), "frame order: no avatar steps -> no frames, no verdict");
+        c.reset();
+        expect(!c.done() && c.frames() == 0, "frame order: reset");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -5021,6 +5164,7 @@ int main() {
     aerodrome_core_tests();
     placement_tests();
     remote_jet_tests();
+    remote_avatar_tests();
     gameplay_row_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
