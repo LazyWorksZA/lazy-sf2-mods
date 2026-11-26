@@ -105,10 +105,11 @@ A client that joins twice in one file gives two `ClientJoined` records. `client_
   - the jet's own kind 7 in TRUTH (as sent, 20 Hz);
   - TRUTH's kind 1 of id N, at the States' own stamps.
 - **The figures**, per 10 s of host time and overall:
-  - the position error's median, p95 and max, split into along track (+ ahead of the truth), across (+ right of its track) and vertical (+ above). Each part gives the signed median, and the p95 and max of its size;
+  - the position error's median, p95 and max, split into along track (+ ahead of the truth), across (+ right of its track) and vertical (+ above). Each part gives the signed median, and the p95 and max of its size. "Along" and "across" are horizontal (the truth's ground track), and "vertical" is world-up, not the jet's own up. So in a climb or a dive part of a timing error (the shown jet is early or late along its path) shows as vertical, not as along;
   - the angle between the shown and the true attitude;
   - snaps, and coasting time (coasting records are not compared);
   - the smoothness figure: the shown path's acceleration (p95 and max over the 10 Hz records, snaps left out), next to the truth's peak at the same times.
+- It warns when an input file ends in a truncated record (the records before it are used).
 - It refuses files that do not overlap in host time. It says how many records fell outside the truth's span, or in a truth gap over 1 s.
 
 ## Reading it (outline for the ACMI exporter)

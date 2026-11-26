@@ -6556,6 +6556,18 @@ void net_report_tests() {
     expect(text.find("overall") != std::string::npos && text.find("VIEW") != std::string::npos &&
                text.find("BOTHOST") != std::string::npos,
            "report: text names both files' sessions and has an overall row");
+    expect(!r.viewer_truncated && !r.truth_truncated && text.find("truncated") == std::string::npos,
+           "report: complete files give no truncation warning");
+    {
+        MemStream cut = viewer;
+        const uint8_t tail[7] = {30, 0, 0, 0, 9, 1, 2};  // a length field and part of the record
+        cut.b.insert(cut.b.end(), tail, tail + sizeof(tail));
+        ac::Report rc;
+        const bool okc = ac::make_report(cut.b.data(), cut.b.size(), truth.b.data(), truth.b.size(), ro, rc);
+        expect(okc && rc.viewer_truncated && !rc.truth_truncated && rc.compared == r.compared &&
+                   ac::format_report(rc).find("warning: the viewer file ends in a truncated record") != std::string::npos,
+               "report: a truncated viewer file still reports, with a warning");
+    }
 
     // A right turn (0.1 rad/s, radius 2000 m), shown 10 m right of the track: 10 m across, 0 along.
     {

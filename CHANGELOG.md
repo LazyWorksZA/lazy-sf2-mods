@@ -5,8 +5,13 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Player features
+
+- **Fixed: the cursor stays on the game's screen in Fullscreen with Match Windows cursor.** The Windows cursor is kept inside the game window while the game is active, and released when you switch away.
+
 ### Developer tools (off unless enabled)
 
+- **Phase 4: two players.** Client mode, host relay, protocol v2, predicted remote jets, a shared clock with drift, the bot's formation, lag and serve modes, client recordings and the comparison report, and background simulation in sessions. The entries below give the details; the setup steps are in `lazy-sf2-recon` (`network-recon.md`, section 8).
 - **Network protocol v2.** The host/client wire protocol changed (theatre check, join velocity, peer messages). It breaks compatibility with earlier builds and with older bots: the host refuses a v1 peer and logs it once.
 - **Host: sends its own jet, relays, and puts clients on its wing.** In a session the host sends its own jet to every client at 20 Hz of game time (id 0) and relays each client's States to the other clients. The Welcome gives each client a join position on the host's wing (150 m right per client, 50 m back, at the host's altitude, heading and speed), the host's game time and theatre; the client's avatar holds there until its first State. Each client then hears who else is in the session (the host's callsign from `LAZYSF2_CALLSIGN`, default HOST, and aircraft type), and when someone leaves. A client in another theatre is refused (Bye 5), and the log names both theatre hashes. The host's Byes now carry id 0, the sender, as every Bye does. After a host hitch only the newest State of each client is relayed, and States can no longer crowd Welcomes, PeerInfos, PeerLefts or Byes out of the host's send queue. The client core passes States only from peers the host has announced and not yet reported gone.
 - **Host: the avatar is the host player's wingman, and predicted to the present.** A client's avatar is now taken from the host player's own flight (#2 first, same type, friendly), falling back to any friendly and then the nearest aircraft; the join line says which and why, and warns when the client flies another type. The avatar is drawn where the client's jet is now, not an interpolation delay behind, with capped corrections; after 3 s without States it coasts straight on (rates zeroed) instead of hovering, and after 10 s it goes back to the AI until the client's States resume, while the session stays up. The per-second line adds sample age, prediction horizon, snaps, coast steps and peak acceleration, and the host logs once per flight whether the avatars step after the player.

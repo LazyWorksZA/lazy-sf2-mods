@@ -34,6 +34,7 @@ struct File {
     bool have_session = false;
     net::SessionInfoPayload session{};
     std::vector<net::StreamRecord> recs;
+    bool truncated = false;  // the file ends in the middle of a record
 };
 
 bool read_file(const uint8_t* data, size_t size, File& f, std::string& err, const char* which) {
@@ -45,7 +46,8 @@ bool read_file(const uint8_t* data, size_t size, File& f, std::string& err, cons
         return false;
     }
     net::StreamRecord rec;
-    while (rd.next(rec) == net::StreamStatus::Ok) {
+    net::StreamStatus st;
+    while ((st = rd.next(rec)) == net::StreamStatus::Ok) {
         if (!std::isfinite(rec.time)) continue;
         if (rec.kind == static_cast<uint8_t>(StreamKind::SessionInfo) && !f.have_session &&
             rec.payload_len == sizeof(f.session)) {
@@ -54,6 +56,7 @@ bool read_file(const uint8_t* data, size_t size, File& f, std::string& err, cons
         }
         f.recs.push_back(rec);
     }
+    f.truncated = st == net::StreamStatus::Truncated;
     return true;  // a truncated tail keeps what came before it
 }
 
@@ -201,6 +204,8 @@ bool make_report(const uint8_t* vdata, size_t vsize, const uint8_t* tdata, size_
     r = Report{};
     File vf, tf;
     if (!read_file(vdata, vsize, vf, r.error, "viewer") || !read_file(tdata, tsize, tf, r.error, "truth")) return false;
+    r.viewer_truncated = vf.truncated;
+    r.truth_truncated = tf.truncated;
     r.viewer_label = label(vf);
     r.truth_label = label(tf);
 
@@ -399,6 +404,9 @@ std::string format_report(const Report& r) {
         return out;
     }
     put("viewer: %s; truth: %s\n", r.viewer_label.c_str(), r.truth_label.c_str());
+    if (r.viewer_truncated || r.truth_truncated)
+        put("warning: the %s file ends in a truncated record (the last moments are missing)\n",
+            r.viewer_truncated && r.truth_truncated ? "viewer and truth" : r.viewer_truncated ? "viewer" : "truth");
     put("remote id %d; truth from %s\n", r.id, r.truth_source.c_str());
     put("aligned on host time: viewer %.3f..%.3f, truth %.3f..%.3f\n", r.viewer_span[0], r.viewer_span[1], r.truth_span[0],
         r.truth_span[1]);
@@ -406,7 +414,7 @@ std::string format_report(const Report& r) {
         r.compared, r.outside, r.gaps, kMaxTruthGap);
     if (r.outside * 10 > r.shown) put("note: the files overlap only in part\n");
     if (r.parked || r.taken || r.lost) put("avatar events: %u parked, %u taken, %u lost\n", r.parked, r.taken, r.lost);
-    out += "metres (along + ahead of the truth, cross + right of its track, vert + above; signed median, then |p95| |max|), "
+    out += "metres (along + ahead of the truth on the ground track, cross + right of it, vert + above (world up); signed median, then |p95| |max|), "
            "angle in degrees, accel in g\n";
     out += "  host time          n   pos med/p95/max      along med/p95/max    cross med/p95/max    vert med/p95/max     "
            "ang med/p95/max    snaps coast s  accel p95/max (truth max)\n";

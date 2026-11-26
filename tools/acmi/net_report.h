@@ -46,6 +46,7 @@ struct Report {
     std::string error;  // why there is no report (ok false)
     int id = -1;
     std::string viewer_label, truth_label;  // "client 1 \"PLAYER\" (F-105D)", from SessionInfo
+    bool viewer_truncated = false, truth_truncated = false;  // an input file ends in a truncated record
     std::string truth_source;               // which records were used as the truth
     double viewer_span[2] = {}, truth_span[2] = {};  // host time
     size_t shown = 0;     // RemoteShown records of the id
