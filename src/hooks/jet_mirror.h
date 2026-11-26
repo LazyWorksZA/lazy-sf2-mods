@@ -42,6 +42,7 @@ JetWriteResult jet_restore_engines(void* obj, uint8_t engines, uint8_t count);
 struct SysRef {
     unsigned char* sys = nullptr;
     uint32_t vt = 0;
+    int comp = 0, index = 0;  // its component's index, and its index in that component's system list
 };
 /// <summary>The aircraft's systems in component order (at most max); SEH-guarded, stale pointers are skipped.</summary>
 int jet_list_systems(void* obj, uintptr_t ao, SysRef* out, int max);

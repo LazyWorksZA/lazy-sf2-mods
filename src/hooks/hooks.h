@@ -447,6 +447,18 @@ bool host_world_send_all(const uint8_t* data, size_t len, bool reliable = true);
 /// and on change) and consumables (every 2 s); a peer's message goes onto the avatar that shows that peer.</summary>
 void stores_tick(void* player);
 void stores_apply(const uint8_t* data, size_t len, void* avatar);
+/// <summary>Damage, death, ejection and countermeasures (damage_sync.cpp), game thread: the player's step sends its
+/// jet's damage (polled 4 times a second, on change) and its chaff/flare releases; a peer's goes onto its avatar.</summary>
+void damage_tick(void* player);
+void damage_apply(const uint8_t* data, size_t len, void* avatar);
+/// <summary>The damage hooks' detours (installed with the other AircraftObject hooks in world_sync.cpp).</summary>
+void __fastcall h_aircraft_kill_event(void* obj);
+void __fastcall h_incoming_missile(void* iface, void* edx, int missile, int stage);
+extern void* g_o_aircraft_kill_event;
+extern void* g_o_incoming_missile;
+/// <summary>A joined client's world is remote (the T4 block is on); the aircraft REMOTEOBJECT mask (0 before).</summary>
+bool world_remote_on();
+uint32_t world_remote_mask();
 /// <summary>The host's game time: the game time on the host, the client's estimate of it on a client.</summary>
 double net_host_now();
 double client_host_now();

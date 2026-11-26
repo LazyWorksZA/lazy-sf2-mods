@@ -48,6 +48,8 @@ int jet_list_systems(void* obj, uintptr_t ao, SysRef* out, int max) {
                 const uintptr_t vt = *reinterpret_cast<uintptr_t*>(s);
                 out[k].sys = s;
                 out[k].vt = vt >= ao && vt < ao + jet::kAoSize ? static_cast<uint32_t>(vt - ao) : 0;
+                out[k].comp = i;
+                out[k].index = j;
                 ++k;
             }
         }

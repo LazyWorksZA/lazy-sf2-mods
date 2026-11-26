@@ -1801,10 +1801,12 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         weapons_apply_launch(data, len, host_now);
         return;
     }
-    if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables)) {
+    if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables) ||
+        wt == static_cast<uint8_t>(net::WorldType::DamageState) || wt == static_cast<uint8_t>(net::WorldType::Countermeasure)) {
         uint16_t peer = 0;
         if (len >= sizeof(net::Header) + 2) std::memcpy(&peer, data + sizeof(net::Header), 2);
-        stores_apply(data, len, client_avatar_object(peer));
+        if (wt <= static_cast<uint8_t>(net::WorldType::Consumables)) stores_apply(data, len, client_avatar_object(peer));
+        else damage_apply(data, len, client_avatar_object(peer));
         return;
     }
     if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
@@ -2217,6 +2219,9 @@ void* checked_damage_fn(void** vt, int slot) {
 
 }  // namespace
 
+bool world_remote_on() { return g_remote_on.load(std::memory_order_acquire); }
+uint32_t world_remote_mask() { return g_mask_air.load(std::memory_order_relaxed); }
+
 bool world_key_of_object(uint32_t id, uint8_t* kind, uint16_t* a, uint16_t* b) {
     SlotTable t{};
     Om om;
@@ -2501,6 +2506,10 @@ void world_on_modules_loaded() {
         LZ_DMG(0, 5, 0x69210, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
         LZ_DMG(1, 8, 0x693d0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x4c),
         LZ_DMG(2, 6, 0x692f0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+        {0x42ac0, reinterpret_cast<void*>(&h_aircraft_kill_event), &g_o_aircraft_kill_event,
+         "world: aircraft kill event (remote copies on a client)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x38, 0x56, 0x8b, 0xf1}, 9},
+        {0x40d40, reinterpret_cast<void*>(&h_incoming_missile), &g_o_incoming_missile,
+         "world: incoming-missile notice (avatars' auto-dispense)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x14, 0x56, 0x57, 0x8b}, 9},
     };
     static const HookDef kGo[] = {
         LZ_DMG(3, 5, 0x18e60, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x8b, 0x45, 0x08),
@@ -2518,7 +2527,7 @@ void world_on_modules_loaded() {
         LZ_DMG(11, 6, 0x3660, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x1c, 0xd9, 0x45, 0x10),
     };
 #undef LZ_DMG
-    hook_image(L"AircraftObject.dll", "AircraftObject.dll", kAoStamp, kAoSize, kAo, 3, g_ao, g_ao_bad);
+    hook_image(L"AircraftObject.dll", "AircraftObject.dll", kAoStamp, kAoSize, kAo, 5, g_ao, g_ao_bad);
     hook_image(L"GroundObject.dll", "GroundObject.dll", kGoStamp, kGoSize, kGo, 3, g_go, g_go_bad);
     hook_image(L"GroundMobileObject.dll", "GroundMobileObject.dll", kGmStamp, kGmSize, kGm, 3, g_gm, g_gm_bad);
     hook_image(L"NavalObject.dll", "NavalObject.dll", kNvStamp, kNvSize, kNv, 3, g_nv, g_nv_bad);

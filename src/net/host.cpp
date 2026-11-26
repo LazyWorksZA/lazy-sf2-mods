@@ -556,11 +556,15 @@ void handle_message(const HostEvent& e, void* player, double now) {
     }
     {
         const uint8_t wt = net::peek_world_type(e.data, e.len);
-        if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables)) {
+        if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables) ||
+            wt == static_cast<uint8_t>(net::WorldType::DamageState) || wt == static_cast<uint8_t>(net::WorldType::Countermeasure)) {
             // A client's stores or consumables: onto its avatar here, and on to the other clients.
             if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
-                const bool reliable = wt == static_cast<uint8_t>(net::WorldType::Loadout);
-                if (!g_av[slot].parked) stores_apply(e.data, e.len, g_av[slot].h.obj);
+                const bool reliable = wt != static_cast<uint8_t>(net::WorldType::Consumables);
+                if (!g_av[slot].parked) {
+                    if (wt <= static_cast<uint8_t>(net::WorldType::Consumables)) stores_apply(e.data, e.len, g_av[slot].h.obj);
+                    else damage_apply(e.data, e.len, g_av[slot].h.obj);
+                }
                 for (int s = 0; s < net::kMaxClients; ++s)
                     if (s != slot && g_av[s].active &&
                         !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, reliable) && reliable)
@@ -749,7 +753,10 @@ void world_tick(void* player, double now) {
         if (net::decode(d, n, m) == net::Status::Ok) g_avatar_states.set(m);
         return g_nclients == 0 || world_send(d, n, true);  // alone: kept for the first joiner
     });
-    if (g_nclients > 0) stores_tick(player);
+    if (g_nclients > 0) {
+        stores_tick(player);
+        damage_tick(player);
+    }
     for (int s = 0; s < net::kMaxClients; ++s) {
         if (!g_world_behind[s]) continue;
         g_world_behind[s] = false;

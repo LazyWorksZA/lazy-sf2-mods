@@ -25,8 +25,10 @@ enum class WorldType : uint8_t {
     WeaponLaunch = 29,    // a player's weapon release, reliable: client to host, host to clients (relayed)
     Loadout = 30,         // a player's stores, reliable, every 10 s and on change: relayed like AvatarState
     Consumables = 31,     // a player's fuel, ammunition and countermeasures, unreliable, every 2 s: relayed
+    DamageState = 32,     // a player's jet damage, reliable, on change (polled 4 times a second): relayed
+    Countermeasure = 33,  // a player's chaff and flare releases, reliable, as they happen: relayed
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 31;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 33;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -587,6 +589,85 @@ inline float fuel_scale(float avatar_total, float owner_total) {
     if (!(avatar_total > 1.0f) || !(owner_total >= 0.0f)) return 1.0f;
     const float k = owner_total / avatar_total;
     return k > 10.0f ? 10.0f : k;
+}
+
+// ---- damage, death, ejection and countermeasures (Phase 5 T6) ----
+
+#pragma pack(push, 1)
+/// <summary>
+/// A player's jet as its owner sees it: damage level 0..5, flags (kDmg*), and per component (index < 64) lost and
+/// showing damage, per system (in component order, index < 64) destroyed; the last attacker by mission key.
+/// </summary>
+struct DamageStateMsg {
+    Header h;
+    uint16_t peer;
+    uint16_t seq;
+    uint8_t level;
+    uint8_t flags;
+    uint8_t components;  // how many the bits describe
+    uint8_t systems;
+    uint64_t lost;
+    uint64_t shown;
+    uint64_t dead;
+    uint8_t attacker_kind;
+    uint16_t attacker_a, attacker_b;
+};
+/// <summary>Chaff and flares a player released since its last message (its dispensers' counts fell by these).</summary>
+struct CountermeasureMsg {
+    Header h;
+    uint16_t peer;
+    uint16_t seq;
+    uint8_t chaff, flares;
+};
+#pragma pack(pop)
+static_assert(sizeof(DamageStateMsg) == 41);  // 4:2 peer, 6:2 seq, 8:1 level, 9:1 flags, 10:1 comps, 11:1 systems,
+                                              // 12:8 lost, 20:8 shown, 28:8 dead, 36:5 attacker
+static_assert(sizeof(CountermeasureMsg) == 10);
+inline constexpr uint8_t kDmgFire = 0x01, kDmgPilotGone = 0x02, kDmgDestroyed = 0x04;
+size_t encode(const DamageStateMsg& m, uint8_t* out, size_t cap);
+Status decode(const uint8_t* data, size_t len, DamageStateMsg& out);
+size_t encode(const CountermeasureMsg& m, uint8_t* out, size_t cap);
+Status decode(const uint8_t* data, size_t len, CountermeasureMsg& out);
+
+/// <summary>True when receivers would see a difference (seq, peer and the attacker alone do not count).</summary>
+inline bool damage_differs(const DamageStateMsg& a, const DamageStateMsg& b) {
+    return a.level != b.level || a.flags != b.flags || a.lost != b.lost || a.shown != b.shown || a.dead != b.dead;
+}
+
+/// <summary>What a receiver does to mirror a new damage state on the avatar, in this order: the attacker, parts
+/// lost (3), parts showing damage (0xc), systems destroyed (4), the level (8), fire and pilot bits, then the
+/// destroy (0xb, never the kill event: only the owner's and the host's records count).</summary>
+struct DamagePlan {
+    uint64_t lose = 0, show = 0, kill_systems = 0;
+    bool set_level = false;
+    uint8_t level = 0;
+    bool fire_on = false, fire_off = false, pilot_gone = false, destroy = false;
+};
+inline DamagePlan damage_plan(const DamageStateMsg& was, const DamageStateMsg& now) {
+    DamagePlan p;
+    p.lose = now.lost & ~was.lost;
+    p.show = now.shown & ~was.shown & ~now.lost;
+    p.kill_systems = now.dead & ~was.dead;
+    const bool destroyed = (now.flags & kDmgDestroyed) || now.level >= 5;
+    p.destroy = destroyed && !((was.flags & kDmgDestroyed) || was.level >= 5);
+    p.set_level = !destroyed && now.level > was.level;
+    p.level = now.level;
+    p.fire_on = (now.flags & kDmgFire) && !(was.flags & kDmgFire);
+    p.fire_off = !(now.flags & kDmgFire) && (was.flags & kDmgFire);
+    p.pilot_gone = (now.flags & kDmgPilotGone) && !(was.flags & kDmgPilotGone);
+    return p;
+}
+/// <summary>
+/// The game's kill event (mission event 1, an aircraft's slot 30) is let through on the host for every aircraft (the
+/// single kill record), and on a client only for its own jet: a REMOTEOBJECT copy's death there (mirrored, or from
+/// the world stream) must not make a kill entry or move mission success.
+/// </summary>
+inline bool kill_event_allowed(bool client_join, bool remote_copy) { return !(client_join && remote_copy); }
+
+/// <summary>Releases since the last count: what fell, clamped to a byte; a rise (a rearm) is none.</summary>
+inline uint8_t released(int before, int now) {
+    const int d = before - now;
+    return static_cast<uint8_t>(d <= 0 ? 0 : d > 255 ? 255 : d);
 }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>

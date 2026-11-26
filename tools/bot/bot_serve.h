@@ -72,6 +72,11 @@ struct ServeConfig {
     /// consumables (fuel from 4,000 kg falling 2 kg/s, a gun's 640 rounds falling 10/s, 30 chaff, 30 flares; every 2 s).</summary>
     bool stores = false;
     std::string stores_weapon = "AIM-9J";
+    /// <summary>--damage: the jet's damage story from the client's Welcome on (damage_script_at), and 2 flares every
+    /// 5 s; the attacker is the client's seat (attacker key) when given.</summary>
+    bool damage = false;
+    uint8_t damage_attacker_kind = 0;
+    uint16_t damage_attacker_a = 0, damage_attacker_b = 0;
 };
 
 struct ServeResult {
@@ -101,6 +106,8 @@ struct ServeResult {
     uint32_t loadouts_sent = 0, consumables_sent = 0;
     uint32_t loadouts_rx = 0, consumables_rx = 0;  // the client's
     uint16_t last_rx_fuel = 0;
+    uint32_t damage_sent = 0, cm_sent = 0, damage_rx = 0, cm_rx = 0;
+    uint8_t last_rx_level = 0;
 };
 
 /// <summary>

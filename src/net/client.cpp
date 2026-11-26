@@ -798,7 +798,10 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
                 pump_world();
                 if (g_session && world_client_tag())
                     world_avatar_tick(aircraft, g_id, [](const uint8_t* d, size_t n) { return g_core->send_world(d, n); });
-                if (g_session && world_client_tag()) stores_tick(aircraft);
+                if (g_session && world_client_tag()) {
+                    stores_tick(aircraft);
+                    damage_tick(aircraft);
+                }
             }
             if (g_disconnected && g_core->finished()) {
                 g_core->stop(false);  // the thread has cleaned up: the join returns at once

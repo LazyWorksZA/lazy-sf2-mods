@@ -30,7 +30,7 @@ void usage() {
         "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
         "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--jet none|ab|guns|ab+guns]\n"
         "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S]\n"
-        "            [--stores [WEAPON]] [--log FILE]\n"
+        "            [--stores [WEAPON]] [--damage [A,SLOT,MEMBER]] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
@@ -51,7 +51,9 @@ void usage() {
         "--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S releases WEAPON (a weapon type name, GUIDED 0 or 1) from the\n"
         "jet's station 0 at that target (N: none) every EVERY_S s; the jet's own key is its seat in the --hit slot.\n"
         "--stores sends the jet's loadout (station 1: WEAPON x2, default AIM-9J) every 10 s and its consumables (fuel,\n"
-        "rounds, chaff, flares) every 2 s. Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
+        "rounds, chaff, flares) every 2 s. --damage plays a damage story on the jet (hit 3 s, part lost 6 s, fire 8 s,\n"
+        "ejection 10 s, destroyed 12 s; the attacker A,SLOT,MEMBER if given) and 2 flares every 5 s.\n"
+        "Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
 }
 
 bool to_double(const char* s, double* out) {
@@ -358,6 +360,17 @@ int main(int argc, char** argv) {
             scfg.launch_kind = kind == 'A' ? 1 : kind == 'G' ? 2 : 0;
             scfg.launch_a = static_cast<uint16_t>(la);
             scfg.launch_b = static_cast<uint16_t>(lb);
+            serve_only = true;
+        } else if (a == "--damage") {
+            scfg.damage = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                char kind = 0;
+                unsigned da = 0, db = 0;
+                ok = sscanf_s(argv[++i], "%c,%u,%u", &kind, 1u, &da, &db) == 3 && (kind == 'A' || kind == 'G');
+                scfg.damage_attacker_kind = kind == 'A' ? 1 : 2;
+                scfg.damage_attacker_a = static_cast<uint16_t>(da);
+                scfg.damage_attacker_b = static_cast<uint16_t>(db);
+            }
             serve_only = true;
         } else if (a == "--stores") {
             scfg.stores = true;

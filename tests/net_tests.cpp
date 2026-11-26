@@ -8760,6 +8760,102 @@ void stores_tests() {
            "loopback: the client's loadout (reliable) and consumables (unreliable) reach the host");
 }
 
+void damage_tests() {
+    std::printf("damage, death, ejection and countermeasures (Phase 5 T6)\n");
+    DamageStateMsg d{};
+    d.peer = 2;
+    d.level = 3;
+    d.flags = kDmgFire;
+    d.components = 12;
+    d.lost = 1ull << 40;
+    d.attacker_kind = 1;
+    d.attacker_a = 5;
+    uint8_t b[96];
+    DamageStateMsg r{};
+    const size_t n = encode(d, b, sizeof(b));
+    expect(n == 41 && peek_world_type(b, n) == 32 && decode(b, n, r) == Status::Ok && r.lost == (1ull << 40) &&
+               r.attacker_a == 5 && r.flags == kDmgFire,
+           "damage: 41 bytes, round trip");
+    d.level = 6;
+    expect(decode(b, encode(d, b, sizeof(b)), r) == Status::BadType, "damage: a level above 5 is refused");
+    CountermeasureMsg k{};
+    k.flares = 2;
+    CountermeasureMsg kr{};
+    const size_t kn = encode(k, b, sizeof(b));
+    expect(kn == 10 && peek_world_type(b, kn) == 33 && decode(b, kn, kr) == Status::Ok && kr.flares == 2,
+           "countermeasures: 10 bytes, round trip");
+    expect(released(30, 28) == 2 && released(28, 30) == 0 && released(400, 0) == 255, "countermeasures: releases are falls");
+
+    DamageStateMsg was{}, now{};
+    now.level = 2;
+    now.shown = 0b0110;
+    now.lost = 0b0100;
+    now.dead = 0b1000;
+    now.flags = kDmgFire;
+    DamagePlan p = damage_plan(was, now);
+    expect(p.lose == 0b0100 && p.show == 0b0010 && p.kill_systems == 0b1000 && p.set_level && p.level == 2 &&
+               p.fire_on && !p.destroy && !p.pilot_gone,
+           "plan: new losses, damage shown on parts still on, systems, the level and fire");
+    was = now;
+    now.flags = kDmgPilotGone;
+    p = damage_plan(was, now);
+    expect(p.lose == 0 && p.show == 0 && !p.set_level && p.fire_off && p.pilot_gone, "plan: only what changed (fire out, ejected)");
+    was = now;
+    now.level = 5;
+    now.flags |= kDmgDestroyed;
+    p = damage_plan(was, now);
+    const bool destroy_once = p.destroy && !p.set_level && !damage_plan(now, now).destroy;
+    expect(destroy_once, "plan: destroyed once (the game's destroy, not a level write)");
+    expect(!damage_differs(now, now) && damage_differs(was, now), "damage: sent only on change");
+    expect(!kill_event_allowed(true, true) && kill_event_allowed(true, false) && kill_event_allowed(false, true) &&
+               kill_event_allowed(false, false),
+           "kills: a joined client logs no kill for a remote copy (no phantom kill entry, mission success unmoved); "
+           "the host logs every kill, a client its own jet's");
+    std::printf("    estimate: 41 B a damage change (a few in a fight, plus one every 10 s), 10 B a chaff/flare release\n");
+
+    bot::DamageStep s0 = bot::damage_script_at(1.0), s1 = bot::damage_script_at(7.0), s2 = bot::damage_script_at(12.5);
+    expect(s0.level == 0 && s1.level == 2 && s1.lost == 4 && s2.level == 5 && (s2.flags & kDmgDestroyed) &&
+               (s2.flags & kDmgPilotGone),
+           "bot --damage: hit, part lost, fire, ejection, destroyed");
+
+    ServeRun sv;
+    sv.cfg.script = bot::Script::Straight;
+    sv.cfg.has_start = true;
+    sv.cfg.start[2] = 3000.0;
+    sv.cfg.damage = true;
+    if (!sv.start()) return expect(false, "bot serve listening (--damage)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<DamageStateMsg> got;
+    int cms = 0;
+    bool sent = false;
+    WorldPacket wp[8];
+    serve_run_for(c, 6.8, [&] {
+        const size_t k2 = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k2; ++i) {
+            DamageStateMsg m{};
+            CountermeasureMsg q{};
+            if (decode(wp[i].data, wp[i].len, m) == Status::Ok) got.push_back(m);
+            if (decode(wp[i].data, wp[i].len, q) == Status::Ok) ++cms;
+        }
+        if (!sent && !c.welcomes.empty()) {
+            DamageStateMsg own{};
+            own.level = 4;
+            CountermeasureMsg oc{};
+            oc.chaff = 1;
+            uint8_t ob[64];
+            sent = c.core.send_world(ob, encode(own, ob, sizeof(ob)), true) && c.core.send_world(ob, encode(oc, ob, sizeof(ob)), true);
+        }
+        return false;
+    });
+    sv.finish();
+    c.core.stop(false);
+    expect(got.size() == 3 && got[0].level == 0 && got[1].level == 1 && got[2].level == 2 && got[2].lost == 4 && cms == 2,
+           "loopback: the host's damage reaches the client on each change (reliable), and its flares");
+    expect(sent && sv.res.damage_rx == 1 && sv.res.last_rx_level == 4 && sv.res.cm_rx == 1,
+           "loopback: the client's damage and chaff reach the host");
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -8842,6 +8938,7 @@ int main() {
     hit_claim_tests();
     weapon_launch_tests();
     stores_tests();
+    damage_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

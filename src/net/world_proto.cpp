@@ -67,6 +67,21 @@ Status decode(const uint8_t* d, size_t n, WeaponLaunchMsg& out) {
     if (s == Status::Ok) out.weapon[sizeof(out.weapon) - 1] = '\0';
     return s;
 }
+size_t encode(const DamageStateMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::DamageState, o, c); }
+Status decode(const uint8_t* d, size_t n, DamageStateMsg& out) {
+    DamageStateMsg m;
+    const Status s = decode_fixed(d, n, WorldType::DamageState, m);
+    if (s != Status::Ok) return s;
+    if (m.level > 5 || m.components > 64 || m.systems > 64) return Status::BadType;
+    out = m;
+    return Status::Ok;
+}
+size_t encode(const CountermeasureMsg& m, uint8_t* o, size_t c) {
+    return encode_fixed(m, WorldType::Countermeasure, o, c);
+}
+Status decode(const uint8_t* d, size_t n, CountermeasureMsg& out) {
+    return decode_fixed(d, n, WorldType::Countermeasure, out);
+}
 size_t encode(const LoadoutMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::Loadout, o, c); }
 Status decode(const uint8_t* d, size_t n, LoadoutMsg& out) {
     LoadoutMsg m;

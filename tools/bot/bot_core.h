@@ -188,6 +188,37 @@ private:
 
 using net::ClockSync;  // the shared clock estimate lives in net/clock_sync.h
 
+/// <summary>
+/// The bot's damage story (--damage), t seconds from its start: hit at 3 s (level 1, part 1 shows damage), part 2 lost
+/// at 6 s (level 2, a system destroyed), on fire at 8 s (level 3), the pilot ejects at 10 s, destroyed at 12 s.
+/// </summary>
+struct DamageStep {
+    uint8_t level = 0, flags = 0;  // net::kDmg*
+    uint64_t lost = 0, shown = 0, dead = 0;
+};
+inline DamageStep damage_script_at(double t) {
+    DamageStep d;
+    if (t >= 3) {
+        d.level = 1;
+        d.shown = 1ull << 1;
+    }
+    if (t >= 6) {
+        d.level = 2;
+        d.lost = 1ull << 2;
+        d.dead = 1ull << 3;
+    }
+    if (t >= 8) {
+        d.level = 3;
+        d.flags |= 0x01;
+    }
+    if (t >= 10) d.flags |= 0x02;
+    if (t >= 12) {
+        d.level = 5;
+        d.flags |= 0x04;
+    }
+    return d;
+}
+
 /// <summary>Scripted jet controls for the bot's AvatarState (Phase 5): none, `ab` (a 14 s cycle), `guns` (Mil, a 1 s
 /// primary-gun burst every 4 s) or `ab+guns` (both).</summary>
 enum class JetScript { None, Ab, Guns, AbGuns };

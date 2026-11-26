@@ -224,6 +224,54 @@ struct Serve {
             cfg.hit_kind == 1 ? 'A' : 'G', static_cast<unsigned>(cfg.hit_a), static_cast<unsigned>(cfg.hit_b));
     }
 
+    // --damage: the jet's damage story and flares.
+    double dmg_t0 = -1, dmg_next_cm = 0;
+    DamageStep dmg_last{};
+    bool dmg_have = false;
+    uint16_t dmg_seq = 0;
+    void damage_tick() {
+        if (!c.on) {
+            dmg_t0 = -1;
+            dmg_have = false;
+            return;
+        }
+        if (dmg_t0 < 0) dmg_t0 = dmg_next_cm = host_t;
+        const DamageStep d = damage_script_at(host_t - dmg_t0);
+        if (!dmg_have || d.level != dmg_last.level || d.flags != dmg_last.flags || d.lost != dmg_last.lost ||
+            d.shown != dmg_last.shown || d.dead != dmg_last.dead) {
+            DamageStateMsg m{};
+            m.seq = ++dmg_seq;
+            m.level = d.level;
+            m.flags = d.flags;
+            m.components = 8;
+            m.systems = 8;
+            m.lost = d.lost;
+            m.shown = d.shown;
+            m.dead = d.dead;
+            m.attacker_kind = cfg.damage_attacker_kind;
+            m.attacker_a = cfg.damage_attacker_a;
+            m.attacker_b = cfg.damage_attacker_b;
+            uint8_t buf[sizeof(m)];
+            const size_t n = encode(m, buf, sizeof(buf));
+            if (n && core.send_world(c.slot, c.gen, buf, n, true)) {
+                ++res.damage_sent;
+                say("bot serve: jet damage: level %u, flags 0x%02x at +%.1f s", static_cast<unsigned>(d.level),
+                    static_cast<unsigned>(d.flags), host_t - dmg_t0);
+                dmg_last = d;
+                dmg_have = true;
+            }
+        }
+        if (host_t >= dmg_next_cm) {
+            dmg_next_cm += 5.0;
+            CountermeasureMsg m{};
+            m.seq = ++dmg_seq;
+            m.flares = 2;
+            uint8_t buf[sizeof(m)];
+            const size_t n = encode(m, buf, sizeof(buf));
+            if (n && core.send_world(c.slot, c.gen, buf, n, true)) ++res.cm_sent;
+        }
+    }
+
     // --stores: the jet's loadout and consumables.
     double stores_t0 = -1, stores_next_lo = 0, stores_next_co = 0;
     uint16_t stores_seq = 0;
@@ -432,6 +480,23 @@ struct Serve {
             res.last_rx_throttle = m.throttle;
             res.last_rx_engines = m.engines;
             res.last_rx_guns = m.guns;
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::DamageState)) {
+            DamageStateMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
+            ++res.damage_rx;
+            res.last_rx_level = m.level;
+            say("bot serve: client %u jet damage: level %u, flags 0x%02x, lost 0x%llx", static_cast<unsigned>(m.peer),
+                static_cast<unsigned>(m.level), static_cast<unsigned>(m.flags), static_cast<unsigned long long>(m.lost));
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::Countermeasure)) {
+            CountermeasureMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
+            ++res.cm_rx;
+            say("bot serve: client %u released %u chaff, %u flares", static_cast<unsigned>(m.peer),
+                static_cast<unsigned>(m.chaff), static_cast<unsigned>(m.flares));
             return;
         }
         if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::Loadout)) {
@@ -737,6 +802,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
         if (cfg.hit) sv.hit_tick();
         if (cfg.launch) sv.launch_tick();
         if (cfg.stores) sv.stores_tick();
+        if (cfg.damage) sv.damage_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

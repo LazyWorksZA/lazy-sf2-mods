@@ -332,12 +332,18 @@ void HostCore::run() {
             if (!push_in(e, true)) drop(n_queue_);
             return;
         }
-        if (wt == static_cast<uint8_t>(WorldType::Loadout) || wt == static_cast<uint8_t>(WorldType::Consumables)) {
+        if (wt == static_cast<uint8_t>(WorldType::Loadout) || wt == static_cast<uint8_t>(WorldType::Consumables) ||
+            wt == static_cast<uint8_t>(WorldType::DamageState) || wt == static_cast<uint8_t>(WorldType::Countermeasure)) {
             LoadoutMsg lm;
             ConsumablesMsg cm;
-            const bool lo = wt == static_cast<uint8_t>(WorldType::Loadout);
-            const bool ok = lo ? channel == kChannelReliable && decode(data, len, lm) == Status::Ok
-                               : channel == kChannelUnreliable && decode(data, len, cm) == Status::Ok;
+            DamageStateMsg dm;
+            CountermeasureMsg km;
+            const bool lo = wt != static_cast<uint8_t>(WorldType::Consumables);  // the reliable ones
+            const bool ok =
+                wt == static_cast<uint8_t>(WorldType::Loadout)       ? channel == kChannelReliable && decode(data, len, lm) == Status::Ok
+                : wt == static_cast<uint8_t>(WorldType::Consumables) ? channel == kChannelUnreliable && decode(data, len, cm) == Status::Ok
+                : wt == static_cast<uint8_t>(WorldType::DamageState) ? channel == kChannelReliable && decode(data, len, dm) == Status::Ok
+                                                                      : channel == kChannelReliable && decode(data, len, km) == Status::Ok;
             if (!ok) return drop(n_format_);
             if (!(slot_state_[slot].load(std::memory_order_acquire) & 1)) return drop(n_state_);
             HostEvent e;
