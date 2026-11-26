@@ -7370,6 +7370,70 @@ void world_stream_tests() {
     h.core.stop(false);
 }
 
+void world_snapshot_tests() {
+    std::printf("world snapshot\n");
+    expect(sizeof(WorldSnapshotMsg) == 15, "snapshot: a 15-byte head, then WorldEvents parts");
+    WorldEventTracker tr;
+    std::vector<WorldEventRec> ev;
+    WorldSeen awake;
+    awake.awake = true;
+    tr.observe(1, 2, 0, awake, &ev);
+    WorldSeen dead;
+    dead.alive = false;
+    tr.observe(1, 3, 1, dead, &ev);
+    WorldSeen sleeping;
+    sleeping.asleep = true;
+    tr.observe(1, 3, 0, sleeping, &ev);
+    WorldSeen placed;
+    placed.level = 40;
+    tr.observe(3, 12, 7, placed, &ev);
+    WorldSeen intact;
+    tr.observe(3, 12, 8, intact, &ev);
+    WorldSeen flight;
+    flight.waypoint = 4;
+    tr.observe(1, 2, kFlightKey, flight, &ev);
+    std::vector<WorldEventRec> snap;
+    tr.snapshot(&snap);
+    expect(ev.empty() && snap.size() == 5 && snap[0].event == kEventAwake && snap[0].a == 2 && snap[1].b == kFlightKey &&
+               snap[1].event == kEventWaypoint && snap[1].value == 4 && snap[2].event == kEventAsleep &&
+               snap[3].event == kEventDestroyed && snap[3].b == 1 && snap[4].event == kEventPlacedDamage &&
+               snap[4].value == 40,
+           "snapshot: every key's state now, sorted by key; intact placed records are left out");
+    WorldSnapshotMsg h{};
+    h.mission_id = 9;
+    h.host_ms = 600000;
+    h.records = 5;
+    h.parts = 1;
+    uint8_t b[32];
+    WorldSnapshotMsg r{};
+    expect(encode(h, b, sizeof(b)) == 15 && peek_world_type(b, 15) == 26 && decode(b, 15, r) == Status::Ok &&
+               r.host_ms == 600000 && r.parts == 1,
+           "snapshot: head round trip");
+    std::printf("    estimate: 150 records = 3 parts, %zu bytes once per join\n",
+                sizeof(WorldSnapshotMsg) + 3 * sizeof(WorldEventsHead) + 150 * sizeof(WorldEventRec));
+    // The client core takes the head and its parts into the never-dropped ring, in order.
+    FakeHost fh;
+    if (!fh.start()) return expect(false, "snapshot loopback: host core");
+    auto c = std::make_unique<ClientCore>();
+    c->start("127.0.0.1", fh.core.port(), cc_hello(0), cc_client_log);
+    CcRx rx;
+    const bool welcomed = cc_run(&fh, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+    uint8_t e[600];
+    const size_t en = encode_world_events(1, 600000, snap.data(), snap.size(), e, sizeof(e));
+    const bool sent = fh.core.send_world(fh.slot, fh.gen, b, 15, true) && fh.core.send_world(fh.slot, fh.gen, e, en, true);
+    WorldPacket got[4];
+    std::vector<uint8_t> order;
+    cc_run(&fh, nullptr, *c, rx, 3.0, [&] {
+        const size_t n = c->poll_world(got, 4);
+        for (size_t i = 0; i < n; ++i) order.push_back(peek_world_type(got[i].data, got[i].len));
+        return order.size() >= 2;
+    });
+    expect(welcomed && sent && order.size() == 2 && order[0] == 26 && order[1] == 24,
+           "snapshot loopback: the head, then its events, reach the client in order");
+    c->stop(false);
+    fh.core.stop(false);
+}
+
 void world_avatar_tests() {
     std::printf("world jet state\n");
     expect(sizeof(AvatarStateMsg) == 16, "jet state: 16 bytes (reliable, on change)");
@@ -7851,6 +7915,7 @@ int main() {
     world_stream_tests();
     world_seat_rule_tests();
     world_avatar_tests();
+    world_snapshot_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

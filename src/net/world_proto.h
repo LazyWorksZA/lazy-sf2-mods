@@ -19,8 +19,9 @@ enum class WorldType : uint8_t {
     WorldStates = 23,     // host to client, unreliable (channel 1), 1..kWorldStatesMax object states
     WorldEvents = 24,     // host to client, reliable, 1..kWorldEventsMax events
     AvatarState = 25,     // each player's own jet, reliable, on change: client to host, host to clients (relayed)
+    WorldSnapshot = 26,   // host to a client after its Welcome, reliable: the head of a late-join snapshot
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 25;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 26;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -268,6 +269,27 @@ private:
     size_t n_ = 0;
     uint64_t clock_ = 0;
 };
+
+// ---- the late-join snapshot (T8) ----
+
+#pragma pack(push, 1)
+/// <summary>
+/// The head of a snapshot: `parts` WorldEvents messages follow on the same reliable channel, `records` events in all,
+/// describing every key whose state differs from the mission file's start (destroyed, awake, asleep, placed damage,
+/// flight waypoints) at host time host_ms. The movers' poses come with the stream as usual.
+/// </summary>
+struct WorldSnapshotMsg {
+    Header h;
+    uint32_t mission_id;
+    uint32_t host_ms;
+    uint16_t records;
+    uint8_t parts;
+};
+#pragma pack(pop)
+static_assert(sizeof(WorldSnapshotMsg) == 15);  // 4:4 mission id, 8:4 host ms, 12:2 records, 14:1 parts
+inline constexpr size_t kSnapshotMaxRecords = 255 * kWorldEventsMax;
+size_t encode(const WorldSnapshotMsg& m, uint8_t* out, size_t cap);
+Status decode(const uint8_t* data, size_t len, WorldSnapshotMsg& out);
 
 // ---- a player's jet state (T7) ----
 

@@ -1472,6 +1472,31 @@ void* world_member_object(int member) {
     return seat_object(member);
 }
 
+bool world_host_snapshot(int slot, uint32_t mission_id, WorldSendToFn send) {
+    if (!g_world_host.load(std::memory_order_acquire) || !send) return true;
+    std::vector<net::WorldEventRec> ev;
+    if (g_hs && g_hs->mission == g_published_id) g_hs->tracker.snapshot(&ev);
+    if (ev.size() > net::kSnapshotMaxRecords) ev.resize(net::kSnapshotMaxRecords);
+    const uint32_t ms = static_cast<uint32_t>(sim_game_time() * 1000.0);
+    net::WorldSnapshotMsg head{};
+    head.mission_id = mission_id;
+    head.host_ms = ms;
+    head.records = static_cast<uint16_t>(ev.size());
+    head.parts = static_cast<uint8_t>((ev.size() + net::kWorldEventsMax - 1) / net::kWorldEventsMax);
+    uint8_t buf[net::kWorldMaxMessage];
+    bool ok = send(slot, buf, net::encode(head, buf, sizeof(buf)), true);
+    size_t bytes = sizeof(head);
+    uint32_t seq = 0;
+    net::world_batches(ev.data(), ev.size(), net::kWorldEventsMax, [&](const net::WorldEventRec* r, size_t n) {
+        const size_t len = net::encode_world_events(++seq, ms, r, n, buf, sizeof(buf));
+        ok = ok && len && send(slot, buf, len, true);
+        bytes += len;
+    });
+    LOG("world: snapshot for client %d: %zu events in %u parts (%zu bytes)%s", slot + 1, ev.size(),
+        static_cast<unsigned>(head.parts), bytes, ok ? "" : "; NOT all queued");
+    return ok;
+}
+
 void world_host_tick(double now, const double (*players)[3], int n_players, WorldSendFn send) {
     if (!g_world_host.load(std::memory_order_acquire) || !send) return;
     if (!g_hs) g_hs = new (std::nothrow) HostStream;
@@ -1737,6 +1762,15 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         return read_member_id(t, a, b, &id) && id != player && resolve_obj(om, id, obj, group) && *group != 0;
     };
     const uint8_t wt = net::peek_world_type(data, len);
+    if (wt == static_cast<uint8_t>(net::WorldType::WorldSnapshot)) {
+        net::WorldSnapshotMsg sn;
+        if (net::decode(data, len, sn) != net::Status::Ok) return;
+        LOG("world: snapshot from the host: mission 0x%08lx, %u events in %u parts at host time %.1f s (ours %.1f s)%s",
+            static_cast<unsigned long>(sn.mission_id), static_cast<unsigned>(sn.records),
+            static_cast<unsigned>(sn.parts), sn.host_ms / 1000.0, sim_game_time(),
+            sn.mission_id == g_flying_id ? "" : "; ANOTHER mission: not applied");
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
         net::AvatarStateMsg am;
         if (net::decode(data, len, am) == net::Status::Ok) world_avatar_apply(data, len, client_avatar_object(am.peer));

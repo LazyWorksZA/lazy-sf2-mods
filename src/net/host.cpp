@@ -273,6 +273,8 @@ void player_type_cb(const LiveAircraft* list, size_t count, void* ctx) {
     }
 }
 
+bool world_send_to(int s, const uint8_t* data, size_t len, bool reliable);  // below, with the world tick
+
 void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, double now) {
     char callsign[17], aircraft[33];
     avatar_logic::to_ascii(callsign, sizeof(callsign), h.callsign);
@@ -383,6 +385,8 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     uint8_t buf[net::kMaxMessage];
     const size_t n = net::encode(w, buf, sizeof(buf));
     if (n) rec(net::StreamKind::WelcomeSent, now, buf, n);
+    // A late joiner (or a reconnect) gets the world's events so far, after its Welcome on the same channel (T8).
+    if (world_host_streaming()) world_host_snapshot(slot, w.mission_id, world_send_to);
     LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg, theatre %s; "
         "host \"%s\" (%s)",
         slot + 1, a.callsign, a.aircraft, got.obj, why, a.spawn[0], a.spawn[1], a.spawn[2],
@@ -661,6 +665,13 @@ void check_order(void* aircraft, bool is_player) {
     LOG("net: frame order: the player stepped before the avatars in %d of %d frames; %s", g_order.player_first(),
         g_order.frames(),
         g_order_shift ? "avatars are shown at the game time plus the player's step" : "the game time is current");
+}
+
+bool world_send_to(int s, const uint8_t* data, size_t len, bool reliable) {
+    if (s < 0 || s >= net::kMaxClients || !g_av[s].active) return false;
+    if (g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, data, len, reliable)) return true;
+    if (reliable) g_world_behind[s] = true;
+    return false;
 }
 
 bool world_send(const uint8_t* data, size_t len, bool reliable) {

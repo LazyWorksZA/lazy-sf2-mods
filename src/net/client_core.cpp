@@ -404,7 +404,10 @@ void ClientCore::run() {
         const WorldObjState* sr = nullptr;
         const WorldEventRec* er = nullptr;
         AvatarStateMsg am;
-        const bool ok = (wt == static_cast<uint8_t>(WorldType::WorldStates) && channel == kChannelUnreliable &&
+        WorldSnapshotMsg snm;
+        const bool ok =
+            (wt == static_cast<uint8_t>(WorldType::WorldSnapshot) && channel == kChannelReliable &&
+             decode(data, len, snm) == Status::Ok) || (wt == static_cast<uint8_t>(WorldType::WorldStates) && channel == kChannelUnreliable &&
                          decode_world_states(data, len, sh, &sr) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::WorldEvents) && channel == kChannelReliable &&
                          decode_world_events(data, len, eh, &er) == Status::Ok) ||

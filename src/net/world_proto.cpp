@@ -59,6 +59,8 @@ size_t encode(const MissionRequestMsg& m, uint8_t* o, size_t c) {
     return encode_fixed(m, WorldType::MissionRequest, o, c);
 }
 size_t encode(const MissionOfferMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::MissionOffer, o, c); }
+size_t encode(const WorldSnapshotMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::WorldSnapshot, o, c); }
+Status decode(const uint8_t* d, size_t n, WorldSnapshotMsg& out) { return decode_fixed(d, n, WorldType::WorldSnapshot, out); }
 size_t encode(const AvatarStateMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::AvatarState, o, c); }
 Status decode(const uint8_t* d, size_t n, AvatarStateMsg& out) { return decode_fixed(d, n, WorldType::AvatarState, out); }
 Status decode(const uint8_t* d, size_t n, MissionRequestMsg& out) {

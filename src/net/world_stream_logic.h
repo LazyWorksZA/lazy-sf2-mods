@@ -2,6 +2,7 @@
 // Pure parts of the world stream (T6): how often each moving object is sent, what changed for the events, and how
 // records are cut into messages. No game or Windows dependencies. See lazy-sf2-recon: network-recon §10.4 and §10.15.
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -73,6 +74,32 @@ public:
         p = s;
     }
     void clear() { prev_.clear(); }
+    /// <summary>
+    /// The late-join snapshot: one event per key and fact as the host sees it now (destroyed; else awake, asleep, a
+    /// placed record's non-zero damage, a flight's waypoint), sorted by key. Applying them to a fresh copy of the
+    /// mission brings it to the host's state, as far as events go.
+    /// </summary>
+    void snapshot(std::vector<WorldEventRec>* out) const {
+        std::vector<uint64_t> keys;
+        keys.reserve(prev_.size());
+        for (const auto& kv : prev_) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        for (uint64_t k : keys) {
+            const WorldSeen& s = prev_.at(k);
+            const uint8_t kind = static_cast<uint8_t>(k >> 32);
+            const uint16_t a = static_cast<uint16_t>(k >> 16), b = static_cast<uint16_t>(k);
+            auto ev = [&](uint8_t e, int16_t v) { out->push_back(WorldEventRec{e, kind, a, b, v}); };
+            if (!s.alive) {
+                ev(kEventDestroyed, 0);
+                continue;
+            }
+            if (s.awake) ev(kEventAwake, 0);
+            if (s.asleep) ev(kEventAsleep, 0);
+            if (kind == static_cast<uint8_t>(KeyKind::Placed) && s.level > 0) ev(kEventPlacedDamage, s.level);
+            if (s.waypoint >= 0) ev(kEventWaypoint, s.waypoint);
+        }
+    }
+    size_t size() const { return prev_.size(); }
 
 private:
     std::unordered_map<uint64_t, WorldSeen> prev_;

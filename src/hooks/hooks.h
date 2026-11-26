@@ -334,6 +334,13 @@ bool world_host_streaming();
 /// the nearest of players[0..n_players)) and, once a second, the events (destroyed, awake, asleep, damage). T6.
 /// </summary>
 void world_host_tick(double now, const double (*players)[3], int n_players, WorldSendFn send);
+/// <summary>Sends one world message to one client slot (reliable: on the events queue).</summary>
+using WorldSendToFn = bool (*)(int slot, const uint8_t* data, size_t len, bool reliable);
+/// <summary>
+/// Host, game thread, right after a client's Welcome in a shared world: sends it the late-join snapshot (T8), a
+/// WorldSnapshot head and the current events in WorldEvents messages. False if a part could not be queued.
+/// </summary>
+bool world_host_snapshot(int slot, uint32_t mission_id, WorldSendToFn send);
 /// <summary>Client in a world join, game thread: applies one WorldStates or WorldEvents message to the remote copies.</summary>
 void world_client_apply(const uint8_t* data, size_t len, double host_now);
 /// <summary>
