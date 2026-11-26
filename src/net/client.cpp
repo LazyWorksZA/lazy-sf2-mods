@@ -64,7 +64,10 @@ bool g_leaving = false;       // we said Bye (the player changed): only the end 
 bool g_disconnected = false;  // Disconnected seen; stop() once the thread has cleaned up
 double g_next_try = 0;        // wall time of the next connection attempt
 bool g_blocked = false;       // refused in a way a retry cannot fix (theatre, version) until the player changes
-bool g_busy_logged = false;   // "not connecting while a puppet or replay runs", once per block
+const char* g_wait_logged = nullptr;  // the last "waiting to connect" reason logged (a literal): each change is logged once
+unsigned g_attempts = 0;      // connection attempts since the last Welcome or new player
+double g_next_still = 0;      // wall time of the next "still no answer" line while retrying quietly
+bool g_join_deferred = false;  // the Welcome's join move waits until the player is airborne
 bool g_retry_quiet = false;   // a failed attempt was logged: later ones are not, until a Welcome or a new player
 cl::RefusalOnce g_refused;    // the host's refusals before a Welcome, each logged once until a Welcome or a new player
 // The network thread's lines are dropped while a quiet retry has not connected (it clears this when it does).
@@ -208,6 +211,7 @@ void end_session(const char* why) {
     }
     g_stream->close(false);  // the writer thread drains, flushes and closes the file
     g_session = false;
+    g_join_deferred = false;
     g_welcomed.store(false, std::memory_order_relaxed);
     g_snap_ok = false;
     g_hold = true;
@@ -295,6 +299,7 @@ void join(void* player, const net::WelcomeMsg& w, double wall) {
     const cl::JoinAction a =
         cl::join_action(net::welcome_has_join(w), g_join_move, cl::airborne(pos, vel), g_moved, dist);
     if (a == cl::JoinAction::Move) {
+        g_join_deferred = false;
         double turned = 0;
         move_player(player, target, w.spawn_heading, &turned);
         g_moved = true;
@@ -304,10 +309,13 @@ void join(void* player, const net::WelcomeMsg& w, double wall) {
             cl::norm3(vel), cl::norm3(w.spawn_vel));
         return;
     }
+    g_join_deferred = a == cl::JoinAction::NotAirborne;
     const unsigned bit = 1u << static_cast<unsigned>(a);
     if (g_join_logged & bit) return;  // a host re-sends its join: say each outcome once per session
     g_join_logged |= bit;
-    if (a == cl::JoinAction::NoJoin)
+    if (a == cl::JoinAction::NotAirborne)
+        LOG("net: client: join move deferred until airborne (join position %.0f m away)", dist);
+    else if (a == cl::JoinAction::NoJoin)
         LOG("net: client: this Welcome has no join position (the host places its jet first); waiting for one");
     else
         LOG("net: client: join position %.0f m away: %s", dist, cl::join_action_name(a));
@@ -339,12 +347,14 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
     if (first) {
         g_session = true;
         g_retry_quiet = false;
+        g_attempts = 0;
         g_refused.clear();
         g_id = w.client_id;
         g_welcome_wall = wall;
         g_reannounce_at = 0;
         g_peer0_logged = false;
         g_join_logged = 0;
+        g_join_deferred = false;
         g_watch.clear();
         g_hclock = net::HostClock{};
         g_tx = g_tx_fail = g_tx_held = 0;
@@ -468,8 +478,8 @@ void handle_end(const ClientEvent& e, double wall) {
     if (g_blocked) {
         LOG("net: client: not connecting again until the player changes");
     } else if (!g_retry_quiet) {
-        LOG("net: client: will connect again %s", why == net::ClientEnd::Left ? "once airborne"
-                                                  : "every 5 s while airborne (further attempts are not logged here)");
+        LOG("net: client: will connect again %s", why == net::ClientEnd::Left ? "at once"
+                                                  : "every 5 s (further attempts are not logged here)");
         g_retry_quiet = why != net::ClientEnd::Left;
     }
 }
@@ -508,7 +518,7 @@ void pump(void* player, double wall) {
                     } else {
                         // Refused before the Welcome: retried quietly every 5 s; each reason is said once.
                         if (g_refused.first(b.reason))
-                            LOG("net: client: the host refused us (Bye %u: %s); trying again every 5 s while airborne, "
+                            LOG("net: client: the host refused us (Bye %u: %s); trying again every 5 s, "
                                 "quietly until welcomed",
                                 static_cast<unsigned>(b.reason), net::bye_reason_name(b.reason));
                         g_retry_quiet = true;
@@ -659,15 +669,15 @@ void avatar_step(int id, double now, double wall) {
 }
 
 /// <summary>On the player's step with no connection: start one if it is time.</summary>
-void maybe_connect(void* player, double wall) {
+void maybe_connect(void* /*player*/, double wall) {
     const bool busy = g_puppet_state.load() != 0 || replay_active();
-    if (busy && !g_busy_logged) LOG("net: client: not connecting while a puppet or replay run is active");
-    g_busy_logged = busy;
-    double pos[3];
-    float vel[3];
-    obj_read(player, kOffPos, pos, 3);
-    obj_read(player, kOffVel, vel, 3);
-    if (!cl::connect_due(sim_player_known(), cl::airborne(pos, vel), true, busy || g_blocked, wall, g_next_try)) return;
+    const bool known = sim_player_known();
+    const char* why = cl::wait_reason(known, busy, g_blocked);
+    if (why != g_wait_logged) {
+        g_wait_logged = why;
+        if (why) LOG("net: client: waiting to connect: %s", why);
+    }
+    if (!cl::connect_due(known, true, busy || g_blocked, wall, g_next_try)) return;
     g_next_try = wall + cl::kRetrySeconds;
     g_own_type[0] = 0;
     probe_with_aircraft(player_type_cb, g_own_type);
@@ -686,6 +696,15 @@ void maybe_connect(void* player, double wall) {
     g_link = Link::Running;
     g_leaving = g_disconnected = false;
     g_welcomes = 0;
+    ++g_attempts;
+    if (!g_retry_quiet) {
+        g_next_still = wall + cl::kStillTryingSeconds;
+        LOG("net: client: connecting to %s:%u (attempt %u)", g_host, static_cast<unsigned>(g_port), g_attempts);
+    } else if (wall >= g_next_still) {
+        g_next_still = wall + cl::kStillTryingSeconds;
+        LOG("net: client: still no answer from %s:%u after %u attempts", g_host, static_cast<unsigned>(g_port),
+            g_attempts);
+    }
     if (!g_retry_quiet)
         LOG("net: client: joining as \"%s\" (%s), theatre %s", g_callsign, g_own_type[0] ? g_own_type : "type unknown",
             g_theatre_hash ? g_theatre : "unknown");
@@ -700,6 +719,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         g_epoch = sim_player_epoch();
         g_blocked = false;
         g_retry_quiet = false;
+        g_attempts = 0;
         g_refused.clear();
         g_moved = false;
         if (g_link == Link::Running && !g_leaving && !g_disconnected) {
@@ -727,6 +747,13 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
             return;
         }
         if (!g_session || g_leaving) return;
+        if (g_join_deferred) {
+            double p[3];
+            float v[3];
+            obj_read(aircraft, kOffPos, p, 3);
+            obj_read(aircraft, kOffVel, v, 3);
+            if (cl::airborne(p, v)) join(aircraft, g_welcome, wall);
+        }
         send_own(aircraft);
         if (wall >= g_next_report) {
             report(aircraft, wall);
@@ -784,7 +811,7 @@ void client_install() {
         }
     }
     g_enabled = true;
-    LOG("net: client on: joins %s:%u as \"%s\" once airborne; join %s", g_host, static_cast<unsigned>(g_port),
+    LOG("net: client on: joins %s:%u as \"%s\" when a flight starts; join %s", g_host, static_cast<unsigned>(g_port),
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
 }
 

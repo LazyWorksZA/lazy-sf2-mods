@@ -6732,10 +6732,14 @@ void client_logic_tests() {
         const float fast[3] = {0, 200, 0}, slow[3] = {30, 30, 0};
         expect(cl::airborne(up, fast) && !cl::airborne(low, fast) && !cl::airborne(up, slow),
                "airborne: above 500 m and faster than 50 m/s");
-        expect(cl::connect_due(true, true, true, false, 10.0, 10.0) && !cl::connect_due(false, true, true, false, 10, 0) &&
-                   !cl::connect_due(true, false, true, false, 10, 0) && !cl::connect_due(true, true, false, false, 10, 0) &&
-                   !cl::connect_due(true, true, true, true, 10, 0) && !cl::connect_due(true, true, true, false, 9.9, 10.0),
-               "connect: player known, airborne, no core, not blocked, retry time reached");
+        expect(cl::connect_due(true, true, false, 10.0, 10.0) && !cl::connect_due(false, true, false, 10, 0) &&
+                   !cl::connect_due(true, false, false, 10, 0) && !cl::connect_due(true, true, true, 10, 0) &&
+                   !cl::connect_due(true, true, false, 9.9, 10.0),
+               "connect: player known, no core, not blocked, retry time reached; airborne not needed");
+        expect(cl::wait_reason(true, true, false) && cl::wait_reason(true, false, true) &&
+                   !cl::wait_reason(true, false, false) &&
+                   std::string(cl::wait_reason(false, true, true)) == "player not known yet",
+               "connect: the waiting reason names what holds it back");
     }
     {
         expect(cl::join_action(false, true, true, false, 5000) == JoinAction::NoJoin,

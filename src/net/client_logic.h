@@ -38,9 +38,18 @@ inline bool airborne(const double pos[3], const float vel[3]) {
 }
 
 /// <summary>Whether to start a connection now. blocked: a puppet or replay run, or a refusal that retrying cannot fix.</summary>
-constexpr bool connect_due(bool player_known, bool is_airborne, bool core_idle, bool blocked, double wall,
-                           double next_try) {
-    return player_known && is_airborne && core_idle && !blocked && wall >= next_try;
+constexpr bool connect_due(bool player_known, bool core_idle, bool blocked, double wall, double next_try) {
+    return player_known && core_idle && !blocked && wall >= next_try;
+}
+
+inline constexpr double kStillTryingSeconds = 30.0;  // wall seconds between "still no answer" lines while retrying
+
+/// <summary>Why a connection does not start now, or nullptr when nothing but the retry timer holds it back.</summary>
+constexpr const char* wait_reason(bool player_known, bool busy, bool blocked) {
+    if (!player_known) return "player not known yet";
+    if (busy) return "blocked: a puppet or replay run is active";
+    if (blocked) return "blocked: refused until the player changes";
+    return nullptr;
 }
 
 enum class JoinAction : uint8_t {
@@ -67,7 +76,7 @@ inline const char* join_action_name(JoinAction a) {
         case JoinAction::Move: return "moved";
         case JoinAction::NoJoin: return "no join position yet";
         case JoinAction::Off: return "not moved (LAZYSF2_NET_JOIN=none)";
-        case JoinAction::NotAirborne: return "not moved (not airborne: below 500 m or slower than 50 m/s)";
+        case JoinAction::NotAirborne: return "not moved yet (not airborne: below 500 m or slower than 50 m/s)";
         case JoinAction::Close: return "not moved (already there)";
         case JoinAction::AlreadyJoined: return "not moved (already joined in this session)";
     }
