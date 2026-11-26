@@ -18,6 +18,7 @@
 
 #include "hooks/aircraft_side.h"
 #include "hooks/hook_util.h"
+#include "hooks/game_files.h"
 #include "hooks/hooks.h"
 #include "hooks/replay_math.h"
 #include "hooks/world_files.h"
@@ -68,6 +69,10 @@ constexpr int kMaxAreas = 8192, kMaxPlaced = 4096;
 
 // SingleMissionScreen: the New page's event handler; the settings block it passes to Generate.
 constexpr DWORD kRvaNewEvent = 0x4300;
+// The Load page's handler (thiscall(page, event), ret 4): on Accept/Fly it builds page +0x220 = the mission folder
+// (page +0x18, from MMG slot 8) joined with the chosen name and ".MSN", and calls MSN slot 0 Load with it.
+constexpr DWORD kRvaLoadEvent = 0x25e0;
+constexpr size_t kLoadPagePath = 0x220;
 constexpr size_t kPageSettings = 0x88;
 constexpr int kEventAccept = 0x65, kEventFly = 0x67;
 
@@ -564,7 +569,33 @@ void regenerate(const Ctx& c, void* page) {
     else LOG("world: ERR regenerating the mission faulted; do not fly this mission");
 }
 
-void accept_save(const Ctx& c, void* page) {
+// The Load page's chosen file as an absolute path (a relative one is under the game folder).
+bool read_page_path(const void* page, wchar_t* out, size_t cap) {
+    __try {
+        wcsncpy_s(out, cap, reinterpret_cast<const wchar_t*>(static_cast<const BYTE*>(page) + kLoadPagePath), _TRUNCATE);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool load_page_path(const void* page, wchar_t* out, size_t cap) {
+    if (!read_page_path(page, out, cap) || !out[0]) return false;
+    const bool absolute = (out[1] == L':') || (out[0] == L'\\' && out[1] == L'\\');
+    if (absolute) return true;
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    wchar_t* slash = n && n < MAX_PATH ? wcsrchr(exe, L'\\') : nullptr;
+    if (!slash) return false;
+    slash[1] = L'\0';
+    std::wstring full = std::wstring(exe) + (out[0] == L'.' && out[1] == L'\\' ? out + 2 : out);
+    if (full.size() >= cap) return false;
+    wcsncpy_s(out, cap, full.c_str(), _TRUNCATE);
+    return true;
+}
+
+// source: null for the generated mission (written by MSN Save); else the Load page's file, copied byte for byte (loose
+// or from a cat, through the exe's file manager) so hand-made keys survive.
+void accept_save(const Ctx& c, void* page, const wchar_t* source) {
     const std::wstring dir = probe_output_dir();
     const int n = next_number(dir);
     const std::wstring msn_path = numbered(dir, n, L".msn");
@@ -573,12 +604,20 @@ void accept_save(const Ctx& c, void* page) {
         LOG("world: save refused (probe folder path too long)");
         return;
     }
-    if (call_save(c.msn, msn_path.c_str()) != 0) {
+    if (source) {
+        std::vector<uint8_t> bytes;
+        if (!read_game_file(source, bytes) || bytes.empty() || bytes.size() > net::kMissionMaxRaw ||
+            !write_bytes(msn_path, bytes)) {
+            LOG("world: ERR could not copy the Load page's mission %ls to %ls; flying it unshared", source,
+                msn_path.c_str());
+            return;
+        }
+    } else if (call_save(c.msn, msn_path.c_str()) != 0) {
         LOG("world: ERR MSN Save faulted for %ls", msn_path.c_str());
         return;
     }
     if (!file_exists(msn_path)) {
-        LOG("world: ERR MSN Save wrote no file at %ls; mission left as generated", msn_path.c_str());
+        LOG("world: ERR no file at %ls; mission left as it was", msn_path.c_str());
         return;
     }
     const uint32_t seed = pick_seed();
@@ -589,7 +628,12 @@ void accept_save(const Ctx& c, void* page) {
     const int lr = call_load(c.msn, msn_path.c_str());
     if (lr != 0) {
         LOG("world: ERR MSN Load of %ls %s", msn_path.c_str(), lr == 1 ? "returned false" : "faulted");
-        regenerate(c, page);
+        if (source) {
+            if (call_load(c.msn, source) == 0) LOG("world: loaded the Load page's mission again from %ls", source);
+            else LOG("world: ERR loading %ls again failed; do not fly this mission", source);
+        } else {
+            regenerate(c, page);
+        }
         return;
     }
     HeaderRaw h{};
@@ -599,9 +643,9 @@ void accept_save(const Ctx& c, void* page) {
     s.has_seed = true;
     if (read_header(c.msn, &h)) fill_sidecar_from_header(h, &s);
     if (!write_text(side_path, format_sidecar(s), false)) LOG("world: ERR could not write %ls", side_path.c_str());
-    LOG("world: saved the generated mission to %ls (theatre %s, %s, %04d-%02d-%02d %02d:%02d, weather %d), seed %lu, "
+    LOG("world: saved the %s mission to %ls (theatre %s, %s, %04d-%02d-%02d %02d:%02d, weather %d), seed %lu, "
         "reloaded it from the file; sidecar %ls",
-        msn_path.c_str(), s.theatre.c_str(), s.aircraft.c_str(), s.year, s.month, s.day, s.hour, s.minute,
+        source ? "Load page's" : "generated", msn_path.c_str(), s.theatre.c_str(), s.aircraft.c_str(), s.year, s.month, s.day, s.hour, s.minute,
         s.weather, static_cast<unsigned long>(seed), side_path.c_str());
     AcquireSRWLockExclusive(&g_lock);
     g_armed = Armed{true, c.msn, seed, n, s, msn_path, side_path};
@@ -703,8 +747,29 @@ int __fastcall h_NewEvent(void* page, void* edx, int ev) {
     if (ev != kEventAccept && ev != kEventFly) return r;
     Ctx c{};
     if (!resolve(&c, "New page Accept")) return r;
-    if (g_mode == Mode::Save) accept_save(c, page);
+    if (g_mode == Mode::Save) accept_save(c, page, nullptr);
     else if (g_mode == Mode::Load) accept_load(c, page);
+    return r;
+}
+
+// The Load page: a host shares the mission it chose there (a stock, saved or hand-made .MSN) as it shares a generated
+// one; a client in a world join flies the host's mission instead, as on the New page.
+NewEvent_t o_LoadEvent = nullptr;
+int __fastcall h_LoadEvent(void* page, void* edx, int ev) {
+    const int r = o_LoadEvent(page, edx, ev);
+    if (ev != kEventAccept && ev != kEventFly) return r;
+    Ctx c{};
+    if (!resolve(&c, "Load page Accept")) return r;
+    if (g_mode == Mode::Save) {
+        wchar_t src[MAX_PATH] = {};
+        if (!load_page_path(page, src, MAX_PATH)) {
+            LOG("world: Load page Accept: refused (the chosen file's path is not readable)");
+            return r;
+        }
+        accept_save(c, page, src);
+    } else if (g_mode == Mode::Load) {
+        accept_load(c, page);
+    }
     return r;
 }
 
@@ -1257,6 +1322,47 @@ constexpr size_t kObjVel = 0x50, kObjRates = 0xd0, kObjMatrix = 0xdc, kObjDamage
 constexpr int kDestroyedLevel = 5;
 constexpr double kEventEvery = 1.0;  // seconds of host time between event walks
 
+// AircraftFormation: each flight's formation object holds its AI at +0x24 (AircraftFormationAIClass, vtable +0x171ac),
+// whose current waypoint is +0x18 (count +0x14); slot 10 (+0x7d00, thiscall(int), ret 4) sets it, clamped, and slot 11
+// reads it. See lazy-sf2-recon: network-recon §10.17.
+constexpr DWORD kAfStamp = 0x51d22040, kAfSize = 0x23000;
+constexpr DWORD kRvaAfAiVtable = 0x171ac, kRvaAfSetWaypoint = 0x7d00;
+constexpr size_t kFormationAi = 0x24, kAiWaypoint = 0x18, kAiWaypointCount = 0x14, kAiSetWaypointSlot = 10;
+
+// The formation AI of a flight's formation object, if it is what we expect. SEH only.
+BYTE* formation_ai(const BYTE* formation, uintptr_t af) {
+    if (!formation || !af) return nullptr;
+    __try {
+        BYTE* ai = *reinterpret_cast<BYTE* const*>(formation + kFormationAi);
+        if (!ai || *reinterpret_cast<const uintptr_t*>(ai) != af + kRvaAfAiVtable) return nullptr;
+        return ai;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+bool read_waypoint(const BYTE* ai, int* wp, int* count) {
+    __try {
+        std::memcpy(wp, ai + kAiWaypoint, 4);
+        std::memcpy(count, ai + kAiWaypointCount, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// Sets the flight's current waypoint through the AI's own slot 10 (it clamps and recomputes its leg). 0 ok, 2 faulted,
+// 1 the slot is not the function we read.
+int set_waypoint(BYTE* ai, uintptr_t af, int wp) {
+    uintptr_t fn = 0;
+    __try {
+        fn = reinterpret_cast<uintptr_t>((*reinterpret_cast<void***>(ai))[kAiSetWaypointSlot]);
+        if (fn != af + kRvaAfSetWaypoint) return 1;
+        reinterpret_cast<void(__fastcall*)(void*, void*, int)>(fn)(ai, nullptr, wp);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
 struct ObjFull {
     BYTE* obj = nullptr;
     int group = 0;  // 1 aircraft, 2 ground group
@@ -1346,7 +1452,7 @@ struct HostStream {
     uint32_t epoch = 0, mission = 0;  // sim_player_epoch() and the published mission it was reset for
     bool have_masks = false;      // read once per reset (the build checks are not repeated every frame)
     StreamMasks masks[2];
-    uintptr_t gm = 0, nv = 0;
+    uintptr_t gm = 0, nv = 0, af = 0;
     net::WorldSendClock clock;
     net::WorldEventTracker tracker;
     uint32_t seq = 0, eseq = 0;
@@ -1395,6 +1501,7 @@ void world_host_tick(double now, const double (*players)[3], int n_players, Worl
             LOG("world: stream: note the aircraft and ground flag masks differ; each class uses its own");
         hs.gm = module_if(L"GroundMobileObject.dll", kGmStamp, kGmSize, "GroundMobileObject.dll");
         hs.nv = module_if(L"NavalObject.dll", kNvStamp, kNvSize, "NavalObject.dll");
+        hs.af = module_if(L"AircraftFormation.dll", kAfStamp, kAfSize, "AircraftFormation.dll");
     }
     const bool have_masks = hs.have_masks;
     const uintptr_t gm = hs.gm, nv = hs.nv;
@@ -1408,6 +1515,17 @@ void world_host_tick(double now, const double (*players)[3], int n_players, Worl
         if (!read_slot(t, i, &s)) break;
         if (s.formation == 0xffffffffu) continue;
         const uint8_t kind = static_cast<uint8_t>(i < t.first_ground ? net::KeyKind::Aircraft : net::KeyKind::Ground);
+        if (event_walk && kind == static_cast<uint8_t>(net::KeyKind::Aircraft)) {  // the flight's current waypoint
+            BYTE* fo = nullptr;
+            int fg = 0;
+            int wp = -1, wn = 0;
+            const BYTE* ai = resolve_obj(om, s.formation, &fo, &fg) ? formation_ai(fo, hs.af) : nullptr;
+            if (ai && read_waypoint(ai, &wp, &wn) && wp >= 0 && wp < 32767) {
+                net::WorldSeen seen;
+                seen.waypoint = static_cast<int16_t>(wp);
+                hs.tracker.observe(kind, static_cast<uint16_t>(i), net::kFlightKey, seen, &ev);
+            }
+        }
         for (int m = 0; m < s.members; ++m) {
             ObjFull f;
             const bool ok = read_full(om, s.ids[m], gm, nv, &f);
@@ -1508,6 +1626,7 @@ struct ClientStream {
     StreamMasks masks[2];
     std::unordered_map<uint64_t, uint32_t> last_ms;  // per key: the newest state applied
     std::unordered_map<uint64_t, bool> destroyed;    // keys the host destroyed: late states are not written on the wreck
+    uintptr_t af = 0;
     uint64_t applied = 0, stale = 0, missing = 0, not_remote = 0, events = 0;
     double next_report = 0;
     bool logged_first = false, logged_refresh = false;
@@ -1608,6 +1727,7 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         cs.last_ms.clear();
         cs.destroyed.clear();
         cs.have_masks = read_stream_masks(cs.masks);
+        cs.af = module_if(L"AircraftFormation.dll", kAfStamp, kAfSize, "AircraftFormation.dll");
     }
     if (!cs.have_masks) return;
     auto object_of = [&](uint8_t kind, uint16_t a, uint16_t b, BYTE** obj, int* group) {
@@ -1664,6 +1784,30 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
             net::WorldEventRec e;
             std::memcpy(&e, &r[i], sizeof(e));
             ++cs.events;
+            if (e.event == net::kEventWaypoint && e.kind == static_cast<uint8_t>(net::KeyKind::Aircraft) &&
+                e.b == net::kFlightKey) {
+                PlayerFlight pf{};
+                const bool own = read_player_flight(msn, &pf) && pf.slot == e.a;
+                if (!apply_host_waypoint(waypoint_policy(), own)) continue;
+                SlotRaw sr{};
+                BYTE* fo = nullptr;
+                int fg = 0, cur = -1, count = 0;
+                BYTE* ai = e.a < t.count && read_slot(t, e.a, &sr) && sr.formation != 0xffffffffu &&
+                                   resolve_obj(om, sr.formation, &fo, &fg)
+                               ? formation_ai(fo, cs.af)
+                               : nullptr;
+                if (!ai || !read_waypoint(ai, &cur, &count)) {
+                    LOG("world: stream: waypoint %d for flight slot %u: the formation is not readable here", e.value,
+                        static_cast<unsigned>(e.a));
+                    continue;
+                }
+                if (cur == e.value) continue;
+                const int r3 = set_waypoint(ai, cs.af, e.value);
+                LOG("world: stream: flight slot %u%s follows the host to waypoint %d (was %d of %d): %s",
+                    static_cast<unsigned>(e.a), own ? " (ours)" : "", e.value, cur, count,
+                    r3 == 0 ? "set" : r3 == 1 ? "NOT set (unexpected slot)" : "FAULTED");
+                continue;
+            }
             if (e.event == net::kEventPlacedDamage && e.kind == static_cast<uint8_t>(net::KeyKind::Placed)) {
                 if (BYTE* rec = find_placed(msn, e.a, e.b)) write_i16(rec + kPlacedDamage, e.value);
                 if (!cs.logged_refresh) {
@@ -1878,6 +2022,8 @@ void world_on_modules_loaded() {
     static const HookDef kSms[] = {
         {kRvaNewEvent, reinterpret_cast<void*>(&h_NewEvent), reinterpret_cast<void**>(&o_NewEvent),
          "world: SingleMissionScreen New page events", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08}, 6},
+        {kRvaLoadEvent, reinterpret_cast<void*>(&h_LoadEvent), reinterpret_cast<void**>(&o_LoadEvent),
+         "world: SingleMissionScreen Load page events", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x81, 0xec, 0x10}, 9},
     };
     static const HookDef kSmAll[] = {
         {kRvaSlot32, reinterpret_cast<void*>(&h_Slot32), reinterpret_cast<void**>(&o_Slot32),
@@ -1892,7 +2038,7 @@ void world_on_modules_loaded() {
     const HookDef* sm_defs = slot32 ? kSmAll : kSmAll + 1;
     const size_t sm_n = (slot32 ? 1 : 0) + (g_mode != Mode::Off ? 2 : 0);
     if (g_mode != Mode::Off)
-        hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 1, g_sms,
+        hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 2, g_sms,
                    g_sms_bad);
     if (sm_n) hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, sm_defs, sm_n, g_sm, g_sm_bad);
     if (!g_remote) return;

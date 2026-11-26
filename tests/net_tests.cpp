@@ -7321,13 +7321,20 @@ void world_stream_tests() {
     s3.level = 5;
     tr.observe(1, 5, 0, s3, &out);
     tr.observe(1, 5, 0, s3, &out);  // nothing more once destroyed
+    WorldSeen fl;
+    fl.waypoint = 2;
+    tr.observe(1, 4, kFlightKey, fl, &out);  // first sighting: remembered
+    fl.waypoint = 3;
+    tr.observe(1, 4, kFlightKey, fl, &out);
+    tr.observe(1, 4, kFlightKey, fl, &out);  // unchanged: nothing
     WorldSeen pl;
     tr.observe(3, 12, 7, pl, &out);
     pl.level = 40;
     tr.observe(3, 12, 7, pl, &out);
-    expect(first_silent && out.size() == 3 && out[0].event == kEventAwake && out[1].event == kEventDestroyed &&
-               out[2].event == kEventPlacedDamage && out[2].value == 40,
-           "stream: events on change only: awake, destroyed once, placed damage delta (no object damage levels)");
+    expect(first_silent && out.size() == 4 && out[0].event == kEventAwake && out[1].event == kEventDestroyed &&
+               out[2].event == kEventWaypoint && out[2].value == 3 && out[2].b == kFlightKey &&
+               out[3].event == kEventPlacedDamage && out[3].value == 40,
+           "stream: events on change only: awake, destroyed once, a flight's waypoint, placed damage delta");
 
     // Bytes per second, the T6 estimate: 8 objects near (10 Hz) + 17 far (1 Hz) a second.
     const size_t per_s = world_states_bytes(8) * 10 + world_states_bytes(17);
@@ -7587,6 +7594,10 @@ void world_seat_tests() {
     expect(!decide_seat(0, 4).apply && !decide_seat(-1, 4).apply, "world seat: 0 or none is stock");
     expect(!decide_seat(1, 0).apply && !decide_seat(1, 49).apply, "world seat: implausible member count is stock");
     expect(parse_seat(L"1") == 1 && parse_seat(L"47") == 47, "world seat: parse 1 and 47");
+    expect(waypoint_policy() == WaypointPolicy::FollowHost && apply_host_waypoint(WaypointPolicy::FollowHost, true) &&
+               apply_host_waypoint(WaypointPolicy::OwnFlightChooses, false) &&
+               !apply_host_waypoint(WaypointPolicy::OwnFlightChooses, true),
+           "waypoints: follow the host for now; the later policy leaves only our own flight to us");
     expect(parse_seat(L"0") == -1 && parse_seat(L"48") == -1 && parse_seat(L"") == -1 && parse_seat(L"x") == -1 &&
                parse_seat(L"-1") == -1 && parse_seat(L"1 ") == -1 && parse_seat(nullptr) == -1,
            "world seat: parse refuses 0, 48, empty, junk");

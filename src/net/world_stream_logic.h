@@ -43,6 +43,7 @@ struct WorldSeen {
     bool awake = false;  // AWAKE bit
     bool asleep = false; // ASLEEP bit
     int16_t level = 0;   // damage level (+0x16c), or a placed record's damage 0..100
+    int16_t waypoint = -1;  // a flight key: its current waypoint index; -1 = not a flight / unknown
 };
 
 /// <summary>
@@ -65,6 +66,7 @@ public:
         if (!p.alive) return;  // nothing after a destruction
         // Objects' damage levels are not sent (the client cannot apply them yet); placed records' damage is.
         if (kind == static_cast<uint8_t>(KeyKind::Placed) && s.level != p.level) ev(kEventPlacedDamage, s.level);
+        if (s.waypoint >= 0 && s.waypoint != p.waypoint) ev(kEventWaypoint, s.waypoint);
         if (s.awake && !p.awake) ev(kEventAwake, 0);
         if (s.asleep && !p.asleep) ev(kEventAsleep, 0);
         if (!s.alive) ev(kEventDestroyed, 0);

@@ -163,6 +163,8 @@ inline constexpr uint8_t kEventDestroyed = 1;     // value: unused
 inline constexpr uint8_t kEventAwake = 2;         // the object woke (formation start, scramble)
 inline constexpr uint8_t kEventAsleep = 3;        // the object went to sleep (landed)
 inline constexpr uint8_t kEventPlacedDamage = 4;  // value: the placed record's damage 0..100 (a delta of its state)
+inline constexpr uint8_t kEventWaypoint = 6;      // key (A, slot, kFlightKey): the flight's current waypoint (value)
+inline constexpr uint16_t kFlightKey = 0xffff;    // the b of a key that names a whole flight, not a member
 inline constexpr uint8_t kEventDamageLevel = 5;   // value: the object's damage level 0..5 (reserved: not sent yet)
 
 /// <summary>An unquantised object state (world metres, m/s, radians).</summary>

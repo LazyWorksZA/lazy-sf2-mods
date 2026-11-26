@@ -52,6 +52,18 @@ inline int parse_seat(const wchar_t* s) {
     return v >= 1 ? v : -1;
 }
 
+/// <summary>
+/// Whose choice a flight's current waypoint is on a client. The owner's decision (2026-11-26): for now every flight
+/// follows the host (the game ties #2's active waypoint to its lead, a remote copy on the client); later the
+/// player's own flight may pick its own, which needs that tie undone (network-recon §10.17).
+/// </summary>
+enum class WaypointPolicy : uint8_t { FollowHost, OwnFlightChooses };
+inline WaypointPolicy waypoint_policy() { return WaypointPolicy::FollowHost; }
+/// <summary>The single decision point: does a host waypoint change apply to this flight on the client?</summary>
+inline bool apply_host_waypoint(WaypointPolicy p, bool players_flight) {
+    return p == WaypointPolicy::FollowHost || !players_flight;
+}
+
 enum class RemoteKind : uint8_t { Aircraft, Ground, Placed };
 
 /// <summary>What one marking pass did, for its log line.</summary>
