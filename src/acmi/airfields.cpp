@@ -7,6 +7,7 @@
 #include <map>
 
 #include "acmi/acmi_format.h"
+#include "acmi/object_types.h"
 
 namespace LazyWorks::SF2Patch::acmi {
 
@@ -50,6 +51,7 @@ struct TypeInfo {
     bool runway = false;
     bool live = false;  // UseGroundObject: the game makes it a live ground object
     bool bridge = false;
+    bool storage = false;  // a fuel or storage tank category
 };
 
 using TypeTable = std::map<std::string, TypeInfo>;
@@ -72,6 +74,7 @@ TypeTable type_table(const Ini* types) {
         const std::string* cat = text(s, "targettype");
         const std::string category = cat ? to_lower_ascii(*cat) : std::string();
         info.bridge = category == "bridge";
+        info.storage = is_storage_category(category);
         info.runway = category.size() >= 6 && category.compare(category.size() - 6, 6, "runway") == 0;
         info.live = flag_true(text(s, "usegroundobject"));
         out.emplace(to_lower_ascii(*name), std::move(info));
@@ -198,6 +201,7 @@ PlacedStructures structures_from(const Ini& targets, const Ini& types) {
             Structure s;
             s.name = it != table.end() && !it->second.full_name.empty() ? it->second.full_name : *t.type;
             s.bridge = it != table.end() && it->second.bridge;
+            s.storage = it != table.end() && it->second.storage;
             s.x = pos[0] + off[0] * ca + off[1] * sa;
             s.y = pos[1] - off[0] * sa + off[1] * ca;
             s.heading = r + heading / kRadToDeg;

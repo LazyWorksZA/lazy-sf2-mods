@@ -5,6 +5,25 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+## 1.1.3 (2026-11-26)
+
+### Tacview
+
+- **Tacview: radar and weapon locks are recorded; Tacview draws lock lines.** When an aircraft (yours or the AI's) tracks or locks another aircraft with its radar, the recording names the target, and clears it when the lock is lost. A guided missile names the aircraft it is guiding to.
+- **Tacview: better shapes for ground vehicles, buildings, fuel tanks and bridges.** Ground objects and structures now get more specific Tacview types (truck, jeep, tank, armored vehicle, anti-aircraft, infantry, ship classes, storage and fuel tanks), chosen from the game's category with the name's generic words as a hint. Bridges are written as buildings, because Tacview has no bridge type.
+
+### Fixed
+
+- Airfield names with accented letters (such as ü or ö) show correctly in Tacview.
+
+### Developer tools (off unless enabled)
+
+- **Lock probe hotkeys.** With the probe on: Ctrl+Shift+A places an AI aircraft (an enemy if there is one) 3 km in front of you, at your altitude, heading and speed; Ctrl+Shift+O makes your radar lock it through the avionics' own commands; Ctrl+Shift+I makes that aircraft's radar lock you. Each logs the radar state (`lock probe:` lines).
+
+### Gameplay
+
+- **The game can keep running in the background** (`Options.ini` `[OtherOptions] BackgroundMode`, set by hand, default 0). With **0** the game pauses when its window loses focus, as stock. With **1** it keeps running in any flight (single player included) and in the menus; the keyboard, mouse and joystick are let go until you come back. While the game is minimised, the mod limits it to its normal frame rate so it doesn't use a whole CPU core. With **2** sounds keep playing as well (the menu music still goes quiet in the background). Borderless only: in Fullscreen the game pauses as stock and the log says so once. The value is read when the game starts; a change applies after a restart.
+
 ## 1.1.2 (2026-11-26)
 
 ### Fixed

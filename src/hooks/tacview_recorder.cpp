@@ -32,6 +32,12 @@ constexpr size_t kOffPos = 0x38, kOffAngles = 0x100;  // aircraft object: double
 constexpr size_t kOffWeaponPos = 0x20, kOffWeaponAngles = 0xe8;
 // Every object: int, 0 once it has finished; its memory stays valid. See lazy-sf2-recon: recon-notes §20.1.3.
 constexpr size_t kOffActive = 0x04;
+// Locks. Aircraft radar block at +0x970: int state (+0x970; 2 search, 3 and 4 track, 5 ground), int stage (+0x974;
+// 2 tracking, 3 locked) and the target's object pointer (+0x988). Missile: target object pointer at +0x194 (kept only
+// while the target is active). Read only from objects the build-checked trackers hold.
+// See lazy-sf2-recon: recon-notes §27.
+constexpr size_t kOffRadarState = 0x970, kOffRadarStage = 0x974, kOffRadarTarget = 0x988;
+constexpr size_t kOffWeaponTarget = 0x194;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
 constexpr size_t kMaxAerodromes = 512;
@@ -140,6 +146,42 @@ bool read_active(const void* obj) {
     }
 }
 
+// The aircraft's radar target while it tracks or locks an air target, else null. No C++ objects (SEH).
+const void* read_radar_target(const void* obj) {
+    __try {
+        const char* b = static_cast<const char*>(obj);
+        const int state = *reinterpret_cast<const volatile int*>(b + kOffRadarState);
+        const int stage = *reinterpret_cast<const volatile int*>(b + kOffRadarStage);
+        if (state < 2 || state > 4 || stage < 2) return nullptr;
+        return *reinterpret_cast<const void* const volatile*>(b + kOffRadarTarget);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// A guided missile's target object, or null. No C++ objects (SEH).
+const void* read_weapon_target(const void* obj) {
+    __try {
+        return *reinterpret_cast<const void* const volatile*>(static_cast<const char*>(obj) + kOffWeaponTarget);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+/// <summary>Sets r's lock to the listed aircraft at target (by pointer); none when null or not listed.</summary>
+void set_lock(acmi::TacviewRec& r, const void* target, const LiveAircraft* list, size_t n) {
+    r.lock_mode = 0;
+    r.lock_seq = 0;
+    if (!target) return;
+    for (size_t k = 0; k < n; ++k) {
+        if (list[k].obj == target) {
+            r.lock_mode = 1;
+            r.lock_seq = static_cast<uint32_t>(list[k].seq);
+            return;
+        }
+    }
+}
+
 struct SnapCtx {
     double t = 0;
     bool wrote = false;
@@ -147,13 +189,21 @@ struct SnapCtx {
     size_t n_air = 0;
 };
 
+/// Aircraft names are UTF-16: stored as UTF-8, cut before a character that would not fit.
 void copy_name(char* dst, const wchar_t* src) {
-    size_t k = 0;
-    for (; k < acmi::kRecNameChars && src[k]; ++k) {
-        const wchar_t ch = src[k];
-        dst[k] = (ch >= 0x20 && ch < 0x7f) ? static_cast<char>(ch) : '?';
+    std::string u;
+    for (size_t k = 0; src[k] && k < acmi::kRecNameChars; ++k) {
+        uint32_t cp = src[k];
+        if (cp >= 0xd800 && cp < 0xdc00 && src[k + 1] >= 0xdc00 && src[k + 1] < 0xe000) {
+            cp = 0x10000 + ((cp - 0xd800) << 10) + (src[k + 1] - 0xdc00);
+            ++k;
+        }
+        if (cp < 0x20 || cp == 0x7f) cp = '?';
+        acmi::append_utf8_cp(u, cp);
     }
-    dst[k] = '\0';
+    const size_t n = acmi::utf8_prefix(u, acmi::kRecNameChars);
+    std::memcpy(dst, u.data(), n);
+    dst[n] = '\0';
 }
 
 // Under both tables' shared locks (the weapons' nested in the aircraft's): no allocation, I/O or logging.
@@ -169,6 +219,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.obj_class = acmi::TacviewRec::kAircraft;
         r.parent_seq = 0;
         r.destroyed = 0;
+        r.lock_mode = 0;  // ring slots are reused
+        r.lock_seq = 0;
         if (!read_active(list[i].obj)) {
             // Finished (destroyed): left out of the frame, so the core removes it; the marker adds the Destroyed event,
             // once per aircraft (a full list just repeats it, which the core ignores).
@@ -203,6 +255,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         size_t t = 0;
         for (; t < acmi::kRecTypeChars && list[i].type_name[t]; ++t) r.type[t] = list[i].type_name[t];
         r.type[t] = '\0';
+        set_lock(r, read_radar_target(list[i].obj), list, n);
         ++used;
     }
     size_t live_weapons = 0;
@@ -214,6 +267,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
             if (sent) continue;
             if (g_wdead_n < sizeof(g_wdead_sent) / sizeof(g_wdead_sent[0])) g_wdead_sent[g_wdead_n++] = wl[i].seq;
             acmi::TacviewRec& m = g_writer->slot(used);
+            m.lock_mode = 0;
+            m.lock_seq = 0;
             m.kind = acmi::TacviewRec::kObject;
             m.obj_class = wl[i].weapon_class;
             m.destroyed = acmi::TacviewRec::kDetonated;
@@ -226,6 +281,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = wl[i].weapon_class;
         r.destroyed = 0;
+        r.lock_mode = 0;
+        r.lock_seq = 0;
         r.parent_class = acmi::TacviewRec::kAircraft;  // ring slots are reused
         r.kind = acmi::TacviewRec::kObject;
         r.is_player = 0;
@@ -242,8 +299,13 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         }
         r.side = static_cast<uint8_t>(wl[i].side);
         size_t k = 0;
-        for (; k < acmi::kRecNameChars && wl[i].name[k]; ++k) r.name[k] = wl[i].name[k];
+        while (k < acmi::kRecNameChars && wl[i].name[k]) ++k;
+        // Cut before a UTF-8 continuation byte, as utf8_prefix does (no allocation here).
+        while (k > 0 && wl[i].name[k] && (static_cast<unsigned char>(wl[i].name[k]) & 0xc0) == 0x80) --k;
+        std::memcpy(r.name, wl[i].name, k);
         r.name[k] = '\0';
+        if (wl[i].weapon_class == static_cast<uint8_t>(WeaponClass::Missile))
+            set_lock(r, read_weapon_target(wl[i].obj), list, n);
         ++used;
     }
     g_weapons_live = live_weapons != 0;
@@ -526,7 +588,9 @@ void write_structures(double t) {
             const StructureMark& sm = list.marks[m];
             acmi::TacviewRec& r = g_writer->slot(used++);
             r.kind = acmi::TacviewRec::kObject;
-            r.obj_class = sm.bridge ? acmi::TacviewRec::kBridge : acmi::TacviewRec::kStructure;
+            r.obj_class = sm.bridge    ? acmi::TacviewRec::kBridge
+                          : sm.storage ? acmi::TacviewRec::kStorage
+                                       : acmi::TacviewRec::kStructure;
             r.side = 0;
             r.is_player = 0;
             r.parent_class = acmi::TacviewRec::kAircraft;

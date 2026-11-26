@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "acmi/acmi_format.h"
+#include "acmi/object_types.h"
 
 namespace LazyWorks::SF2Patch::acmi {
 
@@ -95,6 +96,10 @@ void TacviewCore::add(const TacviewRec& r) {
         s = &objs_.back();
     }
     s->seen = frame_no_;  // present in this frame, even if its transform is skipped below
+    if (family == TacviewRec::Family::Aircraft || weapon) {
+        s->want_lock = r.lock_mode ? r.lock_seq : 0;
+        s->lock_frame = frame_no_;
+    }
     const double min_dt = family == TacviewRec::Family::Aircraft ? min_dt_
                           : weapon                              ? min_dt_weapon_
                                                                 : 0.0;  // the walker's own due times
@@ -155,9 +160,7 @@ void TacviewCore::add(const TacviewRec& r) {
                 p.parent = parent_id;
             }
         } else if (family == TacviewRec::Family::Ground) {
-            p.type = r.obj_class == TacviewRec::kGroundStatic    ? "Ground+Static+Building"
-                     : r.obj_class == TacviewRec::kGroundVehicle ? "Ground+Vehicle"
-                                                                  : "Sea+Watercraft";
+            p.type = ground_type_tags(r.obj_class, name);
         } else if (family == TacviewRec::Family::Aerodrome) {
             side = hooks::AircraftSide::Unknown;  // an airfield has no coalition here
             p.type = "Ground+Static+Aerodrome";
@@ -194,6 +197,27 @@ void TacviewCore::add(const TacviewRec& r) {
     }
     pending_ += '\n';
     ++stats_.transforms;
+}
+
+// After the frame's removals, so a target that left in this frame counts as no lock. Only objects sampled in this
+// frame (a series the frame does not list keeps its lock).
+void TacviewCore::resolve_locks() {
+    for (State& s : objs_) {
+        if (s.lock_frame != frame_no_) continue;
+        uint32_t target = 0;
+        if (s.want_lock) {
+            for (const State& o : objs_) {
+                if (o.seq == s.want_lock && o.obj_class == TacviewRec::kAircraft) {
+                    if (o.id != s.id) target = o.id;
+                    break;
+                }
+            }
+        }
+        if (target == s.lock_id) continue;
+        s.lock_id = target;
+        append_lock(locks_, s.id, target);
+        ++stats_.lock_changes;
+    }
 }
 
 void TacviewCore::add_structure(const TacviewRec& r) {
@@ -244,7 +268,7 @@ void TacviewCore::add_structure(const TacviewRec& r) {
     name[kRecNameChars] = '\0';
     ObjectProps p;
     p.name = name;
-    p.type = r.obj_class == TacviewRec::kBridge ? "Ground+Static+Bridge" : "Ground+Static+Building";
+    p.type = ground_type_tags(r.obj_class, name);
     append_props(pending_, p);
     pending_ += '\n';
     ++stats_.objects;
@@ -273,6 +297,7 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
             ++i;
         }
     }
+    resolve_locks();
     for (const uint32_t id : dead_statics_) {
         append_removal(removals, id);
         ++stats_.removals;
@@ -303,7 +328,7 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
             ++i;
         }
     }
-    if (removals.empty() && pending_.empty() && events_.empty()) return;
+    if (removals.empty() && pending_.empty() && events_.empty() && locks_.empty()) return;
     if (!std::isfinite(t)) t = last_t_;
     if (!have_t0_) {
         have_t0_ = true;
@@ -320,8 +345,10 @@ void TacviewCore::end_frame(double t, std::string& out, uint8_t series_mask) {
     out += events_;
     out += removals;
     out += pending_;
+    out += locks_;
     events_.clear();
     pending_.clear();
+    locks_.clear();
 }
 
 }  // namespace LazyWorks::SF2Patch::acmi

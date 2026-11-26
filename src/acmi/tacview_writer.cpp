@@ -142,7 +142,8 @@ void TacviewWriter::close(bool wait_and_detach, const char* why) {
 }
 
 void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t structures,
-                                uint64_t structures_skipped, uint64_t structures_destroyed, uint64_t destroyed_events) {
+                                uint64_t structures_skipped, uint64_t structures_destroyed, uint64_t destroyed_events,
+                                uint64_t lock_changes) {
     if (summary_logged_.exchange(true)) return;
     char line[640];
     const std::string shown = narrow(display_ ? display_(path()) : path());
@@ -158,9 +159,14 @@ void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char*
                                     static_cast<unsigned long long>(structures_destroyed));
         m = k > 0 ? m + k : -1;
     }
-    if (m > 0 && static_cast<size_t>(m) < sizeof(line) && destroyed_events)
-        std::snprintf(line + m, sizeof(line) - static_cast<size_t>(m), ", %llu Destroyed events in all",
-                      static_cast<unsigned long long>(destroyed_events));
+    if (m > 0 && static_cast<size_t>(m) < sizeof(line) && destroyed_events) {
+        const int k = std::snprintf(line + m, sizeof(line) - static_cast<size_t>(m), ", %llu Destroyed events in all",
+                                    static_cast<unsigned long long>(destroyed_events));
+        m = k > 0 ? m + k : -1;
+    }
+    if (m > 0 && static_cast<size_t>(m) < sizeof(line) && lock_changes)
+        std::snprintf(line + m, sizeof(line) - static_cast<size_t>(m), ", %llu lock changes",
+                      static_cast<unsigned long long>(lock_changes));
     log_(line);
 }
 
@@ -334,7 +340,8 @@ void TacviewWriter::run() {
     CloseHandle(f);
     file_ = nullptr;
     log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed), core.stats().structures,
-                core.stats().structures_skipped, core.stats().structures_destroyed, core.stats().destroyed_events);
+                core.stats().structures_skipped, core.stats().structures_destroyed, core.stats().destroyed_events,
+                core.stats().lock_changes);
     // Hand the closed file to the background compressor: this thread, and so the next recording, never waits for it.
     if (!failed && !no_zip_.load(std::memory_order_acquire)) zip_queue_submit(path, log_, display_);
     finished_.store(true, std::memory_order_release);

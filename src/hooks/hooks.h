@@ -23,6 +23,8 @@ void request_display_mode_apply();
 void dxgi_apply_display_mode();
 /// <summary>True if the swap chain is in exclusive fullscreen (diagnostics).</summary>
 bool dxgi_is_exclusive();
+/// <summary>The game swap chain's last Present result (S_OK before any; D3D9 fallback: always S_OK). Any thread.</summary>
+long dxgi_last_present_result();
 /// <summary>
 /// Confines the cursor to the game's client area in Fullscreen with "Match Windows cursor" (while the game is the
 /// active app) and releases it otherwise, only ever releasing a clip this mod set. Any thread; logs on change.
@@ -34,6 +36,23 @@ void cursor_clip_poll(const char* why);
 void cursor_clip_release_at_exit();
 /// <summary>True while "Match Windows cursor" is active (chosen in Options and the mouse read hook is in place).</summary>
 bool mouse_cursor_mode_active();
+
+/// <summary>
+/// Hooks the exe's focus handler and message pump ([OtherOptions] BackgroundMode): in Borderless a focus loss can keep
+/// the game running (input is still released), paced by our frame limiter while minimised; otherwise stock. Call from
+/// DllMain.
+/// </summary>
+bool install_focus_hooks();
+
+/// <summary>
+/// BackgroundMode 2: hooks dsound!DirectSoundCreate8, then IDirectSound8::CreateSoundBuffer, so new secondary buffers
+/// get DSBCAPS_GLOBALFOCUS. Module watch callback; reads no settings.
+/// </summary>
+void sound_on_modules_loaded();
+/// <summary>True once a sound buffer was created with the GLOBALFOCUS flag we added.</summary>
+bool sound_global_focus_active();
+/// <summary>Stops every playing channel of the game's SND service (stamp-checked). Game thread only.</summary>
+void sound_stop_all_channels(const char* why);
 
 /// <summary>
 /// Hooks kernelbase!LoadLibraryExW. After every load each feature gets a chance to hook the modules that
@@ -275,6 +294,12 @@ bool replay_active();
 /// </summary>
 void player_jump_on_modules_loaded();
 void player_jump_request(bool full);
+/// <summary>
+/// Lock probe (developer tool, lock_probe.cpp): Ctrl+Shift+A places an AI 3 km ahead of the player, Ctrl+Shift+O
+/// locks it with the player's radar, Ctrl+Shift+I makes it lock the player. Requests: 1 place, 2 player lock, 3 AI lock.
+/// </summary>
+void lock_probe_on_modules_loaded();
+void lock_probe_request(int what);
 /// <summary>Step order (developer tool, step_order.cpp): logs once per player whether it steps before the other aircraft in a frame.</summary>
 void step_order_on_modules_loaded();
 
