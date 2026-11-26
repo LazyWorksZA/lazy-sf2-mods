@@ -36,6 +36,7 @@
 #include "bot_client.h"
 #include <miniz.h>
 
+#include "acmi/object_types.h"
 #include "bot_core.h"
 #include "net/host_core.h"
 #include "net/protocol.h"
@@ -2237,13 +2238,13 @@ void tacview_tests() {
         const auto ls = lines_of(out);
         expect(ls.size() == 6, "tacview world: five objects");
         expect(ls[1].rfind("2000001,T=", 0) == 0 &&
-                   ls[1].find(",Name=SA-2 Site,Type=Ground+Static+Building,Coalition=Enemies,Color=Red") != std::string::npos &&
+                   ls[1].find(",Name=SA-2 Site,Type=Ground+AntiAircraft,Coalition=Enemies,Color=Red") != std::string::npos &&
                    ls[1].find("Pilot") == std::string::npos,
                "tacview world: building id 0x2000000+seq, type name, coalition");
         expect(ls[2].rfind("2000002,T=", 0) == 0 &&
-                   ls[2].find(",Name=M113" + std::string(1, 92) + ",APC,Type=Ground+Vehicle,Coalition=Allies") != std::string::npos,
+                   ls[2].find(",Name=M113" + std::string(1, 92) + ",APC,Type=Ground+Heavy+Armor+Vehicle,Coalition=Allies") != std::string::npos,
                "tacview world: vehicle type and escaped name");
-        expect(ls[3].find(",Name=Frigate,Type=Sea+Watercraft,Coalition=Neutrals") != std::string::npos &&
+        expect(ls[3].find(",Name=Frigate,Type=Sea+Watercraft+Warship,Coalition=Neutrals") != std::string::npos &&
                    ls[3].rfind("2000003,T=", 0) == 0,
                "tacview world: ship type");
         expect(ls[4].rfind("3000001,T=", 0) == 0 && ls[4].find("Type=Misc+Decoy+Flare") != std::string::npos &&
@@ -3373,8 +3374,8 @@ void structure_tests() {
     const auto l1 = lines_of(o1);
     expect(l1.size() == 4 && l1[0] == "#1.000" && l1[1] == want2, "structures: one line each, id 0x7000000+seq, Ground+Static+Building, no coalition");
     expect(o1.find("7000001,") == std::string::npos, "structures: one within 15 m of a live ground object is skipped");
-    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Bridge\n") != std::string::npos,
-           "structures: a bridge is Ground+Static+Bridge");
+    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Building\n") != std::string::npos,
+           "structures: a bridge is a building (the SDK has no Bridge tag)");
     expect(o1.find("7000004,T=") != std::string::npos, "structures: vehicles do not hide them");
     // The next chunk: a repeat writes nothing; a new one is added; the earlier ones stay.
     std::string o2;
@@ -3808,7 +3809,38 @@ void probe_snapshot_tests() {
     expect(probe_auto_numbers_to_delete({}, 5).empty(), "probe snap: empty");
 }
 
+static void object_type_tests() {
+    using namespace LazyWorks::SF2Patch::acmi;
+    auto tags = [](uint8_t cls, const char* name) { return std::string(ground_type_tags(cls, name)); };
+    const uint8_t V = TacviewRec::kGroundVehicle, S = TacviewRec::kGroundStatic, H = TacviewRec::kShip;
+    expect(tags(V, "Foo Truck") == "Ground+Medium+Vehicle" && tags(V, "Fuel Tanker") == "Ground+Medium+Vehicle",
+           "types: truck and tanker are medium vehicles, not tanks");
+    expect(tags(V, "Zork Jeep") == "Ground+Light+Vehicle" && tags(V, "Staff Car") == "Ground+Light+Vehicle", "types: jeep and car");
+    expect(tags(V, "Zork Main Battle Tank") == "Ground+Heavy+Armor+Vehicle+Tank" && tags(V, "Zork MBT") == "Ground+Heavy+Armor+Vehicle+Tank",
+           "types: tank");
+    expect(tags(V, "Zork APC") == "Ground+Heavy+Armor+Vehicle" && tags(V, "Zork Howitzer") == "Ground+Heavy+Armor+Vehicle",
+           "types: APC and artillery are armor");
+    expect(tags(V, "Zork AAA Gun") == "Ground+AntiAircraft" && tags(V, "SA-13 Launcher") == "Ground+AntiAircraft" &&
+               tags(V, "Mosa-13") == "Ground+Vehicle",
+           "types: anti-aircraft, and a lookalike is not");
+    expect(tags(V, "Zork Rifle Squad") == "Ground+Light+Human+Infantry" && tags(V, "Zorkmobile") == "Ground+Vehicle",
+           "types: infantry; unknown is a plain vehicle");
+    expect(tags(H, "Zork Carrier") == "Sea+Watercraft+AircraftCarrier" && tags(H, "Zork Destroyer") == "Sea+Watercraft+Warship" &&
+               tags(H, "Zork Submarine") == "Sea+Watercraft+Submarine" && tags(H, "Zork Barge") == "Sea+Watercraft",
+           "types: ship classes");
+    expect(tags(S, "Zork Hangar") == "Ground+Static+Building" && tags(S, "Zork Fuel Tank") == "Ground+Static+Container" &&
+               tags(S, "Zork Radar") == "Ground+AntiAircraft" && tags(S, "Zork Flak Tower") == "Ground+AntiAircraft",
+           "types: static objects");
+    expect(tags(TacviewRec::kStorage, "Zork") == "Ground+Static+Container" && tags(TacviewRec::kBridge, "Fuel Bridge") == "Ground+Static+Building" &&
+               tags(TacviewRec::kStructure, "Zork Storage Tank") == "Ground+Static+Container" &&
+               tags(TacviewRec::kStructure, "Zork Bunker") == "Ground+Static+Building",
+           "types: structures: the class decides, the name refines");
+    expect(is_storage_category("FUEL_STORAGE") && is_storage_category("Oil") && !is_storage_category("BRIDGE") && !is_storage_category("BUILDING"),
+           "types: storage category");
+}
+
 int main() {
+    object_type_tests();
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
     bool ok = protocol_selftest(&why);

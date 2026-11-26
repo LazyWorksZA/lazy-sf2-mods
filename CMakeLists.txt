@@ -61,6 +61,7 @@ add_library(lazysf2 SHARED
     src/hooks/mission_areas.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
+    src/acmi/object_types.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
     src/acmi/acmi_zip.cpp
@@ -105,6 +106,7 @@ add_executable(lazysf2-net-tests
     tools/acmi/acmi_convert.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
+    src/acmi/object_types.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
     src/acmi/acmi_zip.cpp

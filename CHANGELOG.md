@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Tacview
+
+- **Tacview: better shapes for ground vehicles, buildings, fuel tanks and bridges.** Ground objects and structures now get more specific Tacview types (truck, jeep, tank, armored vehicle, anti-aircraft, infantry, ship classes, storage and fuel tanks), chosen from the game's category with the name's generic words as a hint. Bridges are written as buildings, because Tacview has no bridge type.
+
 ## 1.1.2 (2026-11-26)
 
 ### Fixed
