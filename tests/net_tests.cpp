@@ -32,6 +32,7 @@
 #include "hooks/probe_snap_logic.h"
 #include "hooks/world_walk_logic.h"
 #include "hooks/world_files.h"
+#include "hooks/world_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/focus_logic.h"
@@ -7228,6 +7229,20 @@ void pilot_twist_settings_tests() {
            "settings: the limits themselves are kept");
 }
 
+void world_seat_tests() {
+    using namespace LazyWorks::SF2Patch::hooks;
+    std::printf("world seat\n");
+    expect(decide_seat(1, 2).apply && decide_seat(1, 2).member == 1, "world seat: 1-2 in a two-ship");
+    expect(decide_seat(3, 4).apply && decide_seat(3, 4).member == 3, "world seat: 1-4 in a four-ship");
+    expect(!decide_seat(1, 1).apply && !decide_seat(2, 2).apply, "world seat: too few members is stock");
+    expect(!decide_seat(0, 4).apply && !decide_seat(-1, 4).apply, "world seat: 0 or none is stock");
+    expect(!decide_seat(1, 0).apply && !decide_seat(1, 49).apply, "world seat: implausible member count is stock");
+    expect(parse_seat(L"1") == 1 && parse_seat(L"47") == 47, "world seat: parse 1 and 47");
+    expect(parse_seat(L"0") == -1 && parse_seat(L"48") == -1 && parse_seat(L"") == -1 && parse_seat(L"x") == -1 &&
+               parse_seat(L"-1") == -1 && parse_seat(L"1 ") == -1 && parse_seat(nullptr) == -1,
+           "world seat: parse refuses 0, 48, empty, junk");
+}
+
 void world_files_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     std::printf("world files\n");
@@ -7399,6 +7414,7 @@ int main() {
     pilot_twist_tests();
     probe_snapshot_tests();
     world_files_tests();
+    world_seat_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

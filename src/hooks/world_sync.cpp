@@ -18,6 +18,7 @@
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "hooks/world_files.h"
+#include "hooks/world_logic.h"
 #include "log.h"
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -40,6 +41,10 @@ constexpr size_t kRndIndex = 0x4004, kRndSeedValue = 0x4008;
 constexpr DWORD kRvaMsn = 0xa67c0, kRvaMsnVtable = 0x8b924;
 constexpr DWORD kRvaLoad = 0x4a980, kRvaSave = 0x45c60, kRvaGenerate = 0x9230;
 constexpr DWORD kRvaStart = 0x31a20, kRvaIniGetInt = 0x14ae0, kRvaDensity = 0xb5d1c;
+constexpr DWORD kRvaSlot32 = 0x85e0;  // MSN slot 32: writes the pilot into the player's seat, then runs the start
+// The flight list (node +0x00 next, +0x08 record) and the flight record's member count and slot index.
+constexpr size_t kOffFlightHead = 0x2c10, kFlightNodeNext = 0x00, kFlightNodeRec = 0x08;
+constexpr size_t kFlightMembers = 0xe8, kFlightSlot = 0x82;
 // Mission object fields.
 // The settings block: +0x04 type, +0x08 aircraft, +0x210 map, +0x418 time (h, m, s), +0x428 date (y, m, d).
 constexpr size_t kOffHeader = 0x24d0;
@@ -70,6 +75,7 @@ constexpr size_t kAircraftData = 0x380, kGroundTypeRec = 0x360, kTypeName = 0x04
 enum class Mode { Off, Save, Load };
 Mode g_mode = Mode::Off;          // set once in world_install()
 std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
+int g_seat = -1;                  // LAZYSF2_WORLD_SEAT: the player's member index, or -1 (stock)
 bool g_seed_from_env = false;
 uint32_t g_env_seed = 0;
 
@@ -102,6 +108,8 @@ Start_t o_Start = nullptr;
 IniGetInt_t o_IniGetInt = nullptr;
 SRWLOCK g_hook_lock = SRWLOCK_INIT;
 HMODULE g_sms = nullptr, g_sms_bad = nullptr, g_sm = nullptr, g_sm_bad = nullptr;  // guarded by g_hook_lock
+using Slot32_t = int(__fastcall*)(void* msn);  // returns the start's eax, which FlightEngine checks
+Slot32_t o_Slot32 = nullptr;
 
 // Game calls (thiscall, called as fastcall with a dummy edx).
 using Load_t = bool(__fastcall*)(void* msn, void* edx, const wchar_t* path);
@@ -807,6 +815,116 @@ int __fastcall h_Start(void* msn) {
     return result;
 }
 
+// ---- seat (T3) ----
+
+struct PlayerFlight {
+    int index;      // +0x2b24
+    int member;     // +0x2b28
+    int members;    // flight record +0xe8
+    int slot;       // flight record +0x82
+};
+// The player flight's record, found by walking the flight list (bounded by its count). SEH only.
+bool read_player_flight(const void* msn, PlayerFlight* f) {
+    __try {
+        const BYTE* m = static_cast<const BYTE*>(msn);
+        int count = 0;
+        std::memcpy(&f->index, m + kOffPlayerFlight, sizeof(int));
+        std::memcpy(&f->member, m + kOffPlayerMember, sizeof(int));
+        std::memcpy(&count, m + kOffFlightCount, sizeof(int));
+        if (count < 1 || count > kMaxSlots || f->index < 0 || f->index >= count) return false;
+        const BYTE* node = *reinterpret_cast<const BYTE* const*>(m + kOffFlightHead);
+        for (int i = 0; i < f->index && node; ++i) node = *reinterpret_cast<const BYTE* const*>(node + kFlightNodeNext);
+        if (!node) return false;
+        const BYTE* rec = *reinterpret_cast<const BYTE* const*>(node + kFlightNodeRec);
+        if (!rec) return false;
+        int16_t members = 0, slot = 0;
+        std::memcpy(&members, rec + kFlightMembers, sizeof(members));
+        std::memcpy(&slot, rec + kFlightSlot, sizeof(slot));
+        f->members = members;
+        f->slot = slot;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool write_player_member(void* msn, int member) {
+    __try {
+        std::memcpy(static_cast<BYTE*>(msn) + kOffPlayerMember, &member, sizeof(int));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The object id of member m of mission slot s, and the player object (+0x1c). SEH only.
+bool read_member_id(const SlotTable& t, int s, int m, uint32_t* id) {
+    if (s < 0 || s >= t.count || m < 0 || m >= kMaxMembers) return false;
+    __try {
+        std::memcpy(id, t.arr + static_cast<size_t>(s) * kSlotBytes + kSlotMembers + 4 * static_cast<size_t>(m),
+                    sizeof(uint32_t));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool read_player_obj(const void* msn, uint32_t* id) {
+    __try {
+        std::memcpy(id, static_cast<const BYTE*>(msn) + kOffPlayerObj, sizeof(uint32_t));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Before the start: the player takes member g_seat of the player flight. Load and Generate both reset +0x2b28 to 0,
+// so this is the last moment; slot 32 then writes the pilot into that member. See lazy-sf2-recon: network-recon §10.2.
+bool apply_seat(void* msn) {
+    PlayerFlight f{};
+    if (!read_player_flight(msn, &f)) {
+        LOG("world: seat: refused (the player flight could not be read); stock seat");
+        return false;
+    }
+    const SeatDecision d = decide_seat(g_seat, f.members);
+    if (!d.apply) {
+        LOG("world: seat: refused (%s: flight %d has %d members, seat %d asked); stock seat", d.why, f.index,
+            f.members, g_seat);
+        return false;
+    }
+    if (!write_player_member(msn, d.member)) {
+        LOG("world: ERR seat: writing the member index faulted; stock seat");
+        return false;
+    }
+    LOG("world: seat: the player takes member %d (x-%d) of flight %d (%d members) instead of member %d", d.member,
+        d.member + 1, f.index, f.members, f.member);
+    return true;
+}
+
+void check_seat(void* msn) {
+    PlayerFlight f{};
+    SlotTable t{};
+    uint32_t member_id = 0, player_id = 0;
+    if (!read_player_flight(msn, &f) || !read_slot_table(msn, &t) || !read_member_id(t, f.slot, f.member, &member_id) ||
+        !read_player_obj(msn, &player_id)) {
+        LOG("world: seat check: the mission could not be read after the start");
+        return;
+    }
+    LOG("world: seat check: member index %d, player object 0x%08lx, member %d of slot %d is 0x%08lx: %s", f.member,
+        static_cast<unsigned long>(player_id), f.member, f.slot, static_cast<unsigned long>(member_id),
+        player_id == member_id && f.member == g_seat ? "ok" : "MISMATCH");
+    LOG("world: seat: note that the probe's aircraft tracker still takes the first aircraft built (member 0) as the "
+        "player");
+}
+
+int __fastcall h_Slot32(void* msn) {
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    if (g_seat < 0 || !sm || msn != at_rva(sm, kRvaMsn)) return o_Slot32(msn);
+    const bool seated = apply_seat(msn);
+    const int r = o_Slot32(msn);
+    if (seated) check_seat(msn);
+    return r;
+}
+
 // ---- hook installation, per image ----
 
 struct HookDef {
@@ -860,15 +978,31 @@ void hook_image(const wchar_t* name, const char* label, DWORD stamp, DWORD size,
 
 }  // namespace
 
+void install_save_load();
+
 void world_install() {
+    if (!probe_output_dir()) {
+        if (env_set(L"LAZYSF2_WORLD_SAVE") || env_set(L"LAZYSF2_WORLD_LOAD") || env_set(L"LAZYSF2_WORLD_SEAT"))
+            LOG("world: off (LAZYSF2_WORLD_* need LAZYSF2_PROBE_DIR)");
+        return;
+    }
+    wchar_t seat[16] = {};
+    if (GetEnvironmentVariableW(L"LAZYSF2_WORLD_SEAT", seat, 16) > 0) {
+        g_seat = parse_seat(seat);
+        if (g_seat < 0)
+            LOG("world: LAZYSF2_WORLD_SEAT is not a member index 1..47; stock seat");
+        else
+            LOG("world: seat mode: the player takes member %d (x-%d) of the player flight in single missions", g_seat,
+                g_seat + 1);
+    }
+    install_save_load();
+}
+
+void install_save_load() {
     const bool save = env_set(L"LAZYSF2_WORLD_SAVE");
     wchar_t load[MAX_PATH] = {};
     const DWORD ln = GetEnvironmentVariableW(L"LAZYSF2_WORLD_LOAD", load, MAX_PATH);
     if (!save && ln == 0) return;
-    if (!probe_output_dir()) {
-        LOG("world: off (LAZYSF2_WORLD_SAVE/LOAD need LAZYSF2_PROBE_DIR)");
-        return;
-    }
     if (save && ln > 0) {
         LOG("world: off (LAZYSF2_WORLD_SAVE and LAZYSF2_WORLD_LOAD are both set)");
         return;
@@ -902,19 +1036,26 @@ void world_install() {
 }
 
 void world_on_modules_loaded() {
-    if (g_mode == Mode::Off) return;
+    if (g_mode == Mode::Off && g_seat < 0) return;
     static const HookDef kSms[] = {
         {kRvaNewEvent, reinterpret_cast<void*>(&h_NewEvent), reinterpret_cast<void**>(&o_NewEvent),
          "world: SingleMissionScreen New page events", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08}, 6},
     };
-    static const HookDef kSm[] = {
+    static const HookDef kSmAll[] = {
+        {kRvaSlot32, reinterpret_cast<void*>(&h_Slot32), reinterpret_cast<void**>(&o_Slot32),
+         "world: SingleMission MSN slot 32", {0x55, 0x8b, 0xec, 0x81, 0xec, 0xe4, 0x03, 0x00, 0x00}, 9},
         {kRvaStart, reinterpret_cast<void*>(&h_Start), reinterpret_cast<void**>(&o_Start),
          "world: SingleMission mission start", {0x55, 0x8b, 0xec, 0x81, 0xec, 0x34, 0x02, 0x00, 0x00}, 9},
         {kRvaIniGetInt, reinterpret_cast<void*>(&h_IniGetInt), reinterpret_cast<void**>(&o_IniGetInt),
          "world: SingleMission ini int getter", {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x53}, 7},
     };
-    hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 1, g_sms, g_sms_bad);
-    hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, kSm, 2, g_sm, g_sm_bad);
+    // Only what the switches need: slot 32 for the seat; the start and the getter for save/load.
+    const HookDef* sm_defs = g_seat >= 0 ? kSmAll : kSmAll + 1;
+    const size_t sm_n = (g_seat >= 0 ? 1 : 0) + (g_mode != Mode::Off ? 2 : 0);
+    if (g_mode != Mode::Off)
+        hook_image(L"SingleMissionScreen.dll", "SingleMissionScreen.dll", kSmsStamp, kSmsSize, kSms, 1, g_sms,
+                   g_sms_bad);
+    hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, sm_defs, sm_n, g_sm, g_sm_bad);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

@@ -310,7 +310,8 @@ bool client_welcomed();
 /// saves each Single Mission accepted on the New page to &lt;probe dir&gt;\world_NNN.msn (plus world_NNN.sidecar.txt:
 /// seed and start options) and runs from it; LAZYSF2_WORLD_LOAD=&lt;file&gt; runs that file instead, with the
 /// sidecar's seed and options forced. Both write world_NNN.manifest.txt after the mission's objects are created.
-/// LAZYSF2_WORLD_SEED=n fixes the seed for a save. world_install() reads the variables (DllMain, after
+/// LAZYSF2_WORLD_SEED=n fixes the seed for a save. LAZYSF2_WORLD_SEAT=n puts the player on member n (n = 1 is "x-2") of
+/// the player flight in every single mission. world_install() reads the variables (DllMain, after
 /// install_probe_hooks()); world_on_modules_loaded() hooks SingleMissionScreen.dll and SingleMission.dll images.
 /// </summary>
 void world_install();
