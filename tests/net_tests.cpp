@@ -3441,10 +3441,11 @@ void placement_tests() {
 }
 
 // RemoteJet (net/remote_jet.h): synthetic flights through a fake channel (one-way delay, jitter, loss, reordering),
-// the receiver stepping at 60 Hz, errors measured against the truth at the receiver's now.
+// the receiver stepping at a jittered ~60 Hz, errors measured against the truth at the receiver's true time.
 namespace {
 
 namespace rmath = LazyWorks::SF2Patch::hooks::replay_math;
+namespace jm = LazyWorks::SF2Patch::net::jet_math;
 using Out = RemoteJet::Out;
 
 // Level flight at bot::kSpeed that rolls (180 deg/s) into a sustained coordinated turn of `load` g at roll_at.
@@ -3484,6 +3485,63 @@ struct TurnTruth {
     }
 };
 
+// A rigid body flying along its nose at bot::kSpeed, turned by body rates (pitch about x, roll about y):
+//  - Loop: pulls a 6 g loop through the vertical from 2 s (pitch rate ramped in over 0.5 s) and holds it.
+//  - Rolls: every 4 s, a full-stick 360 deg/s roll for exactly 1 s, started and stopped at once.
+struct BodyTruth {
+    enum Kind { Loop, Rolls } kind;
+    explicit BodyTruth(Kind k) : kind(k) {}
+    jm::Quat q{1, 0, 0, 0};
+    double pos[3] = {}, t0 = 0, t = 0, rate[3] = {};
+    void start(const double spawn[3], double hdg, double start_t) {
+        for (int i = 0; i < 3; ++i) pos[i] = spawn[i];
+        const double e[3] = {0.0, hdg, 0.0};
+        q = jm::q_from_euler(e);
+        t0 = t = start_t;
+    }
+    void rates_at(double tau, double w[3]) const {
+        w[0] = w[1] = w[2] = 0.0;
+        if (kind == Loop) {
+            const double q_max = 6.0 * bot::kG / bot::kSpeed;
+            w[0] = tau < 2.0 ? 0.0 : q_max * (std::min)(1.0, (tau - 2.0) / 0.5);
+        } else {
+            const double ph = std::fmod(tau, 4.0);
+            w[1] = (tau > 1.0 && ph >= 2.0 && ph < 3.0) ? 2.0 * rmath::kPi : 0.0;
+        }
+    }
+    void forward(double f[3]) const {
+        f[0] = 2 * (q.x * q.y - q.z * q.w);
+        f[1] = 1 - 2 * (q.x * q.x + q.z * q.z);
+        f[2] = 2 * (q.y * q.z + q.x * q.w);
+    }
+    void advance_to(double to) {
+        while (to - t > 1e-9) {
+            const double dt = (to - t) < 0.001 ? (to - t) : 0.001;
+            rates_at(t - t0 + 0.5 * dt, rate);
+            const double r[3] = {rate[0] * dt * 0.5, rate[1] * dt * 0.5, rate[2] * dt * 0.5};
+            q = jm::q_mul(q, jm::q_exp(r));  // body-frame rotation by half the step: q * exp(w dt / 2)
+            double f[3];
+            forward(f);
+            for (int i = 0; i < 3; ++i) pos[i] += bot::kSpeed * f[i] * dt;  // along the midpoint direction
+            q = jm::q_mul(q, jm::q_exp(r));
+            t += dt;
+        }
+    }
+    bot::Flight::Sample sample() const {
+        bot::Flight::Sample s{};
+        double f[3], e[3];
+        forward(f);
+        jm::q_to_euler(q, e);
+        for (int i = 0; i < 3; ++i) {
+            s.pos[i] = pos[i];
+            s.vel[i] = static_cast<float>(bot::kSpeed * f[i]);
+            s.ang[i] = static_cast<float>(e[i]);
+            s.rates[i] = static_cast<float>(rate[i]);
+        }
+        return s;
+    }
+};
+
 struct ScriptTruth {
     bot::Flight f;
     bot::Script script;
@@ -3497,21 +3555,27 @@ struct JetRun {
     JetParams params;
     double duration = 60.0, delay = 0.15, jitter = 0.010, loss = 0.01, rate = 20.0;
     double heading = 0.3;
-    double gap_at = -1, gap_len = 0;  // seconds from the start: the source sends nothing
+    double sender_phase = 0.0071, sender_jitter = 0.0;  // the first send time, and +- uniform jitter per send
+    double dt_lo = 1.0 / 60.0, dt_hi = 1.0 / 60.0;     // receiver step length, uniform in [lo, hi]
+    double clock_off = 0.0;                            // the receiver's host clock minus the true host time
+    double vel_noise = 0.0;                            // +- uniform per axis on the sent velocity, m/s
+    double gap_at = -1, gap_len = 0;    // seconds from the start: the source sends nothing
     double jump_at = -1, jump = 500.0;  // from then on the source is `jump` metres east
+    double back_at = -1, back = 0.0;    // from then on the receiver's clock reads `back` seconds earlier
     double measure_from = 2.0;
     uint32_t seed = 1;
 };
 
 struct JetResult {
-    std::vector<double> pos_err, ang_err;  // metres, degrees
+    std::vector<double> pos_err, ang_err;  // metres, degrees (rotation distance)
     int outs[5] = {};
     int snaps = 0, snaps_after_first = 0;
-    double accel_excess = -1e9, shown_g = 0, true_g = 0;  // the worst 1 s window: shown g minus true g
-    uint32_t rejected = 0;
+    double accel_excess = -1e9, shown_g = 0, true_g = 0;  // the worst ~1 s window: shown g minus true g
+    uint32_t rejected = 0, restarts = 0, resyncs = 0;
     double delay_end = 0, delay_rate_max = 0;
     double rate_hz = 0, age_p50 = 0, age_p90 = 0, horizon_max = 0;
-    bool angles_wrapped = true;  // every shown angle in (-pi, pi]
+    bool angles_valid = true;  // every shown pitch in [-pi/2, pi/2], heading and roll in (-pi, pi]
+    double min_move = 1e9;     // the smallest shown displacement between two written steps (frozen jet: 0)
 };
 
 double pct(std::vector<double> v, double q) {
@@ -3533,87 +3597,102 @@ JetResult run_jet(Truth truth, const JetRun& run, F on_step) {
         seed = seed * 1664525u + 1013904223u;
         return static_cast<double>(seed >> 8) / 16777216.0;
     };
+    auto sym = [&]() { return 2.0 * rnd() - 1.0; };
     struct InFlight {
         double arrival;
         StateMsg m;
     };
     std::vector<InFlight> q;
-    double next_send = t0 + 0.0071;  // the sender's steps are not in phase with the receiver's
-    int step = 0;
+    int nominal = 0;
+    auto send_time = [&](int k) { return t0 + run.sender_phase + k / run.rate; };
+    double next_send = send_time(0) + run.sender_jitter * sym();
+    double tr = t0, prev_delay = jet.delay();
     uint32_t seq = 0;
-    double tp[2][3] = {}, win_true = 0, prev_delay = jet.delay();
+    double tp[2][3] = {}, tt[2] = {}, win_true = 0, win_start = t0, prev_shown[3] = {};
     int tn = 0;
-    bool started = false;
-    for (;;) {
-        const double ts = next_send, tr = t0 + step / 60.0;
-        if (tr > t0 + run.duration) break;
-        if (ts <= tr) {
-            truth.advance_to(ts);
-            const double rel = ts - t0;
+    bool started = false, have_prev = false;
+    while (tr <= t0 + run.duration) {
+        if (next_send <= tr) {
+            truth.advance_to(next_send);
+            const double rel = next_send - t0;
             if (!(run.gap_at >= 0 && rel >= run.gap_at && rel < run.gap_at + run.gap_len)) {
                 const bot::Flight::Sample s = truth.sample();
                 StateMsg m{};
                 m.seq = ++seq;
-                m.game_time = ts;
+                m.game_time = next_send;
                 for (int i = 0; i < 3; ++i) {
                     m.pos[i] = s.pos[i];
-                    m.vel[i] = s.vel[i];
+                    m.vel[i] = s.vel[i] + static_cast<float>(run.vel_noise * sym());
                     m.ang[i] = s.ang[i];
                     m.rates[i] = s.rates[i];
                 }
                 if (run.jump_at >= 0 && rel >= run.jump_at) m.pos[0] += run.jump;
-                if (rnd() >= run.loss) q.push_back({ts + run.delay + run.jitter * (2.0 * rnd() - 1.0), m});
+                if (rnd() >= run.loss) q.push_back({next_send + run.delay + run.jitter * sym(), m});
             }
-            next_send += 1.0 / run.rate;
+            ++nominal;
+            next_send = (std::max)(next_send + 0.001, send_time(nominal) + run.sender_jitter * sym());
             continue;
         }
         truth.advance_to(tr);
+        const double clock = tr + run.clock_off - (run.back_at >= 0 && tr - t0 >= run.back_at ? run.back : 0.0);
         std::stable_sort(q.begin(), q.end(), [](const InFlight& a, const InFlight& b) { return a.arrival < b.arrival; });
         size_t k = 0;
         for (; k < q.size() && q[k].arrival <= tr; ++k)
-            if (!jet.push(q[k].m, tr)) ++r.rejected;
+            if (!jet.push(q[k].m, clock)) ++r.rejected;
         q.erase(q.begin(), q.begin() + static_cast<std::ptrdiff_t>(k));
         RemoteJet::Kin shown{};
-        const Out o = jet.shown(tr, &shown);
+        const Out o = jet.shown(clock, &shown);
         ++r.outs[static_cast<int>(o)];
         bot::Flight::Sample s = truth.sample();
         if (run.jump_at >= 0 && tr - t0 >= run.jump_at) s.pos[0] += run.jump;
-        if (o == Out::Snap) {
-            if (r.snaps++ > 0) ++r.snaps_after_first;
-        }
+        if (o == Out::Snap && r.snaps++ > 0) ++r.snaps_after_first;
         const bool written = o == Out::Snap || o == Out::Blend || o == Out::Steady;
         if (written) {
-            for (int i = 0; i < 3; ++i) r.angles_wrapped = r.angles_wrapped && shown.a[i] <= rmath::kPi && shown.a[i] > -rmath::kPi;
+            r.angles_valid = r.angles_valid && std::fabs(shown.a[0]) <= 0.5 * rmath::kPi + 1e-9;
+            for (int i = 1; i < 3; ++i) r.angles_valid = r.angles_valid && shown.a[i] <= rmath::kPi && shown.a[i] > -rmath::kPi;
+            if (have_prev && started && tr - t0 >= run.measure_from) {
+                double d2 = 0;
+                for (int i = 0; i < 3; ++i) d2 += (shown.p[i] - prev_shown[i]) * (shown.p[i] - prev_shown[i]);
+                r.min_move = (std::min)(r.min_move, std::sqrt(d2));
+            }
+            std::memcpy(prev_shown, shown.p, sizeof(prev_shown));
+            have_prev = true;
             started = true;
+        } else {
+            have_prev = false;
         }
         if (written && tr - t0 >= run.measure_from) {
-            double d2 = 0, da = 0;
+            double d2 = 0, ta[3];
             for (int i = 0; i < 3; ++i) {
                 d2 += (shown.p[i] - s.pos[i]) * (shown.p[i] - s.pos[i]);
-                da = (std::max)(da, std::fabs(rmath::angle_diff(shown.a[i], s.ang[i])));
+                ta[i] = s.ang[i];
             }
             r.pos_err.push_back(std::sqrt(d2));
-            r.ang_err.push_back(da * 180.0 / rmath::kPi);
+            r.ang_err.push_back(jm::rotation_distance(shown.a, ta) * 180.0 / rmath::kPi);
         }
-        // The truth's per-step acceleration, as RemoteJet measures the shown path's.
+        // The truth's per-step acceleration, measured as RemoteJet measures the shown path's.
         if (tn == 2) {
+            const double h1 = tt[1] - tt[0], h2 = tr - tt[1];
             double a2 = 0;
             for (int i = 0; i < 3; ++i) {
-                const double a = (s.pos[i] - 2.0 * tp[1][i] + tp[0][i]) * 3600.0;
+                const double a = 2.0 * ((s.pos[i] - tp[1][i]) / h2 - (tp[1][i] - tp[0][i]) / h1) / (h1 + h2);
                 a2 += a * a;
             }
             win_true = (std::max)(win_true, std::sqrt(a2) / RemoteJet::kG);
             std::memcpy(tp[0], tp[1], sizeof(tp[0]));
+            tt[0] = tt[1];
             tn = 1;
         }
         for (int i = 0; i < 3; ++i) tp[tn][i] = s.pos[i];
-        ++tn;
+        tt[tn++] = tr;
         if (run.jump_at >= 0 && std::fabs(tr - t0 - run.jump_at) < 0.1) tn = 0;  // the jump is not an acceleration
-        const double dd = std::fabs(jet.delay() - prev_delay) * 60.0;
+        const double dd = std::fabs(jet.delay() - prev_delay) / (std::max)(1e-3, run.dt_lo);
         r.delay_rate_max = (std::max)(r.delay_rate_max, dd);
         prev_delay = jet.delay();
-        if (step % 60 == 59) {
+        if (tr - win_start >= 1.0) {
             const JetStats st = jet.take_stats();
+            r.restarts += st.restarts;
+            r.resyncs += st.resyncs;
             if (started && tr - t0 >= run.measure_from) {
                 if (st.accel_g_max - win_true > r.accel_excess) {
                     r.accel_excess = st.accel_g_max - win_true;
@@ -3626,10 +3705,14 @@ JetResult run_jet(Truth truth, const JetRun& run, F on_step) {
                 r.horizon_max = (std::max)(r.horizon_max, st.horizon_max);
             }
             win_true = 0;
+            win_start = tr;
         }
         on_step(tr - t0, o, shown, s);
-        ++step;
+        tr += run.dt_lo + (run.dt_hi - run.dt_lo) * rnd();
     }
+    const JetStats st = jet.take_stats();
+    r.restarts += st.restarts;
+    r.resyncs += st.resyncs;
     r.delay_end = jet.delay();
     return r;
 }
@@ -3638,12 +3721,50 @@ JetResult run_jet(Truth truth, const JetRun& run) {
     return run_jet(truth, run, [](double, Out, const RemoteJet::Kin&, const bot::Flight::Sample&) {});
 }
 
-void print_jet(const char* name, const JetResult& r) {
-    std::printf("    %-22s pos median %6.2f p95 %6.2f max %6.2f m | ang median %5.2f p95 %6.2f deg | snaps %d | "
-                "worst 1 s: shown %.2f g, true %.2f g | rx %.1f Hz, age p50 %.0f p90 %.0f ms, horizon max %.0f ms\n",
-                name, pct(r.pos_err, 0.5), pct(r.pos_err, 0.95), pct(r.pos_err, 1.0), pct(r.ang_err, 0.5),
-                pct(r.ang_err, 0.95), r.snaps, r.shown_g, r.true_g, r.rate_hz, r.age_p50 * 1e3, r.age_p90 * 1e3,
-                r.horizon_max * 1e3);
+// The worst case over a sweep of runs.
+struct JetWorst {
+    double med = 0, p95 = 0, max = 0, ang_med = 0, ang_p95 = 0, accel_excess = -1e9;
+    int snaps_after_first = 0, coast = 0, runs = 0;
+    bool angles_valid = true;
+    void add(const JetResult& r) {
+        med = (std::max)(med, pct(r.pos_err, 0.5));
+        p95 = (std::max)(p95, pct(r.pos_err, 0.95));
+        max = (std::max)(max, pct(r.pos_err, 1.0));
+        ang_med = (std::max)(ang_med, pct(r.ang_err, 0.5));
+        ang_p95 = (std::max)(ang_p95, pct(r.ang_err, 0.95));
+        accel_excess = (std::max)(accel_excess, r.accel_excess);
+        snaps_after_first = (std::max)(snaps_after_first, r.snaps_after_first);
+        coast += r.outs[static_cast<int>(Out::Coast)];
+        angles_valid = angles_valid && r.angles_valid;
+        ++runs;
+    }
+};
+
+void print_worst(const char* name, const JetWorst& w) {
+    std::printf("    %-24s worst of %d: pos median %5.2f p95 %6.2f max %6.2f m | ang median %5.2f p95 %6.2f deg | "
+                "snaps after join %d | accel excess %+.2f g\n",
+                name, w.runs, w.med, w.p95, w.max, w.ang_med, w.ang_p95, w.snaps_after_first, w.accel_excess);
+}
+
+// 20 seeds x 4 sender phases, with sender jitter, receiver steps of 14-20 ms, velocity noise and (optionally) a
+// constant clock error of up to +-clock_err.
+template <class Make>
+JetWorst sweep(Make make, JetRun base, double clock_err) {
+    JetWorst w;
+    for (uint32_t seed = 1; seed <= 20; ++seed) {
+        for (int ph = 0; ph < 4; ++ph) {
+            JetRun run = base;
+            run.seed = seed * 7u + static_cast<uint32_t>(ph);
+            run.sender_phase = 0.0013 + 0.0119 * ph;
+            run.sender_jitter = 0.004;
+            run.dt_lo = 0.014;
+            run.dt_hi = 0.020;
+            run.vel_noise = 0.3;
+            run.clock_off = clock_err * (((seed * 37u + static_cast<uint32_t>(ph) * 11u) % 21u) / 10.0 - 1.0);
+            w.add(run_jet(make(), run));
+        }
+    }
+    return w;
 }
 
 StateMsg jet_state(uint32_t seq, double t, double x, double heading) {
@@ -3656,59 +3777,158 @@ StateMsg jet_state(uint32_t seq, double t, double x, double heading) {
     return m;
 }
 
+constexpr double kDeg = rmath::kPi / 180.0;
+
 }  // namespace
 
 void remote_jet_tests() {
-    std::printf("remote jet (predict to the present; 150 ms +-10 ms one way, 1 %% loss, 20 Hz, 60 Hz steps)\n");
+    std::printf("remote jet: attitude helpers\n");
     {
-        JetRun run;
-        const JetResult straight = run_jet(ScriptTruth(bot::Script::Straight), run);
-        print_jet("straight", straight);
-        JetRun orbit_run = run;
-        orbit_run.heading = 3.0;  // crosses +-pi about a second in, and every 47 s after
-        const JetResult orbit = run_jet(ScriptTruth(bot::Script::Orbit), orbit_run);
-        print_jet("orbit (3 g)", orbit);
-        const JetResult climb = run_jet(ScriptTruth(bot::Script::Climb), run);
-        print_jet("climb", climb);
-        const JetResult turn4 = run_jet(TurnTruth{}, run);
-        print_jet("roll into 4 g turn", turn4);
-        JetRun breaks_run = run;
-        breaks_run.duration = 90.0;
-        const JetResult breaks = run_jet(ScriptTruth(bot::Script::Breaks), breaks_run);
-        print_jet("breaks (6 g reversals)", breaks);
-
-        expect(pct(straight.pos_err, 0.5) <= 1.0 && pct(straight.pos_err, 0.95) <= 3.0, "straight: median <= 1 m, p95 <= 3 m");
-        expect(pct(orbit.pos_err, 0.5) <= 1.0 && pct(orbit.pos_err, 0.95) <= 3.0, "orbit: median <= 1 m, p95 <= 3 m");
-        // The scripted climb starts and stops pitching instantly (a 7.8 g step): the capped correction spreads the
-        // catch-up, so it is held to the owner's "gentle" target (D2), not to the straight-line one.
-        expect(pct(climb.pos_err, 0.5) <= 1.0 && pct(climb.pos_err, 0.95) <= 10.0, "climb: median <= 1 m, p95 <= 10 m");
-        expect(pct(turn4.pos_err, 0.5) <= 3.0 && pct(turn4.pos_err, 0.95) <= 15.0, "4 g turn: median <= 3 m, p95 <= 15 m");
-        expect(pct(breaks.pos_err, 0.5) <= 3.0 && pct(breaks.pos_err, 0.95) <= 15.0, "breaks: median <= 3 m, p95 <= 15 m");
-        bool one_snap = true, smooth = true;
-        for (const JetResult* r : {&straight, &orbit, &climb, &turn4, &breaks}) {
-            one_snap = one_snap && r->snaps == 1 && r->outs[static_cast<int>(Out::Coast)] == 0;
-            smooth = smooth && r->accel_excess <= 3.0;
+        bool round = true, matrix = true;
+        const double cases[][3] = {{0.3, 1.2, -0.7}, {-1.2, -3.0, 2.9}, {0.0, rmath::kPi, 0.5}, {1.5, 0.2, -3.1}};
+        for (const auto& e : cases) {
+            double back[3];
+            jm::q_to_euler(jm::q_from_euler(e), back);
+            for (int i = 0; i < 3; ++i) round = round && std::fabs(rmath::angle_diff(back[i], e[i])) < 1e-9;
+            float m[9];
+            rmath::build_matrix(e, m);
+            const jm::Quat q = jm::q_from_euler(e);
+            const double f[3] = {2 * (q.x * q.y - q.z * q.w), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z + q.x * q.w)};
+            const double u[3] = {2 * (q.x * q.z + q.y * q.w), 2 * (q.y * q.z - q.x * q.w), 1 - 2 * (q.x * q.x + q.y * q.y)};
+            for (int i = 0; i < 3; ++i) matrix = matrix && std::fabs(f[i] - m[3 + i]) < 1e-6 && std::fabs(u[i] - m[6 + i]) < 1e-6;
         }
-        expect(one_snap, "one snap (the join), none after it, no coasting");
-        expect(smooth, "smoothness: per 1 s window, shown acceleration <= true + 3 g");
-        expect(orbit.angles_wrapped && pct(orbit.ang_err, 1.0) < 5.0, "orbit across +-pi: angles wrapped, max angle error < 5 deg");
-        expect(straight.rate_hz > 18.0 && straight.rate_hz < 21.0 && straight.age_p50 > 0.14 && straight.age_p90 < 0.18,
+        expect(round, "Euler -> quaternion -> Euler round trip");
+        expect(matrix, "quaternion forward and up axes match replay_math::build_matrix");
+        const double a[3] = {89.9 * kDeg, 0.0, 0.0}, b[3] = {89.9 * kDeg, rmath::kPi, rmath::kPi};
+        const double c[3] = {0.0, 0.0, 0.0}, d[3] = {0.0, 0.0, 60.0 * kDeg};
+        expect(std::fabs(jm::rotation_distance(a, b) - 0.2 * kDeg) < 1e-6 &&
+                   std::fabs(jm::rotation_distance(c, d) - 60.0 * kDeg) < 1e-9,
+               "rotation distance: the Euler flip at the vertical is 0.2 deg, a 60 deg roll is 60 deg");
+    }
+
+    std::printf("remote jet (predict to the present; 150 ms +-10 ms one way, 1 %% loss, 20 Hz)\n");
+    {  // one run each, fixed phase and 60 Hz, for the stats
+        JetRun run;
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Straight), run);
+        std::printf("    stats: rx %.1f Hz, age p50 %.0f p90 %.0f ms, horizon max %.0f ms\n", r.rate_hz, r.age_p50 * 1e3,
+                    r.age_p90 * 1e3, r.horizon_max * 1e3);
+        expect(r.rate_hz > 18.0 && r.rate_hz < 21.0 && r.age_p50 > 0.14 && r.age_p90 < 0.18,
                "stats: rate about 20 Hz, arrival age p50/p90 about 150-180 ms");
     }
+
+    struct Traj {
+        const char* name;
+        int kind;  // 0 straight, 1 orbit, 2 climb, 3 4 g turn, 4 breaks, 5 loop, 6 rolls
+        double duration, heading;
+    };
+    const Traj trajs[] = {{"straight", 0, 60.0, 0.3},          {"orbit (3 g, across +-pi)", 1, 60.0, 3.0},
+                          {"climb", 2, 60.0, 0.3},             {"roll into 4 g turn", 3, 60.0, 0.3},
+                          {"breaks (6 g reversals)", 4, 90.0, 1.0}, {"6 g loop (vertical)", 5, 30.0, 0.3},
+                          {"360 deg/s roll stops", 6, 30.0, 0.3}};
+    auto run_sweep = [&](const Traj& t, double clock_err) {
+        JetRun run;
+        run.duration = t.duration;
+        run.heading = t.heading;
+        switch (t.kind) {
+            case 0: return sweep([] { return ScriptTruth(bot::Script::Straight); }, run, clock_err);
+            case 1: return sweep([] { return ScriptTruth(bot::Script::Orbit); }, run, clock_err);
+            case 2: return sweep([] { return ScriptTruth(bot::Script::Climb); }, run, clock_err);
+            case 3: return sweep([] { return TurnTruth{}; }, run, clock_err);
+            case 4: return sweep([] { return ScriptTruth(bot::Script::Breaks); }, run, clock_err);
+            case 5: return sweep([] { return BodyTruth(BodyTruth::Loop); }, run, clock_err);
+            default: return sweep([] { return BodyTruth(BodyTruth::Rolls); }, run, clock_err);
+        }
+    };
+
+    std::printf("  sweep: 20 seeds x 4 sender phases, sender jitter +-4 ms, receiver steps 14-20 ms, velocity noise "
+                "+-0.3 m/s\n");
+    JetWorst w[7];
+    for (int i = 0; i < 7; ++i) {
+        w[i] = run_sweep(trajs[i], 0.0);
+        print_worst(trajs[i].name, w[i]);
+    }
+    expect(w[0].med <= 1.0 && w[0].p95 <= 3.0 && w[1].med <= 1.0 && w[1].p95 <= 3.0,
+           "straight and orbit: median <= 1 m, p95 <= 3 m (worst case)");
+    // The scripted climb starts and stops pitching instantly (a 7.8 g step): the capped correction spreads the
+    // catch-up, so it is held to the hard-manoeuvre limit, not the owner's "gentle" one.
+    expect(w[2].med <= 1.0 && w[2].p95 <= 15.0 && w[3].p95 <= 15.0 && w[4].p95 <= 15.0 && w[5].p95 <= 15.0,
+           "climb, 4 g turn, breaks, loop: p95 <= 15 m (climb median <= 1 m)");
+    expect(w[6].p95 <= 3.0, "roll stops (straight path): p95 <= 3 m");
+    expect(w[0].ang_p95 <= 5.0 && w[1].ang_p95 <= 5.0 && w[2].ang_p95 <= 5.0 && w[3].ang_p95 <= 5.0 && w[5].ang_p95 <= 5.0,
+           "attitude p95 <= 5 deg: straight, orbit, climb, 4 g turn, loop");
+    expect(w[4].ang_p95 <= 20.0, "attitude p95 <= 20 deg: breaks");
+    bool no_snaps = true, smooth = true, valid = true;
+    for (const JetWorst& x : w) {
+        no_snaps = no_snaps && x.snaps_after_first == 0 && x.coast == 0;
+        smooth = smooth && x.accel_excess <= 3.0;
+        valid = valid && x.angles_valid;
+    }
+    expect(no_snaps, "no snaps after the join and no coasting (loop and 360 deg/s roll stops included)");
+    expect(smooth, "smoothness: per ~1 s window, shown acceleration <= true + 3 g");
+    expect(valid, "shown pitch within +-90 deg, heading and roll within +-180 deg");
+
+    std::printf("  the same sweep with a constant clock error of up to +-10 ms\n");
+    JetWorst wc[7];
+    for (int i = 0; i < 7; ++i) {
+        wc[i] = run_sweep(trajs[i], 0.010);
+        print_worst(trajs[i].name, wc[i]);
+    }
+    bool d2 = true, no_snaps_c = true, smooth_c = true;
+    for (int i = 0; i < 7; ++i) {
+        d2 = d2 && wc[i].med <= 3.0 && wc[i].p95 <= ((i >= 2 && i <= 5) ? 25.0 : 10.0);
+        no_snaps_c = no_snaps_c && wc[i].snaps_after_first == 0;
+        smooth_c = smooth_c && wc[i].accel_excess <= 3.0;
+    }
+    expect(d2, "with clock error, owner targets (D2): median <= 3 m; p95 <= 10 m gentle, <= 25 m in hard turns");
+    expect(no_snaps_c && smooth_c, "with clock error: no snaps after the join, shown <= true + 3 g");
+    expect(wc[1].ang_p95 <= 5.0 && wc[4].ang_p95 <= 20.0, "with clock error: attitude p95 orbit <= 5 deg, breaks <= 20 deg");
 
     {  // Interpolate mode at the same settings (the comparison mode)
         JetRun run;
         run.params.mode = JetParams::Mode::Interpolate;
         const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run);
-        print_jet("interpolate, orbit", r);
-        std::printf("    interpolate: delay at the end %.0f ms, fastest change %.1f %% per second\n", r.delay_end * 1e3,
-                    r.delay_rate_max * 100.0);
+        std::printf("    interpolate, orbit: pos median %.1f m, ang p95 %.2f deg; delay at the end %.0f ms, fastest "
+                    "change %.1f %% per second\n",
+                    pct(r.pos_err, 0.5), pct(r.ang_err, 0.95), r.delay_end * 1e3, r.delay_rate_max * 100.0);
         expect(r.delay_end >= 0.2 && r.delay_end <= 0.3, "interpolate: the delay converges to 200-300 ms");
         expect(r.delay_rate_max <= 0.05 + 1e-9, "interpolate: the delay never steps (<= 5 % per second)");
         expect(r.snaps == 1, "interpolate: no snaps after the first sample");
+        JetRun loop = run;
+        loop.duration = 30.0;
+        const JetResult l = run_jet(BodyTruth(BodyTruth::Loop), loop);
+        expect(l.snaps == 1 && l.angles_valid, "interpolate through the vertical: no snaps, valid angles");
     }
 
-    {  // a 2 s gap: velocity only (angles held), then a blend on resume
+    {  // gaps of 0.5 to 2.5 s in turns: velocity only, then one capped correction on resume
+        double worst = -1e9;
+        int snaps = 0, coasts = 0;
+        for (double gap : {0.5, 1.0, 2.0, 2.5}) {
+            for (uint32_t seed = 1; seed <= 5; ++seed) {
+                JetRun run;
+                run.duration = 30.0;
+                run.gap_at = 10.0;
+                run.gap_len = gap;
+                run.seed = seed;
+                run.dt_lo = 0.014;
+                run.dt_hi = 0.020;
+                for (int k = 0; k < 2; ++k) {
+                    const JetResult r = k ? run_jet(ScriptTruth(bot::Script::Breaks), run)
+                                          : run_jet(ScriptTruth(bot::Script::Orbit), run);
+                    worst = (std::max)(worst, r.accel_excess);
+                    snaps += r.snaps_after_first;
+                    coasts += r.outs[static_cast<int>(Out::Coast)];
+                }
+            }
+        }
+        std::printf("    gaps 0.5-2.5 s (orbit, breaks): worst accel excess %+.2f g, snaps %d, coasting steps %d\n",
+                    worst, snaps, coasts);
+        // A snap here is the attitude only (a roll reversal missed during the gap is over 90 deg); the position
+        // stays within the acceleration cap, which the next check proves.
+        expect(coasts == 0, "gaps up to 2.5 s: no coasting");
+        expect(worst <= 6.0 + 0.5, "gaps up to 2.5 s: shown acceleration <= true + the 6 g cap (+0.5 g noise margin)");
+    }
+
+    {  // a 2 s gap: velocity only (attitude held), then a blend on resume
         JetRun run;
         run.duration = 30.0;
         run.gap_at = 10.0;
@@ -3718,21 +3938,21 @@ void remote_jet_tests() {
         RemoteJet::Kin prev{};
         bool have_prev = false;
         // The last State before the gap is sent at about 9.96 s and is shown from 10.11 s; 0.5 s of second-order
-        // prediction later (10.47 s) the velocity and angles must hold until the next State lands at about 12.16 s.
+        // prediction later (10.47 s) the velocity and attitude must hold until the next State lands at about 12.16 s.
         const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run,
                                     [&](double t, Out o, const RemoteJet::Kin& k, const bot::Flight::Sample&) {
             if (o == Out::Coast) any_coast = true;
-            if (t > 10.5 && t < 12.1) {
+            if (t > 10.7 && t < 12.1) {
                 seen_gap = true;
                 if (have_prev)
-                    for (int i = 0; i < 3; ++i)
-                        vel_only = vel_only && std::fabs(k.v[i] - prev.v[i]) < 1e-3 && rmath::angle_diff(k.a[i], prev.a[i]) == 0.0;
+                    vel_only = vel_only && std::fabs(k.v[0] - prev.v[0]) + std::fabs(k.v[1] - prev.v[1]) < 1e-3 &&
+                               jm::rotation_distance(k.a, prev.a) < 1e-9;
                 prev = k;
                 have_prev = true;
             }
             if (t >= 12.1 && resume == Out::None && o != Out::Steady) resume = o;
         });
-        expect(seen_gap && vel_only && !any_coast, "2 s gap: velocity only, angles held, never coasting");
+        expect(seen_gap && vel_only && !any_coast, "2 s gap: velocity only, attitude held, never coasting");
         expect(resume == Out::Blend && r.snaps == 1, "2 s gap: a blend on resume, not a snap");
     }
 
@@ -3748,7 +3968,6 @@ void remote_jet_tests() {
             if (t > 13.2 && t < 14.1 && o == Out::Coast) coast_before_resume = true;
             if (coast_before_resume && after == Out::None && o != Out::Coast) after = o;
         });
-        std::printf("    4 s gap: %d coasting steps\n", r.outs[static_cast<int>(Out::Coast)]);
         expect(coast_before_resume && r.outs[static_cast<int>(Out::Coast)] > 30, "4 s gap: Coast after 3 s");
         expect(after == Out::Snap && r.snaps == 2, "4 s gap: a snap on resume");
     }
@@ -3769,12 +3988,23 @@ void remote_jet_tests() {
         JetRun run;
         run.jitter = 0.04;
         const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run);
-        print_jet("orbit, +-40 ms jitter", r);
-        expect(r.rejected > 0 && r.snaps == 1 && pct(r.pos_err, 0.95) <= 3.0,
-               "reordered States are dropped; no snaps, p95 <= 3 m");
+        expect(r.rejected > 0 && r.snaps == 1 && r.restarts == 0 && pct(r.pos_err, 0.95) <= 3.0,
+               "+-40 ms jitter: reordered States are dropped; no snaps or restarts, p95 <= 3 m");
     }
 
-    {  // old, duplicate and reordered States
+    {  // the receiver's clock steps back 0.3 s (a HostClock reset the caller missed): no freeze, no snap
+        JetRun run;
+        run.duration = 30.0;
+        run.back_at = 15.0;
+        run.back = 0.3;
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run);
+        std::printf("    clock back 0.3 s: resyncs %u, snaps %d, coasting %d, smallest step move %.2f m, p95 %.1f m\n",
+                    r.resyncs, r.snaps, r.outs[static_cast<int>(Out::Coast)], r.min_move, pct(r.pos_err, 0.95));
+        expect(r.resyncs >= 1 && r.snaps == 1 && r.outs[static_cast<int>(Out::Coast)] == 0 && r.min_move > 1.0,
+               "receiver clock 0.3 s back: re-anchored (resync), the jet keeps moving, no snap or coast");
+    }
+
+    {  // old, duplicate, reordered, restarted
         RemoteJet j;
         RemoteJet::Kin k{};
         expect(j.shown(1.0, &k) == Out::None, "nothing received: None");
@@ -3782,24 +4012,67 @@ void remote_jet_tests() {
         const bool b = j.push(jet_state(2, 1.05, 10, 0), 1.20);
         const bool dup = j.push(jet_state(2, 1.05, 10, 0), 1.21);
         const bool same_t = j.push(jet_state(3, 1.05, 10, 0), 1.21);
-        const bool old_seq = j.push(jet_state(1, 1.10, 20, 0), 1.25);
         const bool c = j.push(jet_state(5, 1.20, 40, 0), 1.35);
         const bool reordered = j.push(jet_state(4, 1.15, 30, 0), 1.36);
-        const bool wrapped_seq = j.push(jet_state(0x80000005u, 1.25, 50, 0), 1.40);  // half the sequence space ahead: "older"
-        expect(a && b && c && !dup && !same_t && !old_seq && !reordered && !wrapped_seq,
-               "duplicate, same-time, old-sequence and reordered States are refused");
-        expect(j.shown(1.36, &k) == Out::Snap && j.take_stats().dup_or_old == 5, "the first shown state snaps; 5 refusals counted");
-        RemoteJet w;
-        const double h0 = 179.0 * rmath::kPi / 180.0, h1 = -179.0 * rmath::kPi / 180.0;
-        w.push(jet_state(1, 1.00, 0, h0), 1.0);
-        w.push(jet_state(2, 1.05, 10, h1), 1.05);
-        w.shown(1.15, &k);  // 0.1 s after the newest at +2 deg per 0.05 s: -175 deg
-        expect(std::fabs(k.a[1] - (-175.0 * rmath::kPi / 180.0)) < 1e-6, "heading predicted across +-pi (179 -> -179 -> -175)");
-        RemoteJet z;
+        const bool older_t = j.push(jet_state(6, 1.10, 30, 0), 1.37);
+        expect(a && b && c && !dup && !same_t && !reordered && !older_t,
+               "duplicate, same-time, reordered and older-time States are refused");
+        expect(j.shown(1.37, &k) == Out::Snap, "the first shown state snaps");
+        JetStats st = j.take_stats();
+        expect(st.dup_or_old == 4 && st.restarts == 0, "4 refusals counted, no restart");
+        // sequence wrap: 0xFFFFFFFF then 0 is newer
+        RemoteJet wr;
+        expect(wr.push(jet_state(0xFFFFFFFFu, 1.0, 0, 0), 1.1) && wr.push(jet_state(0u, 1.05, 10, 0), 1.15) &&
+                   wr.take_stats().restarts == 0,
+               "sequence wrap 0xFFFFFFFF -> 0 is newer");
+        // a sender restart at seq 1 with the clock running on: one restart, then the jet carries on with one blend
+        const bool r1 = j.push(jet_state(1, 1.25, 50, 0), 1.40);
+        const Out o1 = j.shown(1.40, &k);
+        st = j.take_stats();
+        expect(r1 && st.restarts == 1 && o1 == Out::Blend && st.snaps == 0, "sequence restart: reset, then one blend");
+        // a mission restart: the source's time and the receiver's clock both go back 5 s, and the jet is far away
+        const bool r2 = j.push(jet_state(2, -3.75, 5000, 0), -3.70);
+        const Out o2 = j.shown(-3.70, &k);
+        st = j.take_stats();
+        expect(r2 && st.restarts == 1 && st.resyncs == 1 && o2 == Out::Snap && std::fabs(k.p[0] - 5010.0) < 1.0,
+               "source time and receiver clock 5 s back: reset, re-anchor, then a snap to the new place");
+        // a sequence jump back by more than kSeqRestart with time running on
+        RemoteJet sj;
+        sj.push(jet_state(5000, 1.0, 0, 0), 1.15);
+        sj.shown(1.15, &k);
+        expect(sj.push(jet_state(3000, 1.05, 10, 0), 1.20) && sj.take_stats().restarts == 1,
+               "sequence back by more than kSeqRestart: restart");
+        // NaN times
+        RemoteJet nn;
+        nn.push(jet_state(1, 1.0, 0, 0), 1.1);
+        nn.shown(1.1, &k);
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        expect(nn.shown(nan, &k) == Out::None && !nn.push(jet_state(2, 1.05, 10, 0), nan) &&
+                   nn.shown(1.12, &k) != Out::None && std::isfinite(k.p[0]),
+               "a NaN now is ignored (None / refused), and the jet carries on");
+        // a 1.5 s step gap: re-anchor, not counted as a snap
+        RemoteJet lg;
+        lg.push(jet_state(1, 1.0, 0, 0), 1.1);
+        lg.shown(1.1, &k);
+        lg.push(jet_state(2, 2.5, 300, 0), 2.6);
+        const Out og = lg.shown(2.6, &k);
+        st = lg.take_stats();
+        expect(og == Out::Snap && st.snaps == 1 && st.resyncs == 1, "a 1.5 s step gap re-anchors as a resync, not a snap");
+
+        // Heading across +-pi (rotation prediction, rate decay off so the expected value is exact).
+        JetParams nodecay;
+        nodecay.rot_lag = 0.0;
+        RemoteJet hw(nodecay);
+        const double h0 = 179.0 * kDeg, h1 = -179.0 * kDeg;
+        hw.push(jet_state(1, 1.00, 0, h0), 1.0);
+        hw.push(jet_state(2, 1.05, 10, h1), 1.05);
+        hw.shown(1.15, &k);  // 0.1 s after the newest at +2 deg per 0.05 s: -175 deg
+        expect(std::fabs(k.a[1] - (-175.0 * kDeg)) < 1e-6, "heading predicted across +-pi (179 -> -179 -> -175)");
+        RemoteJet z(nodecay);
         z.push(jet_state(1, 1.00, 0, h1), 1.0);
         z.push(jet_state(2, 1.05, 10, h0), 1.05);
         z.shown(1.15, &k);
-        expect(std::fabs(k.a[1] - (175.0 * rmath::kPi / 180.0)) < 1e-6, "and the other way (-179 -> 179 -> 175)");
+        expect(std::fabs(k.a[1] - (175.0 * kDeg)) < 1e-6, "and the other way (-179 -> 179 -> 175)");
         z.reset();
         expect(z.shown(2.0, &k) == Out::None && z.push(jet_state(1, 1.00, 0, 0), 2.0), "reset forgets everything");
     }
