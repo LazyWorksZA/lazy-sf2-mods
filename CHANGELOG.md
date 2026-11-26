@@ -5,6 +5,8 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+## 1.1.2 (2026-11-26)
+
 ### Fixed
 
 - **The installer finds more Strike Fighters 2 installs, and lets you choose the game folder when it can't.** It now also looks in the 64-bit registry, the UAC VirtualStore, Windows' list of installed programs and a folder you chose before. If none works, Start menu > Lazy SF2 Patch lets you pick the folder.
