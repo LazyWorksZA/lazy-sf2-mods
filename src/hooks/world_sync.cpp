@@ -615,9 +615,14 @@ void take_fetched_mission() {
     std::vector<uint8_t> packed, msn;
     net::MissionOfferMsg offer{};
     if (!g_fetch->take(&packed, &offer)) {
-        static bool logged = false;
-        if (g_load_path.empty() && !logged) {
-            logged = true;
+        // Nothing new: the file we hold is still good only if it is the host's current mission.
+        const uint32_t latest = g_fetch->latest_id();
+        if (!g_load_path.empty() && latest != 0 && latest != g_fetched_id) {
+            LOG("world: join: the host changed its mission (0x%08lx) and it has not arrived yet; this Accept flies the "
+                "generated mission", static_cast<unsigned long>(latest));
+            g_load_path.clear();
+            g_fetched_id = 0;
+        } else if (g_load_path.empty()) {
             LOG("world: join: no mission from the host yet; this Accept flies the generated mission");
         }
         return;
@@ -854,15 +859,6 @@ void write_manifest(const Ctx& c, const Armed& a, int rnd_index, int rnd_seed) {
         format_manifest_counts(v).c_str() + 2, v.size(), player_key.c_str(), empty_formations);
 }
 
-void start_fetch();
-void restart_fetch() {
-    if (g_fetch && g_fetch->state() == net::MissionFetch::State::Running) return;
-    if (g_fetch) g_fetch->stop();  // the thread has ended (Done or Stopped): the join returns at once
-    delete g_fetch;
-    g_fetch = nullptr;
-    start_fetch();
-}
-
 bool own_flight(int* members, int* member);  // the player flight's size and our member (seat section)
 
 // Host: the saved file and its final sidecar, packed, for clients that ask (T5).
@@ -901,8 +897,6 @@ int __fastcall h_Start(void* msn) {
     if (!resolve(&c, "mission start") || c.msn != msn) return o_Start(msn);
     if (g_join) {
         g_flying_id = g_load_path == a.msn_path ? g_fetched_id : 0;
-        g_load_path.clear();  // the next Accept flies only a mission fetched again (the host may have a new one)
-        restart_fetch();
     }
     const bool seeded = call_seed(c.rnd, a.seed);
     // -1 makes the start read the density through the getter, where it is recorded (Save) or forced (Load).
@@ -1873,8 +1867,9 @@ bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) 
 
 void world_client_session_end() {
     if (!g_join) return;
-    g_load_path.clear();
-    LOG("world: join: the session ended; the next Accept flies only a mission fetched again");
+    // The fetch keeps polling the host: the next Accept flies the host's current mission, or none if it changed
+    // and has not arrived yet.
+    LOG("world: join: the session ended; the next Accept flies the host's current mission");
 }
 
 void world_on_modules_loaded() {

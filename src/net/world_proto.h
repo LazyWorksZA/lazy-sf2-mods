@@ -33,6 +33,7 @@ inline constexpr uint32_t kMissionMaxRaw = 4 * 1024 * 1024;
 inline constexpr uint8_t kOfferOk = 0;       // chunks follow, in order, on the reliable channel
 inline constexpr uint8_t kOfferNone = 1;     // the host has no mission yet: ask again later
 inline constexpr uint8_t kOfferTooBig = 2;   // the host's mission is over kMissionMaxPacked
+inline constexpr uint8_t kOfferSame = 3;     // the client already holds this mission (have_id): no chunks
 
 /// <summary>What the host's seat table needs to know of its own flight.</summary>
 struct SeatPlan {
@@ -182,6 +183,88 @@ size_t encode_world_states(uint32_t seq, uint32_t host_ms, const WorldObjState* 
 Status decode_world_states(const uint8_t* data, size_t len, WorldStatesHead& head, const WorldObjState** states);
 size_t encode_world_events(uint32_t seq, uint32_t host_ms, const WorldEventRec* e, size_t n, uint8_t* out, size_t cap);
 Status decode_world_events(const uint8_t* data, size_t len, WorldEventsHead& head, const WorldEventRec** events);
+
+/// <summary>
+/// The host's seats by client tag. A tag holds its seat while one of its connections is open (claim on a request or
+/// Hello, release when the last one closes, a refused Hello included). A released seat is kept for that tag while
+/// free seats remain, so a client that reconnects or restarts with the same tag gets it back; when none remain, a new
+/// client takes the oldest released one. Not thread-safe: HostCore guards it.
+/// </summary>
+class SeatBook {
+public:
+    static constexpr size_t kMax = 16;
+    void reset(const SeatPlan& p) {
+        plan_ = p;
+        n_ = 0;
+    }
+    const SeatPlan& plan() const { return plan_; }
+    /// <summary>The tag's seat, now active; -1 for tag 0 or no seat to give.</summary>
+    int claim(uint32_t tag) {
+        if (tag == 0) return -1;
+        const uint64_t now = ++clock_;
+        for (size_t i = 0; i < n_; ++i) {
+            Entry& e = e_[i];
+            if (e.tag != tag) continue;
+            if (e.active || !held_by_other(e.seat, i)) {
+                e.active = true;
+                e.stamp = now;
+                return e.seat;
+            }
+            remove(i);  // its old seat went to someone else
+            break;
+        }
+        int taken[kMax];
+        size_t nt = 0;
+        for (size_t i = 0; i < n_; ++i) taken[nt++] = e_[i].seat;  // active and kept seats
+        int s = assign_seat(plan_, taken, nt);
+        if (s < 0) {  // only kept seats are left: the oldest released one goes
+            size_t old = kMax;
+            for (size_t i = 0; i < n_; ++i)
+                if (!e_[i].active && (old == kMax || e_[i].stamp < e_[old].stamp)) old = i;
+            if (old == kMax) return -1;
+            s = e_[old].seat;
+            remove(old);
+        }
+        if (n_ == kMax) {  // forget the oldest released entry
+            size_t old = kMax;
+            for (size_t i = 0; i < n_; ++i)
+                if (!e_[i].active && (old == kMax || e_[i].stamp < e_[old].stamp)) old = i;
+            if (old == kMax) return -1;
+            remove(old);
+        }
+        e_[n_++] = Entry{tag, s, true, now};
+        return s;
+    }
+    /// <summary>The tag's last connection closed: its seat is released (kept for it while seats remain).</summary>
+    void release(uint32_t tag) {
+        for (size_t i = 0; i < n_; ++i)
+            if (e_[i].tag == tag) e_[i].active = false;
+    }
+    /// <summary>True while the tag holds its seat (diagnostics, tests).</summary>
+    bool active(uint32_t tag) const {
+        for (size_t i = 0; i < n_; ++i)
+            if (e_[i].tag == tag) return e_[i].active;
+        return false;
+    }
+
+private:
+    struct Entry {
+        uint32_t tag = 0;
+        int seat = -1;
+        bool active = false;
+        uint64_t stamp = 0;
+    };
+    bool held_by_other(int seat, size_t self) const {
+        for (size_t i = 0; i < n_; ++i)
+            if (i != self && e_[i].seat == seat && e_[i].active) return true;
+        return false;
+    }
+    void remove(size_t i) { e_[i] = e_[--n_]; }
+    SeatPlan plan_{};
+    Entry e_[kMax];
+    size_t n_ = 0;
+    uint64_t clock_ = 0;
+};
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>
 class MissionAssembly {

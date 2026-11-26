@@ -199,22 +199,23 @@ bool HostCore::send_world(uint8_t slot, uint32_t gen, const uint8_t* data, size_
 }
 
 int HostCore::seat_for(uint32_t tag) {
-    if (tag == 0) return -1;
     std::lock_guard<std::mutex> lock(mission_mx_);
-    for (size_t i = 0; i < n_seats_; ++i)
-        if (seat_table_[i].tag == tag) return seat_table_[i].seat;
-    if (n_seats_ >= sizeof(seat_table_) / sizeof(seat_table_[0])) return -1;
-    int taken[8];
-    for (size_t i = 0; i < n_seats_; ++i) taken[i] = seat_table_[i].seat;
-    const int s = assign_seat(seats_, taken, n_seats_);
-    if (s < 0) return -1;
-    seat_table_[n_seats_++] = SeatEntry{tag, s};
-    return s;
+    return seats_.claim(tag);
+}
+
+void HostCore::release_seat(uint32_t tag) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    seats_.release(tag);
+}
+
+bool HostCore::seat_active(uint32_t tag) const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    return seats_.active(tag);
 }
 
 SeatPlan HostCore::seat_plan() const {
     std::lock_guard<std::mutex> lock(mission_mx_);
-    return seats_;
+    return seats_.plan();
 }
 
 uint32_t HostCore::mission_id() const {
@@ -233,8 +234,7 @@ void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t ra
     }
     std::lock_guard<std::mutex> lock(mission_mx_);
     mission_ = std::move(b);
-    seats_ = seats;  // a new mission: seats are given out again
-    n_seats_ = 0;
+    seats_.reset(seats);  // a new mission: seats are given out again
 }
 
 // The network thread. Everything below runs on it, and only it touches ENet.
@@ -281,6 +281,7 @@ void HostCore::run() {
     uint32_t pings[kMaxClients] = {};
     uint32_t gens[kMaxClients] = {};
     uint64_t mission_ask_ms[kMaxClients] = {};
+    uint32_t slot_tag[kMaxClients] = {};  // the world tag each connection carried (request or Hello)
     uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
@@ -293,6 +294,13 @@ void HostCore::run() {
         bye_seen[slot] = false;
         version_refused[slot] = false;
         mission_ask_ms[slot] = 0;
+        // The connection's seat is released when no other open connection carries the same tag.
+        if (const uint32_t tag = slot_tag[slot]) {
+            slot_tag[slot] = 0;
+            bool other = false;
+            for (int i = 0; i < kMaxClients; ++i) other = other || (i != slot && slot_tag[i] == tag);
+            if (!other) release_seat(tag);
+        }
         rtt_[slot].store(0, std::memory_order_relaxed);
     };
     auto drop = [&](std::atomic<uint32_t>& counter) { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -336,12 +344,15 @@ void HostCore::run() {
             o.raw_bytes = b->raw;
             o.chunk_count = static_cast<uint16_t>(mission_chunk_count(b->packed.size()));
             // The host gives the seats, by the client's tag, never by connection slot (network-recon §10.16).
+            slot_tag[slot] = rq.tag;
             const int seat = seat_for(rq.tag);
             o.seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;
             o.host_seat = static_cast<uint8_t>(seat_plan().host_member);
+            if (rq.have_id == b->id) o.status = kOfferSame;  // it holds this mission: no chunks
         }
         uint8_t out[kMissionChunkMax];
         if (!send_raw(slot, out, encode(o, out, sizeof(out)))) return;
+        if (o.status == kOfferSame) return;  // the regular poll of a client that is up to date: no log line
         if (o.status != kOfferOk) {
             say("net: peer %u asked for the mission: %s", static_cast<unsigned>(slot + 1),
                 o.status == kOfferNone ? "none yet" : "too big to send");
@@ -391,6 +402,7 @@ void HostCore::run() {
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok) return drop(n_format_);
                 if (hello_seen[slot]) return drop(n_state_);
                 hello_seen[slot] = true;
+                slot_tag[slot] = m.world_tag;  // the session holds its seat until it closes
                 break;
             }
             case MsgType::Ping: {

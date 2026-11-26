@@ -127,13 +127,15 @@ public:
     /// </summary>
     void set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw, const SeatPlan& seats = {});
     /// <summary>
-    /// The seat (member of the host's flight) of the client with this world tag: assigned on the first ask by the
-    /// owner's rule (assign_seat), then the same for that tag until the next set_mission. -1 for tag 0, no plan or no
-    /// free member. Any thread.
+    /// The seat (member of the host's flight) of the client with this world tag, by the owner's rule (SeatBook):
+    /// held while one of its connections is open, released when the last closes (the network thread does that), and
+    /// given back to the same tag while still free. -1 for tag 0, no plan or no free member. Any thread.
     /// </summary>
     int seat_for(uint32_t tag);
     SeatPlan seat_plan() const;
     uint32_t mission_id() const;
+    /// <summary>True while the tag holds a seat (one of its connections is open).</summary>
+    bool seat_active(uint32_t tag) const;
     /// <summary>
     /// Queues a world message (world_proto.h, up to 1,000 bytes) for a slot. WorldStates (unreliable, channel 1) and
     /// WorldEvents (reliable, channel 0) have queues of their own, apart from the session's: the states can never
@@ -212,13 +214,8 @@ private:
     };
     std::mutex world_mx_;
     WorldRing world_states_{kWorldStatesCap}, world_events_{kWorldEventsCap};  // under world_mx_
-    struct SeatEntry {
-        uint32_t tag = 0;
-        int seat = -1;
-    };
-    SeatPlan seats_{};               // under mission_mx_
-    SeatEntry seat_table_[8] = {};   // under mission_mx_
-    size_t n_seats_ = 0;             // under mission_mx_
+    SeatBook seats_;  // under mission_mx_
+    void release_seat(uint32_t tag);
     mutable std::mutex mission_mx_;
     std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer
     std::atomic<uint32_t> n_missions_{0};

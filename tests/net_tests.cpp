@@ -7366,6 +7366,22 @@ void world_stream_tests() {
 void world_seat_rule_tests() {
     std::printf("world seats and queues\n");
     {
+        SeatBook book;
+        book.reset(SeatPlan{3, 0});  // two seats to give: #2 and #3
+        const int a = book.claim(0xA), b = book.claim(0xB);
+        expect(a == 1 && b == 2 && book.claim(0xC) == -1, "seat book: two seats, the third client gets none");
+        book.release(0xA);
+        expect(!book.active(0xA) && book.claim(0xA) == 1 && book.active(0xA),
+               "seat book: a released seat comes back to the same tag");
+        book.release(0xA);
+        expect(book.claim(0xC) == 1 && book.claim(0xA) == -1,
+               "seat book: with no free seat left, a new client takes the released one; its old owner then gets none");
+        book.release(0xC);
+        book.release(0xB);
+        expect(book.claim(0xA) == 1 || book.claim(0xA) == 2, "seat book: a seat is free again after the others leave");
+        expect(book.claim(0) == -1, "seat book: tag 0 never gets a seat");
+    }
+    {
         const SeatPlan host1{4, 0}, host2{4, 1}, pair{2, 0};
         int taken[3] = {};
         const int a1 = assign_seat(host1, taken, 0);
@@ -7515,21 +7531,48 @@ void world_mission_tests() {
         });
         for (int i = 0; i < 2000 && core.state() != HostCore::State::Running; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        MissionFetch fetch;
-        const bool started = fetch.start("127.0.0.1", core.port(), 0x1234u, nullptr);
+        auto wait_take = [](MissionFetch& f, std::vector<uint8_t>* g, MissionOfferMsg* o, int ms) {
+            for (int i = 0; i < ms / 10; ++i) {
+                if (f.take(g, o)) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return false;
+        };
+        auto fetch = std::make_unique<MissionFetch>();
+        const bool started = fetch->start("127.0.0.1", core.port(), 0x1234u, nullptr, 200);
         for (int i = 0; i < 300 && none_seen.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        expect(started && none_seen.load() >= 1 && fetch.state() == MissionFetch::State::Running,
-               "mission loopback: the host says none yet, the fetch keeps waiting");
+        expect(started && none_seen.load() >= 1 && fetch->state() == MissionFetch::State::Running,
+               "mission loopback: the host says none yet, the fetch keeps asking");
         core.set_mission(packed, id, raw, SeatPlan{4, 1});  // the host flies #2
-        for (int i = 0; i < 1000 && fetch.state() == MissionFetch::State::Running; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         std::vector<uint8_t> got;
         MissionOfferMsg go{};
-        expect(fetch.state() == MissionFetch::State::Done && fetch.take(&got, &go) && got == packed &&
-                   go.mission_id == id && go.seat == 0 && go.host_seat == 1 && !fetch.take(&got, &go),
+        expect(wait_take(*fetch, &got, &go, 10000) && got == packed && go.mission_id == id && go.seat == 0 &&
+                   go.host_seat == 1 && !fetch->take(&got, &go),
                "mission loopback: the fetch receives the mission once; the host (#2) gives it seat #1");
-        expect(core.missions_sent() == 1, "mission loopback: the host counts one mission sent");
-        fetch.stop();
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));  // a few polls: the host answers Same
+        expect(core.missions_sent() == 1 && fetch->latest_id() == id && !fetch->take(&got, &go),
+               "mission loopback: later polls of the same mission send nothing (Same)");
+        // The host changes its mission in the menus: the poll fetches it before the next Accept.
+        std::vector<uint8_t> msn_b = msn;
+        msn_b[10] ^= 1;
+        std::vector<uint8_t> packed_b;
+        uint32_t id_b = 0, raw_b = 0;
+        pack_mission(sidecar, msn_b, &packed_b, &id_b, &raw_b);
+        core.set_mission(packed_b, id_b, raw_b, SeatPlan{4, 1});
+        expect(wait_take(*fetch, &got, &go, 10000) && go.mission_id == id_b && got == packed_b &&
+                   fetch->latest_id() == id_b && core.missions_sent() == 2,
+               "mission loopback: a new host mission is fetched by the next poll");
+        // Seats: released when the client's connections close, given back to the same tag while still free.
+        const uint8_t seat_a = go.seat;
+        fetch->stop();
+        fetch.reset();
+        for (int i = 0; i < 200 && core.seat_active(0x1234u); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        expect(!core.seat_active(0x1234u), "seats: a closed fetch connection releases its seat");
+        auto again = std::make_unique<MissionFetch>();
+        again->start("127.0.0.1", core.port(), 0x1234u, nullptr, 200);
+        const bool back = wait_take(*again, &got, &go, 10000);
+        expect(back && go.seat == seat_a, "seats: a restarted client with the same tag gets its old seat back");
+        again->stop();
         core.stop(false);
     }
     enet_deinitialize();

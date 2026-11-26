@@ -167,16 +167,18 @@ int run_fetch(const std::string& spec, const std::string& dir, double duration) 
     const uint32_t tag = (GetTickCount() ^ (GetCurrentProcessId() << 12)) | 1u;
     if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, fetch_log)) return 2;
     const double limit = duration > 0 ? duration : 60.0;
-    for (int i = 0; i < static_cast<int>(limit * 50) && !g_cancel.load(); ++i) {
-        if (fetch.state() != net::MissionFetch::State::Running) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    fetch.stop();
     std::vector<uint8_t> packed, msn;
     net::MissionOfferMsg offer{};
+    bool got = false;
+    for (int i = 0; i < static_cast<int>(limit * 50) && !g_cancel.load() && !got; ++i) {
+        if (fetch.state() != net::MissionFetch::State::Running) break;
+        got = fetch.take(&packed, &offer);
+        if (!got) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    fetch.stop();
     std::string sidecar;
     const char* why = "";
-    if (!fetch.take(&packed, &offer)) {
+    if (!got) {
         log_line("bot fetch: no mission received");
         return 3;
     }
