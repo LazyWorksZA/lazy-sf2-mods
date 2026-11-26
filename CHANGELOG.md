@@ -3,7 +3,7 @@
 All notable changes to the Lazy SF2 Patch, the runtime mods for Strike Fighters 2 (July 2013).
 Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Releases page.
 
-## Unreleased
+## 1.1.1 (2026-11-26)
 
 ### Fixed
 
