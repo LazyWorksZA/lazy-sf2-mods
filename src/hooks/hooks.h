@@ -275,6 +275,12 @@ bool replay_active();
 /// </summary>
 void player_jump_on_modules_loaded();
 void player_jump_request(bool full);
+/// <summary>
+/// Lock probe (developer tool, lock_probe.cpp): Ctrl+Shift+A places an AI 3 km ahead of the player, Ctrl+Shift+O
+/// locks it with the player's radar, Ctrl+Shift+I makes it lock the player. Requests: 1 place, 2 player lock, 3 AI lock.
+/// </summary>
+void lock_probe_on_modules_loaded();
+void lock_probe_request(int what);
 /// <summary>Step order (developer tool, step_order.cpp): logs once per player whether it steps before the other aircraft in a frame.</summary>
 void step_order_on_modules_loaded();
 

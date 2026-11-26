@@ -59,6 +59,11 @@ void append_header(std::string& out, const char* reference_time, double ref_lon,
 void append_frame(std::string& out, long long ms);
 /// <summary>"-id\n"</summary>
 void append_removal(std::string& out, uint32_t id);
+/// <summary>
+/// A lock line: "id,LockedTarget=target,LockedTargetMode=1\n", or "id,LockedTargetMode=0,LockedTarget=\n" for
+/// target 0 (the lock is lost). Ids in hex.
+/// </summary>
+void append_lock(std::string& out, uint32_t id, uint32_t target);
 /// <summary>"0,Event=Destroyed|id|\n": a global event naming one object (hex id).</summary>
 void append_event_destroyed(std::string& out, uint32_t id);
 /// <summary>

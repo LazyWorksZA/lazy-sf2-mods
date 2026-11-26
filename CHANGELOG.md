@@ -5,6 +5,14 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Tacview
+
+- **Tacview: radar and weapon locks are recorded; Tacview draws lock lines.** When an aircraft (yours or the AI's) tracks or locks another aircraft with its radar, the recording names the target, and clears it when the lock is lost. A guided missile names the aircraft it is guiding to.
+
+### Developer tools (off unless enabled)
+
+- **Lock probe hotkeys.** With the probe on: Ctrl+Shift+A places an AI aircraft (an enemy if there is one) 3 km in front of you, at your altitude, heading and speed; Ctrl+Shift+O makes your radar lock it through the avionics' own commands; Ctrl+Shift+I makes that aircraft's radar lock you. Each logs the radar state (`lock probe:` lines).
+
 ## 1.1.2 (2026-11-26)
 
 ### Fixed
