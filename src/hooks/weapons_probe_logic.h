@@ -39,6 +39,25 @@ inline bool launch_pose(const double from[3], const double to[3], double offset,
     return true;
 }
 
+/// <summary>
+/// A point dist metres behind a target on its tail, at its altitude: back along its horizontal velocity (north
+/// of it if it is not moving horizontally).
+/// </summary>
+inline void tail_point(const double target[3], const float vel[3], double dist, double out[3]) {
+    double ux = vel[0], uy = vel[1];
+    const double h = std::sqrt(ux * ux + uy * uy);
+    if (h > 1e-3) {
+        ux /= h;
+        uy /= h;
+    } else {
+        ux = 0;
+        uy = -1;  // a stationary target: come from the north, flying south
+    }
+    out[0] = target[0] - ux * dist;
+    out[1] = target[1] - uy * dist;
+    out[2] = target[2];
+}
+
 /// <summary>One aircraft as the probe's target and shooter choice sees it.</summary>
 struct Candidate {
     double pos[3];

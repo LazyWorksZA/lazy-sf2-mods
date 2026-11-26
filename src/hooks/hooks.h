@@ -222,13 +222,15 @@ size_t missile_spawn_seen_weapon_ids(uint32_t* out, size_t max);
 /// </summary>
 enum class WeaponsProbeAction : int {
     None = 0,
-    LiveAtPlayer,     // Ctrl+Shift+F: the wingman fires a missile at the player
+    LiveAtPlayer,     // Ctrl+Shift+F: a missile from the wingman at the player, spawned 2 km behind it on its tail
     RemoteAtAi,       // Ctrl+Shift+G: the wingman, marked REMOTEOBJECT for the release, fires at the nearest other AI
     RemoteAtPlayer,   // Ctrl+Shift+V: the same, at the player
     HitQueue,         // Ctrl+Shift+Q: WLD+0x44 kinetic hit on the nearest AI aircraft
     Explosion,        // Ctrl+Shift+E: WLD+0x40 explosion at the nearest AI aircraft
     DamageInterface,  // Ctrl+Shift+U: damage interface (QI 9) blast on the nearest AI aircraft
     List,             // Ctrl+Shift+L: logs the weapon types, the default choice and the player's gun stations
+    ForceFire,        // Ctrl+Shift+B: holds the player's gun trigger input for 2 s of game time
+    Rocket,           // Ctrl+Shift+N: the player fires one unguided rocket straight ahead
 };
 void weapons_probe_request(WeaponsProbeAction a);
 /// <summary>Module watch (probe on): hooks the gun station update of each verified AircraftObject.dll image.</summary>

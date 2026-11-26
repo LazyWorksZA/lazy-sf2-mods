@@ -381,7 +381,8 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         {'F', WeaponsProbeAction::LiveAtPlayer},   {'G', WeaponsProbeAction::RemoteAtAi},
         {'V', WeaponsProbeAction::RemoteAtPlayer}, {'Q', WeaponsProbeAction::HitQueue},
         {'E', WeaponsProbeAction::Explosion},      {'U', WeaponsProbeAction::DamageInterface},
-        {'L', WeaponsProbeAction::List},
+        {'L', WeaponsProbeAction::List},           {'B', WeaponsProbeAction::ForceFire},
+        {'N', WeaponsProbeAction::Rocket},
     };
     bool weapon_was_down[_countof(kWeaponKeys)] = {};
     for (;;) {

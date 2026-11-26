@@ -3800,6 +3800,16 @@ void weapons_probe_tests() {
         expect(launch_pose(from, up, 40, 250, &p) && std::fabs(p.angles[0] - 3.14159265f / 2) < 1e-5,
                "launch: straight up is pitch 90");
         expect(!launch_pose(from, from, 40, 250, &p), "launch: refuses a target on top of the shooter");
+        const double tgt[3] = {1000, 2000, 3000};
+        const float tv[3] = {0, 200, 30};  // flying north and climbing
+        double tail[3];
+        tail_point(tgt, tv, 2000, tail);
+        expect(tail[0] == 1000 && tail[1] == 0 && tail[2] == 3000, "tail: 2 km behind on the horizontal track, same altitude");
+        expect(launch_pose(tail, tgt, 0, 250, &p) && std::fabs(p.angles[1]) < 1e-6 && std::fabs(p.range - 2000) < 1e-9,
+               "tail: nose on the target (heading north), range 2 km");
+        const float still[3] = {0, 0, 0};
+        tail_point(tgt, still, 2000, tail);
+        expect(tail[0] == 1000 && tail[1] == 4000, "tail: a stationary target is approached from the north");
     }
     {
         const wchar_t* names[] = {L"GUNSLINGER", L"GUNSLINGER 2", L"BEAGLE 11", L"GUNSLINGERX 1", L"GUNSLINGER 3"};
