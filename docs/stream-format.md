@@ -4,6 +4,8 @@ Developer tool. With host mode on (`LAZYSF2_HOST`, see `lazy-sf2-recon`, `networ
 
 The bot's synthetic host (`lazysf2-bot --serve PORT --record DIR`) writes the same format to `DIR\botserve_NNN.lzst`. There the "host" is the bot: kind 2 is its scripted jet, kind 1 the client's States, and kind 9 what the bot showed of the client. Unlike the mod host's file, it is opened when the bot starts serving (so HostState records come before any client), and kind 1 holds only the States the bot's receiver accepted (not old or repeated ones). Without `--start` the file has two `WelcomeSent` records per client: the first with an all-zero join position (`net::welcome_has_join` is false), the second, after the client's first State, with the join position on the bot's jet; it is re-sent once a second until the client's States show it there (at most 10 s).
 
+The mod as a client (`LAZYSF2_CONNECT`) writes `LAZYSF2_PROBE_DIR\client_NNN.lzst`. It is opened at the first Welcome of a connection (its `start_game_time` is the Welcome's host time, and the header names the client's theatre) and closed when the session ends. There `time` is the client's estimate of the host's game time. Kind 3 holds each Welcome the client received (a re-Welcome gives another record), kind 1 the States that arrived from the host (id 0 and the relayed ids), kind 4 the host's Bye, kind 7 the client's own States as sent, and kind 9 what it showed of each remote.
+
 All numbers are little-endian. Structures are packed. A reader is in `src/net/stream_format.h` (`StreamReader`): it works on bytes in memory and never reads past the end.
 
 ## When a file exists
@@ -44,7 +46,7 @@ A reader stops at a `length` outside 9 to 105 (`BadLength`): nothing after it ca
 
 ### Kinds
 
-The payloads of kinds 1 to 4 are the protocol messages **byte for byte as on the wire** (`src/net/protocol.h`, with their own magic, version and type). Decode them with `LazyWorks::SF2Patch::net::decode`. Files recorded by builds before protocol v2 carry v1 payloads (a 52-byte Hello and a 42-byte Welcome, version byte 1), which the current decoders reject with `BadVersion`.
+The payloads of kinds 1 to 4 and 7 are the protocol messages **byte for byte as on the wire** (`src/net/protocol.h`, with their own magic, version and type). Decode them with `LazyWorks::SF2Patch::net::decode`. Files recorded by builds before protocol v2 carry v1 payloads (a 52-byte Hello and a 42-byte Welcome, version byte 1), which the current decoders reject with `BadVersion`.
 
 | Kind | Name | Payload | When |
 |---|---|---|---|
@@ -54,7 +56,8 @@ The payloads of kinds 1 to 4 are the protocol messages **byte for byte as on the
 | 4 | ByeReceived | `ByeMsg`, 7 bytes | a client sent Bye |
 | 5 | ClientJoined | `ClientJoinedPayload`, 50 bytes | a client was given an avatar; just before its Welcome |
 | 6 | ClientLeft | `ClientLeftPayload`, 3 bytes | a client's avatar was released |
-| 9 | RemoteShown | `RemoteShownPayload`, 43 bytes | what the receiver showed of a remote jet, at most 10 Hz per remote. Written by `--serve` only so far |
+| 7 | LocalState | `StateMsg`, 78 bytes, the client's own id | a State the client sent (20 Hz of host time). Client files only |
+| 9 | RemoteShown | `RemoteShownPayload`, 43 bytes | what the receiver showed of a remote jet, at most 10 Hz per remote. Written by `--serve` and the client |
 
 `ClientJoinedPayload`: `uint16 client_id`, `char callsign[16]`, `char aircraft[32]`. Both strings are NUL padded and printable ASCII only. The aircraft is the type the client asked for in its Hello. It is not the AI aircraft the host used as the avatar.
 

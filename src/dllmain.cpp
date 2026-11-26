@@ -62,6 +62,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             ok &= LazyWorks::SF2Patch::hooks::install_menu_hooks();
             LazyWorks::SF2Patch::hooks::install_probe_hooks();  // reads LAZYSF2_PROBE_DIR once; no hooks yet
             LazyWorks::SF2Patch::hooks::host_install();         // reads LAZYSF2_HOST once; no threads yet
+            LazyWorks::SF2Patch::hooks::client_install();       // reads LAZYSF2_CONNECT once; no threads yet
             ok &= LazyWorks::SF2Patch::hooks::install_module_watch();
             s = MH_EnableHook(MH_ALL_HOOKS);
             LOG("hooks installed: %s, enable: %s", ok ? "ok" : "PARTIAL", MH_StatusToString(s));
@@ -72,6 +73,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             LazyWorks::SF2Patch::hooks::tacview_recorder_shutdown(reserved != nullptr);  // also at process exit: the file stays readable
             if (reserved == nullptr) {  // FreeLibrary, not process exit
                 LazyWorks::SF2Patch::hooks::host_shutdown();
+                LazyWorks::SF2Patch::hooks::client_shutdown();
                 MH_DisableHook(MH_ALL_HOOKS);
                 MH_Uninitialize();
             }

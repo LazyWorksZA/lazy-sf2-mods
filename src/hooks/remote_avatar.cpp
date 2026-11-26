@@ -143,11 +143,13 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     in.tier = c.rank.tier;
     in.flight_no = c.rank.flight_no;
     in.dist = c.rank.dist;
+    in.nearby = c.rank.nearby;
     std::memcpy(in.from, c.from, sizeof(in.from));
+    in.moved = avatar_logic::dist3(in.from, pick.place);
     if (why && why_cap) {
-        std::snprintf(why, why_cap, "\"%s\" %s (was %.0f m from the player at (%.0f, %.0f, %.0f)); %s", in.name,
-                      in.type[0] ? in.type : "(type unknown)", in.dist, in.from[0], in.from[1], in.from[2],
-                      tier_name(in.tier));
+        std::snprintf(why, why_cap, "\"%s\" %s (was %.0f m from the player at (%.0f, %.0f, %.0f), moved %.0f m); %s%s",
+                      in.name, in.type[0] ? in.type : "(type unknown)", in.dist, in.from[0], in.from[1], in.from[2],
+                      in.moved, tier_name(in.tier), in.nearby ? "" : "; nothing free within 20 km of the player");
     }
     return true;
 }

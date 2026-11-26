@@ -139,8 +139,8 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {
 }
 
 void start_run() {
-    if (host_has_clients()) {
-        LOG("puppet: not started, host mode has clients");
+    if (net_session_active()) {
+        LOG("puppet: not started, a network session is running");
         g_puppet_state.store(kIdle);
         return;
     }

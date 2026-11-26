@@ -79,6 +79,7 @@ add_library(lazysf2 SHARED
     src/net/host_session.cpp
     src/net/client_core.cpp
     src/net/host.cpp
+    src/net/client.cpp
     src/net/remote_jet.cpp
     src/net/stream_format.cpp
     src/net/stream_record.cpp

@@ -262,4 +262,20 @@ void host_shutdown();
 /// <summary>True while any client holds an avatar. Puppet and replay refuse to start then, and the host refuses clients while one runs.</summary>
 bool host_has_clients();
 
+/// <summary>
+/// Client mode (developer tool; src/net/client.cpp): LAZYSF2_CONNECT=host:port makes the mod join a host once the
+/// player is airborne, move the own jet onto the host's wing (LAZYSF2_NET_JOIN=move, the default, or none), send its
+/// State at 20 Hz of host time and show the host and the other clients on AI aircraft. LAZYSF2_CALLSIGN names the
+/// player (default PLAYER). Inert unless the probe is on; with LAZYSF2_HOST also set, both stay off.
+/// client_install() reads the variables (DllMain, after host_install()); client_on_modules_loaded() registers the
+/// step callback; client_shutdown() ends the connection and gives the avatars back (DLL unload only).
+/// </summary>
+void client_install();
+void client_on_modules_loaded();
+void client_shutdown();
+/// <summary>True from the client's Welcome until its session ends. Any thread.</summary>
+bool client_welcomed();
+/// <summary>A network session is running: the host has clients, or the client is welcomed. Any thread.</summary>
+inline bool net_session_active() { return host_has_clients() || client_welcomed(); }
+
 }  // namespace LazyWorks::SF2Patch::hooks

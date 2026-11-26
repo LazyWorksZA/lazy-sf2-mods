@@ -279,6 +279,7 @@ void probe_on_modules_loaded() {
     player_jump_on_modules_loaded();
     step_order_on_modules_loaded();
     host_on_modules_loaded();      // starts the network thread (once), only with LAZYSF2_HOST
+    client_on_modules_loaded();    // registers its step callback (once), only with LAZYSF2_CONNECT
     if (HANDLE t = CreateThread(nullptr, 0, hotkey_thread, nullptr, 0, nullptr)) {
         CloseHandle(t);
     } else {

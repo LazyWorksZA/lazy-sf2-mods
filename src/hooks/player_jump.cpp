@@ -161,8 +161,8 @@ void on_step(void* aircraft, float, bool is_player) {
         LOG("jump: ignored, the last jump is still being watched");
         return;
     }
-    if (host_has_clients() || replay_active()) {
-        LOG("jump: ignored while a host session or replay runs");
+    if (net_session_active() || replay_active()) {
+        LOG("jump: ignored while a network session or replay runs");
         return;
     }
     do_jump(aircraft, req == kFull);

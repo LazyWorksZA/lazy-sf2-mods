@@ -37,11 +37,18 @@ enum class AvatarTier : uint8_t {
     Nearest = 4,
 };
 
+/// <summary>
+/// Candidates within this many metres of the player rank before any farther one, whatever their tier: moving an
+/// aircraft across the theatre can stall the simulation (a 125 km takeover was once followed by a 44 s host stall).
+/// </summary>
+inline constexpr double kAvatarNear = 20000.0;
+
 struct AvatarRank {
     AvatarTier tier = AvatarTier::None;
     int flight_no = -1;  // the number after the flight callsign ("DENVER 12" -> 12), -1 if not of the flight
     double dist = 0;
     unsigned long long seq = 0;
+    bool nearby = false;  // within kAvatarNear of the player
 };
 
 namespace avatar_logic {
@@ -120,8 +127,8 @@ inline int flight_member_no(const wchar_t* name, const wchar_t* base, size_t bas
 }  // namespace avatar_logic
 
 /// <summary>
-/// Ranks candidates one at a time and keeps the best (plan 2.6): Wingman, then SameType, then Friendly, then
-/// Nearest. Within a tier: members of the player's flight first, the lowest flight number first (the player's #2
+/// Ranks candidates one at a time and keeps the best (plan 2.6): those within kAvatarNear of the player first; then
+/// Wingman, then SameType, then Friendly, then Nearest. Within a tier: members of the player's flight first, the lowest flight number first (the player's #2
 /// before #3), then the nearest, then the earliest constructed.
 /// </summary>
 class AvatarPicker {
@@ -135,6 +142,7 @@ public:
         AvatarRank r;
         if (c.is_player || c.taken) return r;
         r.dist = std::isfinite(c.dist) ? c.dist : 1e300;
+        r.nearby = r.dist <= kAvatarNear;
         r.seq = c.seq;
         int no = avatar_logic::flight_member_no(c.name, base_, base_len_);
         // SF2 names are flight digit then member digit (DENVER 11-14, a second DENVER flight 21-24): with a
@@ -152,6 +160,7 @@ public:
 
     /// <summary>True if a ranks before b. Both must have a tier.</summary>
     bool better(const AvatarRank& a, const AvatarRank& b) const {
+        if (a.nearby != b.nearby) return a.nearby;
         if (a.tier != b.tier) return a.tier < b.tier;
         const bool ma = a.flight_no >= 0, mb = b.flight_no >= 0;
         if (ma != mb) return ma;

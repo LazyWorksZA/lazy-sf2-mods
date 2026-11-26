@@ -27,7 +27,8 @@ enum class StreamKind : uint8_t {
     ByeReceived = 4,    // ByeMsg from a client
     ClientJoined = 5,   // ClientJoinedPayload
     ClientLeft = 6,     // ClientLeftPayload
-    RemoteShown = 9,    // RemoteShownPayload: what a receiver showed of a remote jet (kinds 7, 8 and 10: Task 12)
+    LocalState = 7,     // StateMsg as a client sent it, with its own id (client files)
+    RemoteShown = 9,    // RemoteShownPayload: what a receiver showed of a remote jet (kinds 8 and 10: Task 12)
 };
 
 enum class LeaveReason : uint8_t {

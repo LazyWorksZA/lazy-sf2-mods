@@ -100,6 +100,8 @@ public:
     void stop(bool in_loader_lock);
 
     Phase phase() const { return phase_.load(std::memory_order_acquire); }
+    /// <summary>The network thread has cleaned up (after Disconnected): stop() then joins at once.</summary>
+    bool finished() const { return finished_.load(std::memory_order_acquire); }
     /// <summary>The id the Welcome gave us (1..kMaxClients), 0 before it.</summary>
     uint16_t client_id() const { return id_.load(std::memory_order_acquire); }
 

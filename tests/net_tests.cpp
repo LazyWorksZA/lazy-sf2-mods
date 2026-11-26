@@ -40,6 +40,7 @@
 #include "bot_core.h"
 #include "net/clock_sync.h"
 #include "net/client_core.h"
+#include "net/client_logic.h"
 #include "net/host_core.h"
 #include "net/host_session.h"
 #include "net/protocol.h"
@@ -6048,6 +6049,25 @@ void remote_avatar_tests() {
         expect(!ca.taken && cb.taken && std::fabs(ca.dist - 50.0) < 1e-9 && ca.seq == 7 && ca.side == F &&
                    std::wcscmp(ca.name, L"DENVER 12") == 0 && std::strcmp(ca.type_name, "F-105D") == 0,
                "candidate: fields copied, taken by pointer and seq (a reused address is not taken), distance");
+        // Within 20 km of the player first, whatever the tier: a far wingman loses to a near aircraft of any kind.
+        const AvatarCandidate far_wing[] = {
+            {L"DENVER 11", "F-105D", 1, F, true, false, 0},
+            {L"DENVER 12", "F-105D", 2, F, false, false, 30000},
+            {L"COLT 21", "F-4E", 3, F, false, false, 19000},
+            {L"MIG 31", "MiG-21F", 4, E, false, false, 25000},
+        };
+        AvatarRank fr;
+        expect(pick_avatar(far_wing, 4, "F-105D", &fr) == 2 && fr.nearby && fr.tier == AvatarTier::Friendly,
+               "pick: my #2 30 km away loses to a friendly of another type 19 km away");
+        AvatarCandidate fw2[4];
+        std::memcpy(fw2, far_wing, sizeof(far_wing));
+        fw2[2].dist = 21000;
+        expect(pick_avatar(fw2, 4, "F-105D", &fr) == 1 && !fr.nearby && fr.tier == AvatarTier::Wingman,
+               "pick: nothing within 20 km -> the best tier among the far ones (my #2), marked not nearby");
+        fw2[3].dist = 20000;
+        expect(pick_avatar(fw2, 4, "F-105D", &fr) == 3 && fr.nearby && fr.tier == AvatarTier::Nearest,
+               "pick: an enemy at exactly 20 km is near, and beats far friendlies");
+
         AvatarPicker pk(nullptr, "F-105D");
         expect(!pk.offer(0, cb) && pk.offer(1, ca) && pk.best().tier == AvatarTier::SameType,
                "candidate: null name and type are safe; no player -> no flight, friendly same type");
@@ -6093,6 +6113,165 @@ void remote_avatar_tests() {
         expect(!c.done() && c.frames() == 0 && !c.avatar_first(), "frame order: no avatar steps -> no frames, no verdict");
         c.reset();
         expect(!c.done() && c.frames() == 0, "frame order: reset");
+    }
+}
+
+void client_logic_tests() {
+    namespace cl = LazyWorks::SF2Patch::net::client_logic;
+    namespace rm = LazyWorks::SF2Patch::hooks::replay_math;
+    using cl::JoinAction;
+    std::printf("client logic\n");
+
+    {
+        const double up[3] = {0, 0, 1000}, low[3] = {0, 0, 400};
+        const float fast[3] = {0, 200, 0}, slow[3] = {30, 30, 0};
+        expect(cl::airborne(up, fast) && !cl::airborne(low, fast) && !cl::airborne(up, slow),
+               "airborne: above 500 m and faster than 50 m/s");
+        expect(cl::connect_due(true, true, true, false, 10.0, 10.0) && !cl::connect_due(false, true, true, false, 10, 0) &&
+                   !cl::connect_due(true, false, true, false, 10, 0) && !cl::connect_due(true, true, false, false, 10, 0) &&
+                   !cl::connect_due(true, true, true, true, 10, 0) && !cl::connect_due(true, true, true, false, 9.9, 10.0),
+               "connect: player known, airborne, no core, not blocked, retry time reached");
+    }
+    {
+        expect(cl::join_action(false, true, true, false, 5000) == JoinAction::NoJoin,
+               "join: a Welcome without a join position never moves");
+        expect(cl::join_action(true, false, true, false, 5000) == JoinAction::Off, "join: LAZYSF2_NET_JOIN=none");
+        expect(cl::join_action(true, true, true, false, 49) == JoinAction::Close &&
+                   cl::join_action(true, true, true, false, 51) == JoinAction::Move,
+               "join: moves only when more than 50 m away");
+        expect(cl::join_action(true, true, false, false, 2000) == JoinAction::NotAirborne, "join: not when not airborne");
+        expect(cl::join_action(true, true, true, true, 2999) == JoinAction::AlreadyJoined &&
+                   cl::join_action(true, true, true, true, 3001) == JoinAction::Move,
+               "join: after a move, again only when the join position is over 3 km away");
+        // The bot's two-step join: a first Welcome without a position, the join 2 km off, then up to 8 re-sent joins
+        // while the pilot flies on the wing (within a few hundred metres): exactly one move.
+        int moves = 0;
+        bool moved = false;
+        if (cl::join_action(false, true, true, moved, 0) == JoinAction::Move) ++moves;
+        if (cl::join_action(true, true, true, moved, 2000) == JoinAction::Move) {
+            ++moves;
+            moved = true;
+        }
+        for (int k = 0; k < 8; ++k)
+            if (cl::join_action(true, true, true, moved, 20.0 + 50.0 * k) == JoinAction::Move) ++moves;
+        expect(moves == 1, "join: one move for a two-step join with 8 re-Welcomes");
+    }
+    {
+        WelcomeMsg w{};
+        w.spawn_pos[0] = 1000;
+        w.spawn_pos[1] = 2000;
+        w.spawn_pos[2] = 3000;
+        w.spawn_vel[1] = 200;
+        w.host_game_time = 50;
+        double t[3];
+        cl::join_target(w, 50.15, t);
+        const bool on = std::fabs(t[1] - 2030) < 1e-6 && t[0] == 1000 && t[2] == 3000;
+        cl::join_target(w, 49.0, t);
+        const bool back = t[1] == 2000;
+        cl::join_target(w, 60.0, t);
+        expect(on && back && std::fabs(t[1] - 2400) < 1e-6,
+               "join target: carried on with the join velocity, never backwards, at most 2 s");
+    }
+    {
+        float v[3] = {0, 100, 7};
+        cl::turn_heading(v, rm::kPi / 2);
+        const bool east = std::fabs(v[0] - 100) < 1e-3 && std::fabs(v[1]) < 1e-3 && v[2] == 7;
+        float u[3] = {3, 4, 0};
+        cl::turn_heading(u, 1.234);
+        const double h0 = std::atan2(3.0, 4.0), h1 = std::atan2(double(u[0]), double(u[1]));
+        expect(east && std::fabs(std::hypot(u[0], u[1]) - 5) < 1e-4 && std::fabs(rm::wrap_pi(h1 - h0 - 1.234)) < 1e-5,
+               "turn_heading: heading grows by the angle (north turned 90 deg points east), length and z kept");
+        expect(std::fabs(cl::heading_like(4.0f, -1.0) - (2 * rm::kPi - 1.0)) < 1e-5 &&
+                   std::fabs(cl::heading_like(1.0f, 4.0) - (4.0 - 2 * rm::kPi)) < 1e-5 &&
+                   std::fabs(cl::heading_like(4.0f, 1.0) - 1.0) < 1e-6,
+               "heading_like: keeps the convention of the original value ([0, 2pi) or (-pi, pi])");
+    }
+    {
+        char h[64];
+        uint16_t port = 0;
+        expect(cl::parse_connect_spec("127.0.0.1:7777", h, sizeof(h), &port) && std::strcmp(h, "127.0.0.1") == 0 &&
+                   port == 7777,
+               "connect spec: numeric address and port");
+        expect(cl::parse_connect_spec("pc-2.tail-net.ts.net:1", h, sizeof(h), &port) &&
+                   std::strcmp(h, "pc-2.tail-net.ts.net") == 0 && port == 1,
+               "connect spec: a name");
+        char tiny[4];
+        expect(!cl::parse_connect_spec(":7777", h, sizeof(h), &port) && !cl::parse_connect_spec("1.2.3.4", h, sizeof(h), &port) &&
+                   !cl::parse_connect_spec("a:0", h, sizeof(h), &port) && !cl::parse_connect_spec("a:65536", h, sizeof(h), &port) &&
+                   !cl::parse_connect_spec("a b:7", h, sizeof(h), &port) && !cl::parse_connect_spec("a:7x", h, sizeof(h), &port) &&
+                   !cl::parse_connect_spec("a:", h, sizeof(h), &port) &&
+                   !cl::parse_connect_spec("abcd:7", tiny, sizeof(tiny), &port) &&
+                   !cl::parse_connect_spec(nullptr, h, sizeof(h), &port),
+               "connect spec: no host, no port, port 0 or over 65535, bad characters, too long, null");
+    }
+    {
+        // The send schedule: 20 Hz of host time from 60 Hz steps, nothing while held, no burst after the hold.
+        expect(cl::may_send(true, true, false) && !cl::may_send(false, true, false) && !cl::may_send(true, false, false) &&
+                   !cl::may_send(true, true, true),
+               "send: welcomed, a Pong, and no hold");
+        SendTicker tick;
+        int sent = 0, after = 0;
+        double t = 100.0;
+        for (int i = 0; i < 600; ++i, t += 1.0 / 60.0)
+            if (cl::may_send(true, true, false) && tick.due(t)) ++sent;
+        for (int i = 0; i < 120; ++i)  // the host's clock is held: nothing is asked
+            if (cl::may_send(true, true, true) && tick.due(t)) ++sent;
+        t += 2.0;  // the hold ended with a reset: host time stepped on
+        for (int i = 0; i < 6; ++i, t += 1.0 / 60.0)
+            if (cl::may_send(true, true, false) && tick.due(t)) ++after;
+        expect(sent >= 199 && sent <= 201 && after == 2, "send: 200 States in 10 s at 60 Hz steps; none held; no burst after");
+    }
+    {
+        // ClockWatch on a driven ClockSync: synced at the first Pong, hold on a freeze, reset and synced on resume,
+        // a re-Welcome is a re-seed (left to the Welcome's line), the wait for its first Pong is no hold, and an
+        // offset jump is a plain reset.
+        ClockSync c;
+        HostClock hc;
+        cl::ClockWatch wch;
+        auto upd = [&](double wall) {
+            hc.read(wall, c);
+            return wch.update(c, hc, wall);
+        };
+        c.on_welcome(0.0, 100.0, 0.01);
+        const unsigned e0 = upd(0.01);
+        double w = 0.25;
+        c.on_pong(w - 0.01, w + 0.01, 100.0 + w);
+        const unsigned e1 = upd(w + 0.02);
+        unsigned quiet = 0;
+        for (int i = 0; i < 8; ++i) {
+            w += 0.25;
+            c.on_pong(w - 0.01, w + 0.01, 100.0 + w);
+            quiet |= upd(w + 0.02);
+        }
+        const double frozen_at = 100.0 + w;
+        unsigned hold = 0;
+        for (int i = 0; i < 4; ++i) {
+            w += 0.25;
+            c.on_pong(w - 0.01, w + 0.01, frozen_at);
+            hold |= upd(w + 0.02);
+        }
+        const bool held = wch.held();
+        w += 0.25;
+        c.on_pong(w - 0.01, w + 0.01, frozen_at + 0.25);
+        const unsigned resume = upd(w + 0.02);
+        w += 1.0;
+        c.on_welcome(w, frozen_at + 2.0, 0.01);
+        const unsigned rewelcome = upd(w + 0.01);
+        w += 0.25;
+        c.on_pong(w - 0.01, w + 0.01, frozen_at + 2.25);
+        const unsigned after_pong = upd(w + 0.02);
+        w += 0.25;
+        c.on_pong(w - 0.01, w + 0.01, frozen_at + 2.5 + 1.0);  // the host's clock jumped a second
+        const unsigned jump = upd(w + 0.02);
+        unsigned stale = 0;
+        for (int i = 1; i <= 16; ++i) stale |= upd(w + 0.02 + 0.25 * i);  // 4 s without a Pong
+        expect(e0 == 0 && e1 == cl::ClockWatch::kSynced && quiet == 0, "clock watch: synced once at the first Pong");
+        expect(hold == cl::ClockWatch::kHold && held, "clock watch: a freeze is one hold");
+        expect(resume == (cl::ClockWatch::kReset | cl::ClockWatch::kSynced), "clock watch: the resume resets and syncs");
+        expect(rewelcome == (cl::ClockWatch::kReset | cl::ClockWatch::kReseed) && after_pong == 0,
+               "clock watch: a re-Welcome is a re-seed; its first Pong is no new sync and the wait is no hold");
+        expect(jump == cl::ClockWatch::kReset, "clock watch: an offset jump is a reset, not a re-seed");
+        expect(stale == cl::ClockWatch::kHold, "clock watch: no Pong for 3 s is a hold");
     }
 }
 
@@ -6154,6 +6333,7 @@ int main() {
     placement_tests();
     remote_jet_tests();
     remote_avatar_tests();
+    client_logic_tests();
     gameplay_row_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

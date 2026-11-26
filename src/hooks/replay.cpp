@@ -247,8 +247,8 @@ void start_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sh
 }
 
 void try_start(void* player) {
-    if (host_has_clients()) {
-        LOG("replay: not started, host mode has clients");
+    if (net_session_active()) {
+        LOG("replay: not started, a network session is running");
         return;
     }
     if (g_puppet_state.load() != 0) {

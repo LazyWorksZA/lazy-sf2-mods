@@ -38,6 +38,8 @@ struct AvatarInfo {
     int flight_no = -1;
     double dist = 0;     // from the player, before the move
     double from[3] = {};  // where it was
+    double moved = 0;     // metres from there to the placement
+    bool nearby = false;  // within kAvatarNear of the player (false: nothing nearer was free)
 };
 
 /// <summary>

@@ -619,6 +619,10 @@ void host_install() {
         LOG("net: host off");
         return;
     }
+    if (GetEnvironmentVariableW(L"LAZYSF2_CONNECT", nullptr, 0) > 0) {
+        LOG("net: host and client off (LAZYSF2_HOST and LAZYSF2_CONNECT are both set; set one)");
+        return;
+    }
     if (!probe_output_dir()) {
         LOG("net: host off (the probe is off: LAZYSF2_PROBE_DIR is not set or not valid)");
         return;
