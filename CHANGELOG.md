@@ -18,6 +18,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 - **Lock probe hotkeys.** With the probe on: Ctrl+Shift+A places an AI aircraft (an enemy if there is one) 3 km in front of you, at your altitude, heading and speed; Ctrl+Shift+O makes your radar lock it through the avionics' own commands; Ctrl+Shift+I makes that aircraft's radar lock you. Each logs the radar state (`lock probe:` lines).
 
+### Gameplay
+
+- **The game can keep running in the background** (`Options.ini` `[OtherOptions] BackgroundMode`, set by hand, default 0). With **0** the game pauses when its window loses focus, as stock. With **1** it keeps running in any flight (single player included) and in the menus; the keyboard, mouse and joystick are let go until you come back. While the game is minimised, the mod limits it to its normal frame rate so it doesn't use a whole CPU core. With **2** sounds keep playing as well (the menu music still goes quiet in the background). Borderless only: in Fullscreen the game pauses as stock and the log says so once. The value is read when the game starts; a change applies after a restart.
+
 ## 1.1.2 (2026-11-26)
 
 ### Fixed

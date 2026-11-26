@@ -50,6 +50,8 @@ add_library(lazysf2 SHARED
     src/hooks/input_hooks.cpp
     src/hooks/pilot_twist.cpp
     src/hooks/menu_hooks.cpp
+    src/hooks/focus_hooks.cpp
+    src/hooks/sound_hooks.cpp
     src/hooks/options_gameplay_splice.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp

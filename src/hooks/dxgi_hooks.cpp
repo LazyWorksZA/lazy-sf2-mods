@@ -124,6 +124,7 @@ const char* present_result_name(HRESULT hr) {
 }
 
 HRESULT g_last_present = S_OK;
+std::atomic<long> g_last_present_result{S_OK};  // copy of g_last_present for other features (any thread)
 DWORD g_last_present_tick = 0;
 unsigned g_frames_since_change = 0;
 
@@ -144,6 +145,7 @@ HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain* self, UINT sync, UINT flags)
             }
         }
         g_last_present = hr;
+        g_last_present_result = hr;
         g_last_present_tick = now;
         g_frames_since_change = 0;
     }
@@ -363,5 +365,7 @@ void dxgi_on_modules_loaded() {
     }
     ReleaseSRWLockExclusive(&g_install_lock);
 }
+
+long dxgi_last_present_result() { return g_last_present_result.load(std::memory_order_relaxed); }
 
 }  // namespace LazyWorks::SF2Patch::hooks
