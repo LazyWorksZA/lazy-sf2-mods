@@ -4,6 +4,8 @@
 // vsync wait. See lazy-sf2-recon: network-recon §8.1.
 #include <windows.h>
 
+#include <dxgi.h>
+
 #include <MinHook.h>
 
 #include <atomic>
@@ -45,7 +47,7 @@ bool g_pump_hooked = false;  // set once in DllMain; without it a minimised wind
 
 /// <summary>
 /// Further reasons to keep running besides the player's BackgroundMode. None on master. When net-background merges:
-/// return net_session_active() and config::background_sim() (window thread; must stay cheap).
+/// return net_session_active() && config::background_sim() (window thread; must stay cheap).
 /// </summary>
 bool focus_keep_running_reason() { return false; }
 
@@ -75,6 +77,7 @@ void inp_set_active(int on) {
 
 // The stock pause is about to run. Buffers made with GLOBALFOCUS would keep looping through it (the stock focus path
 // never tells SND), so stop the game's channels first; the game starts its looped sounds again when it resumes.
+// APP busy (inside SetActive): the stock handler does nothing then either, so there is no pause to silence.
 void before_stock_pause() {
     if (sound_global_focus_active() && app_active_idle()) sound_stop_all_channels("stock pause");
 }
@@ -88,7 +91,7 @@ void stop_reason_timer() {
 // posted, so a click back in between can't pause a foreground game.
 void CALLBACK reason_timer(HWND hwnd, UINT, UINT_PTR, DWORD) {
     if (!g_kept_running.load()) return;
-    const bool unpaced = !g_pump_hooked && IsIconic(hwnd);
+    const bool unpaced = !g_pump_hooked && (IsIconic(hwnd) || dxgi_last_present_result() == DXGI_STATUS_OCCLUDED);
     if (decide() == BgDecision::KeepRunning && !unpaced) return;
     if (GetForegroundWindow() == hwnd) return;  // the player is back; the activation clears the state
     KillTimer(hwnd, kReasonTimer);
@@ -169,13 +172,20 @@ bool g_pacing = false;
 void pace_frame() {
     const int64_t now = now_us();
     HWND hwnd = game_window();
-    if (g_kept_running.load(std::memory_order_relaxed) && hwnd && IsIconic(hwnd)) {
+    const bool iconic = hwnd && IsIconic(hwnd);
+    const long present = dxgi_last_present_result();
+    if (hwnd && needs_pacing(g_kept_running.load(std::memory_order_relaxed), iconic, present == DXGI_STATUS_OCCLUDED)) {
+        const int64_t period = pace_paced_period(g_period_us);
         if (!g_pacing) {
             g_pacing = true;
             g_deadline_us = 0;
-            LOG("focus: minimised while kept running: frames paced at %.1f Hz", 1e6 / static_cast<double>(g_period_us));
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+            LOG("focus: %s while kept running: frames paced at %.1f Hz (client %ldx%ld, last Present 0x%08lx)",
+                iconic ? "minimised" : "occluded", 1e6 / static_cast<double>(period), rc.right - rc.left,
+                rc.bottom - rc.top, static_cast<unsigned long>(present));
         }
-        const PaceStep s = pace_step(now, g_deadline_us, g_period_us);
+        const PaceStep s = pace_step(now, g_deadline_us, period);
         g_deadline_us = s.deadline_us;
         if (s.wait_us > 0) Sleep(static_cast<DWORD>((s.wait_us + 999) / 1000));
         g_last_us = 0;  // paced frames are not measured
@@ -183,7 +193,8 @@ void pace_frame() {
     }
     if (g_pacing) {
         g_pacing = false;
-        LOG("focus: no longer minimised: frame pacing off");
+        LOG("focus: no longer minimised or occluded: frame pacing off (last Present 0x%08lx)",
+            static_cast<unsigned long>(present));
     }
     if (g_last_us) g_period_us = pace_update_period(g_period_us, now - g_last_us);
     g_last_us = now;

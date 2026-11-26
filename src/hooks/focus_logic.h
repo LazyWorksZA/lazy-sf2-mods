@@ -27,17 +27,28 @@ constexpr bool keep_running(bool player_option, bool other_reason, config::Displ
     return bg_decision(player_option, other_reason, mode) == BgDecision::KeepRunning;
 }
 
-/// <summary>True when new secondary sound buffers get DSBCAPS_GLOBALFOCUS: mode 2, never the primary or the stream.</summary>
-constexpr bool wants_global_focus(config::BackgroundMode mode, uint32_t flags) {
+/// <summary>
+/// True when a new secondary sound buffer gets DSBCAPS_GLOBALFOCUS: mode 2 in Borderless (decided at creation; in
+/// Fullscreen the game pauses on focus loss, so the buffer stays stock), never the primary or the music stream.
+/// </summary>
+constexpr bool wants_global_focus(config::BackgroundMode mode, config::DisplayMode display, uint32_t flags) {
     constexpr uint32_t kPrimary = 0x1, kPositionNotify = 0x100;  // DSBCAPS_PRIMARYBUFFER, DSBCAPS_CTRLPOSITIONNOTIFY
-    return mode == config::BackgroundMode::KeepRunningWithSound && (flags & (kPrimary | kPositionNotify)) == 0;
+    return mode == config::BackgroundMode::KeepRunningWithSound && display == config::DisplayMode::Borderless &&
+           (flags & (kPrimary | kPositionNotify)) == 0;
 }
+
+/// <summary>Pace the kept-running loop: Present no longer waits for vsync (minimised, or occluded, e.g. Win+L).</summary>
+constexpr bool needs_pacing(bool kept_running, bool iconic, bool occluded) { return kept_running && (iconic || occluded); }
 
 // Frame limiter while the kept-running window is minimised (Present no longer waits for vsync). Microseconds.
 inline constexpr int64_t kPaceMinPeriodUs = 4167;     // 240 Hz
 inline constexpr int64_t kPaceMaxPeriodUs = 33333;    // 30 Hz
 inline constexpr int64_t kPaceDefaultPeriodUs = 16667;
 inline constexpr int64_t kPaceMaxSampleUs = 100000;   // longer gaps (loading, menus switching) are not frames
+inline constexpr int64_t kPaceFloorUs = 16667;        // while paced, never faster than 60 Hz (vsync off measures fast)
+
+/// <summary>The period used while paced: the measured one, but at most 60 Hz.</summary>
+constexpr int64_t pace_paced_period(int64_t measured_us) { return measured_us < kPaceFloorUs ? kPaceFloorUs : measured_us; }
 
 /// <summary>Folds one measured frame interval into the period estimate (1/8 weight), clamped to 30..240 Hz.</summary>
 constexpr int64_t pace_update_period(int64_t period_us, int64_t interval_us) {

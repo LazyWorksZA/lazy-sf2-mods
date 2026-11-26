@@ -23,6 +23,8 @@ void request_display_mode_apply();
 void dxgi_apply_display_mode();
 /// <summary>True if the swap chain is in exclusive fullscreen (diagnostics).</summary>
 bool dxgi_is_exclusive();
+/// <summary>The game swap chain's last Present result (S_OK before any; D3D9 fallback: always S_OK). Any thread.</summary>
+long dxgi_last_present_result();
 /// <summary>
 /// Confines the cursor to the game's client area in Fullscreen with "Match Windows cursor" (while the game is the
 /// active app) and releases it otherwise, only ever releasing a clip this mod set. Any thread; logs on change.

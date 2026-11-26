@@ -1564,12 +1564,18 @@ void focus_logic_tests() {
     expect(keeping == 3, "bg: three of eight combinations keep running");
 
     // GLOBALFOCUS: mode 2 only, never the primary buffer or the position-notify music stream.
-    expect(h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x88), "sound: plain secondary buffer gets it");
-    expect(h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x40090), "sound: 3D (LOCDEFER) buffer gets it");
-    expect(!h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x11), "sound: primary buffer never");
-    expect(!h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x10188), "sound: music stream never");
-    expect(!h::wants_global_focus(BackgroundMode::KeepRunning, 0x88) && !h::wants_global_focus(BackgroundMode::Pause, 0x88),
+    constexpr BackgroundMode S2 = BackgroundMode::KeepRunningWithSound;
+    expect(h::wants_global_focus(S2, B, 0x88), "sound: plain secondary buffer gets it");
+    expect(h::wants_global_focus(S2, B, 0x400b0), "sound: 3D (LOCDEFER) buffer with pitch gets it");
+    expect(!h::wants_global_focus(S2, B, 0x11), "sound: primary buffer never");
+    expect(!h::wants_global_focus(S2, B, 0x10188), "sound: music stream never");
+    expect(!h::wants_global_focus(S2, F, 0x88), "sound: Fullscreen at creation: stock buffer");
+    expect(!h::wants_global_focus(BackgroundMode::KeepRunning, B, 0x88) && !h::wants_global_focus(BackgroundMode::Pause, B, 0x88),
            "sound: modes 0 and 1 leave buffers stock");
+    expect(h::needs_pacing(true, true, false) && h::needs_pacing(true, false, true), "pace: minimised or occluded");
+    expect(!h::needs_pacing(true, false, false) && !h::needs_pacing(false, true, true), "pace: only while kept running");
+    expect(h::pace_paced_period(6944) == h::kPaceFloorUs && h::pace_paced_period(20000) == 20000,
+           "pace: paced at most 60 Hz, slower measured periods kept");
 
     // BackgroundMode parsing: 0, 1, 2; anything else is stock (-1).
     expect(parse_choice_setting(L"0", 2) == 0 && parse_choice_setting(L"1", 2) == 1 && parse_choice_setting(L" 2 ", 2) == 2,

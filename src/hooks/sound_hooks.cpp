@@ -39,10 +39,17 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 
 HRESULT STDMETHODCALLTYPE h_CreateSoundBuffer(IDirectSound8* self, LPCDSBUFFERDESC desc, LPDIRECTSOUNDBUFFER* out,
                                              LPUNKNOWN outer) {
-    if (desc && desc->dwSize >= sizeof(DSBUFFERDESC1) && (desc->dwFlags & DSBCAPS_GLOBALFOCUS) == 0 &&
-        wants_global_focus(config::background_mode(), desc->dwFlags)) {
+    // Only a desc we can copy whole (dwSize between the DirectX 7 and 8 layouts), so dwSize matches the copy.
+    const bool copyable = desc && desc->dwSize >= sizeof(DSBUFFERDESC1) && desc->dwSize <= sizeof(DSBUFFERDESC) &&
+                          (desc->dwFlags & DSBCAPS_GLOBALFOCUS) == 0;
+    const config::DisplayMode display = config::display_mode();
+    if (copyable && display != config::DisplayMode::Borderless) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) LOG("sound: Fullscreen at buffer creation: this and later Fullscreen buffers stay stock");
+    }
+    if (copyable && wants_global_focus(config::background_mode(), display, desc->dwFlags)) {
         DSBUFFERDESC copy = {};
-        memcpy(&copy, desc, desc->dwSize < sizeof(copy) ? desc->dwSize : sizeof(copy));
+        memcpy(&copy, desc, desc->dwSize);
         copy.dwFlags |= DSBCAPS_GLOBALFOCUS;
         const HRESULT hr = o_CreateSoundBuffer(self, &copy, out, outer);
         if (SUCCEEDED(hr) && g_global_focus_buffers.fetch_add(1) == 0) {
@@ -63,8 +70,8 @@ HRESULT WINAPI h_DirectSoundCreate8(LPCGUID guid, LPDIRECTSOUND8* out, LPUNKNOWN
     if (!g_buffer_hooked.exchange(true)) {
         create_and_enable(vtable_slot(*out, kDsCreateSoundBuffer), reinterpret_cast<void*>(&h_CreateSoundBuffer),
                           reinterpret_cast<void**>(&o_CreateSoundBuffer), "IDirectSound8::CreateSoundBuffer");
-        LOG("sound: BackgroundMode 2: sound buffers made from now on keep playing without focus (music stream "
-            "excluded); a change of BackgroundMode applies after a restart");
+        LOG("sound: BackgroundMode 2: sound buffers made from now on in Borderless keep playing without focus (music "
+            "stream excluded; decided per buffer at creation); a change of BackgroundMode applies after a restart");
     }
     return hr;
 }
