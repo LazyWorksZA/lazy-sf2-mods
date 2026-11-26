@@ -62,6 +62,10 @@ jobs:
           # Velopack names its files after the package id; publish them under the product name and version.
           Copy-Item installer/Releases/LazySF2Patch-win.msi (Join-Path $out 'Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi')
           Copy-Item installer/Releases/LazySF2Patch-win-Setup.exe (Join-Path $out 'Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe')
+          # The Tacview add-on on its own, for players who use the portable winmm.dll: extract into %APPDATA%\Tacview\AddOns.
+          $stage = New-Item -ItemType Directory -Force addon-stage/LazySF2Patch
+          Copy-Item tacview/addon/LazySF2Patch/main.lua $stage
+          Compress-Archive -Path addon-stage/LazySF2Patch -DestinationPath (Join-Path $out 'Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Tacview-AddOn.zip') -Force
           Push-Location $out
           Get-ChildItem -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
@@ -76,6 +80,7 @@ jobs:
             dist/winmm.dll
             dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi
             dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe
+            dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Tacview-AddOn.zip
 
       - name: Release notes
         shell: pwsh
@@ -97,4 +102,4 @@ jobs:
         run: |
           gh release create '${{ github.ref_name }}' --title 'Lazy SF2 Patch ${{ steps.ver.outputs.version }}' `
             --notes-file notes.md --verify-tag `
-            dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe dist/winmm.dll dist/SHA256SUMS.txt
+            dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}.msi dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Setup.exe dist/Lazy-SF2-Patch-${{ steps.ver.outputs.version }}-Tacview-AddOn.zip dist/winmm.dll dist/SHA256SUMS.txt
