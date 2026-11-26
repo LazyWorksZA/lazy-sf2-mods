@@ -303,6 +303,7 @@ struct Serve {
             m.seq = ++stores_seq;
             const double fuel = 4000.0 - 2.0 * t, rounds = 640.0 - 10.0 * t;
             m.fuel = fuel_to_wire(static_cast<float>(fuel > 0 ? fuel : 0));
+            m.fuel_ext = fuel_to_wire(t < 6 ? 1200.0f : 0.0f);  // a drop tank, dropped at 6 s
             m.guns = 1;
             m.rounds[0] = static_cast<uint16_t>(rounds > 0 ? rounds : 0);
             m.chaff = m.flares = 30;
@@ -512,8 +513,8 @@ struct Serve {
             ConsumablesMsg m{};
             if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
             if (res.consumables_rx++ % 15 == 0)
-                say("bot serve: client %u consumables: fuel %.0f kg, %u gun(s), first %u rounds, chaff %u, flares %u",
-                    static_cast<unsigned>(m.peer), fuel_from_wire(m.fuel), static_cast<unsigned>(m.guns),
+                say("bot serve: client %u consumables: fuel %.0f kg + %.0f external, %u gun(s), first %u rounds, chaff %u, flares %u",
+                    static_cast<unsigned>(m.peer), fuel_from_wire(m.fuel), fuel_from_wire(m.fuel_ext), static_cast<unsigned>(m.guns),
                     static_cast<unsigned>(m.rounds[0]), static_cast<unsigned>(m.chaff), static_cast<unsigned>(m.flares));
             res.last_rx_fuel = m.fuel;
             return;

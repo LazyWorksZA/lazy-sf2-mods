@@ -538,12 +538,14 @@ struct LoadoutMsg {
     uint8_t n;      // entries used in this part
     LoadoutEntry e[12];
 };
-/// <summary>A player's consumables: total fuel in 4 kg steps, each fixed gun's rounds (system order), chaff, flares.</summary>
+/// <summary>A player's consumables: internal and external (drop tank) fuel in 4 kg steps, each fixed gun's rounds
+/// (system order), chaff, flares.</summary>
 struct ConsumablesMsg {
     Header h;
     uint16_t peer;
     uint16_t seq;
-    uint16_t fuel;  // kg / 4
+    uint16_t fuel;      // internal tanks, kg / 4
+    uint16_t fuel_ext;  // external tanks, kg / 4
     uint8_t guns;   // entries used in rounds
     uint16_t rounds[4];
     uint8_t chaff, flares;
@@ -551,7 +553,8 @@ struct ConsumablesMsg {
 #pragma pack(pop)
 static_assert(sizeof(LoadoutEntry) == 7);
 static_assert(sizeof(LoadoutMsg) == 95);      // 4:2 peer, 6:2 seq, 8:1 part, 9:1 parts, 10:1 n, 11:84 entries
-static_assert(sizeof(ConsumablesMsg) == 21);  // 4:2 peer, 6:2 seq, 8:2 fuel, 10:1 guns, 11:8 rounds, 19:1 chaff, 20:1 flares
+static_assert(sizeof(ConsumablesMsg) == 23);  // 4:2 peer, 6:2 seq, 8:2 fuel, 10:2 external fuel, 12:1 guns, 13:8 rounds,
+                                              // 21:1 chaff, 22:1 flares
 inline constexpr size_t kLoadoutPart = 12;
 size_t encode(const LoadoutMsg& m, uint8_t* out, size_t cap);
 /// <summary>Checks the size, part < parts and n <= kLoadoutPart.</summary>
@@ -574,17 +577,25 @@ inline uint16_t fuel_to_wire(float kg) {
 }
 inline float fuel_from_wire(uint16_t q) { return q * 4.0f; }
 
-/// <summary>What the receiver does with one station: nothing, rebuild it (another weapon, or fewer stores than the
-/// owner has: a rearm), or note it (the avatar has more: a store the owner used that the avatar did not).</summary>
-enum class StationAction : uint8_t { None, Rebuild, More };
-inline StationAction station_action(int32_t avatar_weapon, int avatar_count, int32_t owner_weapon, int owner_count) {
-    if (owner_count <= 0 && avatar_count <= 0) return StationAction::None;
-    if (avatar_weapon != owner_weapon) return owner_count > 0 ? StationAction::Rebuild : StationAction::More;
-    if (avatar_count < owner_count) return StationAction::Rebuild;
-    if (avatar_count > owner_count) return StationAction::More;
-    return StationAction::None;
+/// <summary>
+/// What the receiver does with one station. Keep: it matches. Rebuild: the game's rearm rebuilds it with the owner's
+/// weapon and count (another weapon, a rearm, or stores the avatar kept that the owner used). Empty: the owner has none
+/// left and the avatar still has some (the rearm cannot empty a station; noted). GiveUp: this very rebuild was tried
+/// and did not take (a weapon the avatar's station cannot carry): it is not retried until the owner's state changes.
+/// Skip: the avatar (a fallback airframe) has no such station.
+/// </summary>
+enum class StationStep : uint8_t { Keep, Rebuild, Empty, GiveUp, Skip };
+inline StationStep station_step(int32_t avatar_weapon, int avatar_count, int32_t owner_weapon, int owner_count,
+                                bool tried_same, bool has_station = true) {
+    if (owner_count <= 0 && avatar_count <= 0) return StationStep::Keep;
+    if (avatar_weapon == owner_weapon && avatar_count == owner_count) return StationStep::Keep;
+    if (!has_station) return StationStep::Skip;
+    if (owner_count <= 0) return StationStep::Empty;
+    if (tried_same) return StationStep::GiveUp;
+    return StationStep::Rebuild;
 }
-/// <summary>The factor each avatar tank's fuel is scaled by so that its total becomes the owner's (1 when it cannot).</summary>
+/// <summary>The factor each avatar tank's fuel is scaled by so that its total (internal or external, each on its own)
+/// becomes the owner's (1 when it cannot); each tank is then clamped to the most it has held.</summary>
 inline float fuel_scale(float avatar_total, float owner_total) {
     if (!(avatar_total > 1.0f) || !(owner_total >= 0.0f)) return 1.0f;
     const float k = owner_total / avatar_total;

@@ -8676,29 +8676,36 @@ void stores_tests() {
     expect(decode(b, encode(lo, b, sizeof(b)), bad) == Status::BadType, "loadout: a part past the count is refused");
     ConsumablesMsg co{};
     co.fuel = fuel_to_wire(3999.0f);
+    co.fuel_ext = fuel_to_wire(1200.0f);
     co.guns = 2;
     co.rounds[1] = 412;
     co.flares = 30;
     ConsumablesMsg cr{};
     const size_t cn = encode(co, b, sizeof(b));
-    expect(cn == 21 && peek_world_type(b, cn) == 31 && decode(b, cn, cr) == Status::Ok && cr.fuel == 1000 &&
+    expect(cn == 23 && peek_world_type(b, cn) == 31 && decode(b, cn, cr) == Status::Ok && cr.fuel == 1000 &&
+               cr.fuel_ext == 300 &&
                cr.rounds[1] == 412 && cr.flares == 30,
-           "consumables: 21 bytes, fuel in 4 kg steps, round trip");
+           "consumables: 23 bytes, internal and external fuel in 4 kg steps, round trip");
     co.guns = 5;
     expect(decode(b, encode(co, b, sizeof(b)), cr) == Status::BadType, "consumables: at most 4 guns");
     expect(weapon_name_hash("AIM-9J") == weapon_name_hash("AIM-9J") && weapon_name_hash("AIM-9J") != weapon_name_hash("AIM-9L") &&
                weapon_name_hash("") != 0 && fuel_to_wire(-5.0f) == 0 && fuel_to_wire(1e9f) == 65535 &&
                fuel_from_wire(1000) == 4000.0f,
            "loadout: name hashes tell weapons apart; fuel clamps");
-    expect(station_action(17, 2, 17, 2) == StationAction::None && station_action(17, 0, 17, 2) == StationAction::Rebuild &&
-               station_action(-1, 0, 17, 2) == StationAction::Rebuild && station_action(5, 2, 17, 2) == StationAction::Rebuild &&
-               station_action(17, 2, 17, 1) == StationAction::More && station_action(-1, 0, -1, 0) == StationAction::None &&
-               station_action(17, 2, 9, 0) == StationAction::More,
-           "loadout: rebuild for another weapon or a rearm, note an avatar with more, leave equal ones");
+    expect(station_step(17, 2, 17, 2, false) == StationStep::Keep && station_step(17, 0, 17, 2, false) == StationStep::Rebuild &&
+               station_step(-1, 0, 17, 2, false) == StationStep::Rebuild && station_step(5, 2, 17, 2, false) == StationStep::Rebuild &&
+               station_step(-1, 0, -1, 0, false) == StationStep::Keep,
+           "loadout: rebuild for another weapon or a rearm, leave equal ones");
+    expect(station_step(17, 2, 17, 1, false) == StationStep::Rebuild && station_step(17, 2, 9, 0, false) == StationStep::Empty,
+           "loadout: an avatar with more stores than the owner is rebuilt to the owner's count; an emptied one is noted");
+    expect(station_step(17, 0, 17, 2, true) == StationStep::GiveUp && station_step(17, 0, 17, 3, false) == StationStep::Rebuild,
+           "loadout: a rebuild that did not take is given up until the owner's station changes");
+    expect(station_step(-1, 0, 17, 2, false, false) == StationStep::Skip && station_step(-1, 0, -1, 0, false, false) == StationStep::Keep,
+           "loadout: a station a fallback airframe does not have is skipped");
     expect(fuel_scale(2000.0f, 1000.0f) == 0.5f && fuel_scale(0.0f, 1000.0f) == 1.0f && fuel_scale(100.0f, 5000.0f) == 10.0f,
            "fuel: the avatar's tanks scale to the owner's total (bounded)");
     std::printf("    estimate: a loadout is 95 B every 10 s (about 14 B/s with headers, per player and receiver), consumables\n"
-                "    21 B every 2 s unreliable (about 30 B/s); a rearm or new loadout goes at once\n");
+                "    23 B every 2 s unreliable (about 30 B/s); a rearm or new loadout goes at once\n");
 
     namespace jet = LazyWorks::SF2Patch::hooks::jet;
     std::vector<uint8_t> image(jet::kAoSize), obj(0x9a8), comp(0xe0), s1(0x90), s2(0x90);
@@ -8754,7 +8761,8 @@ void stores_tests() {
     c.core.stop(false);
     expect(los.size() == 1 && los[0].n == 1 && los[0].e[0].hash == weapon_name_hash("AIM-9J") && los[0].e[0].count == 2,
            "loopback: --stores sends the jet's loadout (reliable) with the weapon's name hash");
-    expect(cos.size() >= 2 && cos[0].fuel == fuel_to_wire(4000.0f) && cos.back().fuel < cos[0].fuel && cos[0].rounds[0] == 640,
+    expect(cos.size() >= 2 && cos[0].fuel == fuel_to_wire(4000.0f) && cos.back().fuel < cos[0].fuel && cos[0].rounds[0] == 640 &&
+               cos[0].fuel_ext == fuel_to_wire(1200.0f),
            "loopback: --stores sends falling fuel and rounds every 2 s (unreliable)");
     expect(sent == 2 && s.res.loadouts_rx == 2 && s.res.consumables_rx >= 1 && s.res.last_rx_fuel == 777,
            "loopback: the client's loadout (reliable) and consumables (unreliable) reach the host");

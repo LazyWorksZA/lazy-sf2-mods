@@ -58,7 +58,7 @@ bool read_loadout(const void* obj, Entry out[jet::kLoadoutStations]) {
 }
 
 struct Consum {
-    float fuel = 0;
+    float fuel = 0, fuel_ext = 0;
     int guns = 0;
     int16_t rounds[4] = {};
     int chaff = 0, flares = 0;
@@ -68,14 +68,22 @@ bool read_consumables(void* obj, uintptr_t ao, Consum* c) {
     const int n = jet_list_systems(obj, ao, sys, kMaxSys);
     __try {
         const BYTE* o = static_cast<const BYTE*>(obj);
-        std::memcpy(&c->fuel, o + jet::kFuelTotal, 4);
         int16_t ch = 0, fl = 0;
         std::memcpy(&ch, o + jet::kChaffTotal, 2);
         std::memcpy(&fl, o + jet::kFlareTotal, 2);
         c->chaff = ch;
         c->flares = fl;
-        for (int i = 0; i < n && c->guns < 4; ++i)
-            if (sys[i].vt == kRvaFixedGun) std::memcpy(&c->rounds[c->guns++], sys[i].sys + jet::kGunRounds, 2);
+        for (int i = 0; i < n; ++i) {
+            if (sys[i].vt == kRvaFuelTank) {
+                float f = 0;
+                int16_t ext = 0;
+                std::memcpy(&f, sys[i].sys + jet::kTankFuel, 4);
+                std::memcpy(&ext, sys[i].sys + jet::kTankExternal, 2);
+                if (f > 0) (ext ? c->fuel_ext : c->fuel) += f;
+            } else if (sys[i].vt == kRvaFixedGun && c->guns < 4) {
+                std::memcpy(&c->rounds[c->guns++], sys[i].sys + jet::kGunRounds, 2);
+            }
+        }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -139,17 +147,52 @@ BYTE* station_sys(const SysRef* sys, int n, int station) {
     return nullptr;
 }
 
-// Prepares the station for the game's rearm: the entry's weapon, the station's full count, the entry's count 0.
-// 0 prepared, 1 no such station, 2 faulted.
-int prepare_station(BYTE* avatar, const SysRef* sys, int n, int station, int32_t weapon, int count) {
+bool has_station(const SysRef* sys, int n, int station) {
+    __try {
+        return station_sys(sys, n, station) != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Per peer: what the last rebuild of each station asked for, so one that did not take is not retried; the most each
+// avatar tank has held (its capacity, as far as we know).
+struct Tried {
+    int32_t weapon = -2;
+    int count = -1;
+    bool gave_up = false;  // logged once
+};
+struct TankMax {
+    const BYTE* tank = nullptr;
+    float max = 0;
+};
+struct Rx {
+    uint32_t epoch = 0;
+    void* avatar[5] = {};
+    Tried tried[5][jet::kLoadoutStations];
+    TankMax tanks[64];
+    uint64_t rearms = 0, gave_up = 0, empty = 0, unknown = 0, fuel = 0;
+};
+Rx g_rx;
+
+// Sets the station's full count (+0x80); with prepare, also the entry's weapon and a count of 0 so the rearm rebuilds
+// it. A station not to be rebuilt gets its own count as full, so the game's rearm (which refills every station below
+// full) leaves it as it is. 0 done, 1 no such station, 2 faulted.
+int set_station(BYTE* avatar, const SysRef* sys, int n, int station, int32_t weapon, int count, bool prepare) {
     __try {
         BYTE* sta = station_sys(sys, n, station);
         if (!sta) return 1;
         BYTE* e = avatar + jet::kLoadout + jet::kLoadoutEntry * static_cast<size_t>(station);
-        const int16_t zero = 0;
-        const int32_t full = count;
-        std::memcpy(e, &weapon, 4);
-        std::memcpy(e + 8, &zero, 2);
+        int32_t full = count;
+        if (prepare) {
+            const int16_t zero = 0;
+            std::memcpy(e, &weapon, 4);
+            std::memcpy(e + 8, &zero, 2);
+        } else {
+            int16_t have = 0;
+            std::memcpy(&have, e + 8, 2);
+            full = have;
+        }
         std::memcpy(sta + jet::kStaFull, &full, 4);
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -157,19 +200,20 @@ int prepare_station(BYTE* avatar, const SysRef* sys, int n, int station, int32_t
     }
 }
 
-struct Rx {
-    uint32_t epoch = 0;
-    uint16_t logged_seq[5] = {};
-    uint64_t rearms = 0, mismatches = 0, unknown = 0, fuel = 0;
-};
-Rx g_rx;
-
 void apply_loadout(const net::LoadoutMsg& m, BYTE* avatar, uintptr_t ao) {
+    const int peer = m.peer < 5 ? m.peer : 4;
+    if (g_rx.avatar[peer] != avatar) {
+        g_rx.avatar[peer] = avatar;
+        for (Tried& t : g_rx.tried[peer]) t = Tried{};
+    }
     Entry have[jet::kLoadoutStations];
     if (!read_loadout(avatar, have)) return;
     SysRef sys[kMaxSys];
     const int n = jet_list_systems(avatar, ao, sys, kMaxSys);
-    int rebuild = 0, more = 0, unknown = 0, missing = 0;
+    bool rebuild[jet::kLoadoutStations] = {};
+    int32_t want_weapon[jet::kLoadoutStations] = {};
+    int want_count[jet::kLoadoutStations] = {};
+    int nrebuild = 0, unknown = 0, missing = 0, gave_up = 0, empty = 0;
     for (size_t i = 0; i < m.n; ++i) {
         const net::LoadoutEntry& e = m.e[i];
         if (e.station >= jet::kLoadoutStations) continue;
@@ -182,51 +226,91 @@ void apply_loadout(const net::LoadoutMsg& m, BYTE* avatar, uintptr_t ao) {
             continue;
         }
         const Entry& h = have[e.station];
-        const net::StationAction a = net::station_action(h.weapon, h.count, weapon, e.count);
-        if (a == net::StationAction::More) ++more;
-        if (a != net::StationAction::Rebuild) continue;
-        const int r = prepare_station(avatar, sys, n, e.station, weapon, e.count);
-        if (r == 0) ++rebuild;
-        else ++missing;
+        Tried& t = g_rx.tried[peer][e.station];
+        const bool same = t.weapon == weapon && t.count == e.count;
+        const net::StationStep st =
+            net::station_step(h.weapon, h.count, weapon, e.count, same, has_station(sys, n, e.station));
+        if (st == net::StationStep::Keep) {
+            t = Tried{};
+        } else if (st == net::StationStep::Empty) {
+            ++empty;
+        } else if (st == net::StationStep::GiveUp) {
+            if (!t.gave_up) ++gave_up;
+            t.gave_up = true;
+        } else if (st == net::StationStep::Skip) {
+            ++missing;  // a fallback airframe without this station
+        } else {
+            rebuild[e.station] = true;
+            want_weapon[e.station] = weapon;
+            want_count[e.station] = e.count;
+            t = Tried{weapon, e.count, false};
+            ++nrebuild;
+        }
     }
     int ev = -1;
-    if (rebuild) {
+    if (nrebuild) {
+        for (int st = 0; st < static_cast<int>(jet::kLoadoutStations); ++st)
+            set_station(avatar, sys, n, st, rebuild[st] ? want_weapon[st] : 0, rebuild[st] ? want_count[st] : 0, rebuild[st]);
         ev = aircraft_remote_event(avatar, kRearmEvent, nullptr);
         ++g_rx.rearms;
     }
-    if (more) ++g_rx.mismatches;
+    g_rx.gave_up += static_cast<uint64_t>(gave_up);
     if (unknown) ++g_rx.unknown;
-    const uint16_t peer = m.peer < 5 ? m.peer : 4;
-    if (rebuild || missing || unknown || (more && log_milestone(g_rx.mismatches))) {
-        if (g_rx.logged_seq[peer] == m.seq && !rebuild) return;
-        g_rx.logged_seq[peer] = m.seq;
-        LOG("stores: peer %u's loadout (part %u/%u, %u stations): %d rebuilt%s, %d with more stores here than the "
-            "owner's, %d of an unknown weapon, %d without a station here",
-            static_cast<unsigned>(m.peer), static_cast<unsigned>(m.part + 1), static_cast<unsigned>(m.parts),
-            static_cast<unsigned>(m.n), rebuild,
+    if (empty && log_milestone(++g_rx.empty))
+        LOG("stores: peer %u's jet has %d station(s) emptied that its avatar still carries (the rearm cannot empty one)",
+            static_cast<unsigned>(m.peer), empty);
+    if (nrebuild || missing || gave_up || (unknown && log_milestone(g_rx.unknown)))
+        LOG("stores: peer %u's loadout (part %u/%u): %d station(s) rebuilt%s, %d given up (the rebuild did not take), %d "
+            "of an unknown weapon, %d the avatar does not have (skipped)",
+            static_cast<unsigned>(m.peer), static_cast<unsigned>(m.part + 1), static_cast<unsigned>(m.parts), nrebuild,
             ev < 0 ? "" : ev == 0 ? " (rearm)" : ev == 1 ? " (rearm REFUSED: interface not the one we read)" : " (rearm FAULTED)",
-            more, unknown, missing);
-    }
+            gave_up, unknown, missing);
+}
+
+// The most a tank has held so far, the capacity as far as we know (the tanks start full). SEH by the caller.
+float& tank_max(const BYTE* tank, float now) {
+    for (TankMax& t : g_rx.tanks)
+        if (t.tank == tank) {
+            if (now > t.max) t.max = now;
+            return t.max;
+        }
+    for (TankMax& t : g_rx.tanks)
+        if (!t.tank) {
+            t = TankMax{tank, now};
+            return t.max;
+        }
+    static float none;
+    none = now;
+    return none;
 }
 
 void apply_consumables(const net::ConsumablesMsg& m, BYTE* avatar, uintptr_t ao) {
     SysRef sys[kMaxSys];
     const int n = jet_list_systems(avatar, ao, sys, kMaxSys);
-    float total = 0;
+    float total[2] = {}, owner[2] = {net::fuel_from_wire(m.fuel), net::fuel_from_wire(m.fuel_ext)};
     int guns = 0;
     __try {
         for (int i = 0; i < n; ++i)
             if (sys[i].vt == kRvaFuelTank) {
                 float f = 0;
+                int16_t ext = 0;
                 std::memcpy(&f, sys[i].sys + jet::kTankFuel, 4);
-                if (f > 0) total += f;
+                std::memcpy(&ext, sys[i].sys + jet::kTankExternal, 2);
+                tank_max(sys[i].sys, f);
+                if (f > 0) total[ext ? 1 : 0] += f;
             }
-        const float k = net::fuel_scale(total, net::fuel_from_wire(m.fuel));
+        const float k[2] = {net::fuel_scale(total[0], owner[0]), net::fuel_scale(total[1], owner[1])};
         for (int i = 0; i < n; ++i) {
-            if (sys[i].vt == kRvaFuelTank && k != 1.0f) {
+            if (sys[i].vt == kRvaFuelTank) {
                 float f = 0;
+                int16_t ext = 0;
                 std::memcpy(&f, sys[i].sys + jet::kTankFuel, 4);
-                f = f > 0 ? f * k : 0;
+                std::memcpy(&ext, sys[i].sys + jet::kTankExternal, 2);
+                const float kk = k[ext ? 1 : 0];
+                if (kk == 1.0f) continue;
+                f = f > 0 ? f * kk : 0;
+                const float cap = tank_max(sys[i].sys, 0);
+                if (f > cap) f = cap;
                 std::memcpy(sys[i].sys + jet::kTankFuel, &f, 4);
             } else if (sys[i].vt == kRvaFixedGun && guns < m.guns) {
                 const uint16_t want = m.rounds[guns++];
@@ -238,9 +322,10 @@ void apply_consumables(const net::ConsumablesMsg& m, BYTE* avatar, uintptr_t ao)
         return;
     }
     if (log_milestone(++g_rx.fuel))
-        LOG("stores: peer %u's consumables (%llu so far): fuel %.0f kg (the avatar had %.0f), %u gun(s) of %d here",
-            static_cast<unsigned>(m.peer), static_cast<unsigned long long>(g_rx.fuel), net::fuel_from_wire(m.fuel),
-            total, static_cast<unsigned>(m.guns), guns);
+        LOG("stores: peer %u's consumables (%llu so far): fuel %.0f + %.0f kg external (the avatar had %.0f + %.0f), %u "
+            "gun(s) of %d here",
+            static_cast<unsigned>(m.peer), static_cast<unsigned long long>(g_rx.fuel), owner[0], owner[1], total[0],
+            total[1], static_cast<unsigned>(m.guns), guns);
 }
 
 }  // namespace
@@ -280,6 +365,7 @@ void stores_tick(void* player) {
     net::ConsumablesMsg m{};
     m.seq = ++g_tx.seq;
     m.fuel = net::fuel_to_wire(c.fuel);
+    m.fuel_ext = net::fuel_to_wire(c.fuel_ext);
     m.guns = static_cast<uint8_t>(c.guns);
     for (int i = 0; i < c.guns; ++i) m.rounds[i] = static_cast<uint16_t>(c.rounds[i] < 0 ? 0 : c.rounds[i]);
     m.chaff = static_cast<uint8_t>(c.chaff < 0 ? 0 : c.chaff > 255 ? 255 : c.chaff);
