@@ -66,6 +66,7 @@ double g_next_try = 0;        // wall time of the next connection attempt
 bool g_blocked = false;       // refused in a way a retry cannot fix (theatre, version) until the player changes
 bool g_busy_logged = false;   // "not connecting while a puppet or replay runs", once per block
 bool g_retry_quiet = false;   // a failed attempt was logged: later ones are not, until a Welcome or a new player
+cl::RefusalOnce g_refused;    // the host's refusals before a Welcome, each logged once until a Welcome or a new player
 // The network thread's lines are dropped while a quiet retry has not connected (it clears this when it does).
 std::atomic<bool> g_core_quiet{false};
 uint32_t g_epoch = 0;
@@ -129,10 +130,11 @@ void core_log(const char* line) { LOG("%s", line); }
 
 /// <summary>
 /// ClientCore's log (network thread). Its "connecting to" line names the address, which client_install() logged once
-/// already; during a quiet retry nothing is logged until the connection is made.
+/// already; during a quiet retry nothing is logged until we are welcomed (a host that refuses before the Welcome stays
+/// quiet).
 /// </summary>
 void client_core_log(const char* line) {
-    if (std::strncmp(line, "net: client connected", 21) == 0) g_core_quiet.store(false, std::memory_order_relaxed);
+    if (std::strncmp(line, "net: client welcomed", 20) == 0) g_core_quiet.store(false, std::memory_order_relaxed);
     if (g_core_quiet.load(std::memory_order_relaxed) || std::strncmp(line, "net: client connecting to ", 26) == 0)
         return;
     LOG("%s", line);
@@ -328,6 +330,7 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
     if (first) {
         g_session = true;
         g_retry_quiet = false;
+        g_refused.clear();
         g_id = w.client_id;
         g_welcome_wall = wall;
         g_reannounce_at = 0;
@@ -484,8 +487,17 @@ void pump(void* player, double wall) {
                     if (net::decode(e.data, e.len, b) != net::Status::Ok) break;
                     if (g_session) rec_msg(net::StreamKind::ByeReceived, g_now, b);
                     if (b.reason == net::kByeWrongTheatre || b.reason == net::kByeWrongVersion) g_blocked = true;
-                    LOG("net: client: the host said Bye (reason %u)%s", static_cast<unsigned>(b.reason),
-                        g_blocked ? "; no retry until the player changes" : "");
+                    if (g_session || g_blocked) {
+                        LOG("net: client: the host said Bye %u: %s%s", static_cast<unsigned>(b.reason),
+                            net::bye_reason_name(b.reason), g_blocked ? "; no retry until the player changes" : "");
+                    } else {
+                        // Refused before the Welcome: retried quietly every 5 s; each reason is said once.
+                        if (g_refused.first(b.reason))
+                            LOG("net: client: the host refused us (Bye %u: %s); trying again every 5 s while airborne, "
+                                "quietly until welcomed",
+                                static_cast<unsigned>(b.reason), net::bye_reason_name(b.reason));
+                        g_retry_quiet = true;
+                    }
                     end_session("the host said Bye");
                     g_leaving = true;  // the core disconnects by itself
                     break;
@@ -671,6 +683,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         g_epoch = sim_player_epoch();
         g_blocked = false;
         g_retry_quiet = false;
+        g_refused.clear();
         g_moved = false;
         if (g_link == Link::Running && !g_leaving && !g_disconnected) {
             g_core->bye(kByeSessionEnded);

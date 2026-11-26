@@ -137,6 +137,25 @@ inline bool parse_connect_spec(const char* spec, char* host, size_t cap, uint16_
 }
 
 /// <summary>
+/// The host's refusals before a Welcome (Bye 1 busy, Bye 2 no avatar): each reason is logged once, until a Welcome or
+/// a new player clears it; the retries go on quietly.
+/// </summary>
+class RefusalOnce {
+public:
+    /// <summary>True the first time this reason is seen since the last clear().</summary>
+    bool first(uint8_t reason) {
+        const uint32_t bit = 1u << (reason & 31u);
+        if (seen_ & bit) return false;
+        seen_ |= bit;
+        return true;
+    }
+    void clear() { seen_ = 0; }
+
+private:
+    uint32_t seen_ = 0;
+};
+
+/// <summary>
 /// Watches the shared clock for the changes the client logs and acts on: the first sync (and the sync after a hold),
 /// a hold (the host's clock froze, or no Pong for ClockSync::kStale), and a reset (the ClockSync re-seeded or cleared
 /// its window, or the HostClock stepped), on which every remote jet starts again. A reset that came with a Welcome

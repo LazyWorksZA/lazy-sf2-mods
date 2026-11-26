@@ -5941,12 +5941,17 @@ void remote_avatar_tests() {
     f2[5].taken = true;
     expect(pick_avatar(f2, nf, "F-105D", &r) == nf && r.tier == AvatarTier::None, "pick: all taken -> none, never the player");
 
-    // The remote flies another type: friendly, other type, and the player's own flight first within the tier.
+    // The remote flies another type: the player's own flight still comes first, in slot order.
     i = pick_avatar(flight, nf, "F-4E", &r);
-    expect(i == 1 && r.tier == AvatarTier::Friendly && r.flight_no == 12,
-           "pick: other type -> my #2 still, ranked as friendly (other type)");
+    expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 12, "pick: other type -> my #2 still (flight first)");
     i = pick_avatar(flight, nf, nullptr, &r);
-    expect(i == 1 && r.tier == AvatarTier::Friendly, "pick: unknown wanted type -> my #2 as friendly");
+    expect(i == 1 && r.tier == AvatarTier::Wingman, "pick: unknown wanted type -> my #2");
+    // A dead #2 (not in the live list) gives #3.
+    {
+        const AvatarCandidate no2[] = {flight[0], flight[2], flight[3], flight[4], flight[5]};
+        i = pick_avatar(no2, 5, "F-105D", &r);
+        expect(i == 1 && r.flight_no == 13, "pick: #2 dead -> #3");
+    }
 
     // Mixed types inside the flight, and a lead number that is not 1.
     const AvatarCandidate mixed[] = {
@@ -5956,9 +5961,10 @@ void remote_avatar_tests() {
         {L"RAVEN 11", "F-4E", 4, F, false, false, 15},
     };
     i = pick_avatar(mixed, 4, "F-4E", &r);
-    expect(i == 2 && r.tier == AvatarTier::Wingman, "pick: the same-type flight member beats a nearer other-type one");
+    expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 22,
+           "pick: slot order: #2 of another type before #3 of the wanted type");
     i = pick_avatar(mixed, 4, "F-4C", &r);
-    expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 22, "pick: the wanted type decides the wingman");
+    expect(i == 1 && r.tier == AvatarTier::Wingman && r.flight_no == 22, "pick: #2 of the wanted type");
 
     // No player in the list (it was destroyed) and sides unknown (masks not read): not known to be friendly, so none.
     const AvatarCandidate bare[] = {
@@ -6062,8 +6068,15 @@ void remote_avatar_tests() {
             {L"MIG 31", "MiG-21F", 4, E, false, false, 25000},
         };
         AvatarRank fr;
-        expect(pick_avatar(far_wing, 4, "F-105D", &fr) == 2 && fr.nearby && fr.tier == AvatarTier::Friendly,
-               "pick: my #2 30 km away loses to a friendly of another type 19 km away");
+        expect(pick_avatar(far_wing, 4, "F-105D", &fr) == 1 && fr.tier == AvatarTier::Wingman,
+               "pick: flight slot order: my #2 30 km away beats a nearer friendly of another flight");
+        {
+            AvatarCandidate fw1[4];
+            std::memcpy(fw1, far_wing, sizeof(far_wing));
+            fw1[1].taken = true;
+            expect(pick_avatar(fw1, 4, "F-105D", &fr) == 2 && fr.nearby && fr.tier == AvatarTier::Friendly,
+                   "pick: no free plane in the flight -> fallback: the near friendly (never the enemy)");
+        }
         AvatarCandidate fw2[4];
         std::memcpy(fw2, far_wing, sizeof(far_wing));
         fw2[2].dist = 21000;
@@ -6072,10 +6085,10 @@ void remote_avatar_tests() {
         fw2[3].dist = 100;
         expect(pick_avatar(fw2, 4, "F-105D", &fr) == 1 && !fr.nearby && fr.tier == AvatarTier::Wingman,
                "pick: an enemy 100 m away is never taken; the far wingman is");
+        fw2[1].taken = true;
         fw2[2].dist = 20000;
         expect(pick_avatar(fw2, 4, "F-105D", &fr) == 2 && fr.nearby && fr.tier == AvatarTier::Friendly,
-               "pick: a friendly at exactly 20 km is near, and beats a far wingman");
-        fw2[1].taken = true;
+               "pick: fallback: a friendly at exactly 20 km is near");
         fw2[2].taken = true;
         expect(pick_avatar(fw2, 4, "F-105D", &fr) == 4 && fr.tier == AvatarTier::None,
                "pick: only an enemy left -> no avatar");
@@ -6284,6 +6297,34 @@ void client_logic_tests() {
                "clock watch: a re-Welcome is a re-seed; its first Pong is no new sync and the wait is no hold");
         expect(jump == cl::ClockWatch::kReset, "clock watch: an offset jump is a reset, not a re-seed");
         expect(stale == cl::ClockWatch::kHold, "clock watch: no Pong for 3 s is a hold");
+    }
+    {
+        // A host that refuses before the Welcome: the client says each reason once, until cleared.
+        cl::RefusalOnce once;
+        int said = 0;
+        for (int k = 0; k < 20; ++k) said += once.first(2) ? 1 : 0;
+        const bool other = once.first(1) && !once.first(1);
+        once.clear();
+        expect(said == 1 && other && once.first(2), "refusal once: each reason logged once until a Welcome or new player");
+        expect(std::strstr(bye_reason_name(2), "no free friendly") && std::strstr(bye_reason_name(1), "busy") &&
+                   std::strcmp(bye_reason_name(200), "unknown reason") == 0,
+               "bye_reason_name: reasons in words, any number safe");
+    }
+    {
+        // The host's refusal lines: once a minute per key, with the count of those not logged; oldest key evicted.
+        RepeatLog rl;
+        unsigned more = 99;
+        const bool l0 = rl.should_log(7, 0.0, &more) && more == 0;
+        int logged = 0;
+        for (int k = 1; k <= 11; ++k) logged += rl.should_log(7, 5.0 * k, &more) ? 1 : 0;  // every 5 s up to 55 s
+        const bool at60 = rl.should_log(7, 60.0, &more) && more == 11;
+        const bool other = rl.should_log(8, 61.0, &more) && more == 0 && !rl.should_log(8, 62.0, &more);
+        expect(l0 && logged == 0 && at60 && other, "repeat log: at most once a minute per key, with the count not logged");
+        RepeatLog full;
+        for (uint32_t k = 0; k < RepeatLog::kSlots; ++k) full.should_log(100 + k, 1.0 + k, &more);
+        const bool evicted = full.should_log(999, 20.0, &more) && full.should_log(100, 21.0, &more) && more == 0 &&
+                             !full.should_log(101 + 1, 22.0, &more);
+        expect(evicted, "repeat log: a new key takes the oldest slot (that key then logs as new)");
     }
 }
 

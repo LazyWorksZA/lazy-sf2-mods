@@ -34,7 +34,7 @@ struct AvatarCandidate {
 /// </summary>
 enum class AvatarTier : uint8_t {
     None = 0,      // never taken: the player, one already held, or not friendly
-    Wingman = 1,   // friendly, the wanted type, named with the player's flight callsign
+    Wingman = 1,   // friendly, of the player's own flight (any type, any distance): taken in slot order
     SameType = 2,  // friendly, the wanted type
     Friendly = 3,
 };
@@ -129,8 +129,9 @@ inline int flight_member_no(const wchar_t* name, const wchar_t* base, size_t bas
 }  // namespace avatar_logic
 
 /// <summary>
-/// Ranks candidates one at a time and keeps the best (plan 2.6): friendly only; those within kAvatarNear of the
-/// placement first; then Wingman, then SameType, then Friendly. Within a tier: members of the player's flight first, the lowest flight number first (the player's #2
+/// Ranks candidates one at a time and keeps the best: friendly only. First the player's own flight in slot order
+/// (#2, #3, ...), whatever the type or distance. Only if none is free, the fallback: those within kAvatarNear of the
+/// placement first, then SameType, then Friendly. Within a tier: members of the player's flight first, the lowest flight number first (the player's #2
 /// before #3), then the nearest, then the earliest constructed.
 /// </summary>
 class AvatarPicker {
@@ -153,7 +154,7 @@ public:
         r.flight_no = no;
         const bool friendly = c.side == AircraftSide::Friendly;
         const bool type = avatar_logic::same_type(c.type_name, want_);
-        if (friendly && type && r.flight_no >= 0) r.tier = AvatarTier::Wingman;
+        if (friendly && r.flight_no >= 0) r.tier = AvatarTier::Wingman;
         else if (friendly && type) r.tier = AvatarTier::SameType;
         else if (friendly) r.tier = AvatarTier::Friendly;
         return r;
@@ -161,11 +162,12 @@ public:
 
     /// <summary>True if a ranks before b. Both must have a tier.</summary>
     bool better(const AvatarRank& a, const AvatarRank& b) const {
-        if (a.nearby != b.nearby) return a.nearby;
+        // The player's own flight first, in slot order, whatever the type or distance (owner decision for co-op).
+        const bool wa = a.tier == AvatarTier::Wingman, wb = b.tier == AvatarTier::Wingman;
+        if (wa != wb) return wa;
+        if (wa && a.flight_no != b.flight_no) return order_no(a.flight_no) < order_no(b.flight_no);
+        if (!wa && a.nearby != b.nearby) return a.nearby;  // the fallback: near the placement first
         if (a.tier != b.tier) return a.tier < b.tier;
-        const bool ma = a.flight_no >= 0, mb = b.flight_no >= 0;
-        if (ma != mb) return ma;
-        if (ma && a.flight_no != b.flight_no) return order_no(a.flight_no) < order_no(b.flight_no);
         if (a.dist != b.dist) return a.dist < b.dist;
         return a.seq < b.seq;
     }
@@ -223,7 +225,7 @@ inline size_t pick_avatar(const AvatarCandidate* list, size_t n, const char* wan
 
 inline const char* tier_name(AvatarTier t) {
     switch (t) {
-        case AvatarTier::Wingman: return "the player's wingman";
+        case AvatarTier::Wingman: return "the player's wingman (first free slot of the flight)";
         case AvatarTier::SameType: return "friendly, same type";
         case AvatarTier::Friendly: return "friendly, other type";
         default: return "none";

@@ -150,9 +150,11 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     std::memcpy(in.from, c.from, sizeof(in.from));
     in.moved = avatar_logic::dist3(in.from, pick.place);
     if (why && why_cap) {
-        std::snprintf(why, why_cap, "\"%s\" %s (was at (%.0f, %.0f, %.0f), moved %.0f m); %s%s", in.name,
+        const bool flight = in.tier == AvatarTier::Wingman;
+        std::snprintf(why, why_cap, "\"%s\" %s (was at (%.0f, %.0f, %.0f), moved %.0f m); %s%s%s", in.name,
                       in.type[0] ? in.type : "(type unknown)", in.from[0], in.from[1], in.from[2], in.moved,
-                      tier_name(in.tier), in.nearby ? "" : "; no friendly free within 20 km, taken from farther");
+                      flight ? "" : "fallback, no free plane in the player's flight: ", tier_name(in.tier),
+                      flight || in.nearby ? "" : "; no friendly free within 20 km, taken from farther");
     }
     return true;
 }

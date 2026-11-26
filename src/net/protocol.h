@@ -135,6 +135,20 @@ inline constexpr uint8_t kPeerLeftRemoved = 2;  // the host ended it (avatar los
 inline constexpr uint8_t kByeWrongTheatre = 5;
 inline constexpr uint8_t kByeWrongVersion = 6;
 
+/// <summary>A Bye reason in words, for log lines (the host's reasons; any number is safe).</summary>
+inline const char* bye_reason_name(uint8_t reason) {
+    switch (reason) {
+        case 0: return "no reason given";
+        case 1: return "the host is busy (a puppet or replay run, or no room)";
+        case 2: return "the host has no free friendly AI aircraft for our avatar";
+        case 3: return "the host's session ended";
+        case 4: return "the host lost our avatar";
+        case kByeWrongTheatre: return "another theatre";
+        case kByeWrongVersion: return "another protocol version";
+        default: return "unknown reason";
+    }
+}
+
 /// <summary>The largest message. HostCore's queues carry at most this many bytes per message.</summary>
 inline constexpr size_t kMaxMessage = 96;
 static_assert(sizeof(HelloMsg) <= kMaxMessage && sizeof(WelcomeMsg) <= kMaxMessage && sizeof(StateMsg) <= kMaxMessage &&

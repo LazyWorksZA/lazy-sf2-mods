@@ -223,8 +223,19 @@ void release_dead() {
     }
 }
 
-void reject(int slot, uint32_t gen, uint8_t reason, const char* why) {
-    LOG("net: client %d refused: %s", slot + 1, why);
+net::RepeatLog g_refusals;  // a client retrying after a refusal is logged at most once a minute per callsign and reason
+
+void reject(int slot, uint32_t gen, uint8_t reason, const char* why, const char* callsign) {
+    unsigned more = 0;
+    const uint32_t key = net::fnv1a(callsign) ^ (static_cast<uint32_t>(reason) * 0x9E3779B1u);
+    if (g_refusals.should_log(key, static_cast<double>(GetTickCount64()) * 0.001, &more)) {
+        if (more)
+            LOG("net: client %d \"%s\" refused: %s (refused %u more time(s) in the last minute; logged at most once a "
+                "minute)",
+                slot + 1, callsign, why, more);
+        else
+            LOG("net: client %d \"%s\" refused: %s", slot + 1, callsign, why);
+    }
     send_bye(slot, gen, reason);
     request_disconnect(slot, gen);
     if (g_nclients == 0) flush_send_fail();
@@ -241,8 +252,11 @@ void player_type_cb(const LiveAircraft* list, size_t count, void* ctx) {
 }
 
 void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, double now) {
+    char callsign[17], aircraft[33];
+    avatar_logic::to_ascii(callsign, sizeof(callsign), h.callsign);
+    avatar_logic::to_ascii(aircraft, sizeof(aircraft), h.aircraft);
     if (g_puppet_state.load() != 0 || replay_active()) {
-        reject(slot, gen, kByeBusy, "a puppet or replay run is active");
+        reject(slot, gen, kByeBusy, "a puppet or replay run is active", callsign);
         return;
     }
     std::string theatre;
@@ -251,12 +265,9 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         char why[192];
         std::snprintf(why, sizeof(why), "it flies in another theatre (its hash %08x; the host is in %s, hash %08x)",
                       static_cast<unsigned>(h.theatre_hash), theatre.c_str(), static_cast<unsigned>(theatre_hash));
-        reject(slot, gen, net::kByeWrongTheatre, why);
+        reject(slot, gen, net::kByeWrongTheatre, why, callsign);
         return;
     }
-    char callsign[17], aircraft[33];
-    avatar_logic::to_ascii(callsign, sizeof(callsign), h.callsign);
-    avatar_logic::to_ascii(aircraft, sizeof(aircraft), h.aircraft);
     double ppos[3];
     float pang[3], pvel[3];
     obj_read(player, kOffPos, ppos, 3);
@@ -273,7 +284,7 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     AvatarInfo info;
     char why[192];
     if (!avatar_take(pick, taken, net::kMaxClients, &got, why, sizeof(why), &info)) {
-        reject(slot, gen, kByeNoAvatar, why);
+        reject(slot, gen, kByeNoAvatar, why, callsign);
         return;
     }
     if (g_nclients == 0) {

@@ -45,6 +45,47 @@ private:
 };
 
 /// <summary>
+/// Rate limit for the host's refusal lines: a client that is refused again and again (it retries every few seconds)
+/// is logged at most once per kEvery seconds per key (callsign and reason), with the count of the lines not logged.
+/// A small table; the oldest key gives way to a new one.
+/// </summary>
+class RepeatLog {
+public:
+    static constexpr int kSlots = 8;
+    static constexpr double kEvery = 60.0;
+    /// <summary>True if this refusal is to be logged; then *suppressed is how many of the same key were not.</summary>
+    bool should_log(uint32_t key, double t, unsigned* suppressed) {
+        *suppressed = 0;
+        int oldest = 0;
+        for (int i = 0; i < kSlots; ++i) {
+            Slot& s = slots_[i];
+            if (s.used && s.key == key) {
+                if (t - s.last < kEvery) {
+                    ++s.count;
+                    return false;
+                }
+                *suppressed = s.count;
+                s.count = 0;
+                s.last = t;
+                return true;
+            }
+            if (!s.used || (slots_[oldest].used && s.last < slots_[oldest].last)) oldest = i;
+        }
+        slots_[oldest] = Slot{true, key, t, 0};
+        return true;
+    }
+
+private:
+    struct Slot {
+        bool used = false;
+        uint32_t key = 0;
+        double last = 0;
+        unsigned count = 0;
+    };
+    Slot slots_[kSlots];
+};
+
+/// <summary>
 /// The welcomed clients and what the others must hear about them. Game thread only (any single caller in the tests).
 /// Every message goes through HostCore::send; refusals (the out queue is full) are counted for the caller's 1 Hz report.
 /// </summary>
