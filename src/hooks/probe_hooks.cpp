@@ -373,6 +373,17 @@ DWORD WINAPI hotkey_thread(LPVOID) {
     bool was_down = false, puppet_was_down = false, missile_was_down = false, rec_was_down = false,
          replay_was_down = false, rate_was_down = false, jump_was_down = false, nudge_was_down = false,
          twist_was_down = false, hold_was_down = false, destroy_was_down = false;
+    // Weapons probe keys (weapons_probe.cpp), each acting once per press.
+    static constexpr struct {
+        int vk;
+        WeaponsProbeAction action;
+    } kWeaponKeys[] = {
+        {'F', WeaponsProbeAction::LiveAtPlayer},   {'G', WeaponsProbeAction::RemoteAtAi},
+        {'V', WeaponsProbeAction::RemoteAtPlayer}, {'Q', WeaponsProbeAction::HitQueue},
+        {'E', WeaponsProbeAction::Explosion},      {'U', WeaponsProbeAction::DamageInterface},
+        {'L', WeaponsProbeAction::List},
+    };
+    bool weapon_was_down[_countof(kWeaponKeys)] = {};
     for (;;) {
         Sleep(50);
         const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
@@ -410,6 +421,14 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         const bool destroy_down = mods && (GetAsyncKeyState('X') & 0x8000);
         if (destroy_down && !destroy_was_down) tacview_destroy_nearest_request();
         destroy_was_down = destroy_down;
+        for (size_t i = 0; i < _countof(kWeaponKeys); ++i) {
+            const bool d = mods && (GetAsyncKeyState(kWeaponKeys[i].vk) & 0x8000);
+            if (d && !weapon_was_down[i]) {
+                LOG("probe: Ctrl+Shift+%c pressed (weapons probe)", static_cast<char>(kWeaponKeys[i].vk));
+                weapons_probe_request(kWeaponKeys[i].action);
+            }
+            weapon_was_down[i] = d;
+        }
     }
 }
 
@@ -479,11 +498,13 @@ void install_probe_hooks() {
 void probe_on_modules_loaded() {
     if (g_dir.empty()) return;
     missile_spawn_on_modules_loaded();  // own build check and once-flag
+    weapons_probe_on_modules_loaded();  // own build check; re-hooks a reloaded AircraftObject.dll
     if (g_dev_started.load() || !aircraft_track_active()) return;  // the tracker hooks the aircraft first
     if (g_dev_started.exchange(true)) return;
     recorder_on_modules_loaded();  // registers its step callback (once)
     replay_on_modules_loaded();    // likewise
     player_jump_on_modules_loaded();
+    weapons_probe_start();
     step_order_on_modules_loaded();
     g_snapshot = scan_highest_snapshot();
     if (sim_register_step_callback(auto_step)) {

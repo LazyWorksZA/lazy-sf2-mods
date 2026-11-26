@@ -70,6 +70,7 @@ add_library(lazysf2 SHARED
     src/hooks/probe_hooks.cpp
     src/hooks/puppet_hooks.cpp
     src/hooks/missile_spawn.cpp
+    src/hooks/weapons_probe.cpp
     src/hooks/sim_hooks.cpp
     src/hooks/recorder.cpp
     src/hooks/replay.cpp

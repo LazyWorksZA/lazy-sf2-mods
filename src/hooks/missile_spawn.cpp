@@ -31,7 +31,7 @@ constexpr size_t kDescSize = 0xc8;
 constexpr size_t kPosOffset = 0x38, kVelOffset = 0x50, kHeadingOffset = 0x104;  // aircraft
 constexpr size_t kMissilePosOffset = 0x20;                                      // missile object
 constexpr double kFollowSeconds = 20.0;
-constexpr size_t kMaxIds = 16;
+constexpr size_t kMaxIds = 64;
 
 using MissileCtor_t = void*(__fastcall*)(void* self, void* edx, const uint32_t* desc);
 using CreateObject_t = uint32_t(__fastcall*)(void* self, void* edx, int class_id, int group_id, void* desc);
@@ -239,6 +239,14 @@ void follow_frame() {
 }
 
 }  // namespace
+
+size_t missile_spawn_seen_weapon_ids(uint32_t* out, size_t max) {
+    AcquireSRWLockShared(&g_ids_lock);
+    const size_t n = g_id_count < max ? g_id_count : max;
+    for (size_t i = 0; i < n; ++i) out[i] = g_ids[i].id;
+    ReleaseSRWLockShared(&g_ids_lock);
+    return n;
+}
 
 void missile_spawn_request() {
     int s = kIdle;

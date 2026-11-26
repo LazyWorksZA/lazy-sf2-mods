@@ -130,6 +130,7 @@ unsigned g_frames_since_change = 0;
 HRESULT STDMETHODCALLTYPE h_Present(IDXGISwapChain* self, UINT sync, UINT flags) {
     puppet_on_present();
     missile_spawn_on_present();
+    weapons_probe_on_present();
     HRESULT hr = o_Present(self, sync, flags);
     ++g_frames_since_change;
     if (self == g_swapchain.load() && hr != g_last_present) {

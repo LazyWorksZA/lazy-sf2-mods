@@ -11,6 +11,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Developer tools (off unless enabled)
 
+- **Weapons probe hotkeys.** With the probe on, Ctrl+Shift+F, G and V fire a missile from the player's wingman (at the player, or with the wingman marked as a remote object, at another AI aircraft or at the player); Ctrl+Shift+Q, E and U damage the nearest AI aircraft without a weapon (hit queue, explosion, damage interface); Ctrl+Shift+L lists the weapon types. Each test then logs the target's damage for 12 s. While the player's guns fire, the log shows the rounds fired each second and the gun station state.
 - **Tacview destroy test hotkey.** With the probe on, Ctrl+Shift+X during a recorded single mission destroys the nearest building the recording tracks (its damage is set to 100), so the building's destruction can be checked in Tacview without flying a strike. The recording's end line now also counts all Destroyed events.
 
 ## 1.1.0 (2026-11-26)

@@ -32,6 +32,7 @@
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/pilot_twist_math.h"
+#include "hooks/weapons_probe_logic.h"
 #include "config_parse.h"
 #include "bot_client.h"
 #include <miniz.h>
@@ -3779,6 +3780,107 @@ void pilot_twist_settings_tests() {
            "settings: the limits themselves are kept");
 }
 
+void weapons_probe_tests() {
+    std::printf("weapons_probe_tests\n");
+    using namespace LazyWorks::SF2Patch::hooks;
+    using namespace LazyWorks::SF2Patch::hooks::wprobe;
+    {
+        const double from[3] = {0, 0, 1000}, to[3] = {1000, 0, 1000};  // due east, level
+        LaunchPose p{};
+        expect(launch_pose(from, to, 40, 250, &p), "launch: pose made");
+        expect(std::fabs(p.pos[0] - 40) < 1e-9 && std::fabs(p.pos[1]) < 1e-9 && std::fabs(p.pos[2] - 1000) < 1e-9,
+               "launch: 40 m out along the line of sight");
+        expect(std::fabs(p.angles[1] - 3.14159265f / 2) < 1e-5 && std::fabs(p.angles[0]) < 1e-6 && p.angles[2] == 0,
+               "launch: heading 90 degrees (east), pitch 0");
+        expect(std::fabs(p.vel[0] - 250) < 1e-3 && std::fabs(p.vel[1]) < 1e-3, "launch: velocity along the line");
+        expect(std::fabs(p.range - 1000) < 1e-9, "launch: range");
+        const double up[3] = {0, 0, 2000};
+        expect(launch_pose(from, up, 40, 250, &p) && std::fabs(p.angles[0] - 3.14159265f / 2) < 1e-5,
+               "launch: straight up is pitch 90");
+        expect(!launch_pose(from, from, 40, 250, &p), "launch: refuses a target on top of the shooter");
+    }
+    {
+        const wchar_t* names[] = {L"GUNSLINGER", L"GUNSLINGER 2", L"BEAGLE 11", L"GUNSLINGERX 1", L"GUNSLINGER 3"};
+        Candidate c[5] = {
+            {{0, 0, 0}, true, true, AircraftSide::Friendly, names[0]},
+            {{5000, 0, 0}, false, true, AircraftSide::Friendly, names[1]},
+            {{100, 0, 0}, false, true, AircraftSide::Friendly, names[2]},
+            {{50, 0, 0}, false, true, AircraftSide::Friendly, names[3]},
+            {{3000, 0, 0}, false, false, AircraftSide::Friendly, names[4]},  // dead
+        };
+        expect(pick_wingman(c, 5, 0) == 1, "wingman: the player's flight, even when others are nearer; dead skipped");
+        c[1].alive = false;
+        expect(pick_wingman(c, 5, 0) == 3, "wingman: no flight member left -> nearest of the player's side");
+        c[3].side = AircraftSide::Enemy;
+        expect(pick_wingman(c, 5, 0) == 2, "wingman: other sides are not wingmen");
+        c[0].side = AircraftSide::Unknown;
+        expect(pick_wingman(c, 5, 0) == -1, "wingman: side unknown and no flight member -> none");
+        expect(nearest_ai(c, 5, c[0].pos, 0) == 3, "nearest AI: any side, never the player");
+        expect(nearest_ai(c, 5, c[0].pos, 3) == 2, "nearest AI: the excluded index is skipped");
+        expect(!in_player_flight(L"GUNSLINGER", L"GUNSLINGER") && in_player_flight(L"GUNSLINGER 4", L"GUNSLINGER") &&
+                   !in_player_flight(nullptr, L"A") && !in_player_flight(L"A 1", L""),
+               "wingman: flight name rule");
+    }
+    {
+        WeaponInfo w[] = {{3, 0, 0}, {7, 1, 0}, {9, 1, 4}, {12, 1, 10}, {14, 7, 12}};
+        expect(pick_default_weapon(w, 5) == 3, "weapon: first air-to-air missile");
+        expect(pick_default_weapon(w, 3) == 2, "weapon: else the first guided weapon");
+        expect(pick_default_weapon(w, 2) == 1, "weapon: else the first type 1 (a rocket)");
+        expect(pick_default_weapon(w, 1) == -1, "weapon: bombs only -> none");
+        expect(is_air_to_air(w[4]) && !is_air_to_air(w[2]), "weapon: air-to-air rule");
+        const wchar_t aim9[64] = L"AIM-9B";
+        expect(name_matches(aim9, 64, "aim-9b") && !name_matches(aim9, 64, "AIM-9") &&
+                   !name_matches(aim9, 64, "AIM-9BX"),
+               "weapon: name match is whole and case-insensitive");
+    }
+    {
+        unsigned char r[kHitRecordSize];
+        const double from[3] = {1, 2, 3}, to[3] = {4, 5, 6};
+        build_hit_record(r, 0x0300000a, 1, 1.5e6f, 0.f, from, to, 0x03000001, 42);
+        uint32_t u = 0;
+        int32_t i = 0;
+        float f = 0;
+        double d = 0;
+        std::memcpy(&u, r, 4);
+        std::memcpy(&i, r + 4, 4);
+        std::memcpy(&f, r + 8, 4);
+        expect(u == 0x0300000a && i == 1 && f == 1.5e6f, "hit record: target, kind, energy");
+        std::memcpy(&d, r + 0x18 + 16, 8);
+        expect(d == 3, "hit record: from at +0x18");
+        std::memcpy(&d, r + 0x30, 8);
+        expect(d == 4, "hit record: to at +0x30");
+        std::memcpy(&u, r + 0x48, 4);
+        std::memcpy(&i, r + 0x4c, 4);
+        expect(u == 0x03000001 && i == 42, "hit record: shooter +0x48, weapon +0x4c");
+
+        unsigned char x[kExplosionRecordSize];
+        const double pos[3] = {10, 20, 30};
+        build_explosion_record(x, pos, 2e8f, 12.f, 7, 0x03000001, 2);
+        std::memcpy(&d, x + 8, 8);
+        std::memcpy(&f, x + 0x24, 4);
+        expect(d == 20 && f == 2e8f, "explosion record: position, energy +0x24");
+        std::memcpy(&f, x + 0x28, 4);
+        expect(f == 12.f, "explosion record: radius +0x28");
+        std::memcpy(&f, x + 0x30, 4);
+        expect(f == 0.f, "explosion record: no delay (+0x30), so it is applied in the next WLD update");
+        int32_t v[8];
+        std::memcpy(v, x + 0x34, sizeof(v));
+        expect(v[0] == 7 && static_cast<uint32_t>(v[1]) == 0x03000001 && v[2] == -1 && v[3] == -1 && v[4] == -1 &&
+                   v[5] == 2 && v[6] == 0,
+               "explosion record: weapon, shooter, no direct hit, no effect, no sound, warhead, not directed");
+    }
+    {
+        expect(rounds_fired(100, 97, 0, 3) == 3, "gun: three rounds");
+        expect(rounds_fired(100, 100, 5, 8) == 3, "gun: unlimited ammunition still counts by the burst");
+        expect(rounds_fired(100, 99, 12, 1) == 1, "gun: burst reset then one round");
+        expect(rounds_fired(100, 100, 12, 0) == 0, "gun: burst ended, nothing fired");
+        SecondWindow w;
+        expect(!w.tick(5.0) && !w.tick(5.5) && w.tick(6.0) && !w.tick(6.9) && w.tick(7.0),
+               "gun: one report per second of game time");
+        expect(!w.tick(1.0), "gun: a clock that went back starts a new window");
+    }
+}
+
 void probe_snapshot_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     bool a = true;
@@ -3837,6 +3939,7 @@ int main() {
     pilot_twist_tests();
     probe_snapshot_tests();
     pilot_twist_settings_tests();
+    weapons_probe_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

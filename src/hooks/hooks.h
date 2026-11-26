@@ -212,6 +212,34 @@ extern std::atomic<int> g_missile_state;
 inline void missile_spawn_on_present() {
     if (g_missile_state.load(std::memory_order_relaxed) != 0) missile_spawn_run_frame();
 }
+/// <summary>The missile weapon ids the constructor hook has seen this session, first seen first (at most 64).</summary>
+size_t missile_spawn_seen_weapon_ids(uint32_t* out, size_t max);
+
+/// <summary>
+/// Weapons probe (developer tool, weapons_probe.cpp; network-recon §9): weapons fired from the player's wingman,
+/// damage without a weapon, and a gun log. The hotkey thread only sets a request; Present (the game thread) acts on
+/// it and then watches the target for 12 s.
+/// </summary>
+enum class WeaponsProbeAction : int {
+    None = 0,
+    LiveAtPlayer,     // Ctrl+Shift+F: the wingman fires a missile at the player
+    RemoteAtAi,       // Ctrl+Shift+G: the wingman, marked REMOTEOBJECT for the release, fires at the nearest other AI
+    RemoteAtPlayer,   // Ctrl+Shift+V: the same, at the player
+    HitQueue,         // Ctrl+Shift+Q: WLD+0x44 kinetic hit on the nearest AI aircraft
+    Explosion,        // Ctrl+Shift+E: WLD+0x40 explosion at the nearest AI aircraft
+    DamageInterface,  // Ctrl+Shift+U: damage interface (QI 9) blast on the nearest AI aircraft
+    List,             // Ctrl+Shift+L: logs the weapon types, the default choice and the player's gun stations
+};
+void weapons_probe_request(WeaponsProbeAction a);
+/// <summary>Module watch (probe on): hooks the gun station update of each verified AircraftObject.dll image.</summary>
+void weapons_probe_on_modules_loaded();
+/// <summary>Registers the step callback that tells the gun log which aircraft is the player (once, after the tracker).</summary>
+void weapons_probe_start();
+void weapons_probe_run_frame();
+extern std::atomic<bool> g_wprobe_busy;
+inline void weapons_probe_on_present() {
+    if (g_wprobe_busy.load(std::memory_order_relaxed)) weapons_probe_run_frame();
+}
 
 // Simulation step (sim_hooks.cpp): hooks the aircraft's Update(dt), which runs once per simulation step on the
 // game thread and not while paused. The aircraft tracker installs it. The game clock advances on each step of
