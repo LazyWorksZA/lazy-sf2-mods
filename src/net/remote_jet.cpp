@@ -252,7 +252,8 @@ RemoteJet::Out RemoteJet::shown(double now, Kin* out) {
     if (snap || snap_ang) {
         std::memset(off_r_, 0, sizeof(off_r_));
         off_dur_a_ = 0;
-        if (!resync) ++st_.snaps;  // a re-anchor after a long step gap is not new data
+        if (resync) ++st_.resync_snaps;  // a re-anchor after a long step gap: written at once, but not new data
+        else ++st_.snaps;
     }
     if (snap) {
         std::memcpy(ps_, raw.p, sizeof(ps_));
@@ -329,9 +330,9 @@ void RemoteJet::fit() {
     while (j < n_ - 1 && b.t - ring_[j].t > p_.accel_span) ++j;
     const double h = b.t - ring_[j].t;
     for (int i = 0; i < 3; ++i) acc_[i] = h > 1e-6 ? (b.k.v[i] - ring_[j].k.v[i]) / h : 0.0;
-    for (int i = 0; i < 3; ++i) omega_[i] = 0.0;
+    // Over a longer spacing a fast roll can turn 180 deg or more and alias the wrong way: keep the last valid rate.
     const double hr = n_ >= 2 ? b.t - ring_[n_ - 2].t : 0.0;
-    if (hr > 1e-6 && hr <= p_.accel_span) {
+    if (hr > 1e-6 && hr <= p_.rate_span) {
         q_log(q_mul(qring_[n_ - 1], q_conj(qring_[n_ - 2])), omega_);
         for (double& w : omega_) w /= hr;
     }
@@ -353,8 +354,9 @@ void RemoteJet::raw_at(double now, Kin* out, double ff[3], Quat* q) const {
     }
     const double h = t - s.t;
     const double hc = replay_math::clampd(h, -p_.second_order, p_.second_order);
-    // The attitude is turned by the rate for the horizon less rot_lag (smoothly: h - d (1 - e^(-h/d))), so it still
-    // turns at the full rate between States, but a roll that has just stopped overshoots by rate x (age - rot_lag).
+    // The attitude is turned by the rate for the horizon less rot_lag (smoothly: h - d (1 - e^(-h/d))). Between States
+    // it turns at (1 - e^(-h/d)) of the rate: nearly the full rate at the 150 ms design latency, less at LAN ages
+    // (pulled forward at each State). A roll that has just stopped overshoots by about rate x (age - rot_lag).
     const double d = p_.rot_lag, ha = std::fabs(hc);
     const double hr = (hc < 0 ? -1.0 : 1.0) * (d > 0 ? ha - d * (1.0 - std::exp(-ha / d)) : ha);
     for (int i = 0; i < 3; ++i) {

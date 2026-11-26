@@ -51,6 +51,7 @@ struct JetParams {
     double blend_accel_large = 6.0 * 9.80665;  // ... and the large one at most this
     int accel_samples = 3;      // the acceleration is the velocity slope over this many intervals ...
     double accel_span = 0.5;    // ... spanning at most this long
+    double rate_span = 0.2;     // the turn rate comes from the two newest States only if at most this far apart
     double delay_initial = 0.1, delay_min = 0.05, delay_max = 1.0;
     double delay_interval_factor = 1.0;  // Interpolate: delay target = age p90 + this x the median interval
     double max_step = 0.25;              // the longest step the delay ramp counts
@@ -63,6 +64,7 @@ struct JetStats {
     double accel_g_max;  // the largest per-step acceleration of the shown path, in g
     uint32_t restarts;   // the source restarted (sequence or time went back): the samples were dropped
     uint32_t resyncs;    // the receiver's clock stepped back, or steps were over kMaxTrackGap apart
+    uint32_t resync_snaps;  // step-gap resyncs that returned Snap: every Snap is counted in snaps or here
 };
 
 /// <summary>
@@ -71,8 +73,10 @@ struct JetStats {
 ///
 ///  - Predict: the newest State moved on by its age. Position is second order (the acceleration is the velocity slope
 ///    over the last accel_samples States). Attitude turns at the angular velocity between the two newest States (a
-///    rotation, so the Euler flip through the vertical is harmless), over the horizon less rot_lag, so a roll that
-///    stops overshoots less. Beyond `second_order` the position goes on with the velocity reached there, the
+///    rotation, so the Euler flip through the vertical is harmless; held from the last pair at most rate_span apart),
+///    over the horizon less rot_lag, so a roll that stops overshoots less. Between States the attitude then turns at
+///    close to the full rate only at the design latency (about 150 ms); at LAN ages it lags and is pulled forward at
+///    each State. Beyond `second_order` the position goes on with the velocity reached there, the
 ///    attitude held.
 ///  - Interpolate: the same at now - delay; between two States, position by sample_at, attitude by slerp. The delay
 ///    ramps (5 % of the elapsed time) to the arrival-age p90 + delay_interval_factor x the median interval.
@@ -85,7 +89,9 @@ struct JetStats {
 ///  - Recovery. A State whose sequence number goes back by kSeqRestart or more, whose time is restart_back older
 ///    than the newest, or whose sequence is not newer while its time is, is a source restart: the samples are dropped
 ///    (counted in restarts) and the next State is one correction from what is shown (blended, or a snap if it is
-///    over the limits). A receiver `now` that goes back re-anchors without a jump (counted in resyncs).
+///    over the limits). A receiver `now` that goes back re-anchors without a jump (counted in resyncs). The 0.5 s
+///    restart_back rule relies on ENet's unreliable-sequenced delivery, which drops late States: an unsequenced
+///    channel or a relay that can deliver a State over 0.5 s late would trip it.
 ///  - The caller (Task 7) calls reset() on a Welcome, a mission change, and a HostClock reset or step.
 /// </summary>
 class RemoteJet {
@@ -142,7 +148,8 @@ private:
 
     void drain_one();
     void restart();
-    // The acceleration (velocity slope over the newest accel_samples intervals within accel_span) and turn rate.
+    // The acceleration (velocity slope over the newest accel_samples intervals within accel_span) and turn rate
+    // (from the two newest States if within rate_span, else held).
     void fit();
     // The raw path at render time for `now`: state, acceleration ff and attitude q. Requires n_ > 0.
     void raw_at(double now, Kin* out, double ff[3], Quat* q) const;

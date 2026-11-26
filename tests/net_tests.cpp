@@ -3883,6 +3883,27 @@ void remote_jet_tests() {
     expect(no_snaps_c && smooth_c, "with clock error: no snaps after the join, shown <= true + 3 g");
     expect(wc[1].ang_p95 <= 5.0 && wc[4].ang_p95 <= 20.0, "with clock error: attitude p95 orbit <= 5 deg, breaks <= 20 deg");
 
+    {  // LAN latency (20 ms +-2 ms one way): rot_lag makes the attitude lag between States; gated loosely
+        std::printf("  the sweep at 20 ms +-2 ms one way (LAN)\n");
+        JetRun lan;
+        lan.delay = 0.020;
+        lan.jitter = 0.002;
+        lan.duration = 60.0;
+        lan.heading = 3.0;
+        const JetWorst o = sweep([] { return ScriptTruth(bot::Script::Orbit); }, lan, 0.0);
+        print_worst("LAN orbit", o);
+        lan.heading = 0.3;
+        const JetWorst t4 = sweep([] { return TurnTruth{}; }, lan, 0.0);
+        print_worst("LAN 4 g turn", t4);
+        lan.duration = 90.0;
+        lan.heading = 1.0;
+        const JetWorst b = sweep([] { return ScriptTruth(bot::Script::Breaks); }, lan, 0.0);
+        print_worst("LAN breaks", b);
+        expect(o.ang_p95 <= 5.0 && t4.ang_p95 <= 5.0 && b.ang_p95 <= 25.0 && o.p95 <= 3.0 && b.p95 <= 15.0 &&
+                   o.snaps_after_first + t4.snaps_after_first + b.snaps_after_first == 0,
+               "LAN: attitude p95 orbit and 4 g <= 5 deg, breaks <= 25 deg; position as at 150 ms; no snaps");
+    }
+
     {  // Interpolate mode at the same settings (the comparison mode)
         JetRun run;
         run.params.mode = JetParams::Mode::Interpolate;
@@ -4057,7 +4078,27 @@ void remote_jet_tests() {
         lg.push(jet_state(2, 2.5, 300, 0), 2.6);
         const Out og = lg.shown(2.6, &k);
         st = lg.take_stats();
-        expect(og == Out::Snap && st.snaps == 1 && st.resyncs == 1, "a 1.5 s step gap re-anchors as a resync, not a snap");
+        expect(og == Out::Snap && st.snaps == 1 && st.resyncs == 1 && st.resync_snaps == 1,
+               "a 1.5 s step gap re-anchors as a resync (counted in resync_snaps, not snaps)");
+
+        // A 360 deg/s roll with 10 States lost (0.55 s, 198 deg): the rate is held, not aliased the wrong way.
+        {
+            auto roll_state = [](uint32_t seq, double t) {
+                StateMsg m = jet_state(seq, t, 200.0 * t, 0.0);
+                m.ang[2] = static_cast<float>(rmath::wrap_pi(2.0 * rmath::kPi * t));
+                return m;
+            };
+            RemoteJet rr;
+            rr.push(roll_state(1, 1.00), 1.16);
+            rr.push(roll_state(2, 1.05), 1.21);
+            rr.push(roll_state(13, 1.60), 1.76);
+            rr.shown(1.76, &k);
+            const double r0 = k.a[2];
+            rr.shown(1.78, &k);
+            const double step = rmath::angle_diff(k.a[2], r0);
+            std::printf("    roll held over 10 lost States: %+.1f deg in 20 ms (true +7.2)\n", step / kDeg);
+            expect(step > 0.0, "360 deg/s roll after 10 lost States keeps rolling the right way");
+        }
 
         // Heading across +-pi (rotation prediction, rate decay off so the expected value is exact).
         JetParams nodecay;
