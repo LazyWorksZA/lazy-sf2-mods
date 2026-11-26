@@ -76,6 +76,7 @@ add_library(lazysf2 SHARED
     src/net/protocol.cpp
     src/net/host_core.cpp
     src/net/host.cpp
+    src/net/remote_jet.cpp
     src/net/stream_format.cpp
     src/net/stream_record.cpp
     src/net/enet_winmm_shim.cpp
@@ -97,6 +98,7 @@ add_executable(lazysf2-net-tests
     tests/net_tests.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
+    src/net/remote_jet.cpp
     src/net/stream_format.cpp
     src/net/stream_record.cpp
     tools/bot/bot_client.cpp

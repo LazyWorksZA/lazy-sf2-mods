@@ -32,6 +32,7 @@
 #include "hooks/cursor_clip_logic.h"
 #include "bot_client.h"
 #include "net/receiver_math.h"
+#include "net/remote_jet.h"
 #include <miniz.h>
 
 #include "bot_core.h"
@@ -3439,6 +3440,371 @@ void placement_tests() {
            "placement: terrain_xml uses the scale latitude");
 }
 
+// RemoteJet (net/remote_jet.h): synthetic flights through a fake channel (one-way delay, jitter, loss, reordering),
+// the receiver stepping at 60 Hz, errors measured against the truth at the receiver's now.
+namespace {
+
+namespace rmath = LazyWorks::SF2Patch::hooks::replay_math;
+using Out = RemoteJet::Out;
+
+// Level flight at bot::kSpeed that rolls (180 deg/s) into a sustained coordinated turn of `load` g at roll_at.
+struct TurnTruth {
+    double load = 4.0, roll_at = 2.0;
+    double pos[3] = {}, heading = 0, bank = 0, roll_rate = 0, t0 = 0, t = 0;
+    void start(const double spawn[3], double hdg, double start_t) {
+        for (int i = 0; i < 3; ++i) pos[i] = spawn[i];
+        heading = hdg;
+        t0 = t = start_t;
+    }
+    void advance_to(double to) {
+        while (to - t > 1e-9) {
+            const double dt = (to - t) < bot::kStep ? (to - t) : bot::kStep;
+            const double target = t - t0 >= roll_at ? bot::bank_for_load(load) : 0.0;
+            const double d = target - bank, mx = bot::kRollRate * dt;
+            const double nb = d > mx ? bank + mx : (d < -mx ? bank - mx : target);
+            roll_rate = (nb - bank) / dt;
+            const double hr = bot::turn_rate(0.5 * (bank + nb)), hm = heading + 0.5 * hr * dt;
+            pos[0] += bot::kSpeed * std::sin(hm) * dt;
+            pos[1] += bot::kSpeed * std::cos(hm) * dt;
+            heading = bot::wrap_pi(heading + hr * dt);
+            bank = nb;
+            t += dt;
+        }
+    }
+    bot::Flight::Sample sample() const {
+        bot::Flight::Sample s{};
+        for (int i = 0; i < 3; ++i) s.pos[i] = pos[i];
+        s.vel[0] = static_cast<float>(bot::kSpeed * std::sin(heading));
+        s.vel[1] = static_cast<float>(bot::kSpeed * std::cos(heading));
+        s.ang[1] = static_cast<float>(heading);
+        s.ang[2] = static_cast<float>(bank);
+        s.rates[1] = static_cast<float>(bot::turn_rate(bank));
+        s.rates[2] = static_cast<float>(roll_rate);
+        return s;
+    }
+};
+
+struct ScriptTruth {
+    bot::Flight f;
+    bot::Script script;
+    explicit ScriptTruth(bot::Script s) : script(s) {}
+    void start(const double spawn[3], double hdg, double t0) { f.start(script, spawn, hdg, t0); }
+    void advance_to(double t) { f.advance_to(t); }
+    bot::Flight::Sample sample() const { return f.sample(); }
+};
+
+struct JetRun {
+    JetParams params;
+    double duration = 60.0, delay = 0.15, jitter = 0.010, loss = 0.01, rate = 20.0;
+    double heading = 0.3;
+    double gap_at = -1, gap_len = 0;  // seconds from the start: the source sends nothing
+    double jump_at = -1, jump = 500.0;  // from then on the source is `jump` metres east
+    double measure_from = 2.0;
+    uint32_t seed = 1;
+};
+
+struct JetResult {
+    std::vector<double> pos_err, ang_err;  // metres, degrees
+    int outs[5] = {};
+    int snaps = 0, snaps_after_first = 0;
+    double accel_excess = -1e9, shown_g = 0, true_g = 0;  // the worst 1 s window: shown g minus true g
+    uint32_t rejected = 0;
+    double delay_end = 0, delay_rate_max = 0;
+    double rate_hz = 0, age_p50 = 0, age_p90 = 0, horizon_max = 0;
+    bool angles_wrapped = true;  // every shown angle in (-pi, pi]
+};
+
+double pct(std::vector<double> v, double q) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    size_t k = static_cast<size_t>(std::ceil(q * static_cast<double>(v.size())));
+    return v[k == 0 ? 0 : (k > v.size() ? v.size() - 1 : k - 1)];
+}
+
+// on_step(t_from_start, out, shown kin, truth sample) is called after each receiver step.
+template <class Truth, class F>
+JetResult run_jet(Truth truth, const JetRun& run, F on_step) {
+    JetResult r;
+    RemoteJet jet(run.params);
+    const double t0 = 100.0, spawn[3] = {1000.0, 2000.0, 3000.0};
+    truth.start(spawn, run.heading, t0);
+    uint32_t seed = run.seed * 2654435761u + 12345u;
+    auto rnd = [&]() {  // uniform in [0, 1)
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<double>(seed >> 8) / 16777216.0;
+    };
+    struct InFlight {
+        double arrival;
+        StateMsg m;
+    };
+    std::vector<InFlight> q;
+    double next_send = t0 + 0.0071;  // the sender's steps are not in phase with the receiver's
+    int step = 0;
+    uint32_t seq = 0;
+    double tp[2][3] = {}, win_true = 0, prev_delay = jet.delay();
+    int tn = 0;
+    bool started = false;
+    for (;;) {
+        const double ts = next_send, tr = t0 + step / 60.0;
+        if (tr > t0 + run.duration) break;
+        if (ts <= tr) {
+            truth.advance_to(ts);
+            const double rel = ts - t0;
+            if (!(run.gap_at >= 0 && rel >= run.gap_at && rel < run.gap_at + run.gap_len)) {
+                const bot::Flight::Sample s = truth.sample();
+                StateMsg m{};
+                m.seq = ++seq;
+                m.game_time = ts;
+                for (int i = 0; i < 3; ++i) {
+                    m.pos[i] = s.pos[i];
+                    m.vel[i] = s.vel[i];
+                    m.ang[i] = s.ang[i];
+                    m.rates[i] = s.rates[i];
+                }
+                if (run.jump_at >= 0 && rel >= run.jump_at) m.pos[0] += run.jump;
+                if (rnd() >= run.loss) q.push_back({ts + run.delay + run.jitter * (2.0 * rnd() - 1.0), m});
+            }
+            next_send += 1.0 / run.rate;
+            continue;
+        }
+        truth.advance_to(tr);
+        std::stable_sort(q.begin(), q.end(), [](const InFlight& a, const InFlight& b) { return a.arrival < b.arrival; });
+        size_t k = 0;
+        for (; k < q.size() && q[k].arrival <= tr; ++k)
+            if (!jet.push(q[k].m, tr)) ++r.rejected;
+        q.erase(q.begin(), q.begin() + static_cast<std::ptrdiff_t>(k));
+        RemoteJet::Kin shown{};
+        const Out o = jet.shown(tr, &shown);
+        ++r.outs[static_cast<int>(o)];
+        bot::Flight::Sample s = truth.sample();
+        if (run.jump_at >= 0 && tr - t0 >= run.jump_at) s.pos[0] += run.jump;
+        if (o == Out::Snap) {
+            if (r.snaps++ > 0) ++r.snaps_after_first;
+        }
+        const bool written = o == Out::Snap || o == Out::Blend || o == Out::Steady;
+        if (written) {
+            for (int i = 0; i < 3; ++i) r.angles_wrapped = r.angles_wrapped && shown.a[i] <= rmath::kPi && shown.a[i] > -rmath::kPi;
+            started = true;
+        }
+        if (written && tr - t0 >= run.measure_from) {
+            double d2 = 0, da = 0;
+            for (int i = 0; i < 3; ++i) {
+                d2 += (shown.p[i] - s.pos[i]) * (shown.p[i] - s.pos[i]);
+                da = (std::max)(da, std::fabs(rmath::angle_diff(shown.a[i], s.ang[i])));
+            }
+            r.pos_err.push_back(std::sqrt(d2));
+            r.ang_err.push_back(da * 180.0 / rmath::kPi);
+        }
+        // The truth's per-step acceleration, as RemoteJet measures the shown path's.
+        if (tn == 2) {
+            double a2 = 0;
+            for (int i = 0; i < 3; ++i) {
+                const double a = (s.pos[i] - 2.0 * tp[1][i] + tp[0][i]) * 3600.0;
+                a2 += a * a;
+            }
+            win_true = (std::max)(win_true, std::sqrt(a2) / RemoteJet::kG);
+            std::memcpy(tp[0], tp[1], sizeof(tp[0]));
+            tn = 1;
+        }
+        for (int i = 0; i < 3; ++i) tp[tn][i] = s.pos[i];
+        ++tn;
+        if (run.jump_at >= 0 && std::fabs(tr - t0 - run.jump_at) < 0.1) tn = 0;  // the jump is not an acceleration
+        const double dd = std::fabs(jet.delay() - prev_delay) * 60.0;
+        r.delay_rate_max = (std::max)(r.delay_rate_max, dd);
+        prev_delay = jet.delay();
+        if (step % 60 == 59) {
+            const JetStats st = jet.take_stats();
+            if (started && tr - t0 >= run.measure_from) {
+                if (st.accel_g_max - win_true > r.accel_excess) {
+                    r.accel_excess = st.accel_g_max - win_true;
+                    r.shown_g = st.accel_g_max;
+                    r.true_g = win_true;
+                }
+                r.rate_hz = st.rate_hz;
+                r.age_p50 = st.age_p50;
+                r.age_p90 = st.age_p90;
+                r.horizon_max = (std::max)(r.horizon_max, st.horizon_max);
+            }
+            win_true = 0;
+        }
+        on_step(tr - t0, o, shown, s);
+        ++step;
+    }
+    r.delay_end = jet.delay();
+    return r;
+}
+template <class Truth>
+JetResult run_jet(Truth truth, const JetRun& run) {
+    return run_jet(truth, run, [](double, Out, const RemoteJet::Kin&, const bot::Flight::Sample&) {});
+}
+
+void print_jet(const char* name, const JetResult& r) {
+    std::printf("    %-22s pos median %6.2f p95 %6.2f max %6.2f m | ang median %5.2f p95 %6.2f deg | snaps %d | "
+                "worst 1 s: shown %.2f g, true %.2f g | rx %.1f Hz, age p50 %.0f p90 %.0f ms, horizon max %.0f ms\n",
+                name, pct(r.pos_err, 0.5), pct(r.pos_err, 0.95), pct(r.pos_err, 1.0), pct(r.ang_err, 0.5),
+                pct(r.ang_err, 0.95), r.snaps, r.shown_g, r.true_g, r.rate_hz, r.age_p50 * 1e3, r.age_p90 * 1e3,
+                r.horizon_max * 1e3);
+}
+
+StateMsg jet_state(uint32_t seq, double t, double x, double heading) {
+    StateMsg m{};
+    m.seq = seq;
+    m.game_time = t;
+    m.pos[0] = x;
+    m.vel[0] = 200.0f;
+    m.ang[1] = static_cast<float>(heading);
+    return m;
+}
+
+}  // namespace
+
+void remote_jet_tests() {
+    std::printf("remote jet (predict to the present; 150 ms +-10 ms one way, 1 %% loss, 20 Hz, 60 Hz steps)\n");
+    {
+        JetRun run;
+        const JetResult straight = run_jet(ScriptTruth(bot::Script::Straight), run);
+        print_jet("straight", straight);
+        JetRun orbit_run = run;
+        orbit_run.heading = 3.0;  // crosses +-pi about a second in, and every 47 s after
+        const JetResult orbit = run_jet(ScriptTruth(bot::Script::Orbit), orbit_run);
+        print_jet("orbit (3 g)", orbit);
+        const JetResult climb = run_jet(ScriptTruth(bot::Script::Climb), run);
+        print_jet("climb", climb);
+        const JetResult turn4 = run_jet(TurnTruth{}, run);
+        print_jet("roll into 4 g turn", turn4);
+        JetRun breaks_run = run;
+        breaks_run.duration = 90.0;
+        const JetResult breaks = run_jet(ScriptTruth(bot::Script::Breaks), breaks_run);
+        print_jet("breaks (6 g reversals)", breaks);
+
+        expect(pct(straight.pos_err, 0.5) <= 1.0 && pct(straight.pos_err, 0.95) <= 3.0, "straight: median <= 1 m, p95 <= 3 m");
+        expect(pct(orbit.pos_err, 0.5) <= 1.0 && pct(orbit.pos_err, 0.95) <= 3.0, "orbit: median <= 1 m, p95 <= 3 m");
+        // The scripted climb starts and stops pitching instantly (a 7.8 g step): the capped correction spreads the
+        // catch-up, so it is held to the owner's "gentle" target (D2), not to the straight-line one.
+        expect(pct(climb.pos_err, 0.5) <= 1.0 && pct(climb.pos_err, 0.95) <= 10.0, "climb: median <= 1 m, p95 <= 10 m");
+        expect(pct(turn4.pos_err, 0.5) <= 3.0 && pct(turn4.pos_err, 0.95) <= 15.0, "4 g turn: median <= 3 m, p95 <= 15 m");
+        expect(pct(breaks.pos_err, 0.5) <= 3.0 && pct(breaks.pos_err, 0.95) <= 15.0, "breaks: median <= 3 m, p95 <= 15 m");
+        bool one_snap = true, smooth = true;
+        for (const JetResult* r : {&straight, &orbit, &climb, &turn4, &breaks}) {
+            one_snap = one_snap && r->snaps == 1 && r->outs[static_cast<int>(Out::Coast)] == 0;
+            smooth = smooth && r->accel_excess <= 3.0;
+        }
+        expect(one_snap, "one snap (the join), none after it, no coasting");
+        expect(smooth, "smoothness: per 1 s window, shown acceleration <= true + 3 g");
+        expect(orbit.angles_wrapped && pct(orbit.ang_err, 1.0) < 5.0, "orbit across +-pi: angles wrapped, max angle error < 5 deg");
+        expect(straight.rate_hz > 18.0 && straight.rate_hz < 21.0 && straight.age_p50 > 0.14 && straight.age_p90 < 0.18,
+               "stats: rate about 20 Hz, arrival age p50/p90 about 150-180 ms");
+    }
+
+    {  // Interpolate mode at the same settings (the comparison mode)
+        JetRun run;
+        run.params.mode = JetParams::Mode::Interpolate;
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run);
+        print_jet("interpolate, orbit", r);
+        std::printf("    interpolate: delay at the end %.0f ms, fastest change %.1f %% per second\n", r.delay_end * 1e3,
+                    r.delay_rate_max * 100.0);
+        expect(r.delay_end >= 0.2 && r.delay_end <= 0.3, "interpolate: the delay converges to 200-300 ms");
+        expect(r.delay_rate_max <= 0.05 + 1e-9, "interpolate: the delay never steps (<= 5 % per second)");
+        expect(r.snaps == 1, "interpolate: no snaps after the first sample");
+    }
+
+    {  // a 2 s gap: velocity only (angles held), then a blend on resume
+        JetRun run;
+        run.duration = 30.0;
+        run.gap_at = 10.0;
+        run.gap_len = 2.0;
+        bool vel_only = true, any_coast = false, seen_gap = false;
+        Out resume = Out::None;
+        RemoteJet::Kin prev{};
+        bool have_prev = false;
+        // The last State before the gap is sent at about 9.96 s and is shown from 10.11 s; 0.5 s of second-order
+        // prediction later (10.47 s) the velocity and angles must hold until the next State lands at about 12.16 s.
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run,
+                                    [&](double t, Out o, const RemoteJet::Kin& k, const bot::Flight::Sample&) {
+            if (o == Out::Coast) any_coast = true;
+            if (t > 10.5 && t < 12.1) {
+                seen_gap = true;
+                if (have_prev)
+                    for (int i = 0; i < 3; ++i)
+                        vel_only = vel_only && std::fabs(k.v[i] - prev.v[i]) < 1e-3 && rmath::angle_diff(k.a[i], prev.a[i]) == 0.0;
+                prev = k;
+                have_prev = true;
+            }
+            if (t >= 12.1 && resume == Out::None && o != Out::Steady) resume = o;
+        });
+        expect(seen_gap && vel_only && !any_coast, "2 s gap: velocity only, angles held, never coasting");
+        expect(resume == Out::Blend && r.snaps == 1, "2 s gap: a blend on resume, not a snap");
+    }
+
+    {  // a 4 s gap: Coast, then a snap on resume
+        JetRun run;
+        run.duration = 30.0;
+        run.gap_at = 10.0;
+        run.gap_len = 4.0;
+        Out after = Out::None;
+        bool coast_before_resume = false;
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run,
+                                    [&](double t, Out o, const RemoteJet::Kin&, const bot::Flight::Sample&) {
+            if (t > 13.2 && t < 14.1 && o == Out::Coast) coast_before_resume = true;
+            if (coast_before_resume && after == Out::None && o != Out::Coast) after = o;
+        });
+        std::printf("    4 s gap: %d coasting steps\n", r.outs[static_cast<int>(Out::Coast)]);
+        expect(coast_before_resume && r.outs[static_cast<int>(Out::Coast)] > 30, "4 s gap: Coast after 3 s");
+        expect(after == Out::Snap && r.snaps == 2, "4 s gap: a snap on resume");
+    }
+
+    {  // a 500 m jump in the source
+        JetRun run;
+        run.duration = 30.0;
+        run.jump_at = 15.0;
+        double snap_at = -1;
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Straight), run,
+                                    [&](double t, Out o, const RemoteJet::Kin&, const bot::Flight::Sample&) {
+            if (o == Out::Snap && t > 1.0) snap_at = t;
+        });
+        expect(r.snaps == 2 && snap_at > 15.1 && snap_at < 15.4, "500 m jump in the source: one snap when it arrives");
+    }
+
+    {  // reordering on the channel (jitter wider than the interval): the late States are ignored
+        JetRun run;
+        run.jitter = 0.04;
+        const JetResult r = run_jet(ScriptTruth(bot::Script::Orbit), run);
+        print_jet("orbit, +-40 ms jitter", r);
+        expect(r.rejected > 0 && r.snaps == 1 && pct(r.pos_err, 0.95) <= 3.0,
+               "reordered States are dropped; no snaps, p95 <= 3 m");
+    }
+
+    {  // old, duplicate and reordered States
+        RemoteJet j;
+        RemoteJet::Kin k{};
+        expect(j.shown(1.0, &k) == Out::None, "nothing received: None");
+        const bool a = j.push(jet_state(1, 1.00, 0, 0), 1.15);
+        const bool b = j.push(jet_state(2, 1.05, 10, 0), 1.20);
+        const bool dup = j.push(jet_state(2, 1.05, 10, 0), 1.21);
+        const bool same_t = j.push(jet_state(3, 1.05, 10, 0), 1.21);
+        const bool old_seq = j.push(jet_state(1, 1.10, 20, 0), 1.25);
+        const bool c = j.push(jet_state(5, 1.20, 40, 0), 1.35);
+        const bool reordered = j.push(jet_state(4, 1.15, 30, 0), 1.36);
+        const bool wrapped_seq = j.push(jet_state(0x80000005u, 1.25, 50, 0), 1.40);  // half the sequence space ahead: "older"
+        expect(a && b && c && !dup && !same_t && !old_seq && !reordered && !wrapped_seq,
+               "duplicate, same-time, old-sequence and reordered States are refused");
+        expect(j.shown(1.36, &k) == Out::Snap && j.take_stats().dup_or_old == 5, "the first shown state snaps; 5 refusals counted");
+        RemoteJet w;
+        const double h0 = 179.0 * rmath::kPi / 180.0, h1 = -179.0 * rmath::kPi / 180.0;
+        w.push(jet_state(1, 1.00, 0, h0), 1.0);
+        w.push(jet_state(2, 1.05, 10, h1), 1.05);
+        w.shown(1.15, &k);  // 0.1 s after the newest at +2 deg per 0.05 s: -175 deg
+        expect(std::fabs(k.a[1] - (-175.0 * rmath::kPi / 180.0)) < 1e-6, "heading predicted across +-pi (179 -> -179 -> -175)");
+        RemoteJet z;
+        z.push(jet_state(1, 1.00, 0, h1), 1.0);
+        z.push(jet_state(2, 1.05, 10, h0), 1.05);
+        z.shown(1.15, &k);
+        expect(std::fabs(k.a[1] - (175.0 * rmath::kPi / 180.0)) < 1e-6, "and the other way (-179 -> 179 -> 175)");
+        z.reset();
+        expect(z.shown(2.0, &k) == Out::None && z.push(jet_state(1, 1.00, 0, 0), 2.0), "reset forgets everything");
+    }
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -3490,6 +3856,7 @@ int main() {
     texture_tests();
     aerodrome_core_tests();
     placement_tests();
+    remote_jet_tests();
     gameplay_row_splice_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
