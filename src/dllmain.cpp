@@ -60,6 +60,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             // Settings come from Options.ini and are read later, on first use outside DllMain.
             bool ok = LazyWorks::SF2Patch::hooks::install_window_hooks();
             ok &= LazyWorks::SF2Patch::hooks::install_menu_hooks();
+            ok &= LazyWorks::SF2Patch::hooks::install_focus_hooks();
             LazyWorks::SF2Patch::hooks::install_probe_hooks();  // reads LAZYSF2_PROBE_DIR once; no hooks yet
             LazyWorks::SF2Patch::hooks::host_install();         // reads LAZYSF2_HOST once; no threads yet
             ok &= LazyWorks::SF2Patch::hooks::install_module_watch();

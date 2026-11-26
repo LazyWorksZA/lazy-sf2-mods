@@ -5,6 +5,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ## Unreleased
 
+### Gameplay
+
+- **The game can keep running in the background** (`Options.ini` `[OtherOptions] BackgroundMode`, set by hand, default 0). With **0** the game pauses when its window loses focus, as stock. With **1** it keeps running in any flight (single player included) and in the menus; the keyboard, mouse and joystick are let go until you come back. While the game is minimised, the mod limits it to its normal frame rate so it doesn't use a whole CPU core. With **2** sounds keep playing as well (the menu music still goes quiet in the background). Borderless only: in Fullscreen the game pauses as stock and the log says so once. The value is read when the game starts; a change applies after a restart.
+
 ### Releases
 
 - **The Tacview add-on is published on its own.** Each release now also has `Lazy-SF2-Patch-<version>-Tacview-AddOn.zip`, for players who install `winmm.dll` by hand. Extract it into `%APPDATA%\Tacview\AddOns\`.

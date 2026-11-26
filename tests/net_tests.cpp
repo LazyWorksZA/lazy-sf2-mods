@@ -31,6 +31,7 @@
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
+#include "hooks/focus_logic.h"
 #include "hooks/pilot_twist_math.h"
 #include "config_parse.h"
 #include "bot_client.h"
@@ -1536,6 +1537,81 @@ void acmi_tests() {
     std::vector<uint8_t> bad(f.begin(), f.begin() + 60);
     bad[0] = 'X';
     expect(!LazyWorks::SF2Patch::acmi::convert_stream(bad.data(), bad.size(), opt, o3, i3), "bad magic: rejected");
+}
+
+void focus_logic_tests() {
+    using LazyWorks::SF2Patch::config::BackgroundMode;
+    using LazyWorks::SF2Patch::config::DisplayMode;
+    using LazyWorks::SF2Patch::config::parse_choice_setting;
+    namespace h = LazyWorks::SF2Patch::hooks;
+    std::printf("focus logic\n");
+    constexpr DisplayMode B = DisplayMode::Borderless, F = DisplayMode::Fullscreen;
+    static_assert(h::keep_running(true, false, B));
+    expect(h::bg_decision(false, false, B) == h::BgDecision::NoReason, "bg: Pause and no other reason -> stock pause");
+    expect(h::bg_decision(false, false, F) == h::BgDecision::NoReason, "bg: Pause in Fullscreen -> stock, no Fullscreen log");
+    expect(h::bg_decision(true, false, F) == h::BgDecision::Fullscreen, "bg: option in Fullscreen -> Borderless only");
+    expect(h::bg_decision(false, true, F) == h::BgDecision::Fullscreen, "bg: other reason in Fullscreen -> Borderless only");
+    expect(h::keep_running(false, true, B), "bg: another reason (network session) alone keeps running");
+    int keeping = 0;
+    for (int m = 0; m < 8; ++m) {
+        const bool option = (m & 1) != 0, reason = (m & 2) != 0;
+        const DisplayMode mode = (m & 4) ? B : F;
+        if (h::keep_running(option, reason, mode)) {
+            ++keeping;
+            expect(mode == B && (option || reason), "bg: keeps running only in Borderless with a reason");
+        }
+    }
+    expect(keeping == 3, "bg: three of eight combinations keep running");
+
+    // GLOBALFOCUS: mode 2 only, never the primary buffer or the position-notify music stream.
+    expect(h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x88), "sound: plain secondary buffer gets it");
+    expect(h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x40090), "sound: 3D (LOCDEFER) buffer gets it");
+    expect(!h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x11), "sound: primary buffer never");
+    expect(!h::wants_global_focus(BackgroundMode::KeepRunningWithSound, 0x10188), "sound: music stream never");
+    expect(!h::wants_global_focus(BackgroundMode::KeepRunning, 0x88) && !h::wants_global_focus(BackgroundMode::Pause, 0x88),
+           "sound: modes 0 and 1 leave buffers stock");
+
+    // BackgroundMode parsing: 0, 1, 2; anything else is stock (-1).
+    expect(parse_choice_setting(L"0", 2) == 0 && parse_choice_setting(L"1", 2) == 1 && parse_choice_setting(L" 2 ", 2) == 2,
+           "setting: 0, 1, 2 (blanks allowed)");
+    expect(parse_choice_setting(nullptr, 2) == -1 && parse_choice_setting(L"", 2) == -1, "setting: missing -> stock");
+    expect(parse_choice_setting(L"3", 2) == -1 && parse_choice_setting(L"-1", 2) == -1 && parse_choice_setting(L"99", 2) == -1,
+           "setting: out of range -> stock (not clamped)");
+    expect(parse_choice_setting(L"1.5", 2) == -1 && parse_choice_setting(L"on", 2) == -1 && parse_choice_setting(L"1x", 2) == -1,
+           "setting: not a whole number -> stock");
+
+    // Period estimate: 1/8 weight, clamped to 30..240 Hz, hitches ignored.
+    expect(h::pace_update_period(16667, 16667) == 16667, "pace: steady 60 Hz stays");
+    expect(h::pace_update_period(16000, 24000) == 17000, "pace: one slow frame moves 1/8 of the way");
+    expect(h::pace_update_period(16667, 250000) == 16667 && h::pace_update_period(16667, 0) == 16667 &&
+               h::pace_update_period(16667, -5) == 16667,
+           "pace: loading hitches and bad samples are ignored");
+    expect(h::pace_update_period(h::kPaceMinPeriodUs, 1) == h::kPaceMinPeriodUs, "pace: never faster than 240 Hz");
+    expect(h::pace_update_period(h::kPaceMaxPeriodUs, 99000) == h::kPaceMaxPeriodUs, "pace: never slower than 30 Hz");
+    int64_t p = h::kPaceDefaultPeriodUs;
+    for (int i = 0; i < 200; ++i) p = h::pace_update_period(p, 6944);  // 144 Hz monitor
+    expect(p >= 6944 && p <= 6960, "pace: converges on the measured 144 Hz period");
+
+    // Deadlines: first frame free, then one period apart; small lateness catches up, large lateness restarts.
+    constexpr int64_t P = 16667;
+    static_assert(h::pace_step(1000, 0, P).wait_us == 0 && h::pace_step(1000, 0, P).deadline_us == 1000);
+    h::PaceStep s = h::pace_step(1000, 0, P);
+    s = h::pace_step(2000, s.deadline_us, P);
+    expect(s.deadline_us == 1000 + P && s.wait_us == P - 1000, "pace: waits the rest of the period");
+    s = h::pace_step(s.deadline_us + 5000, s.deadline_us, P);  // woke 5 ms late
+    expect(s.deadline_us == 1000 + 2 * P && s.wait_us == P - 5000, "pace: oversleep is taken from the next wait");
+    const int64_t d = s.deadline_us;
+    s = h::pace_step(d + P + 3000, d, P);  // a frame took a period plus 3 ms
+    expect(s.deadline_us == d + P && s.wait_us == 0, "pace: late by less than a period: no wait, catches up");
+    s = h::pace_step(d + 10 * P, d + P, P);  // a long stall
+    expect(s.deadline_us == d + 10 * P && s.wait_us == 0, "pace: late by more than a period: schedule restarts");
+    int64_t now = 1000, dl = 0;  // 0 is the "not started" deadline
+    for (int i = 0; i < 60; ++i) {
+        const h::PaceStep st = h::pace_step(now, dl, P);
+        dl = st.deadline_us;
+        now += st.wait_us + 500;  // each frame's own work takes 0.5 ms
+    }
+    expect(now == 1000 + 59 * P + 500, "pace: 60 frames take 59 periods (the first is free)");
 }
 
 void cursor_clip_tests() {
@@ -3827,6 +3903,7 @@ int main() {
     acmi_tests();
     tracker_logic_tests();
     cursor_clip_tests();
+    focus_logic_tests();
     tacview_tests();
     terrain_tests();
     texture_tests();

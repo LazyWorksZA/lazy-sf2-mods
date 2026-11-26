@@ -31,4 +31,14 @@ inline NumberSetting parse_number_setting(const wchar_t* text, double def, doubl
     return {v, false, false};
 }
 
+/// <summary>
+/// Parses an Options.ini enumeration value: a whole number in [0, max_value], surrounding blanks allowed. Missing,
+/// invalid, fractional or out-of-range text gives -1 (the caller uses its stock value).
+/// </summary>
+inline int parse_choice_setting(const wchar_t* text, int max_value) {
+    const NumberSetting s = parse_number_setting(text, -1.0, -1.0, static_cast<double>(max_value) + 1.0);
+    if (s.defaulted || s.value < 0.0 || s.value > max_value || s.value != std::floor(s.value)) return -1;
+    return static_cast<int>(s.value);
+}
+
 }  // namespace LazyWorks::SF2Patch::config

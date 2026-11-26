@@ -36,6 +36,23 @@ void cursor_clip_release_at_exit();
 bool mouse_cursor_mode_active();
 
 /// <summary>
+/// Hooks the exe's focus handler and message pump ([OtherOptions] BackgroundMode): in Borderless a focus loss can keep
+/// the game running (input is still released), paced by our frame limiter while minimised; otherwise stock. Call from
+/// DllMain.
+/// </summary>
+bool install_focus_hooks();
+
+/// <summary>
+/// BackgroundMode 2: hooks dsound!DirectSoundCreate8, then IDirectSound8::CreateSoundBuffer, so new secondary buffers
+/// get DSBCAPS_GLOBALFOCUS. Module watch callback; reads no settings.
+/// </summary>
+void sound_on_modules_loaded();
+/// <summary>True once a sound buffer was created with the GLOBALFOCUS flag we added.</summary>
+bool sound_global_focus_active();
+/// <summary>Stops every playing channel of the game's SND service (stamp-checked). Game thread only.</summary>
+void sound_stop_all_channels(const char* why);
+
+/// <summary>
 /// Hooks kernelbase!LoadLibraryExW. After every load each feature gets a chance to hook the modules that
 /// just appeared.
 /// </summary>
