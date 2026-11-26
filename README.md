@@ -102,6 +102,7 @@ Smaller items:
 - Tacview: sharp ground everywhere at low level. The add-on streams the game's own ground tiles at native resolution around the camera (prototype works: about 0.16 ms a tile, no extra load time).
 - Tacview: record radar and weapon locks, so Tacview draws who is locked on to whom.
 - Tacview: the game's own 3D models for objects Tacview has no model for (ground vehicles, buildings, fuel tanks, bridges), made on your machine from your install.
+- Multiplayer: a bullseye reference point per mission (in Tacview, later on the in-game map) so players can call positions to each other.
 - Tacview: draw whole aerodromes (taxiways, aprons and ramps), not just runways.
 - Tacview: non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
 
