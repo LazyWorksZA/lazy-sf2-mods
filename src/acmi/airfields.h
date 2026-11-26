@@ -49,6 +49,7 @@ struct Structure {
     double x = 0, y = 0;   // world metres
     double heading = 0;    // radians clockwise from north
     bool bridge = false;
+    bool storage = false;  // the types ini's TargetType names a fuel or storage tank
     uint32_t area = 0;     // index into PlacedStructures::areas
 };
 

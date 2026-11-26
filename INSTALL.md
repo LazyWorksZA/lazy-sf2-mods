@@ -6,11 +6,13 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 
 1. Run **`Lazy-SF2-Patch-<version>.msi`** from the Releases page. It's a normal installer wizard: a welcome page, the license (ours plus the [third-party notices](THIRD_PARTY_NOTICES.md)), an administrator prompt, and a finish page.
    - If the .NET 10 runtime is missing, the installer adds it.
-2. The installer finds Strike Fighters 2 through the game's own registry entry and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
+2. The installer finds Strike Fighters 2 (through the game's own registry entry and other places Windows records installs) and copies **one file, `winmm.dll`**, into the game folder. If a different `winmm.dll` is already there, it leaves it untouched.
    - If Tacview is installed, it also puts the mod's Tacview add-on in place for your Windows account and turns it on in Tacview (see [Tacview terrain](#tacview-terrain)). Close Tacview before installing.
-3. That's all. There's no app, window or shortcut. Start the game as usual; the settings are in the game (below).
+3. That's all. Start the game as usual; the settings are in the game (below).
 
-**Uninstall** the Lazy SF2 Patch from Windows' *Installed apps*. That removes exactly the files the mod added to the game folder, and the Tacview add-on. Tacview's on/off switch for the add-on stays, so a later install or upgrade keeps your choice.
+**If the installer didn't find your game:** open the Start menu, run **Lazy SF2 Patch**, and click **Choose the game folder...**. Pick the folder that contains `StrikeFighters2.exe` (the July 2013 version). The helper copies `winmm.dll` there, asks for administrator rights if the folder needs them, and remembers the folder (`HKCU\SOFTWARE\LazyWorks\LazySF2Patch`, value `GameDir`) for updates and uninstall. Or copy `winmm.dll` from the release into the game folder yourself (next to `StrikeFighters2.exe`) and list nothing else: that is all the mod needs. What the installer tried is in `lazysf2-setup.log` in its install folder.
+
+**Uninstall** the Lazy SF2 Patch from Windows' *Installed apps*. That removes exactly the files the mod added to the game folder, and the Tacview add-on. Uninstall leaves one registry value with the chosen game folder (`HKCU\SOFTWARE\LazyWorks\LazySF2Patch`, `GameDir`), so a reinstall finds it. Tacview's on/off switch for the add-on stays, so a later install or upgrade keeps your choice.
 
 ## Settings, in the game
 
@@ -22,11 +24,12 @@ The Lazy SF2 Patch is a mod for Strike Fighters 2 (July 2013 patch). The project
 | Options → Controls (below Mouse Pointer) | **Pilot Twist** | **On**: in the cockpit, looking far to the side or behind (hat or head tracker) turns the view up to 30 degrees further and leans you a little toward that side. **Off**: stock view. | Off |
 | `Options.ini` only (no row yet) | `PilotTwistAngle` | Pilot Twist's extra view yaw in degrees, 0–45. | 30 |
 | `Options.ini` only (no row yet) | `PilotTwistLean` | Pilot Twist's sideways lean in cm, 0–6 (the lean up is half of it; with a head tracker, the tracker's own sideways offset and the lean together stay within 6 cm). | 4 |
+| `Options.ini` only (no row) | `BackgroundMode` | What the game does when its window loses focus (Alt-Tab, a click on another window, minimising). **0**: it pauses, as stock. **1**: it keeps running, in any flight and in the menus; the keyboard, mouse and joystick are let go until you come back. While the game is minimised the mod limits its frame rate to what it was before, so it doesn't use a whole CPU core. **2**: as 1, and sounds keep playing too (the menu music still goes quiet). 1 and 2 work in Borderless only: in Fullscreen the game pauses, as stock. Any other value counts as 0. Read when the game starts, so a change applies after a restart. | 0 |
 | Options → Gameplay (bottom row) | **Tacview Recording** | **On**: every flight is recorded to a Tacview file (`SF2 <date>.zip.acmi`) in `Saved Games\ThirdWire\StrikeFighters2\Tacview`. **Off**: no recording. | Off |
 
 Changes take effect when you leave the Options screen, like the game's own settings.
 
-All seven are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini`: `DisplayMode` and `DisplayMonitor` under `[GraphicsOptions]`, `MouseMode`, `PilotTwist`, `PilotTwistAngle` and `PilotTwistLean` under `[ControlOptions]`, and `TacviewRecording` under `[OtherOptions]`. Without the mod they do nothing.
+All eight are stored in your own `Saved Games\ThirdWire\StrikeFighters2\Options.ini`: `DisplayMode` and `DisplayMonitor` under `[GraphicsOptions]`, `MouseMode`, `PilotTwist`, `PilotTwistAngle` and `PilotTwistLean` under `[ControlOptions]`, and `TacviewRecording` and `BackgroundMode` under `[OtherOptions]`. Without the mod they do nothing.
 
 **Why the mouse option exists:** the stock game doesn't use the Windows pointer. It draws its own, moved by raw mouse movement with its own speed and no Windows acceleration. So it never quite matches where Windows' pointer is and feels off, and over remote-control tools (RustDesk, Parsec, ...) it wanders by itself.
 

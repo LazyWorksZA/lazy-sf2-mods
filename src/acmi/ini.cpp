@@ -1,4 +1,5 @@
 #include "acmi/ini.h"
+#include "acmi/acmi_format.h"
 
 #include <cstdlib>
 
@@ -29,22 +30,21 @@ const std::string* Ini::get(std::string_view section, std::string_view key) cons
 
 namespace {
 
-void append_utf8(std::string& out, uint32_t cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xc0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3f));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xe0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
-        out += static_cast<char>(0x80 | (cp & 0x3f));
-    } else {
-        out += static_cast<char>(0xf0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3f));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
-        out += static_cast<char>(0x80 | (cp & 0x3f));
+constexpr uint16_t kCp1252High[32] = {
+    0x20ac, 0x81,   0x201a, 0x192,  0x201e, 0x2026, 0x2020, 0x2021, 0x2c6,  0x2030, 0x160,  0x2039, 0x152,  0x8d,   0x17d,  0x8f,
+    0x90,   0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc,  0x2122, 0x161,  0x203a, 0x153,  0x9d,   0x17e,  0x178};
+
+/// <summary>True when every byte of d is ASCII or part of well-formed UTF-8, and there is at least one multi-byte sequence.</summary>
+bool is_multibyte_utf8(const uint8_t* d, size_t n) {
+    bool multi = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (d[i] < 0x80) continue;
+        const size_t len = acmi::utf8_seq_len(d + i, n - i);
+        if (!len) return false;
+        multi = true;
+        i += len - 1;
     }
+    return multi;
 }
 
 std::string decode_text(const uint8_t* d, size_t n) {
@@ -60,19 +60,21 @@ std::string decode_text(const uint8_t* d, size_t n) {
                     i += 2;
                 }
             }
-            append_utf8(t, u);
+            acmi::append_utf8_cp(t, u);
         }
         return t;
     }
     size_t i = 0;
     if (n >= 3 && d[0] == 0xef && d[1] == 0xbb && d[2] == 0xbf) i = 3;  // a UTF-8 BOM: the rest is taken as it is
-    const bool utf8 = i == 3;
+    // Game inis are Windows-1252. A file that is well-formed UTF-8 already is taken as it is, not encoded twice.
+    // Per file: cp1252 text that happens to be valid UTF-8 is read as UTF-8, and a mixed file loses its cp1252 characters.
+    const bool utf8 = i == 3 || is_multibyte_utf8(d, n);
     t.reserve(n);
     for (; i < n; ++i) {
         if (d[i] < 0x80 || utf8)
             t += static_cast<char>(d[i]);
         else
-            append_utf8(t, d[i]);
+            acmi::append_utf8_cp(t, d[i] < 0xa0 ? kCp1252High[d[i] - 0x80] : d[i]);
     }
     return t;
 }

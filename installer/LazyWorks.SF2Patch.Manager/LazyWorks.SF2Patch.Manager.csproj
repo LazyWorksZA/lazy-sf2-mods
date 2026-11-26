@@ -15,6 +15,7 @@
     <Version>0.1.0</Version>
     <Product>Lazy SF2 Patch</Product>
     <Company>Lazy Works</Company>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>

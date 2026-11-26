@@ -51,4 +51,13 @@ bool mission_placed(const GameArea& a, int i, PlacedView* out);
 /// </summary>
 size_t mission_poll_destroyed(const void* const* records, size_t n, uint8_t* dead, uint32_t* out, size_t cap);
 
+/// <summary>Game thread. The damage (0..100) of a placed record; -1 when unreadable or out of range.</summary>
+int mission_placed_damage(const void* record);
+
+/// <summary>
+/// Developer probe, game thread, only while mission_unchanged(). Sets a placed record's damage to destroyed (100), as
+/// a kill would. False when the record is unreadable, out of range or already destroyed; *before gets the old damage.
+/// </summary>
+bool mission_set_destroyed(const void* record, int* before);
+
 }  // namespace LazyWorks::SF2Patch::hooks

@@ -23,11 +23,45 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 - **The other player flies in your flight.** On both sides a remote player's avatar is the local player's first free wingman, in slot order (#2, then #3, ...), whatever its type or distance. Only when the flight has no free plane does the picker fall back to another friendly aircraft, one within 20 km of where the avatar is placed first, and it logs that as a fallback with the distance moved. Enemy (or unknown-side) aircraft are never taken: with no friendly free there is no avatar.
 - **Refusals are logged once.** A host that refuses before the Welcome (busy, or no free friendly aircraft) is retried quietly every 5 s, and the client names the reason once until a Welcome or a new player. The host logs a client it keeps refusing at most once a minute, with a count.
 - **Host: a Bye sent just before a disconnect now arrives.** The host's refusals and goodbyes (for example Bye 5, wrong theatre) were discarded by the disconnect that followed them.
-- **The game keeps flying in the background during a session.** While a network session runs (the host has a client, or the client is welcomed) and Display Mode is Borderless, Alt-Tab no longer pauses the game: the flight keeps simulating and drawing, and only the keyboard, mouse and joystick are let go until you come back. `LAZYSF2_BG_SIM=0` turns this off. Single-player and Fullscreen keep the stock pause (Fullscreen logs "Borderless only" once). If the session ends while the game is in the background, the stock pause applies at once. Sound still goes silent in the background, as stock.
+- **The game keeps flying in the background during a session.** While a network session runs (the host has a client, or the client is welcomed) and Display Mode is Borderless, Alt-Tab no longer pauses the game: the flight keeps simulating and drawing, and only the keyboard, mouse and joystick are let go until you come back. This works whatever `[OtherOptions] BackgroundMode` says, and minimised the frames are paced as with BackgroundMode 1. `LAZYSF2_BG_SIM=0` turns this off (BackgroundMode still applies). Fullscreen keeps the stock pause (it logs "Borderless only" once). If the session ends while the game is in the background and BackgroundMode is 0, the stock pause applies at once. Sound follows BackgroundMode: it goes silent in the background unless BackgroundMode is 2.
+## 1.1.3 (2026-11-26)
+
+### Tacview
+
+- **Tacview: radar and weapon locks are recorded; Tacview draws lock lines.** When an aircraft (yours or the AI's) tracks or locks another aircraft with its radar, the recording names the target, and clears it when the lock is lost. A guided missile names the aircraft it is guiding to.
+- **Tacview: better shapes for ground vehicles, buildings, fuel tanks and bridges.** Ground objects and structures now get more specific Tacview types (truck, jeep, tank, armored vehicle, anti-aircraft, infantry, ship classes, storage and fuel tanks), chosen from the game's category with the name's generic words as a hint. Bridges are written as buildings, because Tacview has no bridge type.
+
+### Fixed
+
+- Airfield names with accented letters (such as ü or ö) show correctly in Tacview.
+
+### Developer tools (off unless enabled)
+
+- **Lock probe hotkeys.** With the probe on: Ctrl+Shift+A places an AI aircraft (an enemy if there is one) 3 km in front of you, at your altitude, heading and speed; Ctrl+Shift+O makes your radar lock it through the avionics' own commands; Ctrl+Shift+I makes that aircraft's radar lock you. Each logs the radar state (`lock probe:` lines).
+
+### Gameplay
+
+- **The game can keep running in the background** (`Options.ini` `[OtherOptions] BackgroundMode`, set by hand, default 0). With **0** the game pauses when its window loses focus, as stock. With **1** it keeps running in any flight (single player included) and in the menus; the keyboard, mouse and joystick are let go until you come back. While the game is minimised, the mod limits it to its normal frame rate so it doesn't use a whole CPU core. With **2** sounds keep playing as well (the menu music still goes quiet in the background). Borderless only: in Fullscreen the game pauses as stock and the log says so once. The value is read when the game starts; a change applies after a restart.
+
+## 1.1.2 (2026-11-26)
+
+### Fixed
+
+- **The installer finds more Strike Fighters 2 installs, and lets you choose the game folder when it can't.** It now also looks in the 64-bit registry, the UAC VirtualStore, Windows' list of installed programs and a folder you chose before. If none works, Start menu > Lazy SF2 Patch lets you pick the folder.
+
+## 1.1.1 (2026-11-26)
+
+### Fixed
+
+- **Rockets show as rockets in Tacview recordings, not as missiles.** Unguided rockets are now written with the Tacview rocket type. Bombs (including laser and TV guided ones) stay bombs, and missiles stay missiles.
 
 ### Releases
 
 - **The Tacview add-on is published on its own.** Each release now also has `Lazy-SF2-Patch-<version>-Tacview-AddOn.zip`, for players who install `winmm.dll` by hand. Extract it into `%APPDATA%\Tacview\AddOns\`.
+
+### Developer tools (off unless enabled)
+
+- **Tacview destroy test hotkey.** With the probe on, Ctrl+Shift+X during a recorded single mission destroys the nearest building the recording tracks (its damage is set to 100), so the building's destruction can be checked in Tacview without flying a strike. The recording's end line now also counts all Destroyed events.
 
 ## 1.1.0 (2026-11-26)
 

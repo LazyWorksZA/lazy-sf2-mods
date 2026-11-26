@@ -32,6 +32,12 @@ constexpr size_t kOffPos = 0x38, kOffAngles = 0x100;  // aircraft object: double
 constexpr size_t kOffWeaponPos = 0x20, kOffWeaponAngles = 0xe8;
 // Every object: int, 0 once it has finished; its memory stays valid. See lazy-sf2-recon: recon-notes §20.1.3.
 constexpr size_t kOffActive = 0x04;
+// Locks. Aircraft radar block at +0x970: int state (+0x970; 2 search, 3 and 4 track, 5 ground), int stage (+0x974;
+// 2 tracking, 3 locked) and the target's object pointer (+0x988). Missile: target object pointer at +0x194 (kept only
+// while the target is active). Read only from objects the build-checked trackers hold.
+// See lazy-sf2-recon: recon-notes §27.
+constexpr size_t kOffRadarState = 0x970, kOffRadarStage = 0x974, kOffRadarTarget = 0x988;
+constexpr size_t kOffWeaponTarget = 0x194;
 constexpr double kSnapshotInterval = 0.1;        // game seconds between snapshots: 10 Hz (aircraft only)
 constexpr double kSnapshotIntervalWeapons = 0.05;  // 20 Hz while a weapon is in flight
 constexpr size_t kMaxAerodromes = 512;
@@ -104,6 +110,13 @@ uint8_t g_watch_dead[kMaxStructures];
 size_t g_watch_n = 0;
 uint32_t g_watch_hits[kMaxDestroyedPerFrame];
 double g_last_poll = 0;
+// For the developer destroy hotkey only: where each watched record stands, and which area and placed index it is.
+double g_watch_xy[kMaxStructures][2];
+uint16_t g_watch_area[kMaxStructures];
+uint16_t g_watch_index[kMaxStructures];
+uint8_t g_destroy_skip[kMaxStructures];
+int g_placed_index[kMaxPlacedPerArea];  // the game's index of g_placed[k]
+std::atomic<bool> g_destroy_request{false};  // set by the probe hotkey thread
 bool g_weapons_live = false;  // the last snapshot held a weapon: snapshot at the faster rate
 std::atomic<bool> g_registered{false};
 std::atomic<bool> g_table_empty{false};  // set by the tracker when the table empties; cleared at a start
@@ -133,6 +146,42 @@ bool read_active(const void* obj) {
     }
 }
 
+// The aircraft's radar target while it tracks or locks an air target, else null. No C++ objects (SEH).
+const void* read_radar_target(const void* obj) {
+    __try {
+        const char* b = static_cast<const char*>(obj);
+        const int state = *reinterpret_cast<const volatile int*>(b + kOffRadarState);
+        const int stage = *reinterpret_cast<const volatile int*>(b + kOffRadarStage);
+        if (state < 2 || state > 4 || stage < 2) return nullptr;
+        return *reinterpret_cast<const void* const volatile*>(b + kOffRadarTarget);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// A guided missile's target object, or null. No C++ objects (SEH).
+const void* read_weapon_target(const void* obj) {
+    __try {
+        return *reinterpret_cast<const void* const volatile*>(static_cast<const char*>(obj) + kOffWeaponTarget);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+/// <summary>Sets r's lock to the listed aircraft at target (by pointer); none when null or not listed.</summary>
+void set_lock(acmi::TacviewRec& r, const void* target, const LiveAircraft* list, size_t n) {
+    r.lock_mode = 0;
+    r.lock_seq = 0;
+    if (!target) return;
+    for (size_t k = 0; k < n; ++k) {
+        if (list[k].obj == target) {
+            r.lock_mode = 1;
+            r.lock_seq = static_cast<uint32_t>(list[k].seq);
+            return;
+        }
+    }
+}
+
 struct SnapCtx {
     double t = 0;
     bool wrote = false;
@@ -140,13 +189,21 @@ struct SnapCtx {
     size_t n_air = 0;
 };
 
+/// Aircraft names are UTF-16: stored as UTF-8, cut before a character that would not fit.
 void copy_name(char* dst, const wchar_t* src) {
-    size_t k = 0;
-    for (; k < acmi::kRecNameChars && src[k]; ++k) {
-        const wchar_t ch = src[k];
-        dst[k] = (ch >= 0x20 && ch < 0x7f) ? static_cast<char>(ch) : '?';
+    std::string u;
+    for (size_t k = 0; src[k] && k < acmi::kRecNameChars; ++k) {
+        uint32_t cp = src[k];
+        if (cp >= 0xd800 && cp < 0xdc00 && src[k + 1] >= 0xdc00 && src[k + 1] < 0xe000) {
+            cp = 0x10000 + ((cp - 0xd800) << 10) + (src[k + 1] - 0xdc00);
+            ++k;
+        }
+        if (cp < 0x20 || cp == 0x7f) cp = '?';
+        acmi::append_utf8_cp(u, cp);
     }
-    dst[k] = '\0';
+    const size_t n = acmi::utf8_prefix(u, acmi::kRecNameChars);
+    std::memcpy(dst, u.data(), n);
+    dst[n] = '\0';
 }
 
 // Under both tables' shared locks (the weapons' nested in the aircraft's): no allocation, I/O or logging.
@@ -162,6 +219,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         r.obj_class = acmi::TacviewRec::kAircraft;
         r.parent_seq = 0;
         r.destroyed = 0;
+        r.lock_mode = 0;  // ring slots are reused
+        r.lock_seq = 0;
         if (!read_active(list[i].obj)) {
             // Finished (destroyed): left out of the frame, so the core removes it; the marker adds the Destroyed event,
             // once per aircraft (a full list just repeats it, which the core ignores).
@@ -196,6 +255,7 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         size_t t = 0;
         for (; t < acmi::kRecTypeChars && list[i].type_name[t]; ++t) r.type[t] = list[i].type_name[t];
         r.type[t] = '\0';
+        set_lock(r, read_radar_target(list[i].obj), list, n);
         ++used;
     }
     size_t live_weapons = 0;
@@ -207,6 +267,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
             if (sent) continue;
             if (g_wdead_n < sizeof(g_wdead_sent) / sizeof(g_wdead_sent[0])) g_wdead_sent[g_wdead_n++] = wl[i].seq;
             acmi::TacviewRec& m = g_writer->slot(used);
+            m.lock_mode = 0;
+            m.lock_seq = 0;
             m.kind = acmi::TacviewRec::kObject;
             m.obj_class = wl[i].weapon_class;
             m.destroyed = acmi::TacviewRec::kDetonated;
@@ -219,6 +281,8 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         acmi::TacviewRec& r = g_writer->slot(used);
         r.obj_class = wl[i].weapon_class;
         r.destroyed = 0;
+        r.lock_mode = 0;
+        r.lock_seq = 0;
         r.parent_class = acmi::TacviewRec::kAircraft;  // ring slots are reused
         r.kind = acmi::TacviewRec::kObject;
         r.is_player = 0;
@@ -235,8 +299,13 @@ void weapon_cb(const LiveWeapon* wl, size_t nw, void* vctx) {
         }
         r.side = static_cast<uint8_t>(wl[i].side);
         size_t k = 0;
-        for (; k < acmi::kRecNameChars && wl[i].name[k]; ++k) r.name[k] = wl[i].name[k];
+        while (k < acmi::kRecNameChars && wl[i].name[k]) ++k;
+        // Cut before a UTF-8 continuation byte, as utf8_prefix does (no allocation here).
+        while (k > 0 && wl[i].name[k] && (static_cast<unsigned char>(wl[i].name[k]) & 0xc0) == 0x80) --k;
+        std::memcpy(r.name, wl[i].name, k);
         r.name[k] = '\0';
+        if (wl[i].weapon_class == static_cast<uint8_t>(WeaponClass::Missile))
+            set_lock(r, read_weapon_target(wl[i].obj), list, n);
         ++used;
     }
     g_weapons_live = live_weapons != 0;
@@ -444,6 +513,7 @@ void pick_structures(const StructureList& list) {
         if (g)
             for (int i = 0; i < g->n_placed && np < kMaxPlacedPerArea; ++i)
                 if (mission_placed(*g, i, &g_placed[np])) {
+                    g_placed_index[np] = i;
                     g_placed_xy[np][0] = g_placed[np].x;
                     g_placed_xy[np][1] = g_placed[np].y;
                     ++np;
@@ -473,6 +543,10 @@ void pick_structures(const StructureList& list) {
                     g_watch_rec[g_watch_n] = g_placed[i].record;
                     g_watch_seq[g_watch_n] = static_cast<uint32_t>(m + 1);
                     g_watch_dead[g_watch_n] = 0;
+                    g_watch_xy[g_watch_n][0] = g_placed[i].x;
+                    g_watch_xy[g_watch_n][1] = g_placed[i].y;
+                    g_watch_area[g_watch_n] = static_cast<uint16_t>(g - g_game_areas);
+                    g_watch_index[g_watch_n] = static_cast<uint16_t>(g_placed_index[i]);
                     ++g_watch_n;
                 }
             }
@@ -514,7 +588,9 @@ void write_structures(double t) {
             const StructureMark& sm = list.marks[m];
             acmi::TacviewRec& r = g_writer->slot(used++);
             r.kind = acmi::TacviewRec::kObject;
-            r.obj_class = sm.bridge ? acmi::TacviewRec::kBridge : acmi::TacviewRec::kStructure;
+            r.obj_class = sm.bridge    ? acmi::TacviewRec::kBridge
+                          : sm.storage ? acmi::TacviewRec::kStorage
+                                       : acmi::TacviewRec::kStructure;
             r.side = 0;
             r.is_player = 0;
             r.parent_class = acmi::TacviewRec::kAircraft;
@@ -572,6 +648,57 @@ void poll_destroyed_structures(double t) {
     g_writer->commit_frame(n, t, 0);
 }
 
+// Developer probe (Ctrl+Shift+X): sets the damage of the nearest watched, still standing structure to destroyed, so
+// that poll_destroyed_structures() finds it as it would a real kill. Game thread, player step.
+void destroy_nearest(const void* player, double t) {
+    if (g_struct_pending) {
+        LOG("tacview destroy test: ignored, the structures are still being written");
+        return;
+    }
+    if (g_watch_n == 0) {
+        LOG("tacview destroy test: ignored, no structure is watched (not a single mission, none drawn, or tracking "
+            "stopped)");
+        return;
+    }
+    if (!mission_unchanged()) {
+        LOG("tacview destroy test: ignored, the mission changed under the recording");
+        return;
+    }
+    double pos[3];
+    float ang[3];
+    if (!read_pose(player, kOffPos, kOffAngles, pos, ang) || !std::isfinite(pos[0]) || !std::isfinite(pos[1])) {
+        LOG("tacview destroy test: ignored, the player's position is unreadable");
+        return;
+    }
+    for (size_t i = 0; i < g_watch_n; ++i) {
+        const int d = g_watch_dead[i] ? -1 : mission_placed_damage(g_watch_rec[i]);
+        g_destroy_skip[i] = d < 0 || d >= 100;
+    }
+    const size_t i = acmi::find_near(g_watch_xy, g_watch_n, pos[0], pos[1], HUGE_VAL, g_destroy_skip);
+    if (i >= g_watch_n) {
+        LOG("tacview destroy test: ignored, every one of the %zu watched structures is destroyed or unreadable", g_watch_n);
+        return;
+    }
+    int before = -1;
+    if (!mission_set_destroyed(g_watch_rec[i], &before)) {
+        LOG("tacview destroy test: could not write the damage of placed record %p (damage %d)", g_watch_rec[i], before);
+        return;
+    }
+    const uint32_t seq = g_watch_seq[i];
+    std::string name = "?";
+    std::shared_ptr<const StructureList> list;
+    if (terrain_structures(g_theater, list) == StaticList::Ready && list && seq - 1 < list->marks.size())
+        name = list->marks[seq - 1].name;
+    const GameArea& a = g_game_areas[g_watch_area[i]];
+    const double dx = g_watch_xy[i][0] - pos[0], dy = g_watch_xy[i][1] - pos[1];
+    LOG("tacview destroy test: damage %d -> 100 at placed record %p (area %u at (%.0f, %.0f), placed %u of %d): "
+        "structure %u \"%s\" at (%.0f, %.0f), %.0f m from the player; Tacview id %x. The destruction poll (every %.0f s "
+        "of game time, t=%.1f) should write its Destroyed event and explosion",
+        before, g_watch_rec[i], g_watch_area[i], a.x, a.y, g_watch_index[i], a.n_placed, seq, name.c_str(),
+        g_watch_xy[i][0], g_watch_xy[i][1], std::sqrt(dx * dx + dy * dy), acmi::kStructureIdBase + seq,
+        kDestroyedPollSeconds, t);
+}
+
 // A start waits (retries each player step) while the previous writer drains, so the game thread never blocks.
 void on_step(void* aircraft, float /*dt*/, bool is_player) {
     if (g_recording) {
@@ -586,6 +713,8 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         }
     }
     if (!is_player) return;
+    const bool destroy = g_destroy_request.exchange(false, std::memory_order_relaxed);
+    if (destroy && !g_recording) LOG("tacview destroy test: ignored, no Tacview recording is running");
     if (!g_recording) {
         if (config::tacview_recording_peek() != 1) return;
         const uint32_t ep = sim_player_epoch();
@@ -619,6 +748,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
     }
     if (g_struct_pending) write_structures(t);
     poll_destroyed_structures(t);
+    if (destroy) destroy_nearest(aircraft, t);
 }
 
 }  // namespace
@@ -661,6 +791,8 @@ void tacview_recorder_menu_moment() {
     }
     if (!g_writer->accepting()) stop_recording("writer stopped");
 }
+
+void tacview_destroy_nearest_request() { g_destroy_request.store(true, std::memory_order_relaxed); }
 
 void tacview_recorder_shutdown(bool process_exit) {
     terrain_export_shutdown();
