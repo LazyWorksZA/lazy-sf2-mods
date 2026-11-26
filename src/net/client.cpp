@@ -37,7 +37,7 @@ using net::ClientCore;
 using net::ClientEvent;
 
 constexpr size_t kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffMatrix = 0xdc, kOffAngles = 0x100,
-                 kOffHeading2 = 0x150;
+                 kOffHeading2 = 0x150, kOffBodyVel = 0xb8, kOffSpeed = 0x624;
 constexpr uint8_t kByeSessionEnded = 3;
 constexpr int kSources = ClientCore::kSources;  // remote ids: the host (0) and clients 1..kMaxClients
 constexpr double kParkAfter = 10.0;   // wall seconds without a State before a remote's aircraft goes back to the AI
@@ -64,7 +64,10 @@ bool g_leaving = false;       // we said Bye (the player changed): only the end 
 bool g_disconnected = false;  // Disconnected seen; stop() once the thread has cleaned up
 double g_next_try = 0;        // wall time of the next connection attempt
 bool g_blocked = false;       // refused in a way a retry cannot fix (theatre, version) until the player changes
-bool g_busy_logged = false;   // "not connecting while a puppet or replay runs", once per block
+const char* g_wait_logged = nullptr;  // the last "waiting to connect" reason logged (a literal): each change is logged once
+unsigned g_attempts = 0;      // connection attempts since the last Welcome or new player
+double g_next_still = 0;      // wall time of the next "still no answer" line while retrying quietly
+bool g_join_deferred = false;  // the Welcome's join move waits until the player is airborne
 bool g_retry_quiet = false;   // a failed attempt was logged: later ones are not, until a Welcome or a new player
 cl::RefusalOnce g_refused;    // the host's refusals before a Welcome, each logged once until a Welcome or a new player
 // The network thread's lines are dropped while a quiet retry has not connected (it clears this when it does).
@@ -78,6 +81,8 @@ char g_theatre[33] = {};
 bool g_session = false;
 uint16_t g_id = 0;
 net::WelcomeMsg g_welcome{};
+net::StateMsg g_host_state{};  // the host's newest State, for the join move
+bool g_have_host_state = false;
 int g_welcomes = 0;           // Welcomes in this session; a re-Welcome re-seeds the clock
 double g_welcome_wall = 0;    // the first Welcome's arrival
 double g_reannounce_at = 0;   // wall: after a re-Welcome, remotes not announced again by then are dropped
@@ -213,6 +218,7 @@ void end_session(const char* why) {
         world_avatar_session_reset();
     }
     g_session = false;
+    g_join_deferred = false;
     g_welcomed.store(false, std::memory_order_relaxed);
     g_snap_ok = false;
     g_hold = true;
@@ -261,58 +267,87 @@ void refresh_clock(double wall) {
 }
 
 /// <summary>
-/// Moves the player's jet to pos and turns it to heading: position, the heading angle (and its copy at +0x150), the
-/// matrix rows and the world velocity turned about the vertical. Pitch, roll, speed, body velocity and rates stay, so
-/// the flight model's body-frame state stays valid (the R3 result: lazy-sf2-recon, network-recon §8.7).
+/// Puts the player's jet on the host's wing: position, pitch/heading/roll (angles, the copy of the heading at +0x150 and
+/// the matrix), the host's world velocity, the scalar speed at +0x624 (the host's), the body velocity (the jet's own,
+/// scaled to the host's speed, so its axes and angle of attack stay valid) and zero rates. Same speed, heading and
+/// climb rate as the host, so the two jets do not drift apart. See lazy-sf2-recon: network-recon §8.7 (R3).
 /// </summary>
-void move_player(void* player, const double pos[3], float heading, double* turned) {
-    double p[3];
-    float vel[3], m[9], ang[3], h2;
-    obj_read(player, kOffPos, p, 3);
-    obj_read(player, kOffVel, vel, 3);
-    obj_read(player, kOffMatrix, m, 9);
+void move_player(void* player, const cl::JoinPose& t, double* turned, float* old_speed) {
+    float ang[3], h2, bv[3], vel0[3];
     obj_read(player, kOffAngles, ang, 3);
     obj_read(player, kOffHeading2, &h2, 1);
-    const double delta = wrap_pi(static_cast<double>(heading) - static_cast<double>(ang[1]));
-    *turned = delta;
-    cl::turn_heading(vel, delta);
-    for (int row = 0; row < 3; ++row) cl::turn_heading(m + 3 * row, delta);  // rows right, forward, up: world vectors
+    obj_read(player, kOffBodyVel, bv, 3);
+    obj_read(player, kOffVel, vel0, 3);
+    *old_speed = static_cast<float>(cl::norm3(vel0));
+    const double host_speed = cl::norm3(t.vel);
+    *turned = wrap_pi(static_cast<double>(t.ang[1]) - static_cast<double>(ang[1]));
     const bool h2_is_copy = std::fabs(wrap_pi(static_cast<double>(h2) - static_cast<double>(ang[1]))) < 1e-3;
-    ang[1] = cl::heading_like(ang[1], heading);
-    if (h2_is_copy) h2 = cl::heading_like(h2, heading);
-    obj_write(player, kOffPos, pos, 3);
-    obj_write(player, kOffVel, vel, 3);
+    ang[0] = t.ang[0];
+    ang[2] = t.ang[2];
+    ang[1] = cl::heading_like(ang[1], t.ang[1]);
+    if (h2_is_copy) h2 = cl::heading_like(h2, t.ang[1]);
+    const double a[3] = {ang[0], ang[1], ang[2]};
+    float m[9];
+    build_matrix(a, m);
+    const double bn = cl::norm3(bv);
+    if (bn > 1.0) {
+        const float k = static_cast<float>(host_speed / bn);
+        for (float& c : bv) c *= k;
+        obj_write(player, kOffBodyVel, bv, 3);
+    }
+    const float zero[3] = {0, 0, 0};
+    const float speed = static_cast<float>(host_speed);
+    obj_write(player, kOffPos, t.pos, 3);
+    obj_write(player, kOffVel, t.vel, 3);
     obj_write(player, kOffMatrix, m, 9);
     obj_write(player, kOffAngles, ang, 3);
     if (h2_is_copy) obj_write(player, kOffHeading2, &h2, 1);
+    obj_write(player, kOffRates, zero, 3);
+    obj_write(player, kOffSpeed, &speed, 1);
 }
 
 void join(void* player, const net::WelcomeMsg& w, double wall) {
+    if (world_client_tag() != 0) {
+        // A shared-world join flies the host's mission in its own seat: no teleport onto the host's wing.
+        g_join_deferred = false;
+        if (!(g_join_logged & 0x80000000u)) {
+            g_join_logged |= 0x80000000u;
+            LOG("net: client: shared world: we fly our own seat in the host's mission; no join move");
+        }
+        return;
+    }
     double pos[3];
     float vel[3];
     obj_read(player, kOffPos, pos, 3);
     obj_read(player, kOffVel, vel, 3);
     net::ClockSync c;
     const double now = g_core->clock_snapshot(&c) ? c.now(wall) : w.host_game_time;
-    double target[3];
-    cl::join_target(w, now, target);
-    const double dist = cl::dist3(pos, target);
+    // The host's latest State when it is newer than the Welcome, so a deferred move is not stale.
+    const cl::JoinPose target = cl::join_pose(w, g_have_host_state ? &g_host_state : nullptr, now);
+    const double dist = cl::dist3(pos, target.pos);
     const cl::JoinAction a =
         cl::join_action(net::welcome_has_join(w), g_join_move, cl::airborne(pos, vel), g_moved, dist);
     if (a == cl::JoinAction::Move) {
+        g_join_deferred = false;
         double turned = 0;
-        move_player(player, target, w.spawn_heading, &turned);
+        float old_speed = 0;
+        move_player(player, target, &turned, &old_speed);
         g_moved = true;
-        LOG("net: client: joined the host's wing: moved %.0f m to (%.0f, %.0f, %.0f), turned %.1f deg to heading %.1f "
-            "deg (speed kept, %.0f m/s; the host's %.0f m/s)",
-            dist, target[0], target[1], target[2], deg(turned), deg(static_cast<double>(w.spawn_heading)),
-            cl::norm3(vel), cl::norm3(w.spawn_vel));
+        LOG("net: client: joined the host's wing (from the host's %s): moved %.0f m to (%.0f, %.0f, %.0f), turned "
+            "%.1f deg to heading %.1f deg, pitch %.1f deg; speed %.0f -> %.0f m/s (the host's velocity, climb %.1f "
+            "m/s)",
+            target.from_state ? "latest State" : "Welcome", dist, target.pos[0], target.pos[1], target.pos[2],
+            deg(turned), deg(static_cast<double>(target.ang[1])), deg(static_cast<double>(target.ang[0])),
+            static_cast<double>(old_speed), cl::norm3(target.vel), static_cast<double>(target.vel[2]));
         return;
     }
+    g_join_deferred = a == cl::JoinAction::NotAirborne;
     const unsigned bit = 1u << static_cast<unsigned>(a);
     if (g_join_logged & bit) return;  // a host re-sends its join: say each outcome once per session
     g_join_logged |= bit;
-    if (a == cl::JoinAction::NoJoin)
+    if (a == cl::JoinAction::NotAirborne)
+        LOG("net: client: join move deferred until airborne (join position %.0f m away)", dist);
+    else if (a == cl::JoinAction::NoJoin)
         LOG("net: client: this Welcome has no join position (the host places its jet first); waiting for one");
     else
         LOG("net: client: join position %.0f m away: %s", dist, cl::join_action_name(a));
@@ -350,12 +385,15 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
     if (first) {
         g_session = true;
         g_retry_quiet = false;
+        g_attempts = 0;
         g_refused.clear();
         g_id = w.client_id;
         g_welcome_wall = wall;
         g_reannounce_at = 0;
         g_peer0_logged = false;
         g_join_logged = 0;
+        g_join_deferred = false;
+        g_have_host_state = false;
         g_watch.clear();
         g_hclock = net::HostClock{};
         g_tx = g_tx_fail = g_tx_held = 0;
@@ -464,6 +502,10 @@ void handle_state(const ClientEvent& e, double wall) {
     // Heard from, with or without an aircraft: the 1 Hz line and the park rule go by this.
     r.last_state_wall = wall;
     r.last_game_time = s.game_time;
+    if (id == 0 && (!g_have_host_state || s.game_time >= g_host_state.game_time)) {
+        g_host_state = s;
+        g_have_host_state = true;
+    }
     if (!r.h.obj && !take(id, s)) return;
     if (!r.jet.push(s, t_rx)) return;
     if (!r.got_state)
@@ -482,8 +524,8 @@ void handle_end(const ClientEvent& e, double wall) {
     if (g_blocked) {
         LOG("net: client: not connecting again until the player changes");
     } else if (!g_retry_quiet) {
-        LOG("net: client: will connect again %s", why == net::ClientEnd::Left ? "once airborne"
-                                                  : "every 5 s while airborne (further attempts are not logged here)");
+        LOG("net: client: will connect again %s", why == net::ClientEnd::Left ? "at once"
+                                                  : "every 5 s (further attempts are not logged here)");
         g_retry_quiet = why != net::ClientEnd::Left;
     }
 }
@@ -522,7 +564,7 @@ void pump(void* player, double wall) {
                     } else {
                         // Refused before the Welcome: retried quietly every 5 s; each reason is said once.
                         if (g_refused.first(b.reason))
-                            LOG("net: client: the host refused us (Bye %u: %s); trying again every 5 s while airborne, "
+                            LOG("net: client: the host refused us (Bye %u: %s); trying again every 5 s, "
                                 "quietly until welcomed",
                                 static_cast<unsigned>(b.reason), net::bye_reason_name(b.reason));
                         g_retry_quiet = true;
@@ -673,15 +715,15 @@ void avatar_step(int id, double now, double wall) {
 }
 
 /// <summary>On the player's step with no connection: start one if it is time.</summary>
-void maybe_connect(void* player, double wall) {
+void maybe_connect(void* /*player*/, double wall) {
     const bool busy = g_puppet_state.load() != 0 || replay_active();
-    if (busy && !g_busy_logged) LOG("net: client: not connecting while a puppet or replay run is active");
-    g_busy_logged = busy;
-    double pos[3];
-    float vel[3];
-    obj_read(player, kOffPos, pos, 3);
-    obj_read(player, kOffVel, vel, 3);
-    if (!cl::connect_due(sim_player_known(), cl::airborne(pos, vel), true, busy || g_blocked, wall, g_next_try)) return;
+    const bool known = sim_player_known();
+    const char* why = cl::wait_reason(known, busy, g_blocked);
+    if (why != g_wait_logged) {
+        g_wait_logged = why;
+        if (why) LOG("net: client: waiting to connect: %s", why);
+    }
+    if (!cl::connect_due(known, true, busy || g_blocked, wall, g_next_try)) return;
     g_next_try = wall + cl::kRetrySeconds;
     g_own_type[0] = 0;
     probe_with_aircraft(player_type_cb, g_own_type);
@@ -701,6 +743,15 @@ void maybe_connect(void* player, double wall) {
     g_link = Link::Running;
     g_leaving = g_disconnected = false;
     g_welcomes = 0;
+    ++g_attempts;
+    if (!g_retry_quiet) {
+        g_next_still = wall + cl::kStillTryingSeconds;
+        LOG("net: client: connecting to %s:%u (attempt %u)", g_host, static_cast<unsigned>(g_port), g_attempts);
+    } else if (wall >= g_next_still) {
+        g_next_still = wall + cl::kStillTryingSeconds;
+        LOG("net: client: still no answer from %s:%u after %u attempts", g_host, static_cast<unsigned>(g_port),
+            g_attempts);
+    }
     if (!g_retry_quiet)
         LOG("net: client: joining as \"%s\" (%s), theatre %s", g_callsign, g_own_type[0] ? g_own_type : "type unknown",
             g_theatre_hash ? g_theatre : "unknown");
@@ -726,6 +777,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
         g_epoch = sim_player_epoch();
         g_blocked = false;
         g_retry_quiet = false;
+        g_attempts = 0;
         g_refused.clear();
         g_moved = false;
         if (g_link == Link::Running && !g_leaving && !g_disconnected) {
@@ -756,6 +808,13 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
             return;
         }
         if (!g_session || g_leaving) return;
+        if (g_join_deferred) {
+            double p[3];
+            float v[3];
+            obj_read(aircraft, kOffPos, p, 3);
+            obj_read(aircraft, kOffVel, v, 3);
+            if (cl::airborne(p, v)) join(aircraft, g_welcome, wall);
+        }
         send_own(aircraft);
         if (wall >= g_next_report) {
             report(aircraft, wall);
@@ -813,7 +872,7 @@ void client_install() {
         }
     }
     g_enabled = true;
-    LOG("net: client on: joins %s:%u as \"%s\" once airborne; join %s", g_host, static_cast<unsigned>(g_port),
+    LOG("net: client on: joins %s:%u as \"%s\" when a flight starts; join %s", g_host, static_cast<unsigned>(g_port),
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
 }
 

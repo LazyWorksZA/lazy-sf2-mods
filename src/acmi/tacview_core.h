@@ -23,13 +23,16 @@
 // Ground+Static+Building, Ground+Vehicle or Sea+Watercraft with the type name as Name; flares and chaff are Misc+Decoy+...
 // An aerodrome (0x6000000+seq) is a static Ground+Static+Aerodrome with its name and heading, written once: the recorder
 // lists it in one frame of its own, and only the final frame (every series) removes it.
-// A structure (0x7000000+seq) is a placed building or bridge from the theatre's inis: Ground+Static+Building or
-// Ground+Static+Bridge, written once and never updated; the recorder lists them over several frames that name no series,
+// A structure (0x7000000+seq) is a placed building or bridge from the theatre's inis: Ground+Static+Building (a bridge too: no Bridge tag) or
+// Ground+Static+Container (a storage tank), written once and never updated; the recorder lists them over several frames that name no series,
 // so only the final frame removes them. A structure within kStructureDedupeMetres of a live ground object (a
 // GroundObject the core already has a position for) is skipped: the game made that one a real object. A destroyed
 // marker for a written structure writes its Destroyed event and an explosion, and removes it.
 // A transform line writes only the T components whose text changed since the last line of that object (ACMI 2.2 lets a
 // component stay empty); every '|' is kept, and an object's first line is complete.
+// An aircraft or weapon record with lock_mode set names its locked aircraft (lock_seq): the core writes
+// "id,LockedTarget=<target id>,LockedTargetMode=1" when the target changes, and "id,LockedTargetMode=0,LockedTarget="
+// when the lock is lost; a target the core has not described yet counts as no lock. Nothing is written while it stays.
 // A frame says which series it lists completely (end_frame's series_mask), so a 1 Hz series is not removed in between.
 #pragma once
 
@@ -67,7 +70,7 @@ struct TacviewRec {
     static constexpr uint8_t kObject = 0, kEndFrame = 1;
     static constexpr uint8_t kAircraft = 0, kMissile = 1, kBomb = 2, kRocket = 3;
     static constexpr uint8_t kGroundStatic = 4, kGroundVehicle = 5, kShip = 6, kFlare = 7, kChaff = 8, kBullet = 9,
-                             kAerodrome = 10, kStructure = 11, kBridge = 12;
+                             kAerodrome = 10, kStructure = 11, kBridge = 12, kStorage = 13;
     /// <summary>The kinds of object that share an id range and a sequence counter.</summary>
     enum class Family : uint8_t { Aircraft, Weapon, Ground, CounterMeasure, Bullet, Aerodrome, Structure };
     static constexpr Family family_of(uint8_t cls) {
@@ -76,7 +79,7 @@ struct TacviewRec {
         if (cls == kFlare || cls == kChaff) return Family::CounterMeasure;
         if (cls == kBullet) return Family::Bullet;
         if (cls == kAerodrome) return Family::Aerodrome;
-        if (cls == kStructure || cls == kBridge) return Family::Structure;
+        if (cls == kStructure || cls == kBridge || cls == kStorage) return Family::Structure;
         return Family::Weapon;  // missile, bomb, rocket, and any unknown value
     }
     /// <summary>Frame series: a frame lists some series completely, and only those can lose objects (removal).</summary>
@@ -102,6 +105,7 @@ struct TacviewRec {
     uint8_t parent_class = kAircraft;  // the class of the parent: a weapon's is an aircraft, a bullet's may be a ground object
     uint8_t destroyed = 0;  // a marker, not a sample, for the object (seq, class); only those are used: kDestroyed or kDetonated
     static constexpr uint8_t kDestroyed = 1, kDetonated = 2;
+    uint8_t lock_mode = 0;  // aircraft and weapons: 1 when lock_seq names the locked target, 0 for none
     uint64_t seq = 0;         // the tracker's sequence number: unique and never reused within its class
     uint64_t parent_seq = 0;  // weapons and bullets: the shooter's seq (in the family of parent_class), or 0 for none
     double t = 0;      // game time, seconds
@@ -109,6 +113,7 @@ struct TacviewRec {
     float ang[3] = {};  // pitch, heading, roll in radians
     char name[kRecNameChars + 1] = {};
     char type[kRecTypeChars + 1] = {};  // aircraft only: the type name, empty when unknown (always empty for weapons)
+    uint32_t lock_seq = 0;  // with lock_mode: the locked aircraft's seq (aircraft family)
 };
 static_assert(sizeof(TacviewRec) == 168, "TacviewRec is copied through the ring: keep it 168 bytes");
 
@@ -134,6 +139,7 @@ struct TacviewCoreStats {
     uint64_t structures = 0;          // structures written
     uint64_t structures_skipped = 0;  // structures not written: a live ground object stands there
     uint64_t structures_destroyed = 0;
+    uint64_t lock_changes = 0;  // LockedTarget lines written (locks and clears)
 };
 
 class TacviewCore {
@@ -177,6 +183,9 @@ private:
         double last_pos[3];  // the pose last sampled (where an explosion goes)
         float last_ang[3];
         bool has_last;
+        uint32_t lock_id;  // the LockedTarget last written; 0 for none
+        uint32_t want_lock;    // this frame's lock_seq (0 for none), resolved at the end of the frame
+        uint64_t lock_frame;   // the frame want_lock was sampled in
         TransformText text;  // the last written text of each T component (delta encoding)
     };
     TacviewCoreConfig cfg_;
@@ -194,6 +203,8 @@ private:
     std::unordered_map<uint64_t, size_t> static_index_;  // seq to index in statics_
     void add_structure(const TacviewRec& r);
     std::string pending_;  // transform lines of the current frame
+    std::string locks_;    // lock lines of the current frame: after the transforms, so every object is described first
+    void resolve_locks();
     struct Explosion {
         uint32_t id;
         double remove_at;  // game time

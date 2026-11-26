@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Win32;
 
 namespace LazyWorks.SF2Patch.Manager;
 
@@ -23,15 +22,8 @@ public static class ModInstaller
     /// <summary>The winmm.dll shipped with this version of the manager.</summary>
     public static string PayloadDll => Path.Combine(AppContext.BaseDirectory, "payload", DllName);
 
-    /// <summary>The game folder from the installer's registry entry, or null.</summary>
-    public static string? FindGameDir()
-    {
-        using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32);
-        using var key = hklm.OpenSubKey(@"SOFTWARE\ThirdWire\Strike Fighters 2");
-        if (key?.GetValue("Path") is not string exe) return null;
-        string? dir = Path.GetDirectoryName(exe);
-        return dir != null && File.Exists(Path.Combine(dir, "StrikeFighters2.exe")) ? dir : null;
-    }
+    /// <summary>The game folder (see <see cref="GameLocator"/> for the places and their order), or null. Logs each place tried.</summary>
+    public static string? FindGameDir(Action<string> log) => GameLocator.Find(new SystemGameEnvironment(), log);
 
     public static State GetState(string? gameDir)
     {

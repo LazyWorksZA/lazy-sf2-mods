@@ -38,9 +38,18 @@ inline bool airborne(const double pos[3], const float vel[3]) {
 }
 
 /// <summary>Whether to start a connection now. blocked: a puppet or replay run, or a refusal that retrying cannot fix.</summary>
-constexpr bool connect_due(bool player_known, bool is_airborne, bool core_idle, bool blocked, double wall,
-                           double next_try) {
-    return player_known && is_airborne && core_idle && !blocked && wall >= next_try;
+constexpr bool connect_due(bool player_known, bool core_idle, bool blocked, double wall, double next_try) {
+    return player_known && core_idle && !blocked && wall >= next_try;
+}
+
+inline constexpr double kStillTryingSeconds = 30.0;  // wall seconds between "still no answer" lines while retrying
+
+/// <summary>Why a connection does not start now, or nullptr when nothing but the retry timer holds it back.</summary>
+constexpr const char* wait_reason(bool player_known, bool busy, bool blocked) {
+    if (!player_known) return "player not known yet";
+    if (busy) return "blocked: a puppet or replay run is active";
+    if (blocked) return "blocked: refused until the player changes";
+    return nullptr;
 }
 
 enum class JoinAction : uint8_t {
@@ -67,7 +76,7 @@ inline const char* join_action_name(JoinAction a) {
         case JoinAction::Move: return "moved";
         case JoinAction::NoJoin: return "no join position yet";
         case JoinAction::Off: return "not moved (LAZYSF2_NET_JOIN=none)";
-        case JoinAction::NotAirborne: return "not moved (not airborne: below 500 m or slower than 50 m/s)";
+        case JoinAction::NotAirborne: return "not moved yet (not airborne: below 500 m or slower than 50 m/s)";
         case JoinAction::Close: return "not moved (already there)";
         case JoinAction::AlreadyJoined: return "not moved (already joined in this session)";
     }
@@ -83,6 +92,42 @@ inline void join_target(const WelcomeMsg& w, double now, double out[3]) {
     if (!(dt > 0.0)) dt = 0.0;
     if (dt > kJoinExtrapolateMax) dt = kJoinExtrapolateMax;
     for (int i = 0; i < 3; ++i) out[i] = w.spawn_pos[i] + static_cast<double>(w.spawn_vel[i]) * dt;
+}
+
+/// <summary>Where and how the player's jet is put on the host's wing: position, world velocity, pitch/heading/roll.</summary>
+struct JoinPose {
+    double pos[3];
+    float vel[3];
+    float ang[3];
+    bool from_state;  // the host's latest State was newer than the Welcome and was used
+};
+
+/// <summary>
+/// The join pose at host time now. From the host's latest State when it is newer than the Welcome (position carried on
+/// with its velocity, its pitch, heading and roll); otherwise from the Welcome (heading and velocity; pitch from the
+/// climb angle of the velocity, roll 0). The carry-on is at most kJoinExtrapolateMax, never backwards.
+/// </summary>
+inline JoinPose join_pose(const WelcomeMsg& w, const StateMsg* latest, double now) {
+    JoinPose p{};
+    if (latest && latest->game_time > w.host_game_time) {
+        double dt = now - latest->game_time;
+        if (!(dt > 0.0)) dt = 0.0;
+        if (dt > kJoinExtrapolateMax) dt = kJoinExtrapolateMax;
+        for (int i = 0; i < 3; ++i) {
+            p.pos[i] = latest->pos[i] + static_cast<double>(latest->vel[i]) * dt;
+            p.vel[i] = latest->vel[i];
+            p.ang[i] = latest->ang[i];
+        }
+        p.from_state = true;
+        return p;
+    }
+    join_target(w, now, p.pos);
+    for (int i = 0; i < 3; ++i) p.vel[i] = w.spawn_vel[i];
+    const double horiz = std::sqrt(double(w.spawn_vel[0]) * w.spawn_vel[0] + double(w.spawn_vel[1]) * w.spawn_vel[1]);
+    p.ang[0] = static_cast<float>(std::atan2(static_cast<double>(w.spawn_vel[2]), horiz));
+    p.ang[1] = w.spawn_heading;
+    p.ang[2] = 0.0f;
+    return p;
 }
 
 /// <summary>Turns a world vector about the vertical so its heading (from +y towards +x) grows by delta radians.</summary>

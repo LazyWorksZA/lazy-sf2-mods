@@ -225,4 +225,26 @@ size_t mission_poll_destroyed(const void* const* records, size_t n, uint8_t* dea
     return k;
 }
 
+int mission_placed_damage(const void* record) {
+    int16_t damage = -1;
+    __try {
+        std::memcpy(&damage, static_cast<const BYTE*>(record) + kOffPlacedDamage, sizeof(damage));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    return damage >= 0 && damage <= kDamageDestroyed ? damage : -1;
+}
+
+bool mission_set_destroyed(const void* record, int* before) {
+    *before = mission_placed_damage(record);
+    if (*before < 0 || *before >= kDamageDestroyed) return false;
+    __try {
+        *reinterpret_cast<volatile int16_t*>(const_cast<BYTE*>(static_cast<const BYTE*>(record)) + kOffPlacedDamage) =
+            kDamageDestroyed;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 }  // namespace LazyWorks::SF2Patch::hooks

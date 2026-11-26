@@ -51,6 +51,7 @@ add_library(lazysf2 SHARED
     src/hooks/pilot_twist.cpp
     src/hooks/menu_hooks.cpp
     src/hooks/focus_hooks.cpp
+    src/hooks/sound_hooks.cpp
     src/hooks/options_gameplay_splice.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp
@@ -62,6 +63,7 @@ add_library(lazysf2 SHARED
     src/hooks/mission_areas.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
+    src/acmi/object_types.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
     src/acmi/acmi_zip.cpp
@@ -75,6 +77,7 @@ add_library(lazysf2 SHARED
     src/hooks/recorder.cpp
     src/hooks/replay.cpp
     src/hooks/player_jump.cpp
+    src/hooks/lock_probe.cpp
     src/hooks/step_order.cpp
     src/hooks/remote_avatar.cpp
     src/hooks/world_sync.cpp
@@ -121,6 +124,7 @@ add_executable(lazysf2-net-tests
     tools/acmi/net_report.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
+    src/acmi/object_types.cpp
     src/acmi/tacview_terrain.cpp
     src/acmi/tacview_writer.cpp
     src/acmi/acmi_zip.cpp

@@ -13,7 +13,7 @@
   The MSI is a normal installer wizard (welcome, license with third-party notices, finish), installs
   per machine and runs elevated, so its hooks can always write the game folder. The helper it
   installs (LazySF2Patch.exe) is headless and framework-dependent; the installer adds the .NET 10 runtime
-  if it is missing. No shortcuts are created: settings are in the game's Options.
+  if it is missing. One Start-menu shortcut (Lazy SF2 Patch) opens the helper's folder chooser for installs the detection can't find; settings are in the game's Options.
 #>
 param(
     [Parameter(Mandatory)] [string]$Version,
@@ -52,7 +52,7 @@ $licenseText = "# Lazy SF2 Patch`n`n" + (Get-Content (Join-Path $root 'LICENSE')
 if ($Clean -and (Test-Path $releases)) { Remove-Item $releases -Recurse -Force }
 if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { $env:Path += ";$env:USERPROFILE\.dotnet\tools" }
 vpk pack --packId LazySF2Patch --packVersion $Version --packDir $publish --mainExe LazySF2Patch.exe `
-    --packTitle 'Lazy SF2 Patch' --packAuthors 'Lazy Works' --icon (Join-Path $PSScriptRoot 'assets\app.ico') --runtime win-x64 --framework net10.0-x64-runtime --shortcuts '' `
+    --packTitle 'Lazy SF2 Patch' --packAuthors 'Lazy Works' --icon (Join-Path $PSScriptRoot 'assets\app.ico') --runtime win-x64 --framework net10.0-x64-runtime --shortcuts StartMenuRoot `
     --msi --instLocation PerMachine `
     --instWelcome (Join-Path $PSScriptRoot 'welcome.txt') --instLicense $license `
     --instConclusion (Join-Path $PSScriptRoot 'conclusion.txt') `

@@ -58,6 +58,15 @@ void set_tacview_recording(bool on);  // the Options page, on Exit
 /// </summary>
 int tacview_recording_peek();
 
+/// <summary>Options.ini [OtherOptions] BackgroundMode: what the game does when its window loses focus.</summary>
+enum class BackgroundMode : int {
+    Pause = 0,                // stock: the game pauses (also when the key is missing or invalid)
+    KeepRunning = 1,          // the game keeps running (Borderless); input is released
+    KeepRunningWithSound = 2, // as 1, and new sound buffers keep playing without focus
+};
+/// <summary>The BackgroundMode read once per process with the other settings (hand-edited; no Options row).</summary>
+BackgroundMode background_mode();
+
 /// <summary>
 /// The game's per-user folder, Saved Games\ThirdWire\&lt;exe name&gt; (where Options.ini lives), or empty if it cannot be
 /// found. A shell call: game thread at a safe moment only, never from the module watch or under a lock.
@@ -65,8 +74,8 @@ int tacview_recording_peek();
 std::wstring game_data_dir();
 
 /// <summary>
-/// LAZYSF2_BG_SIM (environment, read once): keep simulating while unfocused during a network session, Borderless
-/// only. Default on; "0" turns it off. Single-player always keeps the stock pause.
+/// LAZYSF2_BG_SIM (environment, read once): a network session keeps the game running while unfocused (Borderless),
+/// whatever BackgroundMode says. Default on; "0" turns that reason off (BackgroundMode still applies).
 /// </summary>
 bool background_sim();
 

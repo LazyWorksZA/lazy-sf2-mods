@@ -1,6 +1,11 @@
-// Background simulation in a network session (Borderless): a focus loss leaves the game's APP active, so the
-// flight keeps stepping and presenting; only input is released. See lazy-sf2-recon: network-recon §8.1.
+// What the game does when its window loses focus ([OtherOptions] BackgroundMode). Pause is stock. Keep running (in
+// Borderless): the focus loss leaves the game's APP active, so the flight keeps stepping and presenting; only input is
+// released. While the kept-running window is minimised, our own frame limiter in the message pump stands in for the
+// vsync wait. A network session is one more reason to keep running, whatever BackgroundMode says (sound still follows
+// BackgroundMode). See lazy-sf2-recon: network-recon §8.1.
 #include <windows.h>
+
+#include <dxgi.h>
 
 #include <MinHook.h>
 
@@ -18,23 +23,44 @@ namespace {
 
 constexpr DWORD kExeTimestamp = 0x51d22110, kExeImageSize = 0x62000;
 constexpr DWORD kFocusHandlerRva = 0x16b0;  // __cdecl void(int on), called by the WndProc on (de)activation
+constexpr DWORD kAppPumpRva = 0x5b20;       // APP vtable slot 0: the message pump, once per frame
 constexpr DWORD kAppGlobalRva = 0x49cbc;    // APP service pointer
 constexpr DWORD kSysGlobalRva = 0x49cc0;    // service registry pointer
 constexpr DWORD kInpTagRva = 0x30284;       // L"INP", the tag the exe itself passes
 constexpr size_t kAppActive = 0x1c, kAppBusy = 0x20;
 constexpr int kSysGet = 0x08 / 4, kSysRelease = 0x0c / 4, kInpSetActive = 0x04 / 4;
-constexpr UINT_PTR kSessionTimer = 0x4C5A4247;  // our timer on the game window while kept running
-constexpr UINT kSessionPollMs = 250;
+constexpr UINT_PTR kReasonTimer = 0x4C5A4247;  // our timer on the game window while kept running
+constexpr UINT kReasonPollMs = 250;
 
 using FocusHandler_t = void(__cdecl*)(int on);
 // __thiscall game calls through the repo's __fastcall pattern (ecx = this, edx unused).
+using AppPump_t = int(__fastcall*)(void* self, void* edx);
 using SysGet_t = int(__fastcall*)(void* self, void* edx, const wchar_t* tag, void** out);
 using SysRelease_t = void(__fastcall*)(void* self, void* edx, const wchar_t* tag, void** p);
 using InpSetActive_t = void(__fastcall*)(void* self, void* edx, int on);
 
 HMODULE g_exe = nullptr;
 FocusHandler_t o_FocusHandler = nullptr;
-std::atomic<bool> g_kept_running{false};  // a focus loss was skipped; window thread only, atomic for clarity
+AppPump_t o_AppPump = nullptr;
+// Window (= game) thread only; atomic so the pump's check is a plain relaxed load.
+std::atomic<bool> g_kept_running{false};
+bool g_pump_hooked = false;  // set once in DllMain; without it a minimised window falls back to the stock pause
+
+/// <summary>
+/// Further reasons to keep running besides the player's BackgroundMode: a network session, unless LAZYSF2_BG_SIM=0
+/// (window thread; must stay cheap). Outside a session no config is read and nothing is logged.
+/// </summary>
+bool focus_keep_running_reason() {
+    if (!net_session_active()) return false;
+    if (session_reason(true, config::background_sim())) return true;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) LOG("focus: background simulation off (LAZYSF2_BG_SIM=0): no session reason");
+    return false;
+}
+
+bool player_option() { return config::background_mode() != config::BackgroundMode::Pause; }
+
+BgDecision decide() { return bg_decision(player_option(), focus_keep_running_reason(), config::display_mode()); }
 
 void* read_ptr(DWORD rva) { return *static_cast<void**>(at_rva(g_exe, rva)); }
 
@@ -56,33 +82,36 @@ void inp_set_active(int on) {
     reinterpret_cast<SysRelease_t>(vtable_slot(sys, kSysRelease))(sys, nullptr, tag, &inp);
 }
 
-void stop_session_timer() {
-    if (HWND hwnd = game_window()) KillTimer(hwnd, kSessionTimer);
+// The stock pause is about to run. Buffers made with GLOBALFOCUS would keep looping through it (the stock focus path
+// never tells SND), so stop the game's channels first; the game starts its looped sounds again when it resumes.
+// APP busy (inside SetActive): the stock handler does nothing then either, so there is no pause to silence.
+void before_stock_pause() {
+    if (sound_global_focus_active() && app_active_idle()) sound_stop_all_channels("stock pause");
 }
 
-// Window thread, dispatched by the game's pump like a WndProc message. When the session has ended, or the window was
-// minimised (Present would not throttle the loop), hand the focus loss to the stock handler, which pauses. Called
-// directly rather than posted, so a click back in between can't pause a foreground game.
-void CALLBACK session_timer(HWND hwnd, UINT, UINT_PTR, DWORD) {
+void stop_reason_timer() {
+    if (HWND hwnd = game_window()) KillTimer(hwnd, kReasonTimer);
+}
+
+// Window thread, dispatched by the game's pump like a WndProc message. When no reason to keep running is left (a
+// network session ended), or the window is minimised and cannot be paced, hand the focus loss to the stock handler,
+// which pauses. Called directly rather than posted, so a click back in between can't pause a foreground game.
+void CALLBACK reason_timer(HWND hwnd, UINT, UINT_PTR, DWORD) {
     if (!g_kept_running.load()) return;
-    const bool ended = !net_session_active();
-    if (!ended && !IsIconic(hwnd)) return;
+    const bool unpaced = !g_pump_hooked && (IsIconic(hwnd) || dxgi_last_present_result() == DXGI_STATUS_OCCLUDED);
+    if (decide() == BgDecision::KeepRunning && !unpaced) return;
     if (GetForegroundWindow() == hwnd) return;  // the player is back; the activation clears the state
-    KillTimer(hwnd, kSessionTimer);
+    KillTimer(hwnd, kReasonTimer);
     g_kept_running = false;
-    LOG("focus: %s while unfocused: stock pause re-applied", ended ? "session ended" : "minimised");
+    LOG("focus: %s while unfocused: stock pause re-applied", unpaced ? "minimised without frame pacing" : "no reason left");
+    before_stock_pause();
     o_FocusHandler(0);
 }
 
-// Why a session's focus loss pauses as stock, once per reason.
 void log_decision_once(BgDecision d) {
-    static std::atomic<bool> fullscreen{false}, iconic{false}, off{false};
+    static std::atomic<bool> fullscreen{false};
     if (d == BgDecision::Fullscreen && !fullscreen.exchange(true)) {
-        LOG("focus: background simulation: Borderless only (stock pause in Fullscreen)");
-    } else if (d == BgDecision::Iconic && !iconic.exchange(true)) {
-        LOG("focus: lost while minimised: stock pause (session)");
-    } else if (d == BgDecision::OptionOff && !off.exchange(true)) {
-        LOG("focus: background simulation off (LAZYSF2_BG_SIM=0): stock pause (session)");
+        LOG("focus: keep running is Borderless only: stock pause in Fullscreen");
     }
 }
 
@@ -91,15 +120,12 @@ void __cdecl h_FocusHandler(int on) {
         HWND hwnd = game_window();
         // WM_DESTROY also arrives here with 0; DestroyWindow has hidden the window by then.
         const bool closing = !hwnd || !IsWindowVisible(hwnd);
-        const BgDecision d = !net_session_active()
-                                 ? BgDecision::NoSession  // single-player: no config reads, no extra log lines
-                                 : bg_decision(true, config::background_sim(), config::display_mode(),
-                                               hwnd && IsIconic(hwnd));
+        const BgDecision d = decide();
         if (d == BgDecision::KeepRunning && closing) {
-            if (g_kept_running.exchange(false)) stop_session_timer();
+            if (g_kept_running.exchange(false)) stop_reason_timer();
             if (!hwnd) {
                 static std::atomic<bool> logged{false};
-                if (!logged.exchange(true)) LOG("focus: no game window known: stock pause (session)");
+                if (!logged.exchange(true)) LOG("focus: no game window known: stock pause");
             }
         } else if (d == BgDecision::KeepRunning) {
             // WM_KILLFOCUS and WM_ACTIVATEAPP(0) both arrive: act on the first only.
@@ -107,28 +133,85 @@ void __cdecl h_FocusHandler(int on) {
             if (app_active_idle()) {
                 g_kept_running = true;
                 inp_set_active(0);
-                cursor_clip_update("focus lost, simulation kept running");
-                SetTimer(hwnd, kSessionTimer, kSessionPollMs, &session_timer);
-                LOG("focus lost: simulation kept running (session)");
+                cursor_clip_update("focus lost, game kept running");
+                SetTimer(hwnd, kReasonTimer, kReasonPollMs, &reason_timer);
+                LOG("focus lost: game kept running (input released)");
                 return;
             }
         } else {
             log_decision_once(d);
             if (g_kept_running.exchange(false)) {
-                stop_session_timer();
-                LOG("focus: background simulation ended (%s): stock pause",
-                    d == BgDecision::NoSession ? "session over" : "no longer allowed");
+                stop_reason_timer();
+                LOG("focus: keep running ended (no reason left): stock pause");
             }
         }
+        before_stock_pause();
     } else if (g_kept_running.exchange(false)) {
-        stop_session_timer();
+        stop_reason_timer();
         inp_set_active(1);  // the stock handler does nothing now (APP never went inactive), so re-acquire ourselves
         cursor_clip_update("focus back");
-        LOG("focus back: input re-acquired (simulation never paused)");
+        LOG("focus back: input re-acquired (game never paused)");
     }
     // For on == 1 this returns at once (APP is still active); a click activation passes 2, which re-runs SetActive and
     // the notifications with 2, exactly as stock does after WM_ACTIVATEAPP(1).
     o_FocusHandler(on);
+}
+
+// --- Frame limiter while minimised. A minimised window's Present returns at once (no vsync wait), so the loop would
+// spin. The pump runs once per frame on the game thread; sleeping before it paces the whole frame.
+
+int64_t now_us() {
+    static const int64_t freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return static_cast<int64_t>(f.QuadPart);
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<int64_t>(c.QuadPart) * 1000000 / freq;
+}
+
+int64_t g_period_us = kPaceDefaultPeriodUs;  // game thread only
+int64_t g_last_us = 0;
+int64_t g_deadline_us = 0;
+bool g_pacing = false;
+
+void pace_frame() {
+    const int64_t now = now_us();
+    HWND hwnd = game_window();
+    const bool iconic = hwnd && IsIconic(hwnd);
+    const long present = dxgi_last_present_result();
+    if (hwnd && needs_pacing(g_kept_running.load(std::memory_order_relaxed), iconic, present == DXGI_STATUS_OCCLUDED)) {
+        const int64_t period = pace_paced_period(g_period_us);
+        if (!g_pacing) {
+            g_pacing = true;
+            g_deadline_us = 0;
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+            LOG("focus: %s while kept running: frames paced at %.1f Hz (client %ldx%ld, last Present 0x%08lx)",
+                iconic ? "minimised" : "occluded", 1e6 / static_cast<double>(period), rc.right - rc.left,
+                rc.bottom - rc.top, static_cast<unsigned long>(present));
+        }
+        const PaceStep s = pace_step(now, g_deadline_us, period);
+        g_deadline_us = s.deadline_us;
+        if (s.wait_us > 0) Sleep(static_cast<DWORD>((s.wait_us + 999) / 1000));
+        g_last_us = 0;  // paced frames are not measured
+        return;
+    }
+    if (g_pacing) {
+        g_pacing = false;
+        LOG("focus: no longer minimised or occluded: frame pacing off (last Present 0x%08lx)",
+            static_cast<unsigned long>(present));
+    }
+    if (g_last_us) g_period_us = pace_update_period(g_period_us, now - g_last_us);
+    g_last_us = now;
+}
+
+int __fastcall h_AppPump(void* self, void* edx) {
+    // Mode Pause with no other reason: one call and a relaxed load per frame, then stock.
+    static const bool enabled = player_option();  // first pump call: game thread, outside the loader lock
+    if (enabled || g_kept_running.load(std::memory_order_relaxed)) pace_frame();
+    return o_AppPump(self, edx);
 }
 
 }  // namespace
@@ -137,10 +220,15 @@ bool install_focus_hooks() {
     g_exe = GetModuleHandleW(nullptr);
     if (!is_expected_build(g_exe, kExeTimestamp, kExeImageSize, "StrikeFighters2.exe")) return false;
     // Created here, enabled with MH_ALL_HOOKS by DllMain.
-    const MH_STATUS s = MH_CreateHook(at_rva(g_exe, kFocusHandlerRva), reinterpret_cast<void*>(&h_FocusHandler),
-                                      reinterpret_cast<void**>(&o_FocusHandler));
+    MH_STATUS s = MH_CreateHook(at_rva(g_exe, kFocusHandlerRva), reinterpret_cast<void*>(&h_FocusHandler),
+                                reinterpret_cast<void**>(&o_FocusHandler));
     LOG("focus: handler hook %s", s == MH_OK ? "created" : MH_StatusToString(s));
-    return s == MH_OK;
+    if (s != MH_OK) return false;
+    s = MH_CreateHook(at_rva(g_exe, kAppPumpRva), reinterpret_cast<void*>(&h_AppPump),
+                      reinterpret_cast<void**>(&o_AppPump));
+    g_pump_hooked = s == MH_OK;
+    LOG("focus: pump hook %s", g_pump_hooked ? "created" : MH_StatusToString(s));
+    return g_pump_hooked;
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

@@ -451,6 +451,7 @@ void publish_structures(const Job& job, const acmi::Ini& targets, const acmi::In
             m.z = acmi::height_at(job.samples.get(), job.w, job.h, job.spacing, s.x, s.y);
             m.heading = s.heading;
             m.bridge = s.bridge;
+            m.storage = s.storage;
             list.marks.push_back(std::move(m));
         }
     }

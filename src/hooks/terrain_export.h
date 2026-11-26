@@ -91,6 +91,7 @@ struct StructureMark {
     double x = 0, y = 0, z = 0;
     double heading = 0;
     bool bridge = false;
+    bool storage = false;
 };
 
 /// <summary>A theatre's structures by target area: marks[first[i] .. first[i + 1]) are area i's.</summary>
