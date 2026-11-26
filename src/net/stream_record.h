@@ -33,12 +33,14 @@ public:
     StreamWriter& operator=(const StreamWriter&) = delete;
 
     /// <summary>
-    /// Creates dir\stream_NNN.lzst (CREATE_NEW, the first free NNN from 001), writes the header and starts the
-    /// writer thread. theatre may be null. False (and one log line) if no file could be created.
-    /// max_bytes is the size cap for the whole file (kStreamMaxFileBytes in the game; the tests use a small one).
+    /// Creates dir\PREFIX_NNN.lzst (CREATE_NEW, the first free NNN from 001; prefix "stream" on the host, "botserve"
+    /// for the bot's --serve), writes the header and starts the writer thread. theatre may be null. False (and one log
+    /// line) if no file could be created. max_bytes is the size cap for the whole file (kStreamMaxFileBytes in the
+    /// game; the tests use a small one).
     /// </summary>
     bool open(const wchar_t* dir, double start_game_time, const char* theatre, LogFn log,
-              uint64_t max_bytes = kStreamMaxFileBytes);
+              uint64_t max_bytes = kStreamMaxFileBytes, const wchar_t* prefix = L"stream");
+    static constexpr size_t kMaxPrefix = 16;  // characters
     bool is_open() const { return open_.load(std::memory_order_acquire); }
 
     /// <summary>Producer thread only. A no-op unless open. Payload is at most kStreamMaxPayload bytes.</summary>
@@ -72,7 +74,7 @@ private:
     LogFn log_ = nullptr;
     uint64_t max_bytes_ = kStreamMaxFileBytes;
     uint8_t header_[sizeof(StreamHeader)] = {};
-    wchar_t name_[16] = {};  // the file's name, for the log (ASCII)
+    wchar_t name_[kMaxPrefix + 16] = {};  // the file's name, for the log (ASCII)
 
     std::atomic<bool> open_{false};      // accepting records
     std::atomic<bool> stop_{false};

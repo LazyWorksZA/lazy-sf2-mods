@@ -104,6 +104,14 @@ static_assert(sizeof(ByeMsg) == 7);       // 4:2 id, 6:1 reason
 static_assert(sizeof(PeerInfoMsg) == 54); // 4:2 id, 6:16 callsign, 22:32 aircraft
 static_assert(sizeof(PeerLeftMsg) == 7);  // 4:2 id, 6:1 reason
 
+/// <summary>
+/// False for a Welcome with no join position (spawn_vel all zero): the bot's --serve sends one until it knows where
+/// the client is, then a second Welcome with it. A client must not move its jet for such a Welcome.
+/// </summary>
+inline bool welcome_has_join(const WelcomeMsg& w) {
+    return w.spawn_vel[0] != 0.0f || w.spawn_vel[1] != 0.0f || w.spawn_vel[2] != 0.0f;
+}
+
 /// <summary>PeerLeft reasons (the same codes as the recording's LeaveReason).</summary>
 inline constexpr uint8_t kPeerLeftLeft = 0;     // Bye or disconnect
 inline constexpr uint8_t kPeerLeftTimeout = 1;  // no packets for 5 s

@@ -32,6 +32,7 @@
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/remote_avatar_logic.h"
 #include "bot_client.h"
+#include "bot_serve.h"
 #include "net/receiver_math.h"
 #include "net/remote_jet.h"
 #include <miniz.h>
@@ -5586,11 +5587,235 @@ void bot_formation_tests() {
     }
 }
 
+// --- bot --serve, with ClientCore as the game client ---
+
+struct ServeRun {
+    bot::ServeConfig cfg;
+    bot::ServeResult res;
+    std::atomic<uint16_t> port{0};
+    std::atomic<bool> stop{false}, done{false};
+    std::thread th;
+    bool start() {
+        cfg.port = 0;
+        cfg.port_out = &port;
+        cfg.cancel = &stop;
+        cfg.log = bot_log;
+        th = std::thread([this] {
+            res = bot::run_serve(cfg);
+            done = true;
+        });
+        for (int i = 0; i < 3000 && port == 0 && !done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return port != 0;
+    }
+    void finish() {
+        stop = true;
+        if (th.joinable()) th.join();
+    }
+    ~ServeRun() { finish(); }
+};
+
+// The game client's side: polls, keeps the Welcomes, PeerInfos and the host's States, and sends its own jet at 20 Hz
+// of host time (straight and level from pos at heading h) while the clock is synced.
+struct ServeClient {
+    ClientCore core;
+    CcRx rx;
+    std::vector<WelcomeMsg> welcomes;
+    std::vector<PeerInfoMsg> infos;
+    std::vector<StateMsg> host;
+    std::vector<double> host_wall;
+    bool synced = false, hold = false, resumed = false, got_bye = false, ended = false;
+    uint8_t bye_reason = 255;
+    uint32_t seq = 0;
+    double next_send = 0, pos[3] = {5000.0, 6000.0, 2500.0}, heading = 1.0, t_first = -1;
+    size_t seen = 0;
+    void step() {
+        rx.pull(core);
+        for (; seen < rx.ev.size(); ++seen) {
+            const ClientEvent& e = rx.ev[seen];
+            if (e.kind == ClientEvent::Welcome) {
+                WelcomeMsg w{};
+                if (decode(e.data, e.len, w) == Status::Ok) welcomes.push_back(w);
+            } else if (e.kind == ClientEvent::PeerInfo) {
+                PeerInfoMsg p{};
+                if (decode(e.data, e.len, p) == Status::Ok) infos.push_back(p);
+            } else if (e.kind == ClientEvent::State) {
+                StateMsg s{};
+                if (decode(e.data, e.len, s) == Status::Ok && s.client_id == 0) {
+                    host.push_back(s);
+                    host_wall.push_back(e.wall_rx);
+                }
+            } else if (e.kind == ClientEvent::Bye) {
+                got_bye = true;
+                bye_reason = cc_bye_reason(e);
+            } else if (e.kind == ClientEvent::Disconnected) {
+                ended = true;
+            }
+        }
+        double t = 0;
+        const bool now_synced = core.clock_now(ClientCore::wall_now(), &t);
+        if (synced && !now_synced && !welcomes.empty() && !got_bye) hold = true;
+        if (hold && now_synced) resumed = true;
+        synced = now_synced;
+        if (!synced || t < next_send) return;
+        next_send = t + 0.05;
+        if (t_first < 0) t_first = t;
+        StateMsg s{};
+        s.seq = ++seq;
+        s.game_time = t;
+        const double d = 200.0 * (t - t_first);
+        s.pos[0] = pos[0] + d * std::sin(heading);
+        s.pos[1] = pos[1] + d * std::cos(heading);
+        s.pos[2] = pos[2];
+        s.vel[0] = static_cast<float>(200.0 * std::sin(heading));
+        s.vel[1] = static_cast<float>(200.0 * std::cos(heading));
+        s.ang[1] = static_cast<float>(heading);
+        core.send_state(s);
+    }
+};
+
+template <class F>
+void serve_run_for(ServeClient& c, double seconds, F done) {
+    for (const double until = ClientCore::wall_now() + seconds; ClientCore::wall_now() < until && !done();) {
+        c.step();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void bot_serve_tests() {
+    std::printf("bot --serve: the synthetic host, with ClientCore as the client\n");
+    {  // a start position, and a 1 s pause 2 s after the jet starts
+        ServeRun s;
+        s.cfg.script = bot::Script::Orbit;
+        s.cfg.has_start = true;
+        s.cfg.start[0] = 1000.0;
+        s.cfg.start[1] = 2000.0;
+        s.cfg.start[2] = 3000.0;
+        s.cfg.start_heading = 0.3;
+        s.cfg.pause_at = 2.0;
+        s.cfg.pause_for = 1.0;
+        const std::wstring dir = make_temp_dir();
+        s.cfg.record_dir = dir;
+        if (!s.start()) return expect(false, "bot serve listening");
+        ServeClient c;
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        serve_run_for(c, 6.0, [] { return false; });
+        s.finish();
+        serve_run_for(c, 2.0, [&] { return c.ended; });
+        c.core.stop(false);
+        const bot::ServeResult& r = s.res;
+        std::printf("    serve: code %d, %u client(s), %u Welcome(s), %u jet States sent, %u client States, %u paused steps; "
+                    "client got %zu host States\n",
+                    r.code, r.clients, r.welcomes, r.jet_states, r.client_states, r.paused_steps, c.host.size());
+        expect(r.code == 0 && r.clients == 1 && r.welcomes == 1, "one client, one Welcome");
+        bool join_ok = c.welcomes.size() == 1 && c.welcomes[0].client_id == 1 && welcome_has_join(c.welcomes[0]);
+        if (join_ok) {
+            const WelcomeMsg& w = c.welcomes[0];
+            const double v = std::sqrt(w.spawn_vel[0] * w.spawn_vel[0] + w.spawn_vel[1] * w.spawn_vel[1]);
+            join_ok = std::fabs(v - bot::kSpeed) < 1.0 && fh_dist(w.spawn_pos, s.cfg.start) < 3000.0 &&
+                      std::fabs(w.spawn_pos[2] - 3000.0) < 1.0;
+        }
+        expect(join_ok, "the Welcome v2 carries a join position on the jet's wing (its speed, its altitude)");
+        bool info_ok = false;
+        for (const PeerInfoMsg& p : c.infos) info_ok = info_ok || (p.id == 0 && !std::strcmp(p.callsign, "BOTHOST"));
+        expect(info_ok, "the client hears of the host (PeerInfo 0, BOTHOST)");
+        // Rate in host time (the pause freezes it), robust to the test thread's scheduling.
+        double gap_wall = 0, gap_game = 1e9;
+        for (size_t i = 1; i < c.host.size(); ++i) {
+            const double gw = c.host_wall[i] - c.host_wall[i - 1];
+            if (gw > gap_wall) {
+                gap_wall = gw;
+                gap_game = c.host[i].game_time - c.host[i - 1].game_time;
+            }
+        }
+        const double span = c.host.size() > 1 ? c.host.back().game_time - c.host.front().game_time : 0.0;
+        const double hz = span > 0 ? (static_cast<double>(c.host.size()) - 1.0) / span : 0.0;
+        char what[320];
+        std::snprintf(what, sizeof(what), "id 0 States at 20 Hz of host time (%.2f Hz), %zu of %u sent", hz, c.host.size(),
+                      r.jet_states);
+        expect(hz > 18.5 && hz < 21.0 && c.host.size() >= r.jet_states * 9 / 10 && c.host.size() > 40, what);
+        std::snprintf(what, sizeof(what), "the pause: no States for %.2f s of wall time while host time moved %.3f s; the "
+                      "client's clock held and resumed", gap_wall, gap_game);
+        expect(gap_wall > 0.8 && gap_game < 0.15 && c.hold && c.resumed && r.paused_steps > 30, what);
+        expect(r.client_states > 20, "the synthetic host received the client's States");
+        expect(c.got_bye && c.bye_reason == 3 && c.ended, "the end of serving: Bye 3, then the disconnect");
+        const std::wstring file = dir + L"\\botserve_001.lzst";
+        const std::vector<uint8_t> bytes = read_file(file);
+        StreamReader rd(bytes.data(), bytes.size());
+        StreamHeader hd{};
+        uint32_t kinds[16] = {};
+        bool shown_ok = true;
+        double max_age = 0, max_dz = 0, min_age = 1e9;
+        unsigned bad_len = 0, bad_id = 0;
+        StreamRecord rec;
+        if (rd.read_header(hd) == StreamStatus::Ok) {
+            while (rd.next(rec) == StreamStatus::Ok) {
+                if (rec.kind < 16) ++kinds[rec.kind];
+                if (rec.kind == static_cast<uint8_t>(StreamKind::RemoteShown)) {
+                    RemoteShownPayload sp{};
+                    bad_len += rec.payload_len == sizeof(sp) ? 0 : 1;
+                    if (rec.payload_len == sizeof(sp)) std::memcpy(&sp, rec.payload, sizeof(sp));
+                    bad_id += sp.id == 1 ? 0 : 1;
+                    min_age = (std::min)(min_age, static_cast<double>(sp.age));
+                    max_age = (std::max)(max_age, static_cast<double>(sp.age));
+                    max_dz = (std::max)(max_dz, std::fabs(sp.pos[2] - 2500.0));
+                }
+            }
+        }
+        std::snprintf(what, sizeof(what), "--record: botserve_001.lzst with %u HostState, %u StateReceived, %u RemoteShown, "
+                      "%u WelcomeSent, %u ClientJoined, %u ClientLeft; RemoteShown age %.3f..%.2f s, %.2f m off the client's "
+                      "altitude, %u bad sizes, %u bad ids", kinds[2], kinds[1], kinds[9], kinds[3], kinds[5], kinds[6], min_age,
+                      max_age, max_dz, bad_len, bad_id);
+        // Ages: on loopback a few ms, but up to about half a second after the pause (the client resumes on a Pong).
+        // Ages below 0: the client's clock leads by a millisecond or so on loopback, and it notices the pause only from
+        // the Pongs (a few hundred ms), stamping its States ahead of the frozen host time until then.
+        shown_ok = bad_len == 0 && bad_id == 0 && min_age > -0.5 && max_age < 1.0 && max_dz < 1.0;
+        expect(kinds[2] > 150 && kinds[1] > 20 && kinds[9] > 10 && kinds[3] == 1 && kinds[5] == 1 && kinds[6] == 1 && shown_ok,
+               what);
+        DeleteFileW(file.c_str());
+        RemoveDirectoryW(dir.c_str());
+    }
+    {  // no start position: the jet starts 2 km ahead of the client's first State, and a second Welcome joins it
+        ServeRun s;
+        s.cfg.script = bot::Script::Straight;
+        if (!s.start()) return expect(false, "bot serve listening");
+        ServeClient c;
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        serve_run_for(c, 5.0, [&] { return c.welcomes.size() >= 2 && c.host.size() >= 20; });
+        s.finish();
+        c.core.stop(false);
+        const bot::ServeResult& r = s.res;
+        expect(!c.welcomes.empty() && !welcome_has_join(c.welcomes[0]), "the first Welcome has no join position");
+        const double h = c.heading;
+        const double want[3] = {c.pos[0] + 2000.0 * std::sin(h), c.pos[1] + 2000.0 * std::cos(h), c.pos[2]};
+        char what[220];
+        std::snprintf(what, sizeof(what), "the jet starts 2 km ahead of the client's first State: %.1f m off, heading %.4f",
+                      fh_dist(r.jet_start, want), r.jet_start_heading);
+        expect(r.jet_started && fh_dist(r.jet_start, want) < 1.0 && std::fabs(r.jet_start_heading - h) < 1e-6, what);
+        bool second = c.welcomes.size() == 2 && welcome_has_join(c.welcomes[1]);
+        double off = 1e9;
+        if (second) {
+            const WelcomeMsg& w = c.welcomes[1];
+            const double d = bot::kSpeed * (w.host_game_time - r.jet_start_time);
+            const double jet[3] = {r.jet_start[0] + d * std::sin(h), r.jet_start[1] + d * std::cos(h), r.jet_start[2]};
+            double j[3];
+            join_position(jet, h, 0, j);
+            off = fh_dist(w.spawn_pos, j);
+        }
+        std::snprintf(what, sizeof(what), "a second Welcome puts the client on the jet's wing (%.3f m from the join position)",
+                      off);
+        expect(second && off < 1.0, what);
+        int infos0 = 0;
+        for (const PeerInfoMsg& p : c.infos) infos0 += p.id == 0 ? 1 : 0;
+        expect(infos0 == 2 && c.host.size() >= 20, "PeerInfo 0 again after the second Welcome, and the jet's States arrive");
+    }
+}
+
 void bot_two_player_tests() {
     bot_formation_logic_tests();
     bot_host_traffic_tests();
     bot_relay_tests();
     bot_formation_tests();
+    bot_serve_tests();
 }
 
 void remote_avatar_tests() {

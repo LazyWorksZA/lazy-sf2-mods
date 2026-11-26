@@ -27,6 +27,7 @@ enum class StreamKind : uint8_t {
     ByeReceived = 4,    // ByeMsg from a client
     ClientJoined = 5,   // ClientJoinedPayload
     ClientLeft = 6,     // ClientLeftPayload
+    RemoteShown = 9,    // RemoteShownPayload: what a receiver showed of a remote jet (kinds 7, 8 and 10: Task 12)
 };
 
 enum class LeaveReason : uint8_t {
@@ -53,11 +54,19 @@ struct ClientLeftPayload {
     uint16_t client_id;
     uint8_t reason;  // LeaveReason
 };
+struct RemoteShownPayload {
+    uint16_t id;      // the remote jet's id (0 the host, 1..4 a client)
+    double pos[3];    // shown position
+    float ang[3];     // shown pitch, heading, roll
+    float age;        // seconds: the record's time minus the newest State's game_time
+    uint8_t out;      // RemoteJet::Out of that step (0 None, 1 Snap, 2 Blend, 3 Steady, 4 Coast)
+};
 #pragma pack(pop)
 
 static_assert(sizeof(StreamHeader) == 48);
 static_assert(sizeof(ClientJoinedPayload) == 50);
 static_assert(sizeof(ClientLeftPayload) == 3);
+static_assert(sizeof(RemoteShownPayload) == 43);
 
 /// <summary>
 /// Record layout: uint32 length (the bytes that follow it: kind + time + payload, 9 to 105), uint8 kind,

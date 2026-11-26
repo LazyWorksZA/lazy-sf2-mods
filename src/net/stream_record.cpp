@@ -21,8 +21,8 @@ void StreamWriter::join_previous() {
 }
 
 bool StreamWriter::open(const wchar_t* dir, double start_game_time, const char* theatre, LogFn log,
-                        uint64_t max_bytes) {
-    if (!dir || !log) return false;
+                        uint64_t max_bytes, const wchar_t* prefix) {
+    if (!dir || !log || !prefix || !*prefix || wcslen(prefix) > kMaxPrefix) return false;
     join_previous();
     if (open_.load()) return false;  // already open
     log_ = log;
@@ -32,7 +32,7 @@ bool StreamWriter::open(const wchar_t* dir, double start_game_time, const char* 
     if (!encode_stream_header(start_game_time, theatre, header_, sizeof(header_))) return false;
     HANDLE f = INVALID_HANDLE_VALUE;
     for (unsigned n = 1; n < 1000; ++n) {
-        swprintf_s(name_, L"stream_%03u.lzst", n);  // 15 characters: cannot truncate
+        swprintf_s(name_, L"%ls_%03u.lzst", prefix, n);  // at most kMaxPrefix + 9 characters: cannot truncate
         const std::wstring path = std::wstring(dir) + L"\\" + name_;
         if (path.size() >= MAX_PATH) {  // CreateFileW without the \\?\ prefix is limited to MAX_PATH
             std::snprintf(line, sizeof(line), "stream: output path too long (%zu characters, limit %d)", path.size(),
@@ -44,12 +44,13 @@ bool StreamWriter::open(const wchar_t* dir, double start_game_time, const char* 
                         nullptr);
         if (f != INVALID_HANDLE_VALUE) break;
         if (GetLastError() == ERROR_FILE_EXISTS) continue;
-        std::snprintf(line, sizeof(line), "stream: could not create stream_%03u.lzst (error %lu)", n, GetLastError());
+        std::snprintf(line, sizeof(line), "stream: could not create %ls (error %lu)", name_, GetLastError());
         log_(line);
         return false;
     }
     if (f == INVALID_HANDLE_VALUE) {
-        log_("stream: no free stream_NNN.lzst name in the probe folder");
+        std::snprintf(line, sizeof(line), "stream: no free %ls_NNN.lzst name in the folder", prefix);
+        log_(line);
         return false;
     }
     file_ = f;

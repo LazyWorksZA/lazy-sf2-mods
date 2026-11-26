@@ -107,6 +107,7 @@ add_executable(lazysf2-net-tests
     src/net/stream_format.cpp
     src/net/stream_record.cpp
     tools/bot/bot_client.cpp
+    tools/bot/bot_serve.cpp
     tools/acmi/acmi_convert.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
@@ -125,12 +126,18 @@ target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet miniz::mi
 # The developer tools go to their own folder (build\<Config>	ools): next to the proxy they would load it as their winmm.dll.
 set_target_properties(lazysf2-net-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
 
-# The synthetic client (console, developer tool, not shipped). A normal exe, so it links winmm and ws2_32 as usual.
+# The synthetic client, and synthetic host with --serve (console, developer tool, not shipped). A normal exe, so it
+# links winmm and ws2_32 as usual.
 add_executable(lazysf2-bot
     tools/bot/main.cpp
     tools/bot/bot_client.cpp
+    tools/bot/bot_serve.cpp
     src/net/protocol.cpp
+    src/net/host_core.cpp
+    src/net/host_session.cpp
     src/net/remote_jet.cpp
+    src/net/stream_format.cpp
+    src/net/stream_record.cpp
 )
 target_compile_features(lazysf2-bot PRIVATE cxx_std_20)
 target_compile_definitions(lazysf2-bot PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

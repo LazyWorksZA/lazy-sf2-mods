@@ -2,6 +2,8 @@
 
 Developer tool. With host mode on (`LAZYSF2_HOST`, see `lazy-sf2-recon`, `network-recon.md`), the mod records what the host sees to `LAZYSF2_PROBE_DIR\stream_NNN.lzst`. `NNN` is the first free number from 001, and the file is created with `CREATE_NEW`. The code is `src/net/stream_format.*` (format and reader) and `src/net/stream_record.*` (writer).
 
+The bot's synthetic host (`lazysf2-bot --serve PORT --record DIR`) writes the same format to `DIR\botserve_NNN.lzst`. There the "host" is the bot: kind 2 is its scripted jet, kind 1 the client's States, and kind 9 what the bot showed of the client.
+
 All numbers are little-endian. Structures are packed. A reader is in `src/net/stream_format.h` (`StreamReader`): it works on bytes in memory and never reads past the end.
 
 ## When a file exists
@@ -52,10 +54,13 @@ The payloads of kinds 1 to 4 are the protocol messages **byte for byte as on the
 | 4 | ByeReceived | `ByeMsg`, 7 bytes | a client sent Bye |
 | 5 | ClientJoined | `ClientJoinedPayload`, 50 bytes | a client was given an avatar; just before its Welcome |
 | 6 | ClientLeft | `ClientLeftPayload`, 3 bytes | a client's avatar was released |
+| 9 | RemoteShown | `RemoteShownPayload`, 43 bytes | what the receiver showed of a remote jet, at most 10 Hz per remote. Written by `--serve` only so far |
 
 `ClientJoinedPayload`: `uint16 client_id`, `char callsign[16]`, `char aircraft[32]`. Both strings are NUL padded and printable ASCII only. The aircraft is the type the client asked for in its Hello. It is not the AI aircraft the host used as the avatar.
 
 `ClientLeftPayload`: `uint16 client_id`, `uint8 reason`.
+
+`RemoteShownPayload`: `uint16 id` (0 the host, 1 to 4 a client), `double pos[3]` (shown position), `float ang[3]` (shown pitch, heading, roll), `float age` (the record's `time` minus the newest State's `game_time`, seconds; slightly below 0 when the sender's clock leads), `uint8 out` (the receiver's step result: 1 snap, 2 blend, 3 steady, 4 coast).
 
 | Reason | Meaning |
 |---|---|
