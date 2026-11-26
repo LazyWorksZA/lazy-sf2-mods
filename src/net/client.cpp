@@ -462,6 +462,11 @@ bool take(int id, const net::StateMsg& s) {
     Remote& r = g_rm[id];
     if (g_now < r.next_take) return false;
     r.next_take = g_now + kTakeEvery;
+    if (damage_peer_dead(id)) {  // its jet was destroyed: no aircraft until its next life (a new flight)
+        if (!r.take_failed) LOG("net: remote %d \"%s\": its jet was destroyed; no aircraft is taken for it", id, r.callsign);
+        r.take_failed = true;
+        return false;
+    }
     const AvatarPick pick{r.aircraft, {s.pos[0], s.pos[1], s.pos[2]}, s.ang[1], {s.vel[0], s.vel[1], s.vel[2]},
                           r.seat != net::kNoSeat ? world_member_object(r.seat) : nullptr};
     AvatarHandle taken[kSources];

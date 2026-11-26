@@ -8781,9 +8781,12 @@ void damage_tests() {
     uint8_t b[96];
     DamageStateMsg r{};
     const size_t n = encode(d, b, sizeof(b));
-    expect(n == 41 && peek_world_type(b, n) == 32 && decode(b, n, r) == Status::Ok && r.lost == (1ull << 40) &&
-               r.attacker_a == 5 && r.flags == kDmgFire,
-           "damage: 41 bytes, round trip");
+    d.attacker_weapon = 0xffff + 3;
+    d.life = 9;
+    const size_t n2 = encode(d, b, sizeof(b));
+    expect(n == 47 && n2 == 47 && peek_world_type(b, n2) == 32 && decode(b, n2, r) == Status::Ok && r.lost == (1ull << 40) &&
+               r.attacker_a == 5 && r.flags == kDmgFire && r.attacker_weapon == 0xffff + 3 && r.life == 9,
+           "damage: 47 bytes, round trip (with the kill weapon and the owner's life)");
     d.level = 6;
     expect(decode(b, encode(d, b, sizeof(b)), r) == Status::BadType, "damage: a level above 5 is refused");
     CountermeasureMsg k{};
@@ -8819,7 +8822,40 @@ void damage_tests() {
                kill_event_allowed(false, false),
            "kills: a joined client logs no kill for a remote copy (no phantom kill entry, mission success unmoved); "
            "the host logs every kill, a client its own jet's");
-    std::printf("    estimate: 41 B a damage change (a few in a fight, plus one every 10 s), 10 B a chaff/flare release\n");
+    {
+        int A = 0, B = 0;
+        PeerDamage pd;
+        DamageStateMsg hit{}, dead{}, next{};
+        hit.life = dead.life = 1;
+        hit.level = 2;
+        dead.level = 5;
+        dead.flags = kDmgDestroyed;
+        next.life = 2;
+        const bool hit_ok = pd.on_state(hit, &A, false).apply;
+        const PeerDamage::Step kill = pd.on_state(dead, &A, false);
+        const bool retake_ignored = !pd.on_state(dead, &B, false).apply && !pd.on_state(hit, &B, false).apply;
+        const bool dead_now = pd.dead();
+        const PeerDamage::Step again = pd.on_state(next, &B, false);
+        expect(hit_ok && kill.apply && kill.plan.destroy && retake_ignored && dead_now && again.apply && !pd.dead(),
+               "life: after its destruction a peer's resends destroy no retaken aircraft; a new life starts afresh");
+        PeerDamage pd2;
+        const PeerDamage::Step twice = pd2.on_state(dead, &A, true);
+        expect(twice.apply && !twice.plan.destroy && pd2.dead(),
+               "life: no second destroy for an avatar its mirrored part losses already destroyed");
+        PeerDamage pd3;
+        pd3.on_state(hit, nullptr, false);
+        pd3.on_state(dead, nullptr, false);
+        expect(pd3.dead() && !pd3.on_state(dead, &A, false).apply,
+               "life: a death seen while no aircraft shows the peer still blocks a later take");
+        PeerDamage pd4;
+        pd4.on_state(hit, &A, false);
+        const PeerDamage::Step re = pd4.on_state(hit, &B, false);
+        expect(re.apply && re.plan.set_level && re.plan.level == 2, "life: a retake within a life gets the whole state again");
+    }
+    expect(cm_released(30, 28, true, true) == 2 && cm_released(30, 28, false, true) == 0 &&
+               cm_released(30, 28, true, false) == 0 && cm_released(30, 0, true, true) == 0 && cm_released(28, 30, true, true) == 0,
+           "countermeasures: a release only while alive with working dispensers, at most 8 at once (else a reset)");
+    std::printf("    estimate: 47 B a damage change (a few in a fight, plus one every 10 s), 10 B a chaff/flare release\n");
 
     bot::DamageStep s0 = bot::damage_script_at(1.0), s1 = bot::damage_script_at(7.0), s2 = bot::damage_script_at(12.5);
     expect(s0.level == 0 && s1.level == 2 && s1.lost == 4 && s2.level == 5 && (s2.flags & kDmgDestroyed) &&

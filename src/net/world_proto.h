@@ -622,6 +622,8 @@ struct DamageStateMsg {
     uint64_t dead;
     uint8_t attacker_kind;
     uint16_t attacker_a, attacker_b;
+    uint32_t attacker_weapon;  // the owner's +0x31c (its id space), for the host's kill record
+    uint16_t life;             // the owner's player epoch: a new flight or respawn is a new life
 };
 /// <summary>Chaff and flares a player released since its last message (its dispensers' counts fell by these).</summary>
 struct CountermeasureMsg {
@@ -631,8 +633,8 @@ struct CountermeasureMsg {
     uint8_t chaff, flares;
 };
 #pragma pack(pop)
-static_assert(sizeof(DamageStateMsg) == 41);  // 4:2 peer, 6:2 seq, 8:1 level, 9:1 flags, 10:1 comps, 11:1 systems,
-                                              // 12:8 lost, 20:8 shown, 28:8 dead, 36:5 attacker
+static_assert(sizeof(DamageStateMsg) == 47);  // 4:2 peer, 6:2 seq, 8:1 level, 9:1 flags, 10:1 comps, 11:1 systems,
+                                              // 12:8 lost, 20:8 shown, 28:8 dead, 36:5 attacker, 41:4 weapon, 45:2 life
 static_assert(sizeof(CountermeasureMsg) == 10);
 inline constexpr uint8_t kDmgFire = 0x01, kDmgPilotGone = 0x02, kDmgDestroyed = 0x04;
 size_t encode(const DamageStateMsg& m, uint8_t* out, size_t cap);
@@ -668,6 +670,66 @@ inline DamagePlan damage_plan(const DamageStateMsg& was, const DamageStateMsg& n
     p.pilot_gone = (now.flags & kDmgPilotGone) && !(was.flags & kDmgPilotGone);
     return p;
 }
+/// <summary>
+/// A receiver's record of one peer's jet. A life (the owner's player epoch) ends at its destruction: later states of
+/// that life (the owner resends every 10 s) are not applied to anything, so a retaken aircraft is never destroyed by
+/// them, and no aircraft is taken again for the peer until a new life starts. Within a life, another aircraft (a
+/// retake after a park) starts undamaged and gets the whole state again.
+/// </summary>
+class PeerDamage {
+public:
+    struct Step {
+        bool apply = false;
+        DamagePlan plan;
+    };
+    /// <summary>avatar: the aircraft showing the peer (may be null: only the record is kept); avatar_destroyed: its own
+    /// damage level is already 5 (mirrored part losses can destroy it first), so no second destroy is sent.</summary>
+    Step on_state(const DamageStateMsg& m, const void* avatar, bool avatar_destroyed) {
+        Step s;
+        if (!have_ || m.life != life_) {
+            have_ = true;
+            life_ = m.life;
+            dead_ = false;
+            avatar_ = nullptr;
+            last_ = DamageStateMsg{};
+        }
+        if (dead_) return s;
+        if (avatar != avatar_) {
+            avatar_ = avatar;
+            last_ = DamageStateMsg{};
+        }
+        const bool destroyed = (m.flags & kDmgDestroyed) || m.level >= 5;
+        if (!avatar) {
+            if (destroyed) dead_ = true;
+            return s;
+        }
+        s.plan = damage_plan(last_, m);
+        if (s.plan.destroy && avatar_destroyed) s.plan.destroy = false;
+        last_ = m;
+        if (destroyed) dead_ = true;
+        s.apply = true;
+        return s;
+    }
+    bool dead() const { return have_ && dead_; }
+    void reset() { *this = PeerDamage{}; }
+
+private:
+    bool have_ = false, dead_ = false;
+    uint16_t life_ = 0;
+    const void* avatar_ = nullptr;
+    DamageStateMsg last_{};
+};
+
+/// <summary>
+/// Chaff and flares to send for a fall in the owner's counts: only while it is alive and its dispensers work, and at
+/// most cap at once (a bigger fall, or one at death or a dispenser's destruction, is a reset, not a release).
+/// </summary>
+inline uint8_t cm_released(int before, int now, bool alive, bool dispenser_ok, int cap = 8) {
+    const int d = before - now;
+    if (!alive || !dispenser_ok || d <= 0 || d > cap) return 0;
+    return static_cast<uint8_t>(d);
+}
+
 /// <summary>
 /// The game's kill event (mission event 1, an aircraft's slot 30) is let through on the host for every aircraft (the
 /// single kill record), and on a client only for its own jet: a REMOTEOBJECT copy's death there (mirrored, or from

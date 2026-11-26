@@ -2221,6 +2221,7 @@ void* checked_damage_fn(void** vt, int slot) {
 
 bool world_remote_on() { return g_remote_on.load(std::memory_order_acquire); }
 uint32_t world_remote_mask() { return g_mask_air.load(std::memory_order_relaxed); }
+uint32_t world_remote_mask_ground() { return g_mask_ground.load(std::memory_order_relaxed); }
 
 bool world_key_of_object(uint32_t id, uint8_t* kind, uint16_t* a, uint16_t* b) {
     SlotTable t{};
@@ -2515,22 +2516,28 @@ void world_on_modules_loaded() {
         LZ_DMG(3, 5, 0x18e60, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x8b, 0x45, 0x08),
         LZ_DMG(4, 8, 0x14780, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x4c),
         LZ_DMG(5, 6, 0x146a0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+        {0x15aa0, reinterpret_cast<void*>(&h_ground_kill_event<0>), &g_o_ground_kill_event[0],
+         "world: ground object kill event (remote copies on a client)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x38, 0x56, 0x8b, 0xf1}, 9},
     };
     static const HookDef kGm[] = {
         LZ_DMG(6, 5, 0x11500, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x8b, 0x45, 0x08),
         LZ_DMG(7, 8, 0xbf70, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x4c),
         LZ_DMG(8, 6, 0xbe90, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08, 0x83, 0xec, 0x40),
+        {0xd290, reinterpret_cast<void*>(&h_ground_kill_event<1>), &g_o_ground_kill_event[1],
+         "world: vehicle kill event (remote copies on a client)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x38, 0x56, 0x8b, 0xf1}, 9},
     };
     static const HookDef kNv[] = {
         LZ_DMG(9, 5, 0x35d0, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x14, 0xd9, 0x45, 0x10),
         LZ_DMG(10, 8, 0x3700, 0x55, 0x8b, 0xec, 0xd9, 0x45, 0x24, 0x8b, 0x45, 0x20),
         LZ_DMG(11, 6, 0x3660, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x1c, 0xd9, 0x45, 0x10),
+        {0x12620, reinterpret_cast<void*>(&h_ground_kill_event<2>), &g_o_ground_kill_event[2],
+         "world: ship kill event (remote copies on a client)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x38, 0x56, 0x8b, 0xf1}, 9},
     };
 #undef LZ_DMG
     hook_image(L"AircraftObject.dll", "AircraftObject.dll", kAoStamp, kAoSize, kAo, 5, g_ao, g_ao_bad);
-    hook_image(L"GroundObject.dll", "GroundObject.dll", kGoStamp, kGoSize, kGo, 3, g_go, g_go_bad);
-    hook_image(L"GroundMobileObject.dll", "GroundMobileObject.dll", kGmStamp, kGmSize, kGm, 3, g_gm, g_gm_bad);
-    hook_image(L"NavalObject.dll", "NavalObject.dll", kNvStamp, kNvSize, kNv, 3, g_nv, g_nv_bad);
+    hook_image(L"GroundObject.dll", "GroundObject.dll", kGoStamp, kGoSize, kGo, 4, g_go, g_go_bad);
+    hook_image(L"GroundMobileObject.dll", "GroundMobileObject.dll", kGmStamp, kGmSize, kGm, 4, g_gm, g_gm_bad);
+    hook_image(L"NavalObject.dll", "NavalObject.dll", kNvStamp, kNvSize, kNv, 4, g_nv, g_nv_bad);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

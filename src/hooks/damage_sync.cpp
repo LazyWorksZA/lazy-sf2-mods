@@ -27,7 +27,7 @@ namespace {
 
 constexpr double kPollEvery = 0.25, kResendEvery = 10.0;  // game seconds
 constexpr uint32_t kRvaDispenser = 0x9335c;
-constexpr size_t kObjAttacker = 0x318, kCompCount = 0x330, kRequestCmBits = 0x6;  // +0x5f4: 2 flares, 4 chaff
+constexpr size_t kObjAttacker = 0x318, kObjAttackerWeapon = 0x31c, kCompCount = 0x330, kRequestCmBits = 0x6;  // +0x5f4: 2 flares, 4 chaff
 constexpr uint32_t kFlagFire = 0x10, kFlagKillLogged = 0x80000000u, kStatePilotGone = 0x2000000u;
 constexpr int kMaxSys = 256;
 
@@ -73,6 +73,8 @@ bool read_damage(void* obj, uintptr_t ao, net::DamageStateMsg* m) {
         !rd(o + kCompCount, &ncomp) || !rd(o + jet::kComponents + jet::kListArray, &comps))
         return false;
     rd(o + kObjAttacker, &attacker);
+    rd(o + kObjAttackerWeapon, &m->attacker_weapon);
+    m->life = static_cast<uint16_t>(sim_player_epoch());
     m->level = static_cast<uint8_t>(level < 0 ? 0 : level > 5 ? 5 : level);
     m->flags = static_cast<uint8_t>(((flags & kFlagFire) ? net::kDmgFire : 0) |
                                     ((state & kStatePilotGone) ? net::kDmgPilotGone : 0) |
@@ -112,9 +114,8 @@ bool send(const uint8_t* d, size_t n) { return host_world_active() ? host_world_
 
 struct Rx {
     uint32_t epoch = 0;
-    net::DamageStateMsg last[5] = {};
-    void* avatar[5] = {};
-    uint64_t events = 0, cm = 0, kills_blocked = 0, notices = 0;
+    net::PeerDamage peer[5];
+    uint64_t events = 0, cm = 0, kills_blocked = 0, notices = 0, dead_ignored = 0;
 };
 Rx g_rx;
 
@@ -125,15 +126,23 @@ int event(void* avatar, int type, int a = 0, int b = 0, int c = 0) {
 
 void apply_damage(const net::DamageStateMsg& m, BYTE* av, uintptr_t ao) {
     const int peer = m.peer < 5 ? m.peer : 4;
-    if (g_rx.avatar[peer] != av) {  // another aircraft (taken again): it starts undamaged
-        g_rx.avatar[peer] = av;
-        g_rx.last[peer] = net::DamageStateMsg{};
+    int32_t level = 0;
+    const bool already = av && rd(av + jet::kDamage, &level) && level >= 5;
+    const bool was_dead = g_rx.peer[peer].dead();
+    const net::PeerDamage::Step st = g_rx.peer[peer].on_state(m, av, already);
+    if (!st.apply) {
+        if (was_dead && av && log_milestone(++g_rx.dead_ignored))
+            LOG("damage: peer %u's jet was destroyed; its later states are not applied (%llu so far)",
+                static_cast<unsigned>(m.peer), static_cast<unsigned long long>(g_rx.dead_ignored));
+        return;
     }
-    const net::DamagePlan p = net::damage_plan(g_rx.last[peer], m);
-    g_rx.last[peer] = m;
+    const net::DamagePlan& p = st.plan;
     if (m.attacker_kind) {
         uint32_t id = 0xffffffffu;
-        if (world_object_of_key(m.attacker_kind, m.attacker_a, m.attacker_b, &id)) wr(av + kObjAttacker, id);
+        if (world_object_of_key(m.attacker_kind, m.attacker_a, m.attacker_b, &id)) {
+            wr(av + kObjAttacker, id);
+            wr(av + kObjAttackerWeapon, m.attacker_weapon);
+        }
     }
     int sent = 0, refused = 0;
     auto ev = [&](int type, int a = 0, int b = 0, int c = 0) { (event(av, type, a, b, c) == 0 ? sent : refused)++; };
@@ -179,6 +188,20 @@ void apply_cm(const net::CountermeasureMsg& m, BYTE* av, uintptr_t ao) {
     if (log_milestone(++g_rx.cm)) LOG("countermeasures: peer %u's avatar has no dispenser here", static_cast<unsigned>(m.peer));
 }
 
+// Every dispenser of the jet still works (a destroyed one drops its counts without releasing anything).
+bool dispensers_work(void* obj, uintptr_t ao) {
+    SysRef sys[kMaxSys];
+    const int n = jet_list_systems(obj, ao, sys, kMaxSys);
+    int found = 0;
+    for (int i = 0; i < n; ++i) {
+        if (sys[i].vt != kRvaDispenser) continue;
+        int32_t working = 0;
+        if (!rd(sys[i].sys + jet::kSysWorking, &working) || !working) return false;
+        ++found;
+    }
+    return found > 0;
+}
+
 bool is_remote_copy(void* obj) {
     uint32_t flags = 0;
     return rd(static_cast<BYTE*>(obj) + 0x0c, &flags) && (flags & world_remote_mask());
@@ -198,10 +221,13 @@ void damage_tick(void* player) {
     int16_t chaff = 0, flares = 0;
     BYTE* o = static_cast<BYTE*>(player);
     if (rd(o + jet::kChaffTotal, &chaff) && rd(o + jet::kFlareTotal, &flares)) {
-        if (g_tx.chaff >= 0) {
+        if (g_tx.chaff >= 0 && (chaff < g_tx.chaff || flares < g_tx.flares)) {
+            int32_t level = 0;
+            const bool alive = rd(o + jet::kDamage, &level) && level < 5;
             net::CountermeasureMsg m{};
-            m.chaff = net::released(g_tx.chaff, chaff);
-            m.flares = net::released(g_tx.flares, flares);
+            const bool ok = dispensers_work(player, ao);
+            m.chaff = net::cm_released(g_tx.chaff, chaff, alive, ok);
+            m.flares = net::cm_released(g_tx.flares, flares, alive, ok);
             if (m.chaff || m.flares) {
                 m.seq = ++g_tx.seq;
                 uint8_t buf[sizeof(m)];
@@ -232,7 +258,7 @@ void damage_tick(void* player) {
 
 void damage_apply(const uint8_t* data, size_t len, void* avatar) {
     const uintptr_t ao = ao_base();
-    if (!avatar || !ao) return;
+    if (!ao) return;
     if (g_rx.epoch != sim_player_epoch()) {
         g_rx = Rx{};
         g_rx.epoch = sim_player_epoch();
@@ -241,11 +267,36 @@ void damage_apply(const uint8_t* data, size_t len, void* avatar) {
     if (wt == static_cast<uint8_t>(net::WorldType::DamageState)) {
         net::DamageStateMsg m;
         if (net::decode(data, len, m) == net::Status::Ok) apply_damage(m, static_cast<BYTE*>(avatar), ao);
-    } else if (wt == static_cast<uint8_t>(net::WorldType::Countermeasure)) {
+    } else if (avatar && wt == static_cast<uint8_t>(net::WorldType::Countermeasure)) {
         net::CountermeasureMsg m;
         if (net::decode(data, len, m) == net::Status::Ok) apply_cm(m, static_cast<BYTE*>(avatar), ao);
     }
 }
+
+bool damage_peer_dead(int peer) {
+    if (g_rx.epoch != sim_player_epoch()) return false;
+    return peer >= 0 && peer < 5 && g_rx.peer[peer].dead();
+}
+
+// The ground classes' kill event (GroundObject +0x15aa0, GroundMobileObject +0xd290, NavalObject +0x12620, each
+// __fastcall(obj), the same as the aircraft's): on a joined client a remote copy logs no kill.
+void* g_o_ground_kill_event[3] = {};
+template <int K>
+void __fastcall h_ground_kill_event(void* obj) {
+    uint32_t flags = 0;
+    const bool remote = rd(static_cast<BYTE*>(obj) + 0x0c, &flags) && (flags & world_remote_mask_ground());
+    if (!net::kill_event_allowed(world_remote_on(), remote)) {
+        if (rd(static_cast<BYTE*>(obj) + jet::kFlags, &flags)) wr(static_cast<BYTE*>(obj) + jet::kFlags, flags | kFlagKillLogged);
+        if (log_milestone(++g_rx.kills_blocked))
+            LOG("damage: a remote ground copy's kill event was not logged here (%llu so far): the host keeps the kill record",
+                static_cast<unsigned long long>(g_rx.kills_blocked));
+        return;
+    }
+    reinterpret_cast<void(__fastcall*)(void*)>(g_o_ground_kill_event[K])(obj);
+}
+template void __fastcall h_ground_kill_event<0>(void*);
+template void __fastcall h_ground_kill_event<1>(void*);
+template void __fastcall h_ground_kill_event<2>(void*);
 
 // Aircraft primary slot 30 (+0x42ac0, __fastcall(obj)): logs the kill (mission event 1) once.
 void __fastcall h_aircraft_kill_event(void* obj) {
@@ -265,7 +316,8 @@ void __fastcall h_aircraft_kill_event(void* obj) {
 void __fastcall h_incoming_missile(void* iface, void* edx, int missile, int stage) {
     reinterpret_cast<void(__fastcall*)(void*, void*, int, int)>(g_o_incoming_missile)(iface, edx, missile, stage);
     BYTE* obj = static_cast<BYTE*>(iface) - 0x20;
-    if (!host_drives_object(obj) && !client_drives_object(obj)) return;
+    // Avatars on either side, and on a joined client every remote copy (the host's AI are puppets there too).
+    if (!host_drives_object(obj) && !client_drives_object(obj) && !(world_remote_on() && is_remote_copy(obj))) return;
     uint32_t req = 0;
     if (rd(obj + jet::kRequestWord, &req) && (req & kRequestCmBits)) {
         wr(obj + jet::kRequestWord, req & ~kRequestCmBits);

@@ -459,6 +459,12 @@ extern void* g_o_incoming_missile;
 /// <summary>A joined client's world is remote (the T4 block is on); the aircraft REMOTEOBJECT mask (0 before).</summary>
 bool world_remote_on();
 uint32_t world_remote_mask();
+uint32_t world_remote_mask_ground();
+/// <summary>The peer's jet was destroyed in its current life (no aircraft is taken for it until a new one).</summary>
+bool damage_peer_dead(int peer);
+template <int K>
+void __fastcall h_ground_kill_event(void* obj);
+extern void* g_o_ground_kill_event[3];
 /// <summary>The host's game time: the game time on the host, the client's estimate of it on a client.</summary>
 double net_host_now();
 double client_host_now();
