@@ -36,6 +36,12 @@ void cursor_clip_release_at_exit();
 bool mouse_cursor_mode_active();
 
 /// <summary>
+/// Hooks the exe's focus handler: during a network session in Borderless, a focus loss keeps the simulation running
+/// (input is still released); otherwise stock. Call from DllMain.
+/// </summary>
+bool install_focus_hooks();
+
+/// <summary>
 /// Hooks kernelbase!LoadLibraryExW. After every load each feature gets a chance to hook the modules that
 /// just appeared.
 /// </summary>

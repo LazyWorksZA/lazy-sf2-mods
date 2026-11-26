@@ -49,6 +49,7 @@ add_library(lazysf2 SHARED
     src/hooks/dxgi_hooks.cpp
     src/hooks/input_hooks.cpp
     src/hooks/menu_hooks.cpp
+    src/hooks/focus_hooks.cpp
     src/hooks/options_gameplay_splice.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp

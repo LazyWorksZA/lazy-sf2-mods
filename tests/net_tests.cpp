@@ -32,6 +32,7 @@
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
+#include "hooks/focus_logic.h"
 #include "hooks/remote_avatar_logic.h"
 #include "bot_client.h"
 #include "bot_serve.h"
@@ -1746,6 +1747,29 @@ void cursor_clip_tests() {
         if (v) expect(m == 1 + 2 + 4 + 16, "clip: only one input combination clips");
     }
     expect(clipping == 1, "clip: exactly one of 32 combinations clips");
+}
+
+void focus_logic_tests() {
+    using LazyWorks::SF2Patch::config::DisplayMode;
+    using LazyWorks::SF2Patch::hooks::BgDecision;
+    using LazyWorks::SF2Patch::hooks::bg_decision;
+    using LazyWorks::SF2Patch::hooks::keep_running;
+    std::printf("focus logic\n");
+    constexpr DisplayMode B = DisplayMode::Borderless, F = DisplayMode::Fullscreen;
+    static_assert(keep_running(true, true, B, false));
+    expect(keep_running(true, true, B, false), "bg sim: session + option + Borderless -> keep running");
+    expect(bg_decision(false, true, B, false) == BgDecision::NoSession, "bg sim: single-player -> stock pause");
+    expect(bg_decision(true, false, B, false) == BgDecision::OptionOff, "bg sim: option off -> stock pause");
+    expect(bg_decision(true, true, F, false) == BgDecision::Fullscreen, "bg sim: Fullscreen -> Borderless only");
+    expect(bg_decision(true, true, B, true) == BgDecision::Iconic, "bg sim: minimised -> stock pause");
+    expect(bg_decision(false, false, F, true) == BgDecision::NoSession, "bg sim: no session wins over every other reason");
+    int keeping = 0;
+    for (int m = 0; m < 16; ++m) {
+        const bool v = keep_running((m & 1) != 0, (m & 2) != 0, (m & 4) ? B : F, (m & 8) != 0);
+        if (v) ++keeping;
+        if (v) expect(m == 1 + 2 + 4, "bg sim: only one input combination keeps running");
+    }
+    expect(keeping == 1, "bg sim: exactly one of 16 combinations keeps running");
 }
 
 void tracker_logic_tests() {
@@ -6723,6 +6747,7 @@ int main() {
     acmi_ghost_tests();
     tracker_logic_tests();
     cursor_clip_tests();
+    focus_logic_tests();
     tacview_tests();
     terrain_tests();
     texture_tests();

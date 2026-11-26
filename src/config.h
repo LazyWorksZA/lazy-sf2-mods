@@ -49,4 +49,10 @@ int tacview_recording_peek();
 /// </summary>
 std::wstring game_data_dir();
 
+/// <summary>
+/// LAZYSF2_BG_SIM (environment, read once): keep simulating while unfocused during a network session, Borderless
+/// only. Default on; "0" turns it off. Single-player always keeps the stock pause.
+/// </summary>
+bool background_sim();
+
 }  // namespace LazyWorks::SF2Patch::config

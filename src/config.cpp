@@ -99,6 +99,17 @@ int tacview_recording_peek() { return g_tacview.load(); }
 
 std::wstring game_data_dir() { return game_data_path(); }
 
+bool background_sim() {
+    static const bool on = [] {
+        wchar_t v[8] = {};
+        const DWORD n = GetEnvironmentVariableW(L"LAZYSF2_BG_SIM", v, 8);
+        const bool off = n > 0 && n < 8 && wcscmp(v, L"0") == 0;
+        LOG("config: LAZYSF2_BG_SIM -> background simulation in a session %s", off ? "off" : "on (Borderless)");
+        return !off;
+    }();
+    return on;
+}
+
 MouseMode mouse_mode() {
     ensure_loaded();
     return g_mouse.load();
