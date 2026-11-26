@@ -17,7 +17,7 @@ constexpr float kStartYaw = 60.0f * kDeg;   // head yaw where the effect starts
 constexpr float kFullYaw = 150.0f * kDeg;   // head yaw where it is at full strength
 constexpr float kMaxTwist = 20.0f * kDeg;   // extra view yaw at full strength (also how far past the seat limit)
 constexpr float kYawCap = 180.0f * kDeg;    // the twisted view never turns past this
-constexpr float kLeanSide = 0.03f;          // metres toward the side the pilot looks, at full strength
+constexpr float kLeanSide = 0.04f;          // metres toward the side the pilot looks, at full strength
 constexpr float kLeanUp = 0.015f;           // metres up, at full strength
 constexpr float kCapSide = 0.06f;           // our lean plus the game's tracker head offset stays within these
 constexpr float kCapUp = 0.03f;
@@ -148,8 +148,8 @@ constexpr Vec3 native_camera_offset(int axis_x, int axis_z, const float lo[3], c
 }
 
 // Developer head hold (probe hotkey): a fixed head yaw instead of the hat or tracker, for screenshots. Steps: 0 off,
-// then 120 and 160 degrees left, then 120 and 160 degrees right. Positive view yaw is to the right (as the lean
-// assumes), so left is negative.
+// then 120 and 160 degrees left, then 120 and 160 degrees right. Positive view yaw is to the left (seen live), so
+// right is negative.
 constexpr int kHoldSteps = 5;
 
 /// <summary>The step after step; anything out of range goes back to 0 (off).</summary>
@@ -157,7 +157,7 @@ constexpr int next_hold(int step) { return step >= 0 && step < kHoldSteps - 1 ? 
 
 /// <summary>The held head yaw in radians for a step (0 for off or out of range; check hold_active first).</summary>
 constexpr float hold_yaw(int step) {
-    constexpr float yaws[kHoldSteps] = {0.0f, -120.0f * kDeg, -160.0f * kDeg, 120.0f * kDeg, 160.0f * kDeg};
+    constexpr float yaws[kHoldSteps] = {0.0f, 120.0f * kDeg, 160.0f * kDeg, -120.0f * kDeg, -160.0f * kDeg};
     return step >= 0 && step < kHoldSteps ? yaws[step] : 0.0f;
 }
 

@@ -66,7 +66,8 @@ void pilot_twist_apply_setting();
 void pilot_twist_dev_toggle();
 /// <summary>
 /// Developer (probe hotkey thread, Ctrl+Shift+H): steps the head hold off, 120 left, 160 left, 120 right, 160 right,
-/// off. The held yaw (pitch 0) replaces the head angles for the camera build only.
+/// off. The held yaw (pitch 0) is written to the view's head target angles before each update, so the game clamps
+/// and smooths it as it does a hat or tracker head movement.
 /// </summary>
 void pilot_twist_dev_cycle_hold();
 

@@ -3666,7 +3666,7 @@ void pilot_twist_tests() {
 
     // Lean: toward the look side and up, in body axes; our lean shrinks so that it plus the game's tracker offset
     // stays within the caps.
-    expect(close_to(pt::kLeanSide, 0.03, 1e-6) && close_to(pt::kLeanUp, 0.015, 1e-6), "lean: 3 cm sideways, 1.5 cm up");
+    expect(close_to(pt::kLeanSide, 0.04, 1e-6) && close_to(pt::kLeanUp, 0.015, 1e-6), "lean: 4 cm sideways, 1.5 cm up");
     const pt::Vec3 zero{0, 0, 0};
     const pt::Vec3 full = pt::lean_body(1.0f, zero);
     expect(close_to(full.x, pt::kLeanSide, 1e-6) && full.y == 0.0 && close_to(full.z, pt::kLeanUp, 1e-6), "lean: full right and up");
@@ -3684,8 +3684,10 @@ void pilot_twist_tests() {
            "lean: a tracker offset the other way leaves the lean whole");
     const pt::Vec3 left_tracked = pt::lean_body(-1.0f, {-0.05, 0.0, 0.0});
     expect(close_to(left_tracked.x - 0.05, -pt::kCapSide, 1e-6), "lean: the cap holds to the left too");
-    expect(close_to(pt::lean_body(1.0f, {0.03, 0.0, 0.015}).x, pt::kLeanSide, 1e-6),
-           "lean: the stock 3 cm tracker range at full leaves room for the whole lean");
+    expect(close_to(pt::lean_body(1.0f, {0.03, 0.0, 0.015}).x, pt::kCapSide - 0.03, 1e-6),
+           "lean: with the stock 3 cm tracker range at full the lean is trimmed to the 6 cm cap");
+    expect(close_to(pt::lean_body(1.0f, {0.02, 0.0, 0.0}).x, pt::kLeanSide, 1e-6),
+           "lean: a 2 cm tracker offset still leaves room for the whole 4 cm lean");
     {
         const float mlo[3] = {0.03f, 0.0f, 0.03f}, mhi[3] = {0.03f, 0.0f, 0.03f};  // stock seat limits as the seat returns them
         const pt::Vec3 n = pt::native_camera_offset(-16383, 16383, mlo, mhi);
@@ -3720,12 +3722,17 @@ void pilot_twist_tests() {
                pt::hold_yaw(7) == 0.0f && std::string(pt::hold_name(9)) == "off",
            "head hold: out of range is off");
     expect(!pt::hold_active(0) && pt::hold_yaw(0) == 0.0f && std::string(pt::hold_name(0)) == "off", "head hold: step 0 is off");
-    expect(close_to(pt::hold_yaw(1), -120.0f * d, 1e-6) && close_to(pt::hold_yaw(2), -160.0f * d, 1e-6) &&
-               close_to(pt::hold_yaw(3), 120.0f * d, 1e-6) && close_to(pt::hold_yaw(4), 160.0f * d, 1e-6),
-           "head hold: left is negative yaw, right positive, 120 and 160 degrees");
-    expect(pt::target_weight(pt::hold_yaw(2)) < 0 && pt::target_weight(pt::hold_yaw(4)) > 0 &&
-               pt::lean_body(pt::target_weight(pt::hold_yaw(4)), {0, 0, 0}).x > 0,
-           "head hold: the twist and lean follow the held side");
+    expect(close_to(pt::hold_yaw(1), 120.0f * d, 1e-6) && close_to(pt::hold_yaw(2), 160.0f * d, 1e-6) &&
+               close_to(pt::hold_yaw(3), -120.0f * d, 1e-6) && close_to(pt::hold_yaw(4), -160.0f * d, 1e-6),
+           "head hold: left is positive yaw (seen live), right negative, 120 and 160 degrees");
+    expect(pt::target_weight(pt::hold_yaw(2)) > 0 && pt::target_weight(pt::hold_yaw(4)) < 0,
+           "head hold: the twist follows the held side");
+    // A head yaw the hold could give but the seat never would (past the limit widened by the twist) gets no twist:
+    // why the hold must go through the game's own clamp (the head target), as real head tracking does.
+    expect(pt::twist_delta(160.0f * d, 1.0f, -100.0f * d, 100.0f * d, true) == 0.0f,
+           "head hold: a yaw past the widened seat limit gets no extra twist");
+    expect(close_to(pt::twist_delta(100.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), pt::kMaxTwist, 1e-6),
+           "head hold: at the seat limit the full twist applies");
 }
 
 void probe_snapshot_tests() {

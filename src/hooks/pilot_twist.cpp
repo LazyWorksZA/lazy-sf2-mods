@@ -109,9 +109,20 @@ float seconds_since_last() {
 
 void diag_log(void* view);
 
+// Developer head hold: the held yaw (and pitch 0) goes into the view's target angles before the game's update, as
+// the hat would put it there, so the game clamps it to the seat and smooths it like any head movement, and the twist
+// then sees it exactly as it sees real head tracking. (A head tracker sets the targets itself and overrides this.)
+void apply_hold(void* view) {
+    const int hold = g_hold.load(std::memory_order_relaxed);
+    if (!pt::hold_active(hold)) return;
+    at<float>(view, kTargetYaw) = pt::hold_yaw(hold);
+    at<float>(view, kTargetYaw - 4) = 0.0f;
+}
+
 void __fastcall h_Update(void* view, void* edx, float dt) {
     void* const outer = g_updating;  // survives a nested update
     g_updating = applies_to(view) ? view : nullptr;
+    if (g_updating) apply_hold(view);
     const bool probe = probe_output_dir() != nullptr;
     if (probe) g_diag = {};
     o_Update(view, edx, dt);
@@ -121,35 +132,16 @@ void __fastcall h_Update(void* view, void* edx, float dt) {
 
 // Twist without feedback: the extra yaw is in the view's yaw only while the original builds this frame's camera
 // matrix; then the head yaw is put back, so the game's smoothing and limits never see it.
-// A developer head hold puts its yaw (and pitch 0) in the same place for the camera build only, as if the head were
-// there, and puts the game's own angles back afterwards; the twist then applies on top when it is on.
 void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
-    if (!view || view != g_updating) {
+    // The hooks also run for a developer head hold with the twist off: then the camera is the game's own.
+    if (!view || view != g_updating || !g_twist.load(std::memory_order_relaxed)) {
         o_Camera(view, edx, aircraft);
-        return;
-    }
-    float& yaw = at<float>(view, kYaw);
-    float& pitch = at<float>(view, kYaw - 4);
-    const float game_yaw = yaw, game_pitch = pitch;
-    const int hold = g_hold.load(std::memory_order_relaxed);
-    const bool held = pt::hold_active(hold);
-    if (held) {
-        yaw = pt::hold_yaw(hold);
-        pitch = 0.0f;
-    }
-    const auto put_back = [&](float written_yaw) {
-        yaw = pt::restore_yaw(yaw, written_yaw, game_yaw);
-        if (held) pitch = pt::restore_yaw(pitch, 0.0f, game_pitch);
-    };
-    if (!g_twist.load(std::memory_order_relaxed)) {
-        const float written = yaw;
-        o_Camera(view, edx, aircraft);
-        put_back(written);
         return;
     }
     if (g_reset.exchange(false)) g_last_view = nullptr;  // turned off and on again: forget the old filter and side
     if (view != g_last_view) g_state = {};  // another view: start at the target
     g_last_view = view;
+    float& yaw = at<float>(view, kYaw);
     const float head = yaw;
     const float dt = seconds_since_last();
     BYTE* def = at<BYTE*>(view, kViewDef);
@@ -157,7 +149,7 @@ void __fastcall h_Camera(void* view, void* edx, const float* aircraft) {
     const float written = pt::camera_yaw(g_state, head, dt, at<float>(view, kMinYaw), at<float>(view, kMaxYaw), limited);
     yaw = written;
     o_Camera(view, edx, aircraft);
-    put_back(written);
+    yaw = pt::restore_yaw(yaw, written, head);
     g_diag.camera = true;
     g_diag.head = head;
     g_diag.yaw = g_state.yaw;
@@ -373,7 +365,8 @@ void pilot_twist_dev_cycle_hold() {
     } else {
         const int step = pt::next_hold(g_hold.load());
         g_hold = step;
-        LOG("pilot twist (dev): Ctrl+Shift+H head hold %s (pitch 0; twist %s)", pt::hold_name(step), g_twist.load() ? "on" : "off");
+        LOG("pilot twist (dev): Ctrl+Shift+H head hold %s (pitch 0, set as the head target; twist %s)%s", pt::hold_name(step),
+            g_twist.load() ? "on" : "off", step == 0 ? "; the view stays there until moved (hat or view centre)" : "");
         set_enabled_locked(g_twist.load());
     }
     ReleaseSRWLockExclusive(&g_install_lock);
