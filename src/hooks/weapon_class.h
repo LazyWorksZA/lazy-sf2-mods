@@ -8,20 +8,18 @@ namespace LazyWorks::SF2Patch::hooks {
 enum class WeaponClass : uint8_t { Missile = 1, Bomb = 2, Rocket = 3 };
 
 /// <summary>
-/// The weapon data's type field (the object's data pointer at +0x14c, then +0x298) is the ini's WeaponDataType:
-/// 0 is a free-fall bomb (the loader reads its retarded, fin and spin stabilised and lift/drag settings), 1 and 7 are
-/// guided missiles (7 also allows decoys), 2 is a rocket pod. The game's missile object only sets itself up for 0, 1
-/// and 7; any other type that shows up is recorded as a missile.
+/// The weapon data's type field (+0x298) is the ini's WeaponDataType and its guidance field (+0x398, short) is
+/// GuidanceType. Type 0 is a free-fall bomb; 1 and 7 are the guided kind. Rockets are type 1 with guidance 0 (the
+/// pod is a separate type 2 store, never a projectile); guided bombs have guidance 4 (laser) or 5 (TV) and stay bombs.
+/// See lazy-sf2-recon: network-recon §9.2. Anything else is recorded as a missile.
 /// </summary>
-inline WeaponClass classify_weapon_type(int32_t data_type) {
-    switch (data_type) {
-        case 0:
-            return WeaponClass::Bomb;
-        case 2:
-            return WeaponClass::Rocket;
-        default:
-            return WeaponClass::Missile;
+inline WeaponClass classify_weapon(int32_t data_type, int32_t guidance) {
+    if (data_type == 0) return WeaponClass::Bomb;
+    if (data_type == 1) {
+        if (guidance == 0) return WeaponClass::Rocket;
+        if (guidance == 4 || guidance == 5) return WeaponClass::Bomb;
     }
+    return WeaponClass::Missile;
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks
