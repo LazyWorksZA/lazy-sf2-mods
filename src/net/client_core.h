@@ -143,7 +143,7 @@ public:
     /// </summary>
     size_t poll_world(WorldPacket* out, size_t max);
     /// <summary>Queues a reliable world message (at most 96 bytes: AvatarState) for the host. Welcomed only.</summary>
-    bool send_world(const uint8_t* data, size_t len);
+    bool send_world(const uint8_t* data, size_t len, bool reliable = true);
     static constexpr size_t kWorldStatesIn = 64, kWorldEventsIn = 256;
 
     static constexpr size_t kInCap = 512, kOutCap = 64;

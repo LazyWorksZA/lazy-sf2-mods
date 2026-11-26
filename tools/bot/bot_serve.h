@@ -68,6 +68,10 @@ struct ServeConfig {
     uint8_t launch_kind = 0;
     uint16_t launch_a = 0, launch_b = 0, launch_shooter_a = 0;
     double launch_every = 0;
+    /// <summary>--stores: the jet's loadout (one station of `stores_weapon`, by name hash, count 2, every 10 s) and
+    /// consumables (fuel from 4,000 kg falling 2 kg/s, a gun's 640 rounds falling 10/s, 30 chaff, 30 flares; every 2 s).</summary>
+    bool stores = false;
+    std::string stores_weapon = "AIM-9J";
 };
 
 struct ServeResult {
@@ -94,6 +98,9 @@ struct ServeResult {
     uint32_t launches_sent = 0;  // --launch WeaponLaunches queued
     uint32_t launches_rx = 0;    // the client's WeaponLaunches received
     std::string last_rx_weapon;
+    uint32_t loadouts_sent = 0, consumables_sent = 0;
+    uint32_t loadouts_rx = 0, consumables_rx = 0;  // the client's
+    uint16_t last_rx_fuel = 0;
 };
 
 /// <summary>

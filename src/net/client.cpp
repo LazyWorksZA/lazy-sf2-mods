@@ -798,6 +798,7 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
                 pump_world();
                 if (g_session && world_client_tag())
                     world_avatar_tick(aircraft, g_id, [](const uint8_t* d, size_t n) { return g_core->send_world(d, n); });
+                if (g_session && world_client_tag()) stores_tick(aircraft);
             }
             if (g_disconnected && g_core->finished()) {
                 g_core->stop(false);  // the thread has cleaned up: the join returns at once
@@ -877,7 +878,9 @@ void client_install() {
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
 }
 
-bool client_world_send(const uint8_t* data, size_t len) { return g_core && g_session && g_core->send_world(data, len); }
+bool client_world_send(const uint8_t* data, size_t len, bool reliable) {
+    return g_core && g_session && g_core->send_world(data, len, reliable);
+}
 
 bool client_world_active() { return g_core && g_session && world_client_tag() != 0; }
 

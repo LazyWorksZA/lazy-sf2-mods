@@ -68,6 +68,16 @@ const BYTE* weapon_record(uintptr_t mo, uint32_t id) {
     return recs[id];
 }
 
+bool weapon_record_exists(uint32_t id) {
+    const uintptr_t mo = mo_base();
+    if (!mo) return false;
+    __try {
+        return weapon_record(mo, id) != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 int weapon_id_by_name(const char* name) {
     const uintptr_t mo = mo_base();
     if (!mo || !name || !name[0]) return -1;
@@ -304,6 +314,51 @@ int16_t selected_station(const void* obj) {
 }
 
 }  // namespace
+
+bool weapon_name_of(uint32_t id, char* out, size_t cap) {
+    const uintptr_t mo = mo_base();
+    if (!mo || !out || cap == 0) return false;
+    out[0] = '\0';
+    __try {
+        const wchar_t* w = reinterpret_cast<const wchar_t*>(weapon_record(mo, id));
+        if (!w) return false;
+        size_t k = 0;
+        for (; k + 1 < cap && w[k]; ++k) out[k] = (w[k] >= 0x20 && w[k] < 0x7f) ? static_cast<char>(w[k]) : '?';
+        out[k] = '\0';
+        return k > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '\0';
+        return false;
+    }
+}
+
+int weapon_id_by_hash(uint16_t hash) {
+    char name[64];
+    for (uint32_t id = 0; id < 4096; ++id) {
+        if (!weapon_name_of(id, name, sizeof(name))) {
+            if (!weapon_record_exists(id)) break;
+            continue;
+        }
+        if (net::weapon_name_hash(name) == hash) return static_cast<int>(id);
+    }
+    return -1;
+}
+
+int aircraft_remote_event(void* obj, int type, void* payload) {
+    const uintptr_t ao = ao_base();
+    if (!ao || !obj) return 1;
+    __try {
+        BYTE* iface = static_cast<BYTE*>(obj) + kObjRemote;
+        void** vt = *reinterpret_cast<void***>(iface);
+        if (reinterpret_cast<uintptr_t>(vt) != ao + kRvaRemoteVtable ||
+            reinterpret_cast<uintptr_t>(vt[1]) != ao + kRvaRemoteEvent)
+            return 1;
+        reinterpret_cast<void(__fastcall*)(void*, void*, int, void*)>(vt[1])(iface, nullptr, type, payload);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
 
 void weapons_forget_avatar(const void* avatar) {
     for (Pending& p : g_pending)

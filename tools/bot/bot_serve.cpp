@@ -224,6 +224,46 @@ struct Serve {
             cfg.hit_kind == 1 ? 'A' : 'G', static_cast<unsigned>(cfg.hit_a), static_cast<unsigned>(cfg.hit_b));
     }
 
+    // --stores: the jet's loadout and consumables.
+    double stores_t0 = -1, stores_next_lo = 0, stores_next_co = 0;
+    uint16_t stores_seq = 0;
+    void stores_tick() {
+        if (!c.on) {
+            stores_t0 = -1;
+            return;
+        }
+        if (stores_t0 < 0) stores_t0 = stores_next_lo = stores_next_co = host_t;
+        const double t = host_t - stores_t0;
+        if (host_t >= stores_next_lo) {
+            stores_next_lo += 10.0;
+            LoadoutMsg m{};
+            m.seq = ++stores_seq;
+            m.parts = 1;
+            m.n = 1;
+            m.e[0].station = 1;
+            m.e[0].weapon = 0xffff;  // no id the client knows: it finds the weapon by its name's hash
+            m.e[0].hash = weapon_name_hash(cfg.stores_weapon.c_str());
+            m.e[0].count = 2;
+            m.e[0].state = 1;
+            uint8_t buf[sizeof(m)];
+            const size_t n = encode(m, buf, sizeof(buf));
+            if (n && core.send_world(c.slot, c.gen, buf, n, true)) ++res.loadouts_sent;
+        }
+        if (host_t >= stores_next_co) {
+            stores_next_co += 2.0;
+            ConsumablesMsg m{};
+            m.seq = ++stores_seq;
+            const double fuel = 4000.0 - 2.0 * t, rounds = 640.0 - 10.0 * t;
+            m.fuel = fuel_to_wire(static_cast<float>(fuel > 0 ? fuel : 0));
+            m.guns = 1;
+            m.rounds[0] = static_cast<uint16_t>(rounds > 0 ? rounds : 0);
+            m.chaff = m.flares = 30;
+            uint8_t buf[sizeof(m)];
+            const size_t n = encode(m, buf, sizeof(buf));
+            if (n && core.send_world(c.slot, c.gen, buf, n, false)) ++res.consumables_sent;
+        }
+    }
+
     // --launch: a scripted release from the bot's jet.
     double launch_t0 = -1, launch_next = 0;
     uint16_t launch_seq = 0;
@@ -392,6 +432,25 @@ struct Serve {
             res.last_rx_throttle = m.throttle;
             res.last_rx_engines = m.engines;
             res.last_rx_guns = m.guns;
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::Loadout)) {
+            LoadoutMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
+            if (res.loadouts_rx++ == 0 || m.part == 0)
+                say("bot serve: client %u loadout (part %u/%u): %u stations%s", static_cast<unsigned>(m.peer),
+                    static_cast<unsigned>(m.part + 1), static_cast<unsigned>(m.parts), static_cast<unsigned>(m.n),
+                    m.n ? "" : " (none loaded)");
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::Consumables)) {
+            ConsumablesMsg m{};
+            if (!c.on || e.slot != c.slot || e.gen != c.gen || decode(e.data, e.len, m) != Status::Ok) return;
+            if (res.consumables_rx++ % 15 == 0)
+                say("bot serve: client %u consumables: fuel %.0f kg, %u gun(s), first %u rounds, chaff %u, flares %u",
+                    static_cast<unsigned>(m.peer), fuel_from_wire(m.fuel), static_cast<unsigned>(m.guns),
+                    static_cast<unsigned>(m.rounds[0]), static_cast<unsigned>(m.chaff), static_cast<unsigned>(m.flares));
+            res.last_rx_fuel = m.fuel;
             return;
         }
         if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::WeaponLaunch)) {
@@ -677,6 +736,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
         if (cfg.jet != JetScript::None) sv.jet_tick();
         if (cfg.hit) sv.hit_tick();
         if (cfg.launch) sv.launch_tick();
+        if (cfg.stores) sv.stores_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

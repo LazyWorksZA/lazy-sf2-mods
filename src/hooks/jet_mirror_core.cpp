@@ -28,6 +28,34 @@ int engine_count(const BYTE* o) {
 
 }  // namespace
 
+int jet_list_systems(void* obj, uintptr_t ao, SysRef* out, int max) {
+    int k = 0;
+    if (!obj || !ao) return 0;
+    __try {
+        BYTE* o = static_cast<BYTE*>(obj);
+        int32_t ncomp = 0;
+        std::memcpy(&ncomp, o + jet::kComponents + jet::kListCount, 4);
+        BYTE* const* comps = *reinterpret_cast<BYTE* const* const*>(o + jet::kComponents + jet::kListArray);
+        for (int i = 0; comps && i < ncomp && i < 64 && k < max; ++i) {
+            BYTE* c = comps[i];
+            if (!c) continue;
+            int32_t nsys = 0;
+            std::memcpy(&nsys, c + jet::kCompSystems + jet::kListCount, 4);
+            BYTE* const* sys = *reinterpret_cast<BYTE* const* const*>(c + jet::kCompSystems + jet::kListArray);
+            for (int j = 0; sys && j < nsys && j < 64 && k < max; ++j) {
+                BYTE* s = sys[j];
+                if (!s) continue;
+                const uintptr_t vt = *reinterpret_cast<uintptr_t*>(s);
+                out[k].sys = s;
+                out[k].vt = vt >= ao && vt < ao + jet::kAoSize ? static_cast<uint32_t>(vt - ao) : 0;
+                ++k;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return k;
+}
+
 bool jet_read_controls_at(const void* obj, uintptr_t ao, JetControls* out) {
     if (!ao || !obj) return false;
     JetControls c;

@@ -23,8 +23,10 @@ enum class WorldType : uint8_t {
     HitClaim = 27,        // a shooter's PC to the host, reliable: one hit of its own gun on another PC's object
     HitApply = 28,        // the host to the PC that owns a player's jet, reliable: damage for that jet
     WeaponLaunch = 29,    // a player's weapon release, reliable: client to host, host to clients (relayed)
+    Loadout = 30,         // a player's stores, reliable, every 10 s and on change: relayed like AvatarState
+    Consumables = 31,     // a player's fuel, ammunition and countermeasures, unreliable, every 2 s: relayed
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 29;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 31;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -300,7 +302,8 @@ Status decode(const uint8_t* data, size_t len, WorldSnapshotMsg& out);
 /// <summary>
 /// A player's discrete jet state, sent by its owner on change. radar_mode is the detect interface's mode (0 off,
 /// 1 search, 2 track, 3 lock); the target is a stable key (KeyKind::Aircraft slot/member; kind 0 = none). config is
-/// the object's state word +0x5f0 masked to kAvatarConfigMask (flaps, airbrake, gear, hook, lights, wheel brakes).
+/// the object's state word +0x5f0 masked to kAvatarConfigMask (flaps, airbrake, gear, hook, lights, wheel brakes,
+/// jettison).
 /// throttle is input channel 3 (0..1, 1 = full afterburner) as 0..255; engines has bit i set while engine i runs
 /// (the first 8), engine_count says how many of those bits are meaningful (a receiver leaves the avatar's other engines
 /// alone); guns has bit 0 for the primary gun trigger (input 12) and bit 1 for the secondary (13).
@@ -321,8 +324,9 @@ struct AvatarStateMsg {
 #pragma pack(pop)
 static_assert(sizeof(AvatarStateMsg) == 20);  // 4:2 peer, 6:2 seq, 8:1 mode, 9:1 target kind, 10:2 a, 12:2 b, 14:2 config,
                                               // 16:1 throttle, 17:1 engines, 18:1 guns, 19:1 engine count
-inline constexpr uint16_t kAvatarConfigMask = 0xff00;  // +0x5f0: 0x100/0x200 flaps, 0x400 airbrake, 0x800 gear,
-                                                       // 0x1000 hook, 0x2000/0x4000 lights, 0x8000 wheel brakes
+inline constexpr uint16_t kAvatarConfigMask = 0xff48;  // +0x5f0: 0x100/0x200 flaps, 0x400 airbrake, 0x800 gear,
+                                                       // 0x1000 hook, 0x2000/0x4000 lights, 0x8000 wheel brakes;
+                                                       // 0x8 drop tanks and 0x40 all stores jettisoned (T5)
 size_t encode(const AvatarStateMsg& m, uint8_t* out, size_t cap);
 Status decode(const uint8_t* data, size_t len, AvatarStateMsg& out);
 
@@ -508,6 +512,81 @@ inline LaunchPlan launch_plan(LaunchRole role, bool guided, bool native_fired) {
 /// from damaging remote copies.</summary>
 inline bool own_launch_stays_live(bool guided, bool we_are_host, bool target_is_client_jet) {
     return !(guided && we_are_host && target_is_client_jet);
+}
+
+// ---- stores and consumables (Phase 5 T5) ----
+
+#pragma pack(push, 1)
+/// <summary>One loaded station: the sender's weapon id and a 16-bit hash of the weapon's name (weapon_name_hash), so
+/// a receiver whose ids differ finds its own; the count and the entry's state (0 empty, 1 untouched, 2 in use).</summary>
+struct LoadoutEntry {
+    uint8_t station;
+    uint16_t weapon;
+    uint16_t hash;
+    uint8_t count;
+    uint8_t state;
+};
+/// <summary>A player's loadout table (stations with a weapon), in parts of up to kLoadoutPart entries.</summary>
+struct LoadoutMsg {
+    Header h;
+    uint16_t peer;  // the owner (the host sets it from the connection)
+    uint16_t seq;
+    uint8_t part;   // 0..parts-1
+    uint8_t parts;
+    uint8_t n;      // entries used in this part
+    LoadoutEntry e[12];
+};
+/// <summary>A player's consumables: total fuel in 4 kg steps, each fixed gun's rounds (system order), chaff, flares.</summary>
+struct ConsumablesMsg {
+    Header h;
+    uint16_t peer;
+    uint16_t seq;
+    uint16_t fuel;  // kg / 4
+    uint8_t guns;   // entries used in rounds
+    uint16_t rounds[4];
+    uint8_t chaff, flares;
+};
+#pragma pack(pop)
+static_assert(sizeof(LoadoutEntry) == 7);
+static_assert(sizeof(LoadoutMsg) == 95);      // 4:2 peer, 6:2 seq, 8:1 part, 9:1 parts, 10:1 n, 11:84 entries
+static_assert(sizeof(ConsumablesMsg) == 21);  // 4:2 peer, 6:2 seq, 8:2 fuel, 10:1 guns, 11:8 rounds, 19:1 chaff, 20:1 flares
+inline constexpr size_t kLoadoutPart = 12;
+size_t encode(const LoadoutMsg& m, uint8_t* out, size_t cap);
+/// <summary>Checks the size, part < parts and n <= kLoadoutPart.</summary>
+Status decode(const uint8_t* data, size_t len, LoadoutMsg& out);
+size_t encode(const ConsumablesMsg& m, uint8_t* out, size_t cap);
+/// <summary>Checks the size and guns <= 4.</summary>
+Status decode(const uint8_t* data, size_t len, ConsumablesMsg& out);
+
+/// <summary>FNV-1a of an ASCII weapon name, folded to 16 bits; never 0.</summary>
+inline uint16_t weapon_name_hash(const char* s) {
+    uint32_t h = 0x811C9DC5u;
+    for (; s && *s; ++s) h = (h ^ static_cast<uint8_t>(*s)) * 16777619u;
+    const uint16_t f = static_cast<uint16_t>(h ^ (h >> 16));
+    return f ? f : 1;
+}
+inline uint16_t fuel_to_wire(float kg) {
+    if (!(kg > 0.0f)) return 0;
+    const float q = kg / 4.0f + 0.5f;
+    return q >= 65535.0f ? 65535 : static_cast<uint16_t>(q);
+}
+inline float fuel_from_wire(uint16_t q) { return q * 4.0f; }
+
+/// <summary>What the receiver does with one station: nothing, rebuild it (another weapon, or fewer stores than the
+/// owner has: a rearm), or note it (the avatar has more: a store the owner used that the avatar did not).</summary>
+enum class StationAction : uint8_t { None, Rebuild, More };
+inline StationAction station_action(int32_t avatar_weapon, int avatar_count, int32_t owner_weapon, int owner_count) {
+    if (owner_count <= 0 && avatar_count <= 0) return StationAction::None;
+    if (avatar_weapon != owner_weapon) return owner_count > 0 ? StationAction::Rebuild : StationAction::More;
+    if (avatar_count < owner_count) return StationAction::Rebuild;
+    if (avatar_count > owner_count) return StationAction::More;
+    return StationAction::None;
+}
+/// <summary>The factor each avatar tank's fuel is scaled by so that its total becomes the owner's (1 when it cannot).</summary>
+inline float fuel_scale(float avatar_total, float owner_total) {
+    if (!(avatar_total > 1.0f) || !(owner_total >= 0.0f)) return 1.0f;
+    const float k = owner_total / avatar_total;
+    return k > 10.0f ? 10.0f : k;
 }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>

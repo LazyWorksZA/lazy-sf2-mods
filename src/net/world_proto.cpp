@@ -67,6 +67,24 @@ Status decode(const uint8_t* d, size_t n, WeaponLaunchMsg& out) {
     if (s == Status::Ok) out.weapon[sizeof(out.weapon) - 1] = '\0';
     return s;
 }
+size_t encode(const LoadoutMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::Loadout, o, c); }
+Status decode(const uint8_t* d, size_t n, LoadoutMsg& out) {
+    LoadoutMsg m;
+    const Status s = decode_fixed(d, n, WorldType::Loadout, m);
+    if (s != Status::Ok) return s;
+    if (m.parts == 0 || m.part >= m.parts || m.n > kLoadoutPart) return Status::BadType;
+    out = m;
+    return Status::Ok;
+}
+size_t encode(const ConsumablesMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::Consumables, o, c); }
+Status decode(const uint8_t* d, size_t n, ConsumablesMsg& out) {
+    ConsumablesMsg m;
+    const Status s = decode_fixed(d, n, WorldType::Consumables, m);
+    if (s != Status::Ok) return s;
+    if (m.guns > 4) return Status::BadType;
+    out = m;
+    return Status::Ok;
+}
 size_t encode_hit(const HitMsg& m, WorldType t, uint8_t* o, size_t c) {
     if (t != WorldType::HitClaim && t != WorldType::HitApply) return 0;
     return encode_fixed(m, t, o, c);

@@ -332,6 +332,27 @@ void HostCore::run() {
             if (!push_in(e, true)) drop(n_queue_);
             return;
         }
+        if (wt == static_cast<uint8_t>(WorldType::Loadout) || wt == static_cast<uint8_t>(WorldType::Consumables)) {
+            LoadoutMsg lm;
+            ConsumablesMsg cm;
+            const bool lo = wt == static_cast<uint8_t>(WorldType::Loadout);
+            const bool ok = lo ? channel == kChannelReliable && decode(data, len, lm) == Status::Ok
+                               : channel == kChannelUnreliable && decode(data, len, cm) == Status::Ok;
+            if (!ok) return drop(n_format_);
+            if (!(slot_state_[slot].load(std::memory_order_acquire) & 1)) return drop(n_state_);
+            HostEvent e;
+            e.kind = HostEvent::Message;
+            e.slot = static_cast<uint8_t>(slot);
+            e.gen = gens[slot];
+            e.channel = channel;
+            const uint16_t peer = static_cast<uint16_t>(slot + 1);
+            std::memcpy(e.data, data, len);
+            std::memcpy(e.data + sizeof(Header), &peer, 2);  // the connection says who sent it
+            e.len = static_cast<uint16_t>(len);
+            e.is_state = lo ? 0 : 1;  // consumables count against the slot's quota, as States do
+            if (!push_in(e, lo)) drop(n_queue_);
+            return;
+        }
         if (wt == static_cast<uint8_t>(WorldType::WeaponLaunch)) {  // a client's weapon release: to the game thread
             WeaponLaunchMsg wm;
             if (channel != kChannelReliable || decode(data, len, wm) != Status::Ok) return drop(n_format_);

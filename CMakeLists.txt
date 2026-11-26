@@ -85,6 +85,7 @@ add_library(lazysf2 SHARED
     src/hooks/jet_mirror_core.cpp
     src/hooks/hit_claims.cpp
     src/hooks/weapon_net.cpp
+    src/hooks/stores_sync.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp

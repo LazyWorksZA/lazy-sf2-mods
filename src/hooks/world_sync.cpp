@@ -1801,6 +1801,12 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         weapons_apply_launch(data, len, host_now);
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables)) {
+        uint16_t peer = 0;
+        if (len >= sizeof(net::Header) + 2) std::memcpy(&peer, data + sizeof(net::Header), 2);
+        stores_apply(data, len, client_avatar_object(peer));
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::AvatarState)) {
         net::AvatarStateMsg am;
         if (net::decode(data, len, am) == net::Status::Ok) world_avatar_apply(data, len, client_avatar_object(am.peer));

@@ -554,6 +554,21 @@ void handle_message(const HostEvent& e, void* player, double now) {
         }
         return;
     }
+    {
+        const uint8_t wt = net::peek_world_type(e.data, e.len);
+        if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables)) {
+            // A client's stores or consumables: onto its avatar here, and on to the other clients.
+            if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
+                const bool reliable = wt == static_cast<uint8_t>(net::WorldType::Loadout);
+                if (!g_av[slot].parked) stores_apply(e.data, e.len, g_av[slot].h.obj);
+                for (int s = 0; s < net::kMaxClients; ++s)
+                    if (s != slot && g_av[s].active &&
+                        !g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, reliable) && reliable)
+                        g_world_behind[s] = true;
+            }
+            return;
+        }
+    }
     if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::WeaponLaunch)) {
         // A client's weapon release: replayed here, and on to the other clients.
         if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
@@ -734,6 +749,7 @@ void world_tick(void* player, double now) {
         if (net::decode(d, n, m) == net::Status::Ok) g_avatar_states.set(m);
         return g_nclients == 0 || world_send(d, n, true);  // alone: kept for the first joiner
     });
+    if (g_nclients > 0) stores_tick(player);
     for (int s = 0; s < net::kMaxClients; ++s) {
         if (!g_world_behind[s]) continue;
         g_world_behind[s] = false;
@@ -901,8 +917,8 @@ bool host_world_send_to(int slot, const uint8_t* data, size_t len, bool reliable
     return g_running.load(std::memory_order_relaxed) && world_send_to(slot, data, len, reliable);
 }
 
-bool host_world_send_all(const uint8_t* data, size_t len) {
-    return g_running.load(std::memory_order_relaxed) && world_send(data, len, true);
+bool host_world_send_all(const uint8_t* data, size_t len, bool reliable) {
+    return g_running.load(std::memory_order_relaxed) && world_send(data, len, reliable);
 }
 
 double net_host_now() { return client_welcomed() ? client_host_now() : sim_game_time(); }

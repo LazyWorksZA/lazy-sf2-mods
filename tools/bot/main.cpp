@@ -30,7 +30,7 @@ void usage() {
         "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
         "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--jet none|ab|guns|ab+guns]\n"
         "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S]\n"
-        "            [--log FILE]\n"
+        "            [--stores [WEAPON]] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
@@ -50,7 +50,8 @@ void usage() {
         "--hit A,SLOT,MEMBER,EVERY_S sends a scripted 20 kJ gun hit on that jet (the client's seat) every EVERY_S s.\n"
         "--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S releases WEAPON (a weapon type name, GUIDED 0 or 1) from the\n"
         "jet's station 0 at that target (N: none) every EVERY_S s; the jet's own key is its seat in the --hit slot.\n"
-        "Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
+        "--stores sends the jet's loadout (station 1: WEAPON x2, default AIM-9J) every 10 s and its consumables (fuel,\n"
+        "rounds, chaff, flares) every 2 s. Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
 }
 
 bool to_double(const char* s, double* out) {
@@ -357,6 +358,10 @@ int main(int argc, char** argv) {
             scfg.launch_kind = kind == 'A' ? 1 : kind == 'G' ? 2 : 0;
             scfg.launch_a = static_cast<uint16_t>(la);
             scfg.launch_b = static_cast<uint16_t>(lb);
+            serve_only = true;
+        } else if (a == "--stores") {
+            scfg.stores = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') scfg.stores_weapon = argv[++i];
             serve_only = true;
         } else if (a == "--jet" && (v = val())) {
             ok = bot::parse_jet_script(v, &scfg.jet);

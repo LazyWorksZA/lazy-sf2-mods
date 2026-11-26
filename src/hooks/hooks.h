@@ -439,10 +439,14 @@ void* host_avatar_object(int slot);
 bool host_world_send_to(int slot, const uint8_t* data, size_t len, bool reliable);
 bool host_world_active();
 /// <summary>Client (client.cpp): a reliable world message for the host, and whether a shared-world session runs.</summary>
-bool client_world_send(const uint8_t* data, size_t len);
+bool client_world_send(const uint8_t* data, size_t len, bool reliable = true);
 bool client_world_active();
 /// <summary>Host: a reliable world message for every client (true alone or if any queued it).</summary>
-bool host_world_send_all(const uint8_t* data, size_t len);
+bool host_world_send_all(const uint8_t* data, size_t len, bool reliable = true);
+/// <summary>Stores and consumables (stores_sync.cpp), game thread: the player's step sends its loadout (every 10 s
+/// and on change) and consumables (every 2 s); a peer's message goes onto the avatar that shows that peer.</summary>
+void stores_tick(void* player);
+void stores_apply(const uint8_t* data, size_t len, void* avatar);
 /// <summary>The host's game time: the game time on the host, the client's estimate of it on a client.</summary>
 double net_host_now();
 double client_host_now();
@@ -451,6 +455,12 @@ double client_host_now();
 bool weapon_guided(uint32_t weapon_id);
 void weapons_on_release(void* missile);
 void weapons_apply_launch(const uint8_t* data, size_t len, double host_now);
+/// <summary>The weapon type's name for an id here; the id whose name has this weapon_name_hash (-1 none); an
+/// aircraft's remote interface event (slot 1, the game's own remote-aircraft protocol: 2 fire a station, 0x16
+/// rearm, ...; network-recon §11): 0 done, 1 refused (not the interface we read), 2 faulted.</summary>
+bool weapon_name_of(uint32_t id, char* out, size_t cap);
+int weapon_id_by_hash(uint16_t hash);
+int aircraft_remote_event(void* obj, int type, void* payload);
 /// <summary>An avatar was given back: no native fire on it is awaited any more.</summary>
 void weapons_forget_avatar(const void* avatar);
 /// <summary>Client mode: the host address and port from LAZYSF2_CONNECT; false when client mode is off.</summary>

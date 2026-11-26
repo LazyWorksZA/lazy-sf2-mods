@@ -8653,6 +8653,113 @@ static void object_type_tests() {
            "types: storage category");
 }
 
+void stores_tests() {
+    std::printf("stores, fuel and ammunition (Phase 5 T5)\n");
+    LoadoutMsg lo{};
+    lo.peer = 1;
+    lo.seq = 4;
+    lo.parts = 2;
+    lo.part = 1;
+    lo.n = 2;
+    lo.e[1].station = 6;
+    lo.e[1].weapon = 77;
+    lo.e[1].hash = weapon_name_hash("Mk82");
+    lo.e[1].count = 3;
+    uint8_t b[128];
+    LoadoutMsg lr{};
+    const size_t ln = encode(lo, b, sizeof(b));
+    expect(ln == 95 && peek_world_type(b, ln) == 30 && decode(b, ln, lr) == Status::Ok && lr.e[1].station == 6 &&
+               lr.e[1].weapon == 77 && lr.e[1].count == 3 && lr.e[1].hash == weapon_name_hash("Mk82"),
+           "loadout: 95 bytes, up to 12 stations a part, round trip");
+    lo.part = 2;
+    LoadoutMsg bad{};
+    expect(decode(b, encode(lo, b, sizeof(b)), bad) == Status::BadType, "loadout: a part past the count is refused");
+    ConsumablesMsg co{};
+    co.fuel = fuel_to_wire(3999.0f);
+    co.guns = 2;
+    co.rounds[1] = 412;
+    co.flares = 30;
+    ConsumablesMsg cr{};
+    const size_t cn = encode(co, b, sizeof(b));
+    expect(cn == 21 && peek_world_type(b, cn) == 31 && decode(b, cn, cr) == Status::Ok && cr.fuel == 1000 &&
+               cr.rounds[1] == 412 && cr.flares == 30,
+           "consumables: 21 bytes, fuel in 4 kg steps, round trip");
+    co.guns = 5;
+    expect(decode(b, encode(co, b, sizeof(b)), cr) == Status::BadType, "consumables: at most 4 guns");
+    expect(weapon_name_hash("AIM-9J") == weapon_name_hash("AIM-9J") && weapon_name_hash("AIM-9J") != weapon_name_hash("AIM-9L") &&
+               weapon_name_hash("") != 0 && fuel_to_wire(-5.0f) == 0 && fuel_to_wire(1e9f) == 65535 &&
+               fuel_from_wire(1000) == 4000.0f,
+           "loadout: name hashes tell weapons apart; fuel clamps");
+    expect(station_action(17, 2, 17, 2) == StationAction::None && station_action(17, 0, 17, 2) == StationAction::Rebuild &&
+               station_action(-1, 0, 17, 2) == StationAction::Rebuild && station_action(5, 2, 17, 2) == StationAction::Rebuild &&
+               station_action(17, 2, 17, 1) == StationAction::More && station_action(-1, 0, -1, 0) == StationAction::None &&
+               station_action(17, 2, 9, 0) == StationAction::More,
+           "loadout: rebuild for another weapon or a rearm, note an avatar with more, leave equal ones");
+    expect(fuel_scale(2000.0f, 1000.0f) == 0.5f && fuel_scale(0.0f, 1000.0f) == 1.0f && fuel_scale(100.0f, 5000.0f) == 10.0f,
+           "fuel: the avatar's tanks scale to the owner's total (bounded)");
+    std::printf("    estimate: a loadout is 95 B every 10 s (about 14 B/s with headers, per player and receiver), consumables\n"
+                "    21 B every 2 s unreliable (about 30 B/s); a rearm or new loadout goes at once\n");
+
+    namespace jet = LazyWorks::SF2Patch::hooks::jet;
+    std::vector<uint8_t> image(jet::kAoSize), obj(0x9a8), comp(0xe0), s1(0x90), s2(0x90);
+    const uintptr_t ao = reinterpret_cast<uintptr_t>(image.data());
+    auto put32 = [](std::vector<uint8_t>& v, size_t off, uint32_t x) { std::memcpy(v.data() + off, &x, 4); };
+    auto addr = [](const void* p) { return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)); };
+    put32(s1, 0, static_cast<uint32_t>(ao + 0x93abc));
+    put32(s2, 0, 0x1234);  // a vtable outside the image
+    uint32_t systems[3] = {addr(s1.data()), 0, addr(s2.data())};
+    put32(comp, jet::kCompSystems + jet::kListCount, 3);
+    put32(comp, jet::kCompSystems + jet::kListArray, addr(systems));
+    uint32_t comps[2] = {addr(comp.data()), 0};
+    put32(obj, jet::kComponents + jet::kListCount, 2);
+    put32(obj, jet::kComponents + jet::kListArray, addr(comps));
+    LazyWorks::SF2Patch::hooks::SysRef refs[8];
+    const int nr = LazyWorks::SF2Patch::hooks::jet_list_systems(obj.data(), ao, refs, 8);
+    expect(nr == 2 && refs[0].vt == 0x93abc && refs[1].vt == 0 && refs[1].sys == s2.data(),
+           "systems: walked in component order, empty slots skipped, a foreign vtable as 0");
+
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    s.cfg.stores = true;
+    if (!s.start()) return expect(false, "bot serve listening (--stores)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<LoadoutMsg> los;
+    std::vector<ConsumablesMsg> cos;
+    int sent = 0;
+    WorldPacket wp[8];
+    serve_run_for(c, 4.5, [&] {
+        const size_t k = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k; ++i) {
+            LoadoutMsg l{};
+            ConsumablesMsg q{};
+            if (decode(wp[i].data, wp[i].len, l) == Status::Ok) los.push_back(l);
+            if (decode(wp[i].data, wp[i].len, q) == Status::Ok) cos.push_back(q);
+        }
+        if (sent < 2 && !c.welcomes.empty()) {
+            LoadoutMsg ol{};
+            ol.parts = 1;
+            ConsumablesMsg oc{};
+            oc.fuel = 777;
+            uint8_t ob[128];
+            if (c.core.send_world(ob, encode(ol, ob, sizeof(ob)), true) &&
+                c.core.send_world(ob, encode(oc, ob, sizeof(ob)), false))
+                ++sent;
+        }
+        return false;
+    });
+    s.finish();
+    c.core.stop(false);
+    expect(los.size() == 1 && los[0].n == 1 && los[0].e[0].hash == weapon_name_hash("AIM-9J") && los[0].e[0].count == 2,
+           "loopback: --stores sends the jet's loadout (reliable) with the weapon's name hash");
+    expect(cos.size() >= 2 && cos[0].fuel == fuel_to_wire(4000.0f) && cos.back().fuel < cos[0].fuel && cos[0].rounds[0] == 640,
+           "loopback: --stores sends falling fuel and rounds every 2 s (unreliable)");
+    expect(sent == 2 && s.res.loadouts_rx == 2 && s.res.consumables_rx >= 1 && s.res.last_rx_fuel == 777,
+           "loopback: the client's loadout (reliable) and consumables (unreliable) reach the host");
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -8734,6 +8841,7 @@ int main() {
     jet_mirror_tests();
     hit_claim_tests();
     weapon_launch_tests();
+    stores_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

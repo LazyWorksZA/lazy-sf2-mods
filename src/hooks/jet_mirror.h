@@ -38,6 +38,14 @@ void jet_clear_triggers(void* obj);
 /// <summary>Gives the engines back as they were taken, so the AI does not glide on. The throttle is left.</summary>
 JetWriteResult jet_restore_engines(void* obj, uint8_t engines, uint8_t count);
 
+/// <summary>One system of an aircraft, with its vtable as an AircraftObject RVA (0 if outside the image).</summary>
+struct SysRef {
+    unsigned char* sys = nullptr;
+    uint32_t vt = 0;
+};
+/// <summary>The aircraft's systems in component order (at most max); SEH-guarded, stale pointers are skipped.</summary>
+int jet_list_systems(void* obj, uintptr_t ao, SysRef* out, int max);
+
 // The same with AircraftObject's base given (jet_mirror_core.cpp, no logging), so the tests can use a fake aircraft.
 bool jet_read_controls_at(const void* obj, uintptr_t ao, JetControls* out);
 JetWriteResult jet_write_controls_at(void* obj, uintptr_t ao, const JetControls& c, bool inputs);
