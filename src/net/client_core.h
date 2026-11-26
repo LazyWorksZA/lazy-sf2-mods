@@ -56,6 +56,7 @@ struct ClientCounters {
     uint32_t dropped_state = 0;   // in the wrong phase, repeated, or over the Pong rate
     uint32_t dropped_queue = 0;   // States refused: their source was over its quota, or the ring was nearly full
     uint32_t dropped_control = 0; // control events lost (the ring was completely full); the connection is then ended
+    uint32_t dropped_out = 0;     // our States not sent: the out queue was full, or they were late (after a Bye)
     uint32_t pings = 0, pongs = 0;  // Pings sent, Pongs the ClockSync accepted
 };
 
@@ -64,6 +65,9 @@ struct ClientLimits {
     uint32_t connect_ms = 5000;   // ENet connection
     uint32_t welcome_ms = 15000;  // the host's game thread may be loading
     uint32_t silence_ms = kTimeoutMs;
+    /// <summary>Tests only: replaces ENet's name lookup (ipv4 as ENetAddress::host). Runs on the lookup thread.</summary>
+    using ResolveFn = bool (*)(const char* name, uint32_t* ipv4);
+    ResolveFn resolve = nullptr;
 };
 
 class ClientCore {
@@ -82,7 +86,8 @@ public:
     /// <summary>
     /// Starts the network thread and returns at once (never waits for it, so it is safe under the loader lock).
     /// host is a numeric IPv4 address (preferred) or a name, which the network thread resolves. The Hello is sent as
-    /// given. False if already started or the arguments are bad; every later failure arrives as Disconnected.
+    /// given. False if already started (also after the connection ended: call stop() first) or the arguments are bad;
+    /// every later failure arrives as Disconnected. The lookup of a name is bounded by limits.connect_ms.
     /// </summary>
     bool start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const ClientLimits& limits = {});
     /// <summary>
@@ -104,7 +109,10 @@ public:
     /// yet), or if the queue is full. The caller holds States while clock_now() is false (the host is paused).
     /// </summary>
     bool send_state(const StateMsg& s);
-    /// <summary>Sends a Bye (once), then disconnects when it is delivered. Before the Welcome it only disconnects.</summary>
+    /// <summary>
+    /// Sends a Bye (once), then disconnects when it is delivered. Before the Welcome it only disconnects; before the
+    /// connection it ends at once. After a Bye from the host the client leaves by itself within about a second.
+    /// </summary>
     void bye(uint8_t reason);
     /// <summary>
     /// The host's game time at wall (ClientCore::wall_now()). False while not synced (no Welcome and Pong yet), on
@@ -116,6 +124,13 @@ public:
     uint32_t rtt_ms() const { return rtt_.load(std::memory_order_relaxed); }  // ENet's smoothed round trip time
     ClientCounters counters() const;
 
+    static constexpr size_t kInCap = 512, kOutCap = 64;
+    static constexpr int kSources = kMaxClients + 1;  // State sources: the host (0) and clients 1..kMaxClients
+    /// <summary>Entries of the in ring that only control events may use.</summary>
+    static constexpr size_t kControlReserve = 64;
+    /// <summary>At most this many States per source id in the ring at once; together they fit outside the reserve.</summary>
+    static constexpr size_t kStateQuota = (kInCap - kControlReserve) / kSources;
+
 private:
     struct OutMsg {
         uint8_t len = 0;
@@ -123,12 +138,6 @@ private:
     };
     static_assert(sizeof(ClientEvent::data) >= kMaxMessage && sizeof(OutMsg::data) >= kMaxMessage,
                   "every protocol message must fit the queues");
-    static constexpr size_t kInCap = 512, kOutCap = 64;
-    static constexpr int kSources = kMaxClients + 1;  // State sources: the host (0) and clients 1..kMaxClients
-    /// <summary>Entries of the in ring that only control events may use.</summary>
-    static constexpr size_t kControlReserve = 64;
-    /// <summary>At most this many States per source id in the ring at once; together they fit outside the reserve.</summary>
-    static constexpr size_t kStateQuota = (kInCap - kControlReserve) / kSources;
     static_assert(kStateQuota * kSources <= kInCap - kControlReserve, "the State quotas must fit outside the reserve");
     // A Welcome, a Bye and a PeerInfo and PeerLeft for every other peer, several times over.
     static_assert(kControlReserve >= 2 + 2 * kSources * 4, "the control reserve is too small");
@@ -150,6 +159,7 @@ private:
     std::atomic<bool> finished_{false};  // the network thread has cleaned up and is about to return
     std::atomic<int> bye_reason_{-1};    // set once by bye(); -1 none
     std::atomic<uint32_t> rtt_{0};
+    bool started_ = false;  // game thread: start() ran at least once
 
     ClockSync clock_;  // network thread only
     mutable std::mutex clock_mx_;
@@ -169,7 +179,7 @@ private:
     size_t out_head_ = 0, out_n_ = 0;
 
     std::atomic<uint32_t> n_received_{0}, n_format_{0}, n_range_{0}, n_state_{0}, n_queue_{0}, n_control_{0}, n_pings_{0},
-        n_pongs_{0};
+        n_pongs_{0}, n_out_{0};
 };
 
 }  // namespace LazyWorks::SF2Patch::net

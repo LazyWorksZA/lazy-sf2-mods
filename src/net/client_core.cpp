@@ -21,6 +21,40 @@ constexpr double kStopByeLimit = 0.25;     // on stop(), seconds a pending Bye m
 constexpr size_t kMaxPacket = sizeof(ClientEvent::data);
 constexpr size_t kMaxServiceLoop = 512;  // events handled per pass, so a flood cannot starve the queues
 
+constexpr double kHostByeGrace = 1.0;     // after the host's Bye, seconds before we disconnect if it has not
+constexpr double kReWelcomeGap = 1.0;     // a re-Welcome sooner than this after the last one is dropped
+
+/// <summary>
+/// A name lookup on its own short-lived thread, which getaddrinfo can block for many seconds: the network thread
+/// waits for it while still honouring stop(), and abandons it if it must. Shared by the two threads with a reference
+/// count; the lookup thread touches only this block, never the ClientCore.
+/// </summary>
+struct Lookup {
+    std::atomic<int> refs{2};
+    std::atomic<int> result{0};  // 0 pending, 1 resolved (ip set), 2 failed
+    uint32_t ip = 0;             // ENetAddress::host
+    char name[256] = {};
+    ClientLimits::ResolveFn fn = nullptr;
+};
+void release(Lookup* l) {
+    if (l->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete l;
+}
+bool enet_resolve(const char* name, uint32_t* ip) {
+    ENetAddress a{};
+    if (enet_address_set_host(&a, name) != 0) return false;
+    *ip = a.host;
+    return true;
+}
+void run_lookup(Lookup* l) {
+    const bool wsa = enet_initialize() == 0;  // its own Winsock reference: the network thread may deinitialize first
+    uint32_t ip = 0;
+    const bool ok = wsa && (l->fn ? l->fn : enet_resolve)(l->name, &ip);
+    if (wsa) enet_deinitialize();
+    l->ip = ip;
+    l->result.store(ok ? 1 : 2, std::memory_order_release);
+    release(l);
+}
+
 bool delivered(const ENetPeer* p) {
     return p->reliableDataInTransit == 0 && enet_list_empty(&p->sentReliableCommands) &&
            enet_list_empty(&p->outgoingSendReliableCommands) && enet_list_empty(&p->outgoingCommands);
@@ -47,6 +81,7 @@ double ClientCore::wall_now() {
 
 bool ClientCore::start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const ClientLimits& limits) {
     if (thread_.joinable() || !host || !*host || std::strlen(host) >= sizeof(host_) || port == 0) return false;
+    if (started_ && !finished_.load()) return false;  // a thread detached by stop(true) is still cleaning up
     std::snprintf(host_, sizeof(host_), "%s", host);
     port_ = port;
     hello_ = hello;
@@ -75,6 +110,7 @@ bool ClientCore::start(const char* host, uint16_t port, const HelloMsg& hello, L
         out_head_ = out_n_ = 0;
     }
     phase_.store(Phase::Connecting, std::memory_order_release);
+    started_ = true;
     try {
         thread_ = std::thread([this] { run(); });
     } catch (...) {
@@ -123,6 +159,9 @@ void ClientCore::set_end(ClientEnd why, Phase phase, double wall) {
         std::lock_guard<std::mutex> lock(clock_mx_);
         clock_valid_ = false;
     }
+    // The phase first: a game thread that sees the Disconnected event (through in_mx_) then also sees this phase.
+    // Not after stop(): a thread detached there must not overwrite the Idle that stop() set.
+    if (!stop_.load()) phase_.store(phase, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(in_mx_);
         end_ = ClientEvent{};
@@ -132,7 +171,6 @@ void ClientCore::set_end(ClientEnd why, Phase phase, double wall) {
         end_pending_ = true;
         in_count_.store(static_cast<uint32_t>(in_n_ + 1), std::memory_order_release);
     }
-    phase_.store(phase, std::memory_order_release);
 }
 
 size_t ClientCore::poll(ClientEvent* out, size_t max) {
@@ -166,13 +204,18 @@ bool ClientCore::send_state(const StateMsg& s) {
     uint8_t buf[sizeof(StateMsg)];
     const size_t n = encode(m, buf, sizeof(buf));
     if (n == 0) return false;
-    std::lock_guard<std::mutex> lock(out_mx_);
-    if (out_n_ >= kOutCap) return false;
-    OutMsg& o = out_[(out_head_ + out_n_) % kOutCap];
-    o.len = static_cast<uint8_t>(n);
-    std::memcpy(o.data, buf, n);
-    ++out_n_;
-    return true;
+    {
+        std::lock_guard<std::mutex> lock(out_mx_);
+        if (out_n_ < kOutCap) {
+            OutMsg& o = out_[(out_head_ + out_n_) % kOutCap];
+            o.len = static_cast<uint8_t>(n);
+            std::memcpy(o.data, buf, n);
+            ++out_n_;
+            return true;
+        }
+    }
+    n_out_.fetch_add(1, std::memory_order_relaxed);
+    return false;
 }
 
 void ClientCore::bye(uint8_t reason) {
@@ -207,6 +250,7 @@ ClientCounters ClientCore::counters() const {
     c.dropped_state = n_state_.load(std::memory_order_relaxed);
     c.dropped_queue = n_queue_.load(std::memory_order_relaxed);
     c.dropped_control = n_control_.load(std::memory_order_relaxed);
+    c.dropped_out = n_out_.load(std::memory_order_relaxed);
     c.pings = n_pings_.load(std::memory_order_relaxed);
     c.pongs = n_pongs_.load(std::memory_order_relaxed);
     return c;
@@ -235,10 +279,37 @@ void ClientCore::run() {
     if (enet_initialize() != 0) return fail_early("enet_initialize");
     say("net: client connecting to %s:%u", host_, static_cast<unsigned>(port_));
     ENetAddress addr{};
-    // A numeric address needs no lookup; a name is resolved here, on the network thread, never on the game thread.
-    if (enet_address_set_host_ip(&addr, host_) != 0 && enet_address_set_host(&addr, host_) != 0) {
-        enet_deinitialize();
-        return fail_early("the host name does not resolve");
+    // A numeric address needs no lookup. A name is looked up on a thread of its own, so that neither the game thread
+    // nor stop() ever waits for the resolver.
+    if (enet_address_set_host_ip(&addr, host_) != 0) {
+        Lookup* l = new (std::nothrow) Lookup;
+        if (!l) {
+            enet_deinitialize();
+            return fail_early("out of memory");
+        }
+        std::snprintf(l->name, sizeof(l->name), "%s", host_);
+        l->fn = limits_.resolve;
+        try {
+            std::thread([l] { run_lookup(l); }).detach();
+        } catch (...) {
+            l->result.store(2);
+            release(l);  // the thread's reference
+        }
+        const double until = wall_now() + limits_.connect_ms * 0.001;
+        while (l->result.load(std::memory_order_acquire) == 0 && !stop_.load() && wall_now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const int result = l->result.load(std::memory_order_acquire);
+        if (result == 1) addr.host = l->ip;
+        release(l);  // ours: an abandoned lookup frees the block when it returns
+        if (result != 1) {
+            enet_deinitialize();
+            if (stop_.load()) {
+                say("net: client stopped (during the name lookup)");
+                finished_.store(true);
+                return;
+            }
+            return fail_early(result == 2 ? "the host name does not resolve" : "the name lookup took too long");
+        }
     }
     addr.port = port_;
     ENetHost* host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
@@ -253,6 +324,8 @@ void ClientCore::run() {
 
     bool connected = false, welcomed = false, bye_seen = false, refused = false;
     bool bye_started = false, bye_sent = false, disconnect_sent = false;
+    bool peer_known[kSources] = {};  // PeerInfo seen and no PeerLeft since: duplicates are dropped
+    double bye_seen_at = 0, welcomed_at = 0;
     double t0 = wall_now();
     double connect_deadline = t0 + limits_.connect_ms * 0.001, welcome_deadline = 0;
     double last_rx = t0, next_ping = 0, bye_at = 0, delivered_at = 0, disconnect_at = 0, next_report = t0 + 1.0;
@@ -325,6 +398,7 @@ void ClientCore::run() {
                     m.client_id > kMaxClients || (welcomed && m.client_id != my_id))
                     return drop(n_format_);
                 if (!connected || bye_seen || bye_started || refused) return drop(n_state_);
+                if (welcomed && rx - welcomed_at < kReWelcomeGap) return drop(n_state_);
                 bool ok = finite(m.host_game_time) && within(m.spawn_heading, kMaxAngle);
                 for (int i = 0; i < 3; ++i)
                     ok = ok && within(m.spawn_pos[i], kMaxPosition) && within(m.spawn_vel[i], kMaxVelocity);
@@ -338,6 +412,8 @@ void ClientCore::run() {
                     next_ping = rx;
                     say("net: client welcomed as client %u, host time %.3f", static_cast<unsigned>(my_id), m.host_game_time);
                 }
+                welcomed_at = rx;
+                for (bool& k : peer_known) k = false;  // the host announces its peers again after a Welcome
                 publish_clock();
                 phase_.store(Phase::Welcomed, std::memory_order_release);
                 e.kind = ClientEvent::Welcome;
@@ -370,7 +446,8 @@ void ClientCore::run() {
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.id > kMaxClients ||
                     (welcomed && m.id == my_id))
                     return drop(n_format_);
-                if (!welcomed) return drop(n_state_);
+                if (!welcomed || bye_seen || peer_known[m.id]) return drop(n_state_);
+                peer_known[m.id] = true;
                 e.kind = ClientEvent::PeerInfo;
                 what = "PeerInfo";
                 break;
@@ -380,7 +457,8 @@ void ClientCore::run() {
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok || m.id == 0 || m.id > kMaxClients ||
                     (welcomed && m.id == my_id))
                     return drop(n_format_);
-                if (!welcomed) return drop(n_state_);
+                if (!welcomed || bye_seen || !peer_known[m.id]) return drop(n_state_);
+                peer_known[m.id] = false;
                 e.kind = ClientEvent::PeerLeft;
                 what = "PeerLeft";
                 break;
@@ -394,6 +472,7 @@ void ClientCore::run() {
                     return drop(n_format_);
                 if (!connected || bye_seen) return drop(n_state_);
                 bye_seen = true;
+                bye_seen_at = rx;
                 say("net: client got Bye from the host (reason %u)", static_cast<unsigned>(m.reason));
                 e.kind = ClientEvent::Bye;
                 what = "Bye";
@@ -427,7 +506,7 @@ void ClientCore::run() {
                 const size_t n = encode(hello_, out, sizeof(out));
                 if (n) send_now(out, n, kChannelReliable);
                 phase_.store(Phase::AwaitWelcome, std::memory_order_release);
-                say("net: client connected; Hello sent");
+                say("net: client connected; Hello sent (ENet packet throttle off for this connection)");
                 break;
             }
             case ENET_EVENT_TYPE_DISCONNECT: {
@@ -470,7 +549,10 @@ void ClientCore::run() {
                 }
             }
             if (n == 0) return;
-            if (!welcomed || bye_started || ended) continue;  // late States: discarded
+            if (!welcomed || bye_started || bye_seen || ended) {  // late States: discarded
+                n_out_.fetch_add(static_cast<uint32_t>(n), std::memory_order_relaxed);
+                continue;
+            }
             for (size_t i = 0; i < n; ++i) send_now(batch[i].data, batch[i].len, kChannelUnreliable);
         }
     };
@@ -478,7 +560,7 @@ void ClientCore::run() {
     while (!stop_.load(std::memory_order_relaxed) && !ended) {
         drain_out();
         ENetEvent ev;
-        int r = enet_host_service(host, &ev, 5);  // waits up to 5 ms for traffic, then returns
+        int r = enet_host_service(host, &ev, 2);  // waits up to 2 ms for traffic (a queued State waits at most that long)
         for (size_t guard = 0; r > 0 && guard < kMaxServiceLoop && !ended; ++guard) {
             handle_event(ev);
             if (ended) break;
@@ -492,7 +574,11 @@ void ClientCore::run() {
             end(ClientEnd::CannotConnect, Phase::Failed);
             break;
         }
-        if (connected && !welcomed && !bye_seen && !refused && !bye_started && now >= welcome_deadline) {
+        if (!connected && bye_reason_.load(std::memory_order_relaxed) >= 0) {  // bye() before the connection: just go
+            end(ClientEnd::Left, Phase::Closed);
+            break;
+        }
+        if (connected && !welcomed && !disconnect_sent && now >= welcome_deadline) {
             say("net: client: no Welcome %u ms after connecting", static_cast<unsigned>(limits_.welcome_ms));
             enet_peer_disconnect_now(peer, 0);
             end(ClientEnd::NoWelcome, Phase::Failed);
@@ -506,7 +592,13 @@ void ClientCore::run() {
             break;
         }
 
-        if (connected && !bye_started && bye_reason_.load(std::memory_order_relaxed) >= 0) send_bye();
+        if (bye_seen && !bye_started && !disconnect_sent && now - bye_seen_at >= kHostByeGrace) {
+            // The host said Bye but kept the connection: leave by ourselves.
+            enet_peer_disconnect(peer, 0);
+            disconnect_sent = true;
+            disconnect_at = now;
+        }
+        if (connected && !bye_started && !disconnect_sent && bye_reason_.load(std::memory_order_relaxed) >= 0) send_bye();
         if (bye_started && !disconnect_sent) {
             // ENet drops a peer's undelivered packets when the disconnect arrives, so disconnect only once the Bye is
             // acknowledged, plus a moment for the host's game side to pick it up.
@@ -523,7 +615,7 @@ void ClientCore::run() {
             break;
         }
 
-        if (welcomed && !bye_started && !disconnect_sent && now >= next_ping) {
+        if (welcomed && !bye_started && !bye_seen && !disconnect_sent && now >= next_ping) {
             PingMsg p{};
             p.client_send_time = now;
             uint8_t out[sizeof(PingMsg)];
@@ -545,12 +637,13 @@ void ClientCore::run() {
             const ClientCounters c = counters();
             if (c.dropped_format != reported.dropped_format || c.dropped_range != reported.dropped_range ||
                 c.dropped_state != reported.dropped_state || c.dropped_queue != reported.dropped_queue ||
-                c.dropped_control != reported.dropped_control) {
+                c.dropped_control != reported.dropped_control || c.dropped_out != reported.dropped_out) {
                 say("net: client dropped packets in the last second: %u malformed, %u out of range, %u wrong phase or rate, "
-                    "%u States refused (the game is not draining), %u control events lost (queue full)",
+                    "%u States refused (the game is not draining), %u control events lost (queue full), "
+                    "%u outgoing States (queue full, or after a Bye)",
                     c.dropped_format - reported.dropped_format, c.dropped_range - reported.dropped_range,
                     c.dropped_state - reported.dropped_state, c.dropped_queue - reported.dropped_queue,
-                    c.dropped_control - reported.dropped_control);
+                    c.dropped_control - reported.dropped_control, c.dropped_out - reported.dropped_out);
             }
             reported = c;
         }

@@ -4647,11 +4647,323 @@ void client_core_connect_tests() {
     }
 }
 
+std::atomic<int> g_slow_started{0}, g_slow_done{0};
+
+// A name lookup that takes 3 s, then answers 127.0.0.1 (stands in for a stalled DNS server).
+bool cc_slow_resolve(const char*, uint32_t* ip) {
+    ++g_slow_started;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    ENetAddress a{};
+    enet_address_set_host_ip(&a, "127.0.0.1");
+    *ip = a.host;
+    ++g_slow_done;
+    return true;
+}
+
+// Services the raw host for a while without the client's game side polling (a paused or loading game).
+void cc_idle_raw(RawHost& raw, double seconds) {
+    const double until = ClientCore::wall_now() + seconds;
+    while (ClientCore::wall_now() < until) {
+        raw.service();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// A raw host that has welcomed the client, with the Welcome already polled.
+bool cc_welcomed_raw(RawHost& raw, ClientCore& c, CcRx& rx) {
+    if (!raw.open()) return false;
+    c.start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+    cc_run(nullptr, &raw, c, rx, 5.0, [&] { return raw.got_hello; });
+    raw.welcome(50.0);
+    return cc_run(nullptr, &raw, c, rx, 3.0, [&] { return rx.has(ClientEvent::Welcome); });
+}
+
+void client_core_lookup_tests() {
+    std::printf("client core: slow name lookups\n");
+    ClientLimits slow;
+    slow.resolve = cc_slow_resolve;
+    for (int loader = 0; loader < 2; ++loader) {
+        auto c = std::make_unique<ClientCore>();
+        c->start("slow.example", 7777, cc_hello(0), cc_client_log, slow);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const double t0 = ClientCore::wall_now();
+        c->stop(loader != 0);
+        const double dt = ClientCore::wall_now() - t0;
+        char what[160];
+        std::snprintf(what, sizeof(what), "stop(%s) during a stalled lookup returns in %.0f ms", loader ? "in loader lock" : "join",
+                      dt * 1000.0);
+        expect(dt < 0.5 && c->phase() == ClientCore::Phase::Idle, what);
+    }
+    {
+        auto c = std::make_unique<ClientCore>();
+        ClientLimits lim = slow;
+        lim.connect_ms = 500;
+        const double t0 = ClientCore::wall_now();
+        c->start("slow.example", 7777, cc_hello(0), cc_client_log, lim);
+        CcRx rx;
+        const bool ok = cc_run(nullptr, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        const double dt = ClientCore::wall_now() - t0;
+        char what[160];
+        std::snprintf(what, sizeof(what), "a lookup over the connect limit: Disconnected (cannot connect) after %.2f s", dt);
+        expect(ok && dt >= 0.4 && dt < 2.5 && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::CannotConnect) &&
+                   c->phase() == ClientCore::Phase::Failed,
+               what);
+    }
+    // The abandoned lookups end by themselves and free their shared block (they never touch the ClientCore).
+    const double until = ClientCore::wall_now() + 8.0;
+    while (g_slow_done.load() < g_slow_started.load() && ClientCore::wall_now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    expect(g_slow_started.load() == 3 && g_slow_done.load() == 3, "the three abandoned lookups finished, after their ClientCores were gone");
+}
+
+void client_core_flood_tests() {
+    std::printf("client core: floods while the game does not poll\n");
+    {  // States from two sources, then a Bye with the connection kept: quotas hold, the Bye and the end still arrive.
+        RawHost raw;
+        auto c = std::make_unique<ClientCore>();
+        CcRx rx;
+        if (!cc_welcomed_raw(raw, *c, rx)) return expect(false, "welcomed by the raw host");
+        const int per = 150;
+        uint32_t seq = 0;
+        for (int i = 0; i < per; ++i) {
+            raw.send(cc_jet(0, ++seq, 50.0), kChannelUnreliable);
+            raw.send(cc_jet(2, ++seq, 50.0), kChannelUnreliable);
+            if (i % 25 == 24) raw.service();
+        }
+        ByeMsg b{};
+        b.reason = 2;
+        raw.send(b, kChannelReliable);
+        cc_idle_raw(raw, 3.0);  // the client leaves about 1 s after the Bye, since the host does not disconnect
+        rx.ev.clear();
+        ClientEvent one[1];
+        while (c->poll(one, 1) == 1) rx.ev.push_back(one[0]);  // one at a time: Disconnected must still come last
+        size_t n0 = 0, n2 = 0;
+        for (const ClientEvent& e : rx.ev) {
+            StateMsg s{};
+            if (e.kind == ClientEvent::State && decode(e.data, e.len, s) == Status::Ok) (s.client_id == 0 ? n0 : n2) += 1;
+        }
+        const ClientCounters cn = c->counters();
+        const int bi = rx.find(ClientEvent::Bye), di = rx.find(ClientEvent::Disconnected);
+        char what[220];
+        std::snprintf(what, sizeof(what), "per-source quota: %zu and %zu States queued (quota %zu), %u refused", n0, n2,
+                      ClientCore::kStateQuota, cn.dropped_queue);
+        expect(n0 == ClientCore::kStateQuota && n2 == ClientCore::kStateQuota && cn.dropped_queue >= 100 &&
+                   cn.dropped_queue + 2 * ClientCore::kStateQuota <= 2u * per,
+               what);
+        expect(bi >= 0 && cc_bye_reason(rx.ev[bi]) == 2 && di == static_cast<int>(rx.ev.size()) - 1 && rx.count(ClientEvent::Disconnected) == 1 &&
+                   rx.ev[di].reason == static_cast<uint8_t>(ClientEnd::HostClosed) && c->phase() == ClientCore::Phase::Closed,
+               "the Bye survives the flood; the client leaves after the host's Bye by itself; Disconnected last, once");
+        expect(!c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log), "start after an end without stop() is refused");
+    }
+    {  // Control events beyond the whole ring: the session ends (QueueFull), and everything queued is still delivered.
+        RawHost raw;
+        auto c = std::make_unique<ClientCore>();
+        CcRx rx;
+        if (!cc_welcomed_raw(raw, *c, rx)) return expect(false, "welcomed by the raw host");
+        PeerInfoMsg pi{};
+        pi.id = 2;
+        PeerLeftMsg pl{};
+        pl.id = 2;
+        for (int i = 0; i < 300; ++i) {
+            raw.send(pi, kChannelReliable);
+            raw.send(pl, kChannelReliable);
+            if (i % 20 == 19) raw.service();
+        }
+        const double until = ClientCore::wall_now() + 10.0;
+        while (c->phase() == ClientCore::Phase::Welcomed && ClientCore::wall_now() < until) cc_idle_raw(raw, 0.01);
+        rx.ev.clear();
+        ClientEvent b7[7];
+        size_t n;
+        while ((n = c->poll(b7, 7)) > 0) rx.ev.insert(rx.ev.end(), b7, b7 + n);
+        const ClientCounters cn = c->counters();
+        char what[200];
+        std::snprintf(what, sizeof(what), "a control flood ends the session: %zu events delivered (ring %zu + Disconnected), %u lost",
+                      rx.ev.size(), ClientCore::kInCap, cn.dropped_control);
+        expect(rx.ev.size() == ClientCore::kInCap + 1 && rx.ev.back().kind == ClientEvent::Disconnected &&
+                   rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::QueueFull) && cn.dropped_control >= 1 &&
+                   c->phase() == ClientCore::Phase::Closed,
+               what);
+    }
+    {  // Pongs over 100 a second are dropped.
+        RawHost raw;
+        auto c = std::make_unique<ClientCore>();
+        CcRx rx;
+        if (!cc_welcomed_raw(raw, *c, rx)) return expect(false, "welcomed by the raw host");
+        for (int i = 0; i < 300; ++i) {
+            PongMsg p{};
+            p.client_send_time = ClientCore::wall_now() - 0.001;
+            p.host_game_time = 50.0 + 0.001 * i;
+            raw.send(p, kChannelUnreliable);
+            if (i % 25 == 24) raw.service();
+        }
+        cc_idle_raw(raw, 0.5);
+        const ClientCounters cn = c->counters();
+        char what[160];
+        std::snprintf(what, sizeof(what), "Pong rate limit: %u of 300 accepted, %u dropped", cn.pongs, cn.dropped_state);
+        expect(cn.pongs >= 100 && cn.pongs <= 200 && cn.pongs + cn.dropped_state == 300, what);
+    }
+}
+
+void client_core_id_tests() {
+    std::printf("client core: ids, duplicates and re-Welcome\n");
+    RawHost raw;
+    auto c = std::make_unique<ClientCore>();
+    CcRx rx;
+    if (!cc_welcomed_raw(raw, *c, rx)) return expect(false, "welcomed by the raw host");
+    rx.ev.clear();
+    PeerInfoMsg pi{};
+    PeerLeftMsg pl{};
+    WelcomeMsg w{};
+    w.host_game_time = 51.0;
+    ByeMsg b{};
+    pi.id = 1;
+    raw.send(pi, kChannelReliable);  // our own id: malformed
+    pl.id = 0;
+    raw.send(pl, kChannelReliable);  // the host "leaving": malformed (it says Bye)
+    pl.id = 1;
+    raw.send(pl, kChannelReliable);  // our own id: malformed
+    pl.id = 3;
+    raw.send(pl, kChannelReliable);  // a peer never announced: wrong phase
+    pi.id = 3;
+    raw.send(pi, kChannelReliable);  // good
+    raw.send(pi, kChannelReliable);  // a duplicate: wrong phase
+    w.client_id = 2;
+    raw.send(w, kChannelReliable);  // a different id: malformed
+    w.client_id = 1;
+    raw.send(w, kChannelReliable);  // the same id, too soon: wrong phase
+    cc_run(nullptr, &raw, *c, rx, 1.2, [] { return false; });
+    raw.send(w, kChannelReliable);  // the same id, later: a re-Welcome
+    b.client_id = 3;
+    raw.send(b, kChannelReliable);  // addressed to another client: malformed
+    b.client_id = 1;
+    b.reason = 1;
+    raw.send(b, kChannelReliable);  // addressed to us: good
+    cc_run(nullptr, &raw, *c, rx, 4.0, [&] { return rx.has(ClientEvent::Disconnected); });
+    const ClientCounters cn = c->counters();
+    std::printf("    drops: %u malformed, %u wrong phase\n", cn.dropped_format, cn.dropped_state);
+    const bool kinds = rx.ev.size() == 4 && rx.ev[0].kind == ClientEvent::PeerInfo && rx.ev[1].kind == ClientEvent::Welcome &&
+                       rx.ev[2].kind == ClientEvent::Bye && rx.ev[3].kind == ClientEvent::Disconnected;
+    expect(kinds && cn.dropped_format == 5 && cn.dropped_state == 3,
+           "own-id, id-0, unknown and duplicate peer messages, a foreign Welcome or Bye are dropped; a later re-Welcome and our Bye pass");
+}
+
+void client_core_bye_stop_tests() {
+    std::printf("client core: bye() and stop() at awkward moments, restart\n");
+    {  // bye() before the connection exists: the client ends at once.
+        uint16_t dead_port = 0;
+        {
+            RawHost tmp;
+            if (tmp.open()) dead_port = tmp.port();
+        }
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log);
+        c->bye(0);
+        CcRx rx;
+        const double t0 = ClientCore::wall_now();
+        const bool ok = cc_run(nullptr, nullptr, *c, rx, 3.0, [&] { return rx.has(ClientEvent::Disconnected); });
+        expect(ok && ClientCore::wall_now() - t0 < 1.0 && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::Left) &&
+                   c->phase() == ClientCore::Phase::Closed,
+               "bye() while connecting: Disconnected (we left) at once");
+    }
+    {  // bye() before the Welcome: no Bye (no id yet), just the disconnect.
+        FakeHost h;
+        h.answer_hello = false;
+        if (!h.start()) return expect(false, "host core running");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        cc_run(&h, nullptr, *c, rx, 5.0, [&] { return c->phase() == ClientCore::Phase::AwaitWelcome && h.got_hello; });
+        c->bye(0);
+        const bool ok = cc_run(&h, nullptr, *c, rx, 4.0, [&] { return rx.has(ClientEvent::Disconnected) && h.got_disconnect; });
+        expect(ok && h.byes.empty() && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::Left),
+               "bye() before the Welcome: the host sees the disconnect and no Bye");
+        c->stop(false);
+        h.core.stop(false);
+    }
+    {  // A Bye asked for just before stop() still reaches the host; then the same core starts a new session.
+        FakeHost h;
+        if (!h.start()) return expect(false, "host core running");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+        c->bye(4);
+        c->stop(false);
+        cc_run(&h, nullptr, *c, rx, 3.0, [&] { return !h.byes.empty() && h.got_disconnect; });
+        expect(h.byes.size() == 1 && h.byes[0].reason == 4, "a Bye pending at stop() reaches the host");
+        rx.ev.clear();
+        h.got_disconnect = false;
+        expect(c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log), "restart after stop()");
+        const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+        expect(ok && rx.ev[0].kind == ClientEvent::Welcome && c->phase() == ClientCore::Phase::Welcomed && c->client_id() == 1,
+               "the second session is welcomed, with nothing left over from the first");
+        c->stop(false);
+        h.core.stop(false);
+    }
+}
+
+void client_core_concurrency_tests() {
+    std::printf("client core: a game thread of its own\n");
+    FakeHost h;
+    if (!h.start()) return expect(false, "host core running");
+    auto c = std::make_unique<ClientCore>();
+    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+    CcRx rx;
+    if (!cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); })) return expect(false, "welcomed");
+    h.send_jet = true;
+    std::atomic<bool> quit{false};
+    std::vector<uint32_t> seqs;
+    uint32_t sent = 0, refused = 0, clock_reads = 0;
+    std::thread game([&] {  // polls in small batches, reads the clock and sends at about 200 Hz, as a busy game would
+        double next = ClientCore::wall_now();
+        while (!quit.load()) {
+            ClientEvent ev[3];
+            const size_t n = c->poll(ev, 3);
+            for (size_t i = 0; i < n; ++i) {
+                StateMsg s{};
+                if (ev[i].kind == ClientEvent::State && decode(ev[i].data, ev[i].len, s) == Status::Ok) seqs.push_back(s.seq);
+            }
+            double t = 0;
+            const double wall = ClientCore::wall_now();
+            if (c->clock_now(wall, &t)) {
+                ++clock_reads;
+                if (wall >= next) {
+                    next = wall + 0.005;
+                    if (!c->send_state(cc_jet(1, ++sent, t))) ++refused;
+                }
+            }
+            std::this_thread::yield();
+        }
+    });
+    const double until = ClientCore::wall_now() + 2.0;
+    while (ClientCore::wall_now() < until) {
+        h.pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    quit = true;
+    game.join();
+    bool ordered = true;
+    for (size_t i = 1; i < seqs.size(); ++i) ordered = ordered && seqs[i] > seqs[i - 1];
+    bool host_ordered = true;
+    for (size_t i = 1; i < h.states.size(); ++i) host_ordered = host_ordered && h.states[i].seq > h.states[i - 1].seq;
+    char what[220];
+    std::snprintf(what, sizeof(what), "game thread: %zu host States in order, %u clock reads; host got %zu of %u sent in order (%u refused)",
+                  seqs.size(), clock_reads, h.states.size(), sent, refused);
+    expect(ordered && host_ordered && seqs.size() >= 10 && h.states.size() >= 50 && c->counters().dropped_queue == 0, what);
+    c->stop(false);
+    h.core.stop(false);
+}
+
 void client_core_tests() {
     client_core_connect_tests();
     client_core_session_tests();
     client_core_host_bye_tests();
     client_core_refusal_tests();
+    client_core_id_tests();
+    client_core_flood_tests();
+    client_core_bye_stop_tests();
+    client_core_lookup_tests();
+    client_core_concurrency_tests();
 }
 
 }  // namespace
