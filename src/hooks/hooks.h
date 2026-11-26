@@ -305,6 +305,16 @@ void client_on_modules_loaded();
 void client_shutdown();
 /// <summary>True from the client's Welcome until its session ends. Any thread.</summary>
 bool client_welcomed();
+/// <summary>
+/// Shared mission world tooling (developer tool; world_sync.cpp), inert unless the probe is on. LAZYSF2_WORLD_SAVE=1
+/// saves each Single Mission accepted on the New page to &lt;probe dir&gt;\world_NNN.msn (plus world_NNN.sidecar.txt:
+/// seed and start options) and runs from it; LAZYSF2_WORLD_LOAD=&lt;file&gt; runs that file instead, with the
+/// sidecar's seed and options forced. Both write world_NNN.manifest.txt after the mission's objects are created.
+/// LAZYSF2_WORLD_SEED=n fixes the seed for a save. world_install() reads the variables (DllMain, after
+/// install_probe_hooks()); world_on_modules_loaded() hooks SingleMissionScreen.dll and SingleMission.dll images.
+/// </summary>
+void world_install();
+void world_on_modules_loaded();
 /// <summary>True if the environment variable is set to a non-empty value (an empty one counts as unset).</summary>
 inline bool env_set(const wchar_t* name) {
     wchar_t b[2];

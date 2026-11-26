@@ -77,6 +77,7 @@ add_library(lazysf2 SHARED
     src/hooks/player_jump.cpp
     src/hooks/step_order.cpp
     src/hooks/remote_avatar.cpp
+    src/hooks/world_sync.cpp
     src/net/protocol.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp

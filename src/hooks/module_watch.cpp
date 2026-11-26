@@ -26,6 +26,7 @@ void notify() {
     weapon_track_on_modules_loaded();  // MissileObject.dll: same rule as the aircraft tracker
     tacview_recorder_on_modules_loaded();  // registers a step callback once; nothing runs unless tracking is on
     probe_on_modules_loaded();  // developer probe; does nothing unless LAZYSF2_PROBE_DIR is set
+    world_on_modules_loaded();  // developer world tooling; does nothing unless LAZYSF2_WORLD_SAVE/LOAD is set
 }
 
 HMODULE WINAPI h_LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {

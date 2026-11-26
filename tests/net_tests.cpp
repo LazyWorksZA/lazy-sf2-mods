@@ -31,6 +31,7 @@
 #include "hooks/weapon_class.h"
 #include "hooks/probe_snap_logic.h"
 #include "hooks/world_walk_logic.h"
+#include "hooks/world_files.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/focus_logic.h"
@@ -7227,6 +7228,84 @@ void pilot_twist_settings_tests() {
            "settings: the limits themselves are kept");
 }
 
+void world_files_tests() {
+    using namespace LazyWorks::SF2Patch::hooks;
+    std::printf("world files\n");
+    ManifestEntry a;
+    a.kind = ManifestEntry::Aircraft, a.a = 3, a.b = 1, a.type = "F-4E", a.side = 'F';
+    a.pos[0] = 1234.5, a.pos[1] = -0.4, a.pos[2] = -1234.5;
+    a.heading = -0.00001f, a.has_pose = true, a.has_id = true, a.id = 0x01000005;
+    expect(format_manifest_line(a) == "A 003.01 type=F-4E side=F pos=1235,0,-1235 hdg=0.0 id=0x01000005",
+           "world manifest: aircraft line, rounding, heading wrap");
+    a.heading = 3.14159265f / 2;
+    a.type.clear();
+    expect(format_manifest_line(a) == "A 003.01 type=? side=F pos=1235,0,-1235 hdg=90.0 id=0x01000005",
+           "world manifest: empty type, 90 degrees");
+    expect(heading_tenths(6.2831f) == 0 && heading_tenths(-3.14159265f / 2) == 2700 &&
+               heading_tenths(std::numeric_limits<float>::quiet_NaN()) == 0,
+           "world manifest: heading wraps to 0..359.9");
+    ManifestEntry g;
+    g.kind = ManifestEntry::Ground, g.a = 40, g.b = -1, g.state = ManifestEntry::Absent;
+    expect(format_manifest_line(g) == "G 040.-- absent", "world manifest: absent slot");
+    ManifestEntry p;
+    p.kind = ManifestEntry::Placed, p.a = 12, p.b = 7, p.state = ManifestEntry::Model;
+    p.pos[0] = 10, p.pos[1] = 20, p.has_pose = true;
+    expect(format_manifest_line(p) == "P 0012.0007 model pos=10,20,0", "world manifest: placed model, no heading");
+    ManifestEntry u;
+    u.kind = ManifestEntry::Aircraft, u.a = 0, u.b = 2, u.state = ManifestEntry::Unresolved, u.has_id = true;
+    u.id = 0xffffffffu;
+    expect(format_manifest_line(u) == "A 000.02 unresolved id=0xffffffff", "world manifest: unresolved member");
+    ManifestEntry bad = a;
+    bad.pos[1] = std::numeric_limits<double>::infinity();
+    expect(format_manifest_line(bad).find("pos=bad") != std::string::npos, "world manifest: non-finite position");
+    std::vector<ManifestEntry> v{p, g, a, u};
+    ManifestEntry a0 = a;
+    a0.b = 0;
+    v.push_back(a0);
+    const std::string text = format_manifest({"# head", "H seed=1"}, v);
+    expect(v[0].kind == 'A' && v[0].a == 0 && v[1].a == 3 && v[1].b == 0 && v[2].b == 1 && v[3].kind == 'G' &&
+               v[4].kind == 'P',
+           "world manifest: sorted by kind, slot, member");
+    expect(text.rfind("# head\nH seed=1\nA 000.02", 0) == 0 &&
+               text.find("C aircraft=2 aircraft_absent_slots=0 aircraft_unresolved=1 ground=0 ground_absent_slots=1 "
+                         "ground_unresolved=0 placed_objects=0 placed_models=1 placed_none=0 placed_unresolved=0\n") !=
+                   std::string::npos,
+           "world manifest: header first, counts last");
+
+    WorldSidecar s;
+    s.msn = "world_007.msn", s.seed = 4000000000u, s.has_seed = true, s.density = 3, s.mission_start = 0;
+    s.theatre = "GermanyCE", s.aircraft = "F-100D", s.mission_type = 1;
+    s.year = 1965, s.month = 7, s.day = 4, s.hour = 8, s.minute = 30, s.second = 5, s.weather = 2;
+    WorldSidecar r;
+    std::string err;
+    const bool ok = parse_sidecar(format_sidecar(s), &r, &err);
+    expect(ok && r.msn == s.msn && r.seed == s.seed && r.density == 3 && r.mission_start == 0 &&
+               r.theatre == "GermanyCE" && r.aircraft == "F-100D" && r.mission_type == 1 && r.year == 1965 &&
+               r.month == 7 && r.day == 4 && r.hour == 8 && r.minute == 30 && r.second == 5 && r.weather == 2,
+           "world sidecar: round trip");
+    expect(parse_sidecar("version=1\r\nseed=5\r\n\r\n# c\r\nfuture=x\r\n", &r, &err) && r.seed == 5 &&
+               r.density == -1,
+           "world sidecar: CRLF, comments, unknown keys, defaults");
+    expect(!parse_sidecar("version=1\n", &r, &err) && err == "no seed", "world sidecar: seed required");
+    expect(!parse_sidecar("seed=1\n", &r, &err), "world sidecar: version required");
+    expect(!parse_sidecar("version=2\nseed=1\n", &r, &err), "world sidecar: other version refused");
+    expect(!parse_sidecar("version=1\nseed=-1\n", &r, &err) && !parse_sidecar("version=1\nseed=x\n", &r, &err) &&
+               !parse_sidecar("version=1\nseed=4294967296\n", &r, &err),
+           "world sidecar: bad seeds refused");
+    expect(!parse_sidecar("version=1\nseed=1\ndensity=4\n", &r, &err) &&
+               !parse_sidecar("version=1\nseed=1\ndate=1965-07\n", &r, &err) &&
+               !parse_sidecar("version=1\nseed=1\njunk\n", &r, &err),
+           "world sidecar: bad values refused");
+
+    expect(world_file_number(L"world_012.msn") == 12 && world_file_number(L"WORLD_3.manifest.txt") == 3 &&
+               world_file_number(L"world_.msn") == -1 && world_file_number(L"world_12") == -1 &&
+               world_file_number(L"snap_012.msn") == -1,
+           "world files: numbering");
+    expect(world_companion_path(L"C:\\p\\world_001.MSN", L".sidecar.txt") == L"C:\\p\\world_001.sidecar.txt" &&
+               world_companion_path(L"C:\\p\\x", L".sidecar.txt") == L"C:\\p\\x.sidecar.txt",
+           "world files: companion path");
+}
+
 void probe_snapshot_tests() {
     using namespace LazyWorks::SF2Patch::hooks;
     bool a = true;
@@ -7319,6 +7398,7 @@ int main() {
     gameplay_row_splice_tests();
     pilot_twist_tests();
     probe_snapshot_tests();
+    world_files_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

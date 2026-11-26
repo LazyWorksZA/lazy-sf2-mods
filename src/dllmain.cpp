@@ -64,6 +64,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             LazyWorks::SF2Patch::hooks::install_probe_hooks();  // reads LAZYSF2_PROBE_DIR once; no hooks yet
             LazyWorks::SF2Patch::hooks::host_install();         // reads LAZYSF2_HOST once; no threads yet
             LazyWorks::SF2Patch::hooks::client_install();       // reads LAZYSF2_CONNECT once; no threads yet
+            LazyWorks::SF2Patch::hooks::world_install();        // reads LAZYSF2_WORLD_SAVE/LOAD once; no hooks yet
             ok &= LazyWorks::SF2Patch::hooks::install_module_watch();
             s = MH_EnableHook(MH_ALL_HOOKS);
             LOG("hooks installed: %s, enable: %s", ok ? "ok" : "PARTIAL", MH_StatusToString(s));
