@@ -34,6 +34,7 @@
 #include "hooks/world_files.h"
 #include "hooks/world_logic.h"
 #include "hooks/aircraft_side.h"
+#include "hooks/jet_layout.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/focus_logic.h"
 #include "hooks/remote_avatar_logic.h"
@@ -7884,6 +7885,58 @@ void probe_snapshot_tests() {
     expect(probe_auto_numbers_to_delete({}, 5).empty(), "probe snap: empty");
 }
 
+namespace LazyWorks::SF2Patch::hooks {
+std::string jet_census(const void* object, uintptr_t ao);
+}
+
+void jet_census_tests() {
+    std::printf("jet census\n");
+    namespace jet = LazyWorks::SF2Patch::hooks::jet;
+    std::vector<uint8_t> image(jet::kAoSize), obj(0x9a8), eng(0x90), gun(0x6c), comp(0xe0);
+    const uintptr_t ao = reinterpret_cast<uintptr_t>(image.data());
+    auto put32 = [](std::vector<uint8_t>& b, size_t off, uint32_t v) { std::memcpy(b.data() + off, &v, 4); };
+    auto put16 = [](std::vector<uint8_t>& b, size_t off, int16_t v) { std::memcpy(b.data() + off, &v, 2); };
+    auto putf = [](std::vector<uint8_t>& b, size_t off, float v) { std::memcpy(b.data() + off, &v, 4); };
+    auto addr = [](const void* p) { return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)); };
+    put32(image, 0x93494 + 4 * jet::kEngSetRunningSlot, static_cast<uint32_t>(ao + jet::kRvaEngSetRunning));
+    put32(eng, 0, static_cast<uint32_t>(ao + 0x93494));
+    put16(eng, jet::kEngRunning, 1);
+    putf(eng, jet::kEngThrottle, 0.75f);
+    put16(eng, jet::kEngAb, 2);
+    put32(gun, 0, static_cast<uint32_t>(ao + 0x94bec));
+    put16(gun, jet::kGunRounds, 640);
+    float inputs[16] = {};
+    inputs[3] = 0.75f;
+    uint32_t systems[2] = {addr(eng.data()), addr(gun.data())};
+    put32(comp, 0, static_cast<uint32_t>(ao + 0x8c374));
+    put32(comp, jet::kCompSystems + jet::kListCount, 2);
+    put32(comp, jet::kCompSystems + jet::kListArray, addr(systems));
+    uint32_t comps[1] = {addr(comp.data())};
+    put32(obj, jet::kInputs, addr(inputs));
+    put16(obj, jet::kEngineCount, 1);
+    put32(obj, jet::kEngines, systems[0]);
+    put32(obj, jet::kComponents + jet::kListCount, 1);
+    put32(obj, jet::kComponents + jet::kListArray, addr(comps));
+    for (size_t i = 0; i < jet::kLoadoutStations; ++i) put32(obj, jet::kLoadout + jet::kLoadoutEntry * i, 0xffffffffu);
+    put32(obj, jet::kLoadout + jet::kLoadoutEntry * 2, 17);
+    put16(obj, jet::kLoadout + jet::kLoadoutEntry * 2 + 8, 2);
+    put16(obj, jet::kLoadout + jet::kLoadoutEntry * 2 + 10, 1);
+    putf(obj, jet::kFuelTotal, 3200.0f);
+    put16(obj, jet::kFlareTotal, 30);
+    const std::string c = LazyWorks::SF2Patch::hooks::jet_census(obj.data(), ao);
+    auto has = [&](const char* t) { return c.find(t) != std::string::npos; };
+    expect(has("[3] 0.750") && has("[0] vt +0x93494 setter ok running 1 throttle 0.750 ab 2"),
+           "census: the input array and the engine (running, throttle, AB stage, slot 22 checked)");
+    expect(has("loadout: [2] id 17 x2 state 1\n") && has("fuel 3200.0 kg") && has("flares 30"),
+           "census: loaded stations only, fuel and countermeasure totals");
+    expect(has("comp 0") && has("systems 2") && has("(jet engine)") && has("(fixed gun)") && has("rounds 640"),
+           "census: components and their systems by class");
+    put32(obj, jet::kComponents + jet::kListArray, 0x20);  // a bad pointer: skipped, no fault
+    const std::string bad = LazyWorks::SF2Patch::hooks::jet_census(obj.data(), ao);
+    expect(bad.find("components 1:") != std::string::npos && bad.find("comp 0") == std::string::npos,
+           "census: an unreadable pointer is skipped");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -7958,6 +8011,7 @@ int main() {
     world_avatar_tests();
     world_snapshot_tests();
     pilot_twist_settings_tests();
+    jet_census_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

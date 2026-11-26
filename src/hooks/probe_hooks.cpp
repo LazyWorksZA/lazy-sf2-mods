@@ -18,12 +18,16 @@
 
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/jet_layout.h"
 #include "hooks/probe_snap_logic.h"
 #include "hooks/terrain_export.h"
 #include "hooks/world_walk.h"
 #include "log.h"
 
 namespace LazyWorks::SF2Patch::hooks {
+
+/// <summary>The systems census of one aircraft (jet_census.cpp); ao is AircraftObject's base, or 0.</summary>
+std::string jet_census(const void* object, uintptr_t ao);
 
 namespace {
 
@@ -95,6 +99,7 @@ struct Copy {
     ULONGLONG created = 0;
     std::vector<BYTE> object;
     std::vector<Block> blocks;
+    std::string census;  // manual snapshots only
 };
 
 // Under the table's shared lock we only copy memory (ReadProcessMemory, VirtualQuery) into heap buffers. The
@@ -105,9 +110,11 @@ struct CopyCtx {
     size_t limit = SIZE_MAX;  // most aircraft to copy: the player first, then the others in table order
     size_t omitted = 0;
     bool failed = false;      // an allocation failed: copies was cleared
+    bool census = false;      // add each aircraft's systems census
+    uintptr_t ao = 0;         // AircraftObject.dll's base, for vtable RVAs (0: printed as 0)
 };
 
-void copy_one(const LiveAircraft& e, std::vector<Copy>& copies) {
+void copy_one(const LiveAircraft& e, std::vector<Copy>& copies, const CopyCtx& ctx) {
     Copy c;
     c.object.resize(kObjectSize);
     if (!read_mem(e.obj, c.object.data(), kObjectSize)) return;
@@ -127,6 +134,7 @@ void copy_one(const LiveAircraft& e, std::vector<Copy>& copies) {
         if (!read_mem(target, b.bytes.data(), bytes)) continue;
         c.blocks.push_back(std::move(b));
     }
+    if (ctx.census) c.census = jet_census(e.obj, ctx.ao);
     copies.push_back(std::move(c));
 }
 
@@ -143,7 +151,7 @@ void copy_cb(const LiveAircraft* list, size_t n, void* vctx) {
                     continue;
                 }
                 ++taken;
-                copy_one(list[i], ctx.copies);
+                copy_one(list[i], ctx.copies, ctx);
             }
         }
     } catch (...) {
@@ -190,6 +198,12 @@ unsigned write_snapshot(unsigned number, const wchar_t* tag, const std::vector<C
         index += "\n";
     }
     if (world) put(g_dir + fmt(L"\\snap%03u%ls_world.txt", number, tag), world->data(), world->size());
+    std::string census;
+    for (const Copy& c : copies) {
+        if (c.census.empty()) continue;
+        census += to_utf8(c.name) + "\n" + c.census + "\n";
+    }
+    if (!census.empty()) put(g_dir + fmt(L"\\snap%03u%ls_census.txt", number, tag), census.data(), census.size());
 
     put(g_dir + fmt(L"\\snap%03u%ls.txt", number, tag), index.data(), index.size());
     const char* kind = *tag ? "auto " : "";
@@ -205,6 +219,10 @@ unsigned write_snapshot(unsigned number, const wchar_t* tag, const std::vector<C
 void take_snapshot() {
     const unsigned number = ++g_snapshot;
     CopyCtx ctx;
+    ctx.census = true;
+    HMODULE ao = GetModuleHandleW(L"AircraftObject.dll");
+    if (ao && is_expected_build(ao, jet::kAoStamp, jet::kAoSize, "AircraftObject.dll"))
+        ctx.ao = reinterpret_cast<uintptr_t>(ao);
     probe_with_aircraft(copy_cb, &ctx);
     if (ctx.failed) {
         LOG("probe: snapshot %u: out of memory; dropped", number);
