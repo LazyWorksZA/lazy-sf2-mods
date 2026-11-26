@@ -68,13 +68,11 @@ The release notes also list each file's SHA-256.
 
 **Now: multiplayer** (the [network brief](docs/SF2%20Network%20Layer%20%E2%80%94%20Claude%20Code%20Brief.md))
 
-1. ~~Recon~~
-2. ~~Puppet spike~~: drive one AI aircraft from a recorded path.
-3. ~~Synthetic client and recording~~: host mode, a bot client, stream recording, ACMI export (developer-only).
-4. **Two real players** (next): replicated player jets, a shared clock, smoothing; the game keeps running (and optionally keeps its sound) without focus; the cursor stays on the game screen in Fullscreen.
-5. Weapons and damage.
-6. Sessions: handshake, content hashing, our own multiplayer screens (including a Multiplayer entry on the main menu), master server, encrypted and authenticated traffic (key exchange at connect, sealed packets), and bandwidth savings: profile real session traffic first, then choose (likely delta encoding against the last acknowledged state, plus quantisation or packet compression). Spawns use a theatre's dogfight file when it has one, otherwise a runway or air start.
-7. Public multiplayer release: NAT traversal with a relay that only ever sees encrypted traffic.
+Multiplayer comes in this order:
+
+1. **Co-op single missions** (in progress). Two players are flying together in development builds. Next: both games running the same mission world, then weapons and damage, then sessions with our own multiplayer screens (encrypted, compressed traffic), then a public release.
+2. Co-op campaigns.
+3. PvP dogfights.
 
 **Quality of life** (the [QoL brief](docs/SF2%20Quality-of-Life%20Follow-up%20%E2%80%94%20Claude%20Code%20Brief.md); each item ships on its own)
 
