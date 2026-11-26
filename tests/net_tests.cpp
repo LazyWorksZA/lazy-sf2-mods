@@ -2668,6 +2668,35 @@ void tacview_tests() {
         expect(out.find("1000007,LockedTarget=10002,LockedTargetMode=1\n") != std::string::npos,
                "tacview locks: a missile's target is written on the weapon");
     }
+    {  // the target leaves while the locker still names it; a frame of other series keeps the lock
+        TacviewCore core{TacviewCoreConfig{}};
+        auto ai = [](double t, uint64_t target) {
+            TacviewRec r = make_rec(2, false, AircraftSide::Enemy, "E", t, 0, 3000, 1000, 0, 0, 0);
+            r.lock_mode = target ? 1 : 0;
+            r.lock_seq = static_cast<uint32_t>(target);
+            return r;
+        };
+        std::string o1;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.0, 0, 0, 1000, 0, 0, 0));
+        core.add(make_rec(3, false, AircraftSide::Enemy, "E2", 1.0, 0, 5000, 1000, 0, 0, 0));
+        core.add(ai(1.0, 3));
+        core.end_frame(1.0, o1);
+        expect(o1.find("10002,LockedTarget=10003,LockedTargetMode=1\n") != std::string::npos, "tacview locks: lock written");
+        std::string o2;  // a weapons-only frame: aircraft not sampled
+        core.end_frame(1.05, o2, TacviewRec::kSeriesWeapon);
+        expect(o2.find("LockedTarget") == std::string::npos, "tacview locks: a frame of other series keeps the lock");
+        std::string o3;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.1, 0, 0, 1000, 0, 0, 0));
+        core.add(ai(1.1, 3));
+        core.end_frame(1.1, o3, TacviewRec::kSeriesAircraft);
+        expect(o3.find("-10003\n") != std::string::npos && o3.find("10002,LockedTargetMode=0,LockedTarget=\n") != std::string::npos,
+               "tacview locks: the target removed while still named writes a clear");
+        std::string o4;
+        core.add(make_rec(1, true, AircraftSide::Friendly, "P", 1.2, 0, 0, 1000, 0, 0, 0));
+        core.add(ai(1.2, 3));
+        core.end_frame(1.2, o4, TacviewRec::kSeriesAircraft);
+        expect(o4.find("LockedTarget") == std::string::npos, "tacview locks: the clear is written once");
+    }
 }
 
 // The Gameplay row splice, on a miniature of the stock OptionsScreen.ini shape.

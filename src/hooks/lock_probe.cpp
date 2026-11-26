@@ -24,7 +24,7 @@ constexpr DWORD kAircraftTimestamp = 0x51d220bd, kAircraftImageSize = 0xc2000;
 constexpr DWORD kAvionicsServiceRva = 0xac3cc;  // AircraftObject.dll global: the player's AVN service (or null)
 constexpr DWORD kRadarSetStateRva = 0x333b0;    // radar block: __thiscall(state)
 // Aircraft object (network-recon §4.1).
-constexpr size_t kOffId = 0x08, kOffPos = 0x38, kOffVel = 0x50, kOffMatrix = 0xdc, kOffAngles = 0x100,
+constexpr size_t kOffActive = 0x04, kOffId = 0x08, kOffPos = 0x38, kOffVel = 0x50, kOffMatrix = 0xdc, kOffAngles = 0x100,
                  kOffHeading2 = 0x150, kOffWarnings = 0x5f4;
 // Radar block and the detect interface (recon-notes §27).
 constexpr size_t kOffRadar = 0x970, kOffDetect = 0x24;
@@ -141,6 +141,18 @@ void avn_module(void* avn, wchar_t* out, DWORD n) {
         GetModuleFileNameW(m, out, n);
 }
 
+// The position of a still active aircraft (object +0x04 non-zero); false when finished or unreadable.
+bool read_pos_if_active(const void* obj, double pos[3]) {
+    __try {
+        const char* b = static_cast<const char*>(obj);
+        if (*reinterpret_cast<const volatile int*>(b + kOffActive) == 0) return false;
+        std::memcpy(pos, b + kOffPos, 3 * sizeof(double));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 struct Pick {
     const void* player = nullptr;
     void* best = nullptr;
@@ -159,11 +171,7 @@ void pick_cb(const LiveAircraft* list, size_t n, void* vctx) {
     for (size_t i = 0; i < n; ++i) {
         if (list[i].is_player || list[i].obj == p.player) continue;
         double pos[3];
-        __try {
-            std::memcpy(pos, static_cast<const char*>(list[i].obj) + kOffPos, sizeof(pos));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            continue;
-        }
+        if (!read_pos_if_active(list[i].obj, pos)) continue;  // finished (a wreck) or unreadable
         const double dx = pos[0] - p.ppos[0], dy = pos[1] - p.ppos[1], dz = pos[2] - p.ppos[2];
         const double d2 = dx * dx + dy * dy + dz * dz;
         const bool enemy = list[i].side == AircraftSide::Enemy;
