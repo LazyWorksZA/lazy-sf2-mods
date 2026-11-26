@@ -31,6 +31,7 @@ using namespace replay_math;
 using net::HostEvent;
 
 constexpr size_t kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffAngles = 0x100;
+constexpr double kShownEvery = 0.1;  // RemoteShown records per client, host seconds (and every Snap)
 
 // Bye reasons the host sends.
 enum ByeReason : uint8_t { kByeNone = 0, kByeBusy = 1, kByeNoAvatar = 2, kByeSessionEnded = 3, kByeAvatarLost = 4 };
@@ -75,6 +76,11 @@ struct Avatar {
     bool parked = false;
     bool retake_failed = false;  // logged once per park
     double last_state_t = 0;     // host time of the newest accepted State
+    double last_game_time = 0;   // that State's stamp
+    double next_shown = 0;       // host time of the next RemoteShown record
+    bool have_shown = false;
+    double shown_p[3] = {};
+    float shown_a[3] = {};
     double next_retake = 0;
     uint32_t flag_clears = 0;  // in the current one-second window
 };
@@ -103,6 +109,11 @@ void core_log(const char* line) { LOG("%s", line); }
 
 // Hands a record to the writer thread: a copy into a ring, no I/O. A no-op while no stream is open.
 void rec(net::StreamKind kind, double t, const void* payload, size_t len) { g_stream->record(kind, t, payload, len); }
+
+void rec_avatar_event(int slot, net::AvatarEventType ev, double t) {
+    const net::AvatarEventPayload p{static_cast<uint16_t>(slot + 1), static_cast<uint8_t>(ev)};
+    rec(net::StreamKind::AvatarEvent, t, &p, sizeof(p));
+}
 
 // The host player's own state, as a State with client_id 0 (the source id of the host's jet).
 net::StateMsg host_state(void* player, double now, uint32_t seq) {
@@ -296,10 +307,14 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
         g_tx_states = g_relayed = 0;
         g_peers->take_superseded();
         g_now = now;
-        // Theatre name: not read; the header field stays empty (see docs/stream-format.md).
+        char own_type[33] = {};
+        probe_with_aircraft(player_type_cb, own_type);
+        const net::SessionInfoPayload si =
+            net::make_session_info(net::SessionRole::Host, 0, g_callsign, own_type[0] ? own_type : "unknown");
         // open() does one CreateFileW and may wait in join_previous() for an earlier writer that is still flushing:
         // bounded (a drain of at most 1 MB), and only at the start of a session.
-        g_stream->open(probe_output_dir(), now, nullptr, core_log);
+        g_stream->open(probe_output_dir(), now, theatre_hash ? theatre.c_str() : nullptr, core_log,
+                       net::kStreamMaxFileBytes, L"stream", &si);
     }
     Avatar& a = g_av[slot];
     a = Avatar{};  // a fresh RemoteJet: the Welcome resets the receiver
@@ -366,6 +381,20 @@ void hold_kin(const Avatar& a, double now, Kin* out) {
     out->a[1] = a.spawn_heading;
 }
 
+// RemoteShown at kShownEvery, and at every Snap. t is the time the avatar was shown for.
+void record_shown(int slot, net::RemoteJet::Out out, double t) {
+    Avatar& a = g_av[slot];
+    if (!a.have_shown || !g_stream->is_open() || (t < a.next_shown && out != net::RemoteJet::Out::Snap)) return;
+    a.next_shown = t + kShownEvery;
+    net::RemoteShownPayload p{};
+    p.id = static_cast<uint16_t>(slot + 1);
+    std::memcpy(p.pos, a.shown_p, sizeof(p.pos));
+    std::memcpy(p.ang, a.shown_a, sizeof(p.ang));
+    p.age = static_cast<float>(t - a.last_game_time);
+    p.out = static_cast<uint8_t>(out);
+    rec(net::StreamKind::RemoteShown, t, &p, sizeof(p));
+}
+
 void avatar_step(int slot, double now) {
     Avatar& a = g_av[slot];
 
@@ -388,7 +417,9 @@ void avatar_step(int slot, double now) {
         a.parked = true;
         a.retake_failed = false;
         a.coasting = false;
+        a.have_shown = false;
         a.next_retake = 0;
+        rec_avatar_event(slot, net::AvatarEventType::Parked, now);
         return;
     }
 
@@ -405,7 +436,8 @@ void avatar_step(int slot, double now) {
             LOG("net: client %d \"%s\": no State for over %.0f s; the avatar coasts on its velocity, rates zeroed", slot + 1,
                 a.callsign, a.jet.params().coast_after);
         }
-        return;  // REMOTEOBJECT coasts it natively
+        record_shown(slot, out, t);  // the last shown position: REMOTEOBJECT coasts it natively
+        return;
     }
     if (out == net::RemoteJet::Out::None) {  // nothing received yet: coast from the spawn with the player's velocity
         hold_kin(a, now, &k);
@@ -423,6 +455,14 @@ void avatar_step(int slot, double now) {
         }
     }
     avatar_write(a.h, k);
+    if (out != net::RemoteJet::Out::None) {
+        for (int i = 0; i < 3; ++i) {
+            a.shown_p[i] = k.p[i];
+            a.shown_a[i] = static_cast<float>(k.a[i]);
+        }
+        a.have_shown = true;
+        record_shown(slot, out, t);
+    }
 }
 
 // A parked slot's States resumed: take an aircraft again (same picker), placed on the State, and start the receiver
@@ -445,6 +485,8 @@ bool retake(int slot, const net::StateMsg& s, double now) {
     a.parked = false;
     a.jet.reset();
     a.shown_state = false;
+    a.have_shown = false;
+    rec_avatar_event(slot, net::AvatarEventType::Taken, now);
     LOG("net: client %d \"%s\": States again; avatar %p %s", slot + 1, a.callsign, got.obj, why);
     return true;
 }
@@ -474,6 +516,7 @@ void handle_message(const HostEvent& e, void* player, double now) {
                 if (g_av[slot].jet.push(s, now)) {
                     g_av[slot].got_state = true;
                     g_av[slot].last_state_t = now;
+                    g_av[slot].last_game_time = s.game_time;
                 }
             }
             break;

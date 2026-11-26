@@ -21,7 +21,7 @@ void StreamWriter::join_previous() {
 }
 
 bool StreamWriter::open(const wchar_t* dir, double start_game_time, const char* theatre, LogFn log,
-                        uint64_t max_bytes, const wchar_t* prefix) {
+                        uint64_t max_bytes, const wchar_t* prefix, const SessionInfoPayload* session) {
     if (!dir || !log || !prefix || !*prefix || wcslen(prefix) > kMaxPrefix) return false;
     join_previous();
     if (open_.load()) return false;  // already open
@@ -70,6 +70,7 @@ bool StreamWriter::open(const wchar_t* dir, double start_game_time, const char* 
         return false;
     }
     open_.store(true, std::memory_order_release);
+    if (session) record(StreamKind::SessionInfo, start_game_time, session, sizeof(*session));
     std::snprintf(line, sizeof(line), "stream: recording to %ls (cap %llu bytes)", name_,
                   static_cast<unsigned long long>(max_bytes_));
     log_(line);

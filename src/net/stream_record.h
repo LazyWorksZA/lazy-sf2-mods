@@ -36,10 +36,12 @@ public:
     /// Creates dir\PREFIX_NNN.lzst (CREATE_NEW, the first free NNN from 001; prefix "stream" on the host, "botserve"
     /// for the bot's --serve), writes the header and starts the writer thread. theatre may be null. False (and one log
     /// line) if no file could be created. max_bytes is the size cap for the whole file (kStreamMaxFileBytes in the
-    /// game; the tests use a small one).
+    /// game; the tests use a small one). A session (may be null) is recorded as the first record, at start_game_time.
+    /// Call it on the producer thread.
     /// </summary>
     bool open(const wchar_t* dir, double start_game_time, const char* theatre, LogFn log,
-              uint64_t max_bytes = kStreamMaxFileBytes, const wchar_t* prefix = L"stream");
+              uint64_t max_bytes = kStreamMaxFileBytes, const wchar_t* prefix = L"stream",
+              const SessionInfoPayload* session = nullptr);
     static constexpr size_t kMaxPrefix = 16;  // characters
     bool is_open() const { return open_.load(std::memory_order_acquire); }
 

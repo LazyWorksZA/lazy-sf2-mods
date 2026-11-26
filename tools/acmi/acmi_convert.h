@@ -1,4 +1,5 @@
-// Converts a recorded host stream (*.lzst, docs/stream-format.md) to Tacview ACMI 2.2 text.
+// Converts a recorded stream (*.lzst of the host, a client or the bot's --serve; docs/stream-format.md) to Tacview
+// ACMI 2.2 text.
 // Developer tool, not shipped. No Windows or game dependencies. Spec: Tacview "ACMI telemetry file format".
 #pragma once
 
@@ -14,6 +15,7 @@ struct Options {
     double ref_lat = 0;    // degrees; the origin of the local flat mapping
     double ref_lon = 0;    // degrees
     double max_rate = 30;  // samples per second per object at most; 0 or less means no limit
+    bool ghosts = false;   // also each RemoteShown track, as its own object ("<callsign> as seen by <viewer>")
 };
 
 struct Info {
@@ -24,6 +26,7 @@ struct Info {
     size_t samples_out = 0;   // transform lines written
     size_t skipped_bad = 0;   // samples dropped (non-finite values, or a client that never joined)
     size_t objects = 0;       // objects created
+    size_t ghost_samples = 0; // transform lines written for RemoteShown tracks (with Options::ghosts)
 };
 
 /// <summary>

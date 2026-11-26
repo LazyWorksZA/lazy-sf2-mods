@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "acmi/acmi_format.h"
@@ -16,6 +17,8 @@ using net::StreamKind;
 
 constexpr uint32_t kHostId = 1;
 constexpr uint32_t kClientIdBase = 0x100;
+constexpr uint32_t kGhostIdBase = 0x200;
+constexpr uint8_t kOutCoast = 4;  // RemoteJet::Out::Coast
 
 enum class EvType { Join, Sample, Leave };
 
@@ -23,8 +26,10 @@ struct Event {
     double t = 0;
     EvType type = EvType::Sample;
     uint32_t id = 0;     // ACMI object id
-    std::string name;    // Join: aircraft
-    std::string pilot;   // Join: callsign
+    bool lazy = false;   // Sample: creates its object if none is shown (the host, the recorder's own jet, ghosts)
+    bool ghost = false;
+    std::string name;    // Join, or a lazy Sample: aircraft (ghosts: "<callsign> as seen by <viewer>")
+    std::string pilot;   // Join, or a lazy Sample: callsign
     double pos[3] = {};  // Sample
     float ang[3] = {};   // Sample: pitch, heading, roll (radians)
 };
@@ -47,12 +52,19 @@ struct Presence {
     double join_t = 0;
 };
 
+struct Names {
+    std::string callsign, aircraft;
+};
+
 struct Obj {
     bool alive = false;
     bool described = false;
+    bool ghost = false;
     double last_t = 0;
     std::string name, pilot;
 };
+
+uint32_t object_id(uint16_t src) { return src == 0 ? kHostId : kClientIdBase + src; }
 
 }  // namespace
 
@@ -72,9 +84,17 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
     }
     info.header_ok = true;
 
-    // Pass 1, in file order (which is host order): decode, track which clients are present, build events.
+    // Pass 1, in file order (the recorder's game-thread order): decode, track which jets are present, build events.
     std::vector<Event> ev;
-    std::vector<Presence> clients(65536);  // indexed by the 16-bit client id
+    std::vector<Presence> clients(65536);  // indexed by the 16-bit source id
+    std::vector<Names> names(65536);
+    bool have_session = false;
+    net::SessionInfoPayload session{};
+    auto is_role = [&](net::SessionRole r) { return have_session && session.role == static_cast<uint8_t>(r); };
+    auto viewer = [&]() -> std::string {
+        if (have_session && session.callsign[0]) return fixed_str(session.callsign, sizeof(session.callsign));
+        return is_role(net::SessionRole::Client) ? "the client" : "the host";
+    };
 
     net::StreamRecord rec;
     net::StreamStatus st;
@@ -86,14 +106,17 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
         }
         switch (rec.kind) {
             case static_cast<uint8_t>(StreamKind::HostState):
-            case static_cast<uint8_t>(StreamKind::StateReceived): {
+            case static_cast<uint8_t>(StreamKind::StateReceived):
+            case static_cast<uint8_t>(StreamKind::LocalState): {
                 net::StateMsg s{};
                 if (net::decode(rec.payload, rec.payload_len, s) != net::Status::Ok) {
                     ++info.skipped_bad;
                     break;
                 }
                 const bool host = rec.kind == static_cast<uint8_t>(StreamKind::HostState);
-                double t = host ? rec.time : s.game_time;  // client samples carry the host-clock stamp
+                const bool local = rec.kind == static_cast<uint8_t>(StreamKind::LocalState);
+                const uint16_t src = host ? 0 : s.client_id;
+                double t = host ? rec.time : s.game_time;  // other samples carry the sender's host-clock stamp
                 const double ang[3] = {s.ang[0], s.ang[1], s.ang[2]};
                 if (!std::isfinite(t) || !finite_all(s.pos, 3) || !finite_all(ang, 3)) {
                     ++info.skipped_bad;
@@ -101,15 +124,17 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
                 }
                 Event e;
                 e.type = EvType::Sample;
-                if (host) {
-                    e.id = kHostId;
+                e.id = object_id(src);
+                if (src == 0 || local) {  // the host's jet, or the recorder's own: no join record
+                    e.lazy = true;
+                    e.name = names[src].aircraft;
+                    e.pilot = names[src].callsign.empty() && src == 0 ? "Host" : names[src].callsign;
                 } else {
-                    const Presence& c = clients[s.client_id];
+                    const Presence& c = clients[src];
                     if (!c.active) {  // never joined in this file
                         ++info.skipped_bad;
                         break;
                     }
-                    e.id = kClientIdBase + s.client_id;
                     t = std::max(t, c.join_t);  // a sample cannot come before its object exists
                 }
                 e.t = t;
@@ -119,17 +144,44 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
                 ++info.samples_in;
                 break;
             }
-            case static_cast<uint8_t>(StreamKind::ClientJoined): {
-                net::ClientJoinedPayload p;
-                if (rec.payload_len != sizeof(p)) break;
-                std::memcpy(&p, rec.payload, sizeof(p));
-                clients[p.client_id] = {true, rec.time};
+            case static_cast<uint8_t>(StreamKind::SessionInfo): {
+                if (rec.payload_len != sizeof(session) || have_session) break;
+                std::memcpy(&session, rec.payload, sizeof(session));
+                have_session = true;
+                names[session.own_id] = {fixed_str(session.callsign, sizeof(session.callsign)),
+                                         fixed_str(session.aircraft, sizeof(session.aircraft))};
+                break;
+            }
+            case static_cast<uint8_t>(StreamKind::ClientJoined):
+            case static_cast<uint8_t>(StreamKind::PeerInfoReceived): {
+                uint16_t id = 0;
+                Names n;
+                if (rec.kind == static_cast<uint8_t>(StreamKind::ClientJoined)) {
+                    net::ClientJoinedPayload p;
+                    if (rec.payload_len != sizeof(p)) break;
+                    std::memcpy(&p, rec.payload, sizeof(p));
+                    id = p.client_id;
+                    n = {fixed_str(p.callsign, sizeof(p.callsign)), fixed_str(p.aircraft, sizeof(p.aircraft))};
+                } else {
+                    net::PeerInfoMsg p{};
+                    if (net::decode(rec.payload, rec.payload_len, p) != net::Status::Ok) break;
+                    id = p.id;
+                    n = {fixed_str(p.callsign, sizeof(p.callsign)), fixed_str(p.aircraft, sizeof(p.aircraft))};
+                    // A re-announcement (after a re-Welcome) of a jet already shown is not a new aircraft.
+                    if (id != 0 && clients[id].active) {
+                        names[id] = n;
+                        break;
+                    }
+                }
+                names[id] = n;
+                if (id == 0) break;  // the host's jet has no join
+                clients[id] = {true, rec.time};
                 Event e;
                 e.t = rec.time;
                 e.type = EvType::Join;
-                e.id = kClientIdBase + p.client_id;
-                e.pilot = fixed_str(p.callsign, sizeof(p.callsign));
-                e.name = fixed_str(p.aircraft, sizeof(p.aircraft));
+                e.id = object_id(id);
+                e.pilot = n.callsign;
+                e.name = n.aircraft;
                 ev.push_back(std::move(e));
                 break;
             }
@@ -137,26 +189,58 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
                 net::ClientLeftPayload p;
                 if (rec.payload_len != sizeof(p)) break;
                 std::memcpy(&p, rec.payload, sizeof(p));
+                if (p.client_id == 0) break;
                 clients[p.client_id].active = false;
                 Event e;
                 e.t = rec.time;
                 e.type = EvType::Leave;
-                e.id = kClientIdBase + p.client_id;
+                e.id = object_id(p.client_id);
+                ev.push_back(e);
+                if (opt.ghosts) {
+                    e.id = kGhostIdBase + p.client_id;
+                    ev.push_back(e);
+                }
+                break;
+            }
+            case static_cast<uint8_t>(StreamKind::RemoteShown): {
+                if (!opt.ghosts) break;
+                net::RemoteShownPayload p;
+                if (rec.payload_len != sizeof(p)) break;
+                std::memcpy(&p, rec.payload, sizeof(p));
+                if (p.out == kOutCoast) break;  // the last shown place, held: the aircraft itself coasts on
+                const double ang[3] = {p.ang[0], p.ang[1], p.ang[2]};
+                if (!finite_all(p.pos, 3) || !finite_all(ang, 3)) {
+                    ++info.skipped_bad;
+                    break;
+                }
+                Event e;
+                e.t = rec.time;
+                e.type = EvType::Sample;
+                e.id = kGhostIdBase + p.id;
+                e.lazy = e.ghost = true;
+                const std::string& cs = names[p.id].callsign;
+                e.name = (cs.empty() ? (p.id == 0 ? std::string("Host") : "id " + std::to_string(p.id)) : cs) +
+                         " as seen by " + viewer();
+                std::memcpy(e.pos, p.pos, sizeof(e.pos));
+                std::memcpy(e.ang, p.ang, sizeof(e.ang));
                 ev.push_back(std::move(e));
                 break;
             }
             default:
-                break;  // Welcome, Bye and unknown kinds carry nothing we plot
+                break;  // Welcome, Bye, avatar events and unknown kinds carry nothing we plot
         }
     }
     info.end = st;
 
-    // Output frames must not go back in time. The two State kinds interleave out of order, so sort. The sort is
-    // stable: a Join stays before the samples clamped to its time, and a Leave after the samples before it.
+    // Output frames must not go back in time. The kinds interleave out of order, so sort. The sort is stable: a Join
+    // stays before the samples clamped to its time, and a Leave after the samples before it.
     std::stable_sort(ev.begin(), ev.end(), [](const Event& a, const Event& b) { return a.t < b.t; });
 
     const double t0 = ev.empty() ? 0.0 : ev.front().t;
-    append_header(out, "2000-01-01T00:00:00Z", opt.ref_lon, opt.ref_lat, "Strike Fighters 2 host stream");
+    const char* title = is_role(net::SessionRole::Client)     ? "Strike Fighters 2 client stream"
+                        : is_role(net::SessionRole::BotServe) ? "Strike Fighters 2 bot serve stream"
+                                                              : "Strike Fighters 2 host stream";
+    append_header(out, "2000-01-01T00:00:00Z", opt.ref_lon, opt.ref_lat, title);
 
     const Mapping map = make_mapping(opt.ref_lat);
     const double min_dt = opt.max_rate > 0 ? 1.0 / opt.max_rate : 0.0;
@@ -195,9 +279,12 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
             frame(e.t);
             append_removal(out, e.id);
         } else {
-            if (e.id == kHostId && !o.alive && !o.described) {
+            if (e.lazy && !o.alive) {
+                o = Obj{};
                 o.alive = true;
-                o.pilot = "Host";
+                o.ghost = e.ghost;
+                o.name = e.name;
+                o.pilot = e.pilot;
                 ++info.objects;
             }
             if (!o.alive) continue;
@@ -217,12 +304,13 @@ bool convert_stream(const uint8_t* data, size_t size, const Options& opt_in, std
                 pr.name = o.name.c_str();
                 pr.pilot = o.pilot.c_str();
                 pr.type = "Air+FixedWing";
-                pr.coalition = host ? "Allies" : "Enemies";
-                pr.color = host ? "Blue" : "Red";
+                pr.coalition = o.ghost ? "Neutrals" : host ? "Allies" : "Enemies";
+                pr.color = o.ghost ? "Green" : host ? "Blue" : "Red";
                 append_props(out, pr);
             }
             out += '\n';
             ++info.samples_out;
+            if (o.ghost) ++info.ghost_samples;
         }
     }
     return true;

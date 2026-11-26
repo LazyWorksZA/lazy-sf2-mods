@@ -41,7 +41,7 @@ constexpr size_t kOffPos = 0x38, kOffVel = 0x50, kOffRates = 0xd0, kOffMatrix = 
 constexpr uint8_t kByeSessionEnded = 3;
 constexpr int kSources = ClientCore::kSources;  // remote ids: the host (0) and clients 1..kMaxClients
 constexpr double kParkAfter = 10.0;   // wall seconds without a State before a remote's aircraft goes back to the AI
-constexpr double kShownEvery = 0.1;   // RemoteShown records per remote, host seconds
+constexpr double kShownEvery = 0.1;   // RemoteShown records per remote, host seconds (and every Snap)
 constexpr double kTakeEvery = 1.0;    // host seconds between tries to take an aircraft for a remote
 
 // Set once by client_install(), then read-only.
@@ -150,6 +150,11 @@ void rec_msg(net::StreamKind kind, double t, const M& m) {
     if (n) rec(kind, t, buf, n);
 }
 
+void rec_avatar_event(int id, net::AvatarEventType ev) {
+    const net::AvatarEventPayload p{static_cast<uint16_t>(id), static_cast<uint8_t>(ev)};
+    rec(net::StreamKind::AvatarEvent, g_now, &p, sizeof(p));
+}
+
 double deg(double r) { return r * 180.0 / kPi; }
 
 void handles(AvatarHandle out[kSources]) {
@@ -213,8 +218,12 @@ void release_dead() {
     bool live[kSources];
     check_live(live);
     g_checked_gen = gen;
-    for (int i = 0; i < kSources; ++i)
-        if (g_rm[i].h.obj && !live[i]) release_remote(i, "aircraft destroyed; another is taken at the next State", false, false);
+    for (int i = 0; i < kSources; ++i) {
+        if (g_rm[i].h.obj && !live[i]) {
+            release_remote(i, "aircraft destroyed; another is taken at the next State", false, false);
+            rec_avatar_event(i, net::AvatarEventType::Lost);
+        }
+    }
 }
 
 void reset_jets() {
@@ -343,9 +352,11 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
         g_checked_gen = g_aircraft_generation.load(std::memory_order_acquire);
         g_welcomed.store(true, std::memory_order_relaxed);
         sim_set_run_active(true);
+        const net::SessionInfoPayload si = net::make_session_info(net::SessionRole::Client, g_id, g_callsign,
+                                                                  g_own_type[0] ? g_own_type : "unknown");
         // One CreateFileW, and a bounded wait for an earlier writer that is still flushing: only at a session start.
         g_stream->open(probe_output_dir(), w.host_game_time, g_theatre[0] ? g_theatre : nullptr, core_log,
-                       net::kStreamMaxFileBytes, L"client");
+                       net::kStreamMaxFileBytes, L"client", &si);
         LOG("net: client %u welcomed: host time %.3f, theatre %s", static_cast<unsigned>(g_id), w.host_game_time,
             w.theatre_hash ? (w.theatre_hash == g_theatre_hash ? g_theatre : "another hash") : "unknown to the host");
     } else {
@@ -364,6 +375,7 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
 void handle_peer_info(const ClientEvent& e) {
     net::PeerInfoMsg m;
     if (net::decode(e.data, e.len, m) != net::Status::Ok || m.id >= kSources) return;
+    rec(net::StreamKind::PeerInfoReceived, g_now, e.data, e.len);
     Remote& r = g_rm[m.id];
     char callsign[17], aircraft[33];
     avatar_logic::to_ascii(callsign, sizeof(callsign), m.callsign);
@@ -387,6 +399,8 @@ void handle_peer_left(const ClientEvent& e) {
     if (net::decode(e.data, e.len, m) != net::Status::Ok || m.id >= kSources || !g_rm[m.id].known) return;
     LOG("net: peer %u \"%s\" left (reason %u)", static_cast<unsigned>(m.id), g_rm[m.id].callsign,
         static_cast<unsigned>(m.reason));
+    const net::ClientLeftPayload lp{m.id, m.reason};  // PeerLeft reasons are LeaveReason codes
+    rec(net::StreamKind::ClientLeft, g_now, &lp, sizeof(lp));
     bool live[kSources] = {};
     if (g_rm[m.id].h.obj) check_live(live);
     release_remote(m.id, "the peer left", live[m.id], true);
@@ -415,6 +429,7 @@ bool take(int id, const net::StateMsg& s) {
     r.shown_state = false;
     r.have_shown = false;
     r.coasting = false;
+    rec_avatar_event(id, net::AvatarEventType::Taken);
     LOG("net: remote %d \"%s\" (%s): avatar %p %s", id, r.callsign, r.aircraft, got.obj, why);
     if (!avatar_logic::same_type(info.type, r.aircraft) && std::strcmp(r.aircraft, "unknown") != 0)
         LOG("net: remote %d: warning: it flies \"%s\" but its avatar is \"%s\"", id, r.aircraft,
@@ -599,6 +614,7 @@ void avatar_step(int id, double now, double wall) {
         avatar_release(r.h, true);
         r.coasting = r.shown_state = r.have_shown = false;
         r.next_take = 0;
+        rec_avatar_event(id, net::AvatarEventType::Parked);
         return;
     }
     if (avatar_keep_remote(r.h)) ++r.flag_clears;
@@ -629,7 +645,8 @@ void avatar_step(int id, double now, double wall) {
         }
         r.have_shown = true;
     }
-    if (out != net::RemoteJet::Out::None && r.have_shown && g_stream->is_open() && now >= r.next_shown) {
+    if (out != net::RemoteJet::Out::None && r.have_shown && g_stream->is_open() &&
+        (now >= r.next_shown || out == net::RemoteJet::Out::Snap)) {
         r.next_shown = now + kShownEvery;
         net::RemoteShownPayload p{};
         p.id = static_cast<uint16_t>(id);

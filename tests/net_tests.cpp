@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <numeric>
 #include <memory>
 #include <chrono>
 #include <cmath>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "acmi/acmi_convert.h"
+#include "acmi/net_report.h"
 #include "acmi/acmi_format.h"
 #include "acmi/airfields.h"
 #include "tacview_addon_lua.h"
@@ -5793,8 +5795,16 @@ void bot_serve_tests() {
         double max_age = 0, max_dz = 0, min_age = 1e9;
         unsigned bad_len = 0, bad_id = 0;
         StreamRecord rec;
+        bool session_first = false;
         if (rd.read_header(hd) == StreamStatus::Ok) {
             while (rd.next(rec) == StreamStatus::Ok) {
+                if (kinds[8] == 0 && rec.kind == static_cast<uint8_t>(StreamKind::SessionInfo) &&
+                    rec.payload_len == sizeof(SessionInfoPayload) && std::accumulate(kinds, kinds + 16, 0u) == 0) {
+                    SessionInfoPayload si{};
+                    std::memcpy(&si, rec.payload, sizeof(si));
+                    session_first = si.role == static_cast<uint8_t>(SessionRole::BotServe) && si.own_id == 0 &&
+                                    std::strcmp(si.callsign, "BOTHOST") == 0;
+                }
                 if (rec.kind < 16) ++kinds[rec.kind];
                 if (rec.kind == static_cast<uint8_t>(StreamKind::RemoteShown)) {
                     RemoteShownPayload sp{};
@@ -5817,6 +5827,16 @@ void bot_serve_tests() {
         shown_ok = bad_len == 0 && bad_id == 0 && min_age > -0.5 && max_age < 1.0 && max_dz < 1.0;
         expect(kinds[2] > 150 && kinds[1] > 20 && kinds[9] > 10 && kinds[3] == 1 && kinds[5] == 1 && kinds[6] == 1 && shown_ok,
                what);
+        expect(session_first && kinds[8] == 1, "--record: SessionInfo (bot serve, id 0, BOTHOST) is the first record");
+        expect(kinds[7] > 0 && kinds[7] <= r.jet_states && kinds[7] + 2 >= r.jet_states,
+               "--record: LocalState holds each State the jet sent");
+        {  // the report on the file itself: what the bot showed of the client against the States it received
+            LazyWorks::SF2Patch::acmi::Report rep;
+            LazyWorks::SF2Patch::acmi::ReportOptions ro;
+            const bool ok = LazyWorks::SF2Patch::acmi::make_report(bytes.data(), bytes.size(), bytes.data(), bytes.size(), ro, rep);
+            expect(ok && rep.id == 1 && rep.compared > 10 && rep.truth_source.rfind("StateReceived", 0) == 0,
+                   "--record: the report compares the shown client with its received States");
+        }
         DeleteFileW(file.c_str());
         RemoveDirectoryW(dir.c_str());
     }
@@ -6328,6 +6348,327 @@ void client_logic_tests() {
     }
 }
 
+// An in-memory stream for the Task 12 tests.
+struct MemStream {
+    std::vector<uint8_t> b = std::vector<uint8_t>(64);
+    MemStream() { b.resize(encode_stream_header(100.0, "Korea", b.data(), b.size())); }
+    void add(StreamKind k, double t, const void* p, size_t len) {
+        uint8_t r[kStreamRecordTotalMax];
+        const size_t n = encode_stream_record(k, t, static_cast<const uint8_t*>(p), len, r, sizeof(r));
+        b.insert(b.end(), r, r + n);
+    }
+    template <class M>
+    void msg(StreamKind k, double t, const M& m) {
+        uint8_t buf[kMaxMessage];
+        add(k, t, buf, encode(m, buf, sizeof(buf)));
+    }
+    void session(SessionRole role, uint16_t id, const char* cs, const char* ac) {
+        const SessionInfoPayload si = make_session_info(role, id, cs, ac);
+        add(StreamKind::SessionInfo, 100.0, &si, sizeof(si));
+    }
+    void shown(uint16_t id, double t, const double p[3], const double a[3], uint8_t out) {
+        RemoteShownPayload s{};
+        s.id = id;
+        for (int i = 0; i < 3; ++i) {
+            s.pos[i] = p[i];
+            s.ang[i] = static_cast<float>(a[i]);
+        }
+        s.age = 0.1f;
+        s.out = out;
+        add(StreamKind::RemoteShown, t, &s, sizeof(s));
+    }
+};
+
+StateMsg state_at(uint16_t id, double t, const double p[3], const double v[3], const double a[3]) {
+    StateMsg s{};
+    s.client_id = id;
+    s.game_time = t;
+    for (int i = 0; i < 3; ++i) {
+        s.pos[i] = p[i];
+        s.vel[i] = static_cast<float>(v[i]);
+        s.ang[i] = static_cast<float>(a[i]);
+    }
+    return s;
+}
+
+// Task 12, L2: the new kinds through the writer and back, a truncated tail, and unknown kinds passed over.
+void stream_kinds_tests() {
+    std::printf("stream: session, local, shown, peer info and avatar records\n");
+    const SessionInfoPayload odd = make_session_info(SessionRole::Client, 3, "A\x01" "B", nullptr);
+    expect(odd.role == 1 && odd.own_id == 3 && std::strcmp(odd.callsign, "A?B") == 0 && odd.aircraft[0] == 0,
+           "make_session_info: non-printable bytes replaced, a null string left empty");
+    const SessionInfoPayload longer = make_session_info(SessionRole::Host, 0, "0123456789ABCDEFGHIJ", "x");
+    expect(longer.callsign[15] == 0 && std::strncmp(longer.callsign, "0123456789ABCDE", 15) == 0,
+           "make_session_info: a long callsign is cut to 15 characters");
+
+    const std::wstring dir = make_temp_dir();
+    expect(!dir.empty(), "temp dir");
+    if (dir.empty()) return;
+    const SessionInfoPayload si = make_session_info(SessionRole::Client, 2, "VIEW", "F-105D");
+    {
+        auto w = std::make_unique<StreamWriter>();
+        expect(w->open(dir.c_str(), 50.0, "Korea", stream_log, kStreamMaxFileBytes, L"client", &si), "open with a session");
+        const double p[3] = {1, 2, 3}, v[3] = {200, 0, 0}, a[3] = {0, 1.5, 0};
+        uint8_t buf[kMaxMessage];
+        const StateMsg ls = state_at(2, 50.5, p, v, a);
+        w->record(StreamKind::LocalState, 50.5, buf, encode(ls, buf, sizeof(buf)));
+        PeerInfoMsg pi{};
+        pi.id = 0;
+        set_str(pi.callsign, "BOSS");
+        set_str(pi.aircraft, "F-105D");
+        w->record(StreamKind::PeerInfoReceived, 50.6, buf, encode(pi, buf, sizeof(buf)));
+        RemoteShownPayload rs{};
+        rs.id = 0;
+        rs.pos[0] = 7.0;
+        rs.out = 3;
+        w->record(StreamKind::RemoteShown, 50.7, &rs, sizeof(rs));
+        const uint8_t junk[5] = {1, 2, 3, 4, 5};
+        w->record(static_cast<StreamKind>(77), 50.8, junk, sizeof(junk));  // a kind from a later version
+        const AvatarEventPayload ae{0, static_cast<uint8_t>(AvatarEventType::Parked)};
+        w->record(StreamKind::AvatarEvent, 50.9, &ae, sizeof(ae));
+        w->close(true);
+    }
+    const std::vector<uint8_t> f = read_file(dir + L"\\client_001.lzst");
+    std::vector<uint8_t> kinds;
+    bool fields = true;
+    auto read_all_kinds = [&](size_t size, StreamStatus* end) {
+        kinds.clear();
+        StreamReader rd(f.data(), size);
+        StreamHeader h{};
+        if (rd.read_header(h) != StreamStatus::Ok) return;
+        fields = fields && std::strcmp(h.theatre, "Korea") == 0 && h.start_game_time == 50.0;
+        StreamRecord rec;
+        StreamStatus st;
+        while ((st = rd.next(rec)) == StreamStatus::Ok) {
+            kinds.push_back(rec.kind);
+            if (rec.kind == static_cast<uint8_t>(StreamKind::SessionInfo)) {
+                SessionInfoPayload got{};
+                fields = fields && rec.payload_len == sizeof(got) && rec.time == 50.0;
+                if (rec.payload_len == sizeof(got)) std::memcpy(&got, rec.payload, sizeof(got));
+                fields = fields && got.role == 1 && got.own_id == 2 && std::strcmp(got.callsign, "VIEW") == 0 &&
+                         std::strcmp(got.aircraft, "F-105D") == 0;
+            } else if (rec.kind == static_cast<uint8_t>(StreamKind::PeerInfoReceived)) {
+                PeerInfoMsg got{};
+                fields = fields && decode(rec.payload, rec.payload_len, got) == Status::Ok && got.id == 0 &&
+                         std::strcmp(got.callsign, "BOSS") == 0;
+            } else if (rec.kind == static_cast<uint8_t>(StreamKind::LocalState)) {
+                StateMsg got{};
+                fields = fields && decode(rec.payload, rec.payload_len, got) == Status::Ok && got.client_id == 2;
+            } else if (rec.kind == static_cast<uint8_t>(StreamKind::RemoteShown)) {
+                RemoteShownPayload got{};
+                fields = fields && rec.payload_len == sizeof(got);
+                if (rec.payload_len == sizeof(got)) std::memcpy(&got, rec.payload, sizeof(got));
+                fields = fields && got.pos[0] == 7.0 && got.out == 3;
+            } else if (rec.kind == 77) {
+                fields = fields && rec.payload_len == 5;  // passed to the caller with its length: skippable
+            }
+        }
+        *end = st;
+    };
+    StreamStatus end = StreamStatus::Ok;
+    read_all_kinds(f.size(), &end);
+    const std::vector<uint8_t> want = {8, 7, 10, 9, 77, 11};
+    expect(end == StreamStatus::End && kinds == want && fields,
+           "new kinds round trip: SessionInfo first, then LocalState, PeerInfoReceived, RemoteShown, an unknown kind, "
+           "AvatarEvent");
+    read_all_kinds(f.size() - 2, &end);  // the tail cut inside the last record
+    expect(end == StreamStatus::Truncated && kinds.size() == 5 && kinds.back() == 77,
+           "a truncated tail: the records before it are kept");
+    DeleteFileW((dir + L"\\client_001.lzst").c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
+// Task 12, L1: the comparison report on synthetic streams with a known error.
+void net_report_tests() {
+    std::printf("net report\n");
+    namespace ac = LazyWorks::SF2Patch::acmi;
+    // The truth: a jet flying east at 200 m/s, 60 Hz, host time 100..130.
+    auto straight = [](double t, double p[3], double v[3], double a[3]) {
+        p[0] = 1000.0 + 200.0 * (t - 100.0);
+        p[1] = 5000.0;
+        p[2] = 3000.0;
+        v[0] = 200.0;
+        v[1] = v[2] = 0.0;
+        a[0] = a[2] = 0.0;
+        a[1] = 1.5707963267948966;  // east
+    };
+    MemStream truth;
+    truth.session(SessionRole::BotServe, 0, "BOTHOST", "F-105D");
+    for (int i = 0; i <= 30 * 60; ++i) {
+        const double t = 100.0 + i / 60.0;
+        double p[3], v[3], a[3];
+        straight(t, p, v, a);
+        truth.msg(StreamKind::HostState, t, state_at(0, t, p, v, a));
+    }
+    // The viewer: the host's jet shown 10 m ahead along its track, 10 Hz; one Snap, one Coast record (not compared).
+    MemStream viewer;
+    viewer.session(SessionRole::Client, 1, "VIEW", "F-105D");
+    for (int i = 0; i < 300; ++i) {
+        const double t = 100.05 + i * 0.1;
+        double p[3], v[3], a[3];
+        straight(t, p, v, a);
+        p[0] += 10.0;
+        if (i == 200) p[0] = -1e6;  // a coasting record holds the last shown place: never compared
+        viewer.shown(0, t, p, a, i == 200 ? 4 : (i == 50 ? 1 : 3));
+    }
+    ac::Report r;
+    ac::ReportOptions ro;
+    bool ok = ac::make_report(viewer.b.data(), viewer.b.size(), truth.b.data(), truth.b.size(), ro, r);
+    const ac::ReportRow& o = r.overall;
+    char what[256];
+    std::snprintf(what, sizeof(what),
+                  "report: a constant 10 m along-track error is 10 m along (median %.3f, p95 %.3f), 0 across (max %.4f), "
+                  "0 vertical (max %.4f); %zu compared",
+                  o.along.median, o.along.p95, o.cross.max, o.vert.max, r.compared);
+    expect(ok && r.id == 0 && std::fabs(o.along.median - 10.0) < 1e-3 && std::fabs(o.along.p95 - 10.0) < 1e-3 &&
+               std::fabs(o.pos.max - 10.0) < 1e-3 && o.cross.max < 1e-3 && o.vert.max < 1e-3 && r.compared == 299,
+           what);
+    expect(ok && o.snaps == 1 && std::fabs(o.coast_s - 0.1) < 1e-6 && o.ang.max < 0.01 && o.accel_max_g < 0.01 &&
+               r.truth_source.rfind("HostState", 0) == 0,
+           "report: one snap, 0.1 s coasting, no angle error, a smooth path, truth from HostState");
+    expect(r.rows.size() == 3 && r.rows[0].pos.n >= 99 && r.rows[0].pos.n <= 101 && r.rows[0].snaps == 1,
+           "report: three 10 s rows");
+    const std::string text = ac::format_report(r);
+    expect(text.find("overall") != std::string::npos && text.find("VIEW") != std::string::npos &&
+               text.find("BOTHOST") != std::string::npos,
+           "report: text names both files' sessions and has an overall row");
+
+    // A right turn (0.1 rad/s, radius 2000 m), shown 10 m right of the track: 10 m across, 0 along.
+    {
+        auto turn = [](double t, double p[3], double v[3], double a[3]) {
+            const double h = 0.1 * (t - 100.0), R = 2000.0;
+            p[0] = -R * std::cos(h);
+            p[1] = R * std::sin(h);
+            p[2] = 3000.0;
+            v[0] = 200.0 * std::sin(h);
+            v[1] = 200.0 * std::cos(h);
+            v[2] = 0.0;
+            a[0] = 0.0;
+            a[1] = std::remainder(h, 2.0 * 3.141592653589793);
+            a[2] = 0.0;
+        };
+        MemStream tt, vv;
+        for (int i = 0; i <= 20 * 60; ++i) {
+            const double t = 100.0 + i / 60.0;
+            double p[3], v[3], a[3];
+            turn(t, p, v, a);
+            tt.msg(StreamKind::LocalState, t, state_at(2, t, p, v, a));
+        }
+        for (int i = 0; i < 190; ++i) {
+            const double t = 100.5 + i * 0.1;
+            double p[3], v[3], a[3];
+            turn(t, p, v, a);
+            const double h = 0.1 * (t - 100.0);
+            p[0] += 10.0 * std::cos(h);
+            p[1] -= 10.0 * std::sin(h);
+            vv.shown(2, t, p, a, 3);
+        }
+        ac::Report rt;
+        ac::ReportOptions rot;
+        rot.id = 2;
+        const bool okt = ac::make_report(vv.b.data(), vv.b.size(), tt.b.data(), tt.b.size(), rot, rt);
+        std::snprintf(what, sizeof(what), "report: in a turn, 10 m right of the track is 10 m across (median %.3f), 0 along (max %.3f)",
+                      rt.overall.cross.median, rt.overall.along.max);
+        expect(okt && std::fabs(rt.overall.cross.median - 10.0) < 0.01 && rt.overall.along.max < 0.01 &&
+                   rt.truth_source.rfind("LocalState", 0) == 0 && rt.overall.truth_accel_max_g > 1.9 &&
+                   rt.overall.truth_accel_max_g < 2.2,
+               what);
+    }
+
+    // --offset: the truth is the host's jet plus (right, back, up); a formation point 10 m ahead is 10 m along.
+    {
+        MemStream host;  // one file: the host's own jet, and what it showed of client 1
+        host.session(SessionRole::Host, 0, "HOST", "F-105D");
+        for (int i = 0; i <= 10 * 60; ++i) {
+            const double t = 100.0 + i / 60.0;
+            double p[3], v[3], a[3];
+            straight(t, p, v, a);
+            host.msg(StreamKind::HostState, t, state_at(0, t, p, v, a));
+        }
+        for (int i = 0; i < 90; ++i) {
+            const double t = 100.5 + i * 0.1;
+            double p[3], v[3], a[3];
+            straight(t, p, v, a);  // east: right is south (-y), back is west (-x)
+            const double q[3] = {p[0] - 50.0 + 10.0, p[1] - 150.0, p[2] + 20.0};
+            host.shown(1, t, q, a, 3);
+        }
+        ac::Report rf;
+        ac::ReportOptions rof;
+        rof.has_offset = true;
+        rof.offset[0] = 150.0;
+        rof.offset[1] = 50.0;
+        rof.offset[2] = 20.0;
+        const bool okf = ac::make_report(host.b.data(), host.b.size(), host.b.data(), host.b.size(), rof, rf);
+        expect(okf && rf.id == 1 && std::fabs(rf.overall.along.median - 10.0) < 1e-3 && rf.overall.cross.max < 1e-3 &&
+                   rf.overall.vert.max < 1e-3,
+               "report --offset: the host's jet plus the formation offset is the truth");
+        ac::ReportOptions none;  // without the offset the host file has no States of id 1
+        ac::Report rn;
+        expect(!ac::make_report(host.b.data(), host.b.size(), host.b.data(), host.b.size(), none, rn) &&
+                   rn.error.find("no States of id 1") != std::string::npos,
+               "report: no truth for the id is an error");
+    }
+
+    // Files from different sessions: no overlap in host time.
+    {
+        MemStream late;
+        const double p[3] = {0, 0, 1000}, a[3] = {0, 0, 0};
+        for (int i = 0; i < 10; ++i) late.shown(0, 500.0 + i * 0.1, p, a, 3);
+        ac::Report rl;
+        expect(!ac::make_report(late.b.data(), late.b.size(), truth.b.data(), truth.b.size(), ro, rl) &&
+                   rl.error.find("do not overlap") != std::string::npos &&
+                   ac::format_report(rl).find("no report") != std::string::npos,
+               "report: files that do not overlap in host time say so");
+        ac::ReportOptions r7;
+        r7.id = 7;
+        expect(!ac::make_report(viewer.b.data(), viewer.b.size(), truth.b.data(), truth.b.size(), r7, rl) &&
+                   rl.error.find("id 7") != std::string::npos,
+               "report: an id the viewer never showed is an error");
+    }
+}
+
+// Task 12: client and bot files convert, and ghosts are written only with the flag.
+void acmi_ghost_tests() {
+    std::printf("acmi: client files and ghosts\n");
+    namespace ac = LazyWorks::SF2Patch::acmi;
+    MemStream c;
+    c.session(SessionRole::Client, 1, "VIEW", "F-105D");
+    PeerInfoMsg pi{};
+    pi.id = 0;
+    set_str(pi.callsign, "BOSS");
+    set_str(pi.aircraft, "F-105D");
+    c.msg(StreamKind::PeerInfoReceived, 100.0, pi);
+    for (int i = 0; i < 20; ++i) {
+        const double t = 100.1 + i * 0.05;
+        const double p[3] = {200.0 * i, 0, 3000}, v[3] = {200, 0, 0}, a[3] = {0, 1.5707963, 0};
+        const double q[3] = {200.0 * i, -150, 3000};
+        c.msg(StreamKind::StateReceived, t + 0.1, state_at(0, t, p, v, a));
+        c.msg(StreamKind::LocalState, t, state_at(1, t, q, v, a));
+        if (i % 2 == 0) c.shown(0, t + 0.1, p, a, 3);
+    }
+    const double zero[3] = {0, 0, 0};
+    c.shown(0, 101.5, zero, zero, 4);  // coasting
+    ac::Options opt;
+    opt.max_rate = 0;
+    std::string plain, ghosts;
+    ac::Info ip, ig;
+    expect(ac::convert_stream(c.b.data(), c.b.size(), opt, plain, ip), "client stream converts");
+    opt.ghosts = true;
+    expect(ac::convert_stream(c.b.data(), c.b.size(), opt, ghosts, ig), "client stream converts with --ghosts");
+    expect(plain.find("Strike Fighters 2 client stream") != std::string::npos &&
+               plain.find("\n1,T=") != std::string::npos && plain.find("Name=F-105D,Pilot=BOSS") != std::string::npos &&
+               plain.find("\n101,T=") != std::string::npos && plain.find("Name=F-105D,Pilot=VIEW") != std::string::npos,
+           "client file: the host (from PeerInfoReceived) and the own jet (from SessionInfo and LocalState)");
+    expect(plain.find("as seen by") == std::string::npos && plain.find("\n200,") == std::string::npos &&
+               ip.ghost_samples == 0 && ip.skipped_bad == 0,
+           "no ghosts without the flag");
+    expect(ghosts.find("\n200,T=") != std::string::npos &&
+               ghosts.find("Name=BOSS as seen by VIEW,Type=Air+FixedWing,Coalition=Neutrals,Color=Green") !=
+                   std::string::npos &&
+               ig.ghost_samples == 10 && ig.objects == ip.objects + 1,
+           "--ghosts: the shown track is its own green object, coasting records left out");
+}
+
 }  // namespace
 
 int main() {
@@ -6377,6 +6718,9 @@ int main() {
     bot_two_player_tests();
     stream_tests();
     acmi_tests();
+    stream_kinds_tests();
+    net_report_tests();
+    acmi_ghost_tests();
     tracker_logic_tests();
     cursor_clip_tests();
     tacview_tests();

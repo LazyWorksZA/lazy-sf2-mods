@@ -17,18 +17,29 @@ inline constexpr uint32_t kStreamRecordMax = kStreamRecordMin + kStreamMaxPayloa
 inline constexpr uint64_t kStreamMaxFileBytes = 512ull * 1024 * 1024;
 
 /// <summary>
-/// What a record holds. The payload of the first four is the protocol message exactly as it was on the wire
-/// (see protocol.h); the other two are defined below. A reader skips kinds it does not know.
+/// What a record holds. The payloads of kinds 1 to 4, 7 and 10 are the protocol message exactly as it was on the wire
+/// (see protocol.h); the others are defined below. A reader skips kinds it does not know.
 /// </summary>
 enum class StreamKind : uint8_t {
-    StateReceived = 1,  // StateMsg from a client (client_id 1..4)
+    StateReceived = 1,  // StateMsg from a client (client_id 1..4); on a client, from the host (id 0 and relayed ids)
     HostState = 2,      // StateMsg of the host player, client_id 0, once per player step
     WelcomeSent = 3,    // WelcomeMsg
     ByeReceived = 4,    // ByeMsg from a client
     ClientJoined = 5,   // ClientJoinedPayload
-    ClientLeft = 6,     // ClientLeftPayload
-    LocalState = 7,     // StateMsg as a client sent it, with its own id (client files)
-    RemoteShown = 9,    // RemoteShownPayload: what a receiver showed of a remote jet (kinds 8 and 10: Task 12)
+    ClientLeft = 6,     // ClientLeftPayload; on a client, a PeerLeft
+    LocalState = 7,     // StateMsg as sent, with the sender's own id (client and bot serve files)
+    SessionInfo = 8,    // SessionInfoPayload, always the first record
+    RemoteShown = 9,    // RemoteShownPayload: what a receiver showed of a remote jet
+    PeerInfoReceived = 10,  // PeerInfoMsg (client files)
+    AvatarEvent = 11,   // AvatarEventPayload: a remote's aircraft parked, taken or lost
+};
+
+enum class SessionRole : uint8_t { Host = 0, Client = 1, BotServe = 2 };
+
+enum class AvatarEventType : uint8_t {
+    Parked = 1,  // no State for 10 s: the aircraft went back to the AI
+    Taken = 2,   // an aircraft was taken for the remote again (after a park or a loss; on a client also the first one)
+    Lost = 3,    // the remote's aircraft was destroyed
 };
 
 enum class LeaveReason : uint8_t {
@@ -44,12 +55,22 @@ struct StreamHeader {
     uint16_t version;
     uint16_t header_len;     // bytes in the whole header, including this field; a reader skips to here
     double start_game_time;  // host game time when the file was opened
-    char theatre[kStreamTheatreLen];  // host theatre name, or all NUL when unknown
+    char theatre[kStreamTheatreLen];  // the recorder's theatre id, or all NUL when unknown
 };
 struct ClientJoinedPayload {
     uint16_t client_id;
     char callsign[16];  // NUL padded, printable ASCII
     char aircraft[32];  // NUL padded, printable ASCII
+};
+struct SessionInfoPayload {
+    uint8_t role;       // SessionRole
+    uint16_t own_id;    // 0 the host, 1..4 a client
+    char callsign[16];  // NUL padded, printable ASCII
+    char aircraft[32];  // NUL padded, printable ASCII
+};
+struct AvatarEventPayload {
+    uint16_t id;    // the remote's id
+    uint8_t event;  // AvatarEventType
 };
 struct ClientLeftPayload {
     uint16_t client_id;
@@ -67,6 +88,8 @@ struct RemoteShownPayload {
 static_assert(sizeof(StreamHeader) == 48);
 static_assert(sizeof(ClientJoinedPayload) == 50);
 static_assert(sizeof(ClientLeftPayload) == 3);
+static_assert(sizeof(SessionInfoPayload) == 51);
+static_assert(sizeof(AvatarEventPayload) == 3);
 static_assert(sizeof(RemoteShownPayload) == 43);
 
 /// <summary>
@@ -75,6 +98,9 @@ static_assert(sizeof(RemoteShownPayload) == 43);
 /// </summary>
 inline constexpr size_t kStreamRecordHeadBytes = 4 + 1 + 8;  // length + kind + time
 inline constexpr size_t kStreamRecordTotalMax = 4 + kStreamRecordMax;
+
+/// <summary>A SessionInfo payload; the strings (may be null) are cut to fit and non-printable bytes become '?'.</summary>
+SessionInfoPayload make_session_info(SessionRole role, uint16_t own_id, const char* callsign, const char* aircraft);
 
 /// <summary>Writes a header (theatre may be null) into out. Returns sizeof(StreamHeader), or 0 if cap is too small.</summary>
 size_t encode_stream_header(double start_game_time, const char* theatre, uint8_t* out, size_t cap);

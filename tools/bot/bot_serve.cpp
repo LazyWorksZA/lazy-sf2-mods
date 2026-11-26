@@ -33,7 +33,7 @@ constexpr double kReWelcomeAfter = kReWelcomeMinGap + 0.5;
 constexpr double kReWelcomeEvery = kReWelcomeMinGap + 0.25;
 constexpr double kJoinNear = 300.0;     // metres from the join point: the client has moved there
 constexpr double kJoinGiveUp = 10.0;    // seconds of re-sending before giving up
-constexpr double kShownEvery = 0.1;           // RemoteShown records, host seconds
+constexpr double kShownEvery = 0.1;           // RemoteShown records, host seconds (and every Snap)
 constexpr double kHostTime0 = 100.0;          // host time at the start
 constexpr uint8_t kByeBusy = 1, kByeSessionEnded = 3;  // as host.cpp
 constexpr size_t kMaxQueued = 4096;           // events and States --lag may hold
@@ -299,6 +299,7 @@ struct Serve {
                 } else if (o.len) {
                     peers.send_state(o.data, o.len, -1);
                 }
+                if (o.len) record(StreamKind::LocalState, m);  // at the step, before any --lag
                 ++res.jet_states;
             }
         }
@@ -320,7 +321,8 @@ struct Serve {
                 }
                 c.have_shown = true;
             }
-            if (o != RemoteJet::Out::None && c.have_shown && rec.is_open() && host_t >= c.next_shown) {
+            if (o != RemoteJet::Out::None && c.have_shown && rec.is_open() &&
+                (host_t >= c.next_shown || o == RemoteJet::Out::Snap)) {
                 c.next_shown = host_t + kShownEvery;
                 RemoteShownPayload p{};
                 p.id = static_cast<uint16_t>(c.slot + 1);
@@ -395,8 +397,11 @@ ServeResult run_serve(const ServeConfig& cfg) {
         return res;
     }
     if (cfg.port_out) cfg.port_out->store(sv.core.port(), std::memory_order_release);
-    if (!cfg.record_dir.empty())
-        sv.rec.open(cfg.record_dir.c_str(), sv.host_t, nullptr, core_log, kStreamMaxFileBytes, L"botserve");
+    if (!cfg.record_dir.empty()) {
+        const SessionInfoPayload si =
+            make_session_info(SessionRole::BotServe, 0, cfg.callsign.c_str(), cfg.aircraft.c_str());
+        sv.rec.open(cfg.record_dir.c_str(), sv.host_t, nullptr, core_log, kStreamMaxFileBytes, L"botserve", &si);
+    }
     if (cfg.has_start) sv.start_jet(cfg.start, cfg.start_heading);
     sv.say("bot serve: serving '%s' as \"%s\" (%s) on %s:%u%s%s", script_name(cfg.script), cfg.callsign.c_str(),
            cfg.aircraft.c_str(), addr, static_cast<unsigned>(sv.core.port()),

@@ -4,6 +4,22 @@
 
 namespace LazyWorks::SF2Patch::net {
 
+namespace {
+template <size_t N>
+void put_ascii(char (&out)[N], const char* s) {
+    for (size_t i = 0; s && i + 1 < N && s[i]; ++i) out[i] = (s[i] >= 0x20 && s[i] <= 0x7e) ? s[i] : '?';
+}
+}  // namespace
+
+SessionInfoPayload make_session_info(SessionRole role, uint16_t own_id, const char* callsign, const char* aircraft) {
+    SessionInfoPayload p{};
+    p.role = static_cast<uint8_t>(role);
+    p.own_id = own_id;
+    put_ascii(p.callsign, callsign);
+    put_ascii(p.aircraft, aircraft);
+    return p;
+}
+
 size_t encode_stream_header(double start_game_time, const char* theatre, uint8_t* out, size_t cap) {
     if (!out || cap < sizeof(StreamHeader)) return 0;
     StreamHeader h{};

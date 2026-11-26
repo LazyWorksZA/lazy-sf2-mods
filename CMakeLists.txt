@@ -110,6 +110,7 @@ add_executable(lazysf2-net-tests
     tools/bot/bot_client.cpp
     tools/bot/bot_serve.cpp
     tools/acmi/acmi_convert.cpp
+    tools/acmi/net_report.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp
@@ -151,9 +152,11 @@ set_target_properties(lazysf2-bot PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_B
 add_executable(lazysf2-acmi
     tools/acmi/main.cpp
     tools/acmi/acmi_convert.cpp
+    tools/acmi/net_report.cpp
     src/acmi/acmi_format.cpp
     src/net/stream_format.cpp
     src/net/protocol.cpp
+    src/net/remote_jet.cpp
 )
 target_compile_features(lazysf2-acmi PRIVATE cxx_std_20)
 target_compile_options(lazysf2-acmi PRIVATE /W4 /permissive-)
