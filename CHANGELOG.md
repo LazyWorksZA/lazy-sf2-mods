@@ -9,6 +9,10 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 - **The Tacview add-on is published on its own.** Each release now also has `Lazy-SF2-Patch-<version>-Tacview-AddOn.zip`, for players who install `winmm.dll` by hand. Extract it into `%APPDATA%\Tacview\AddOns\`.
 
+### Developer tools (off unless enabled)
+
+- **Tacview destroy test hotkey.** With the probe on, Ctrl+Shift+X during a recorded single mission destroys the nearest building the recording tracks (its damage is set to 100), so the building's destruction can be checked in Tacview without flying a strike. The recording's end line now also counts all Destroyed events.
+
 ## 1.1.0 (2026-11-26)
 
 ### Tacview
