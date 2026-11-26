@@ -56,6 +56,28 @@ void input_on_modules_loaded();
 void input_apply_settings();
 
 /// <summary>
+/// Pilot Twist (pilot_twist.cpp): creates the ViewManager.dll inside-view hooks once it is loaded, and enables them
+/// only while the setting is on (no detour runs while it is off). Module watch callback.
+/// </summary>
+void pilot_twist_on_modules_loaded();
+/// <summary>
+/// Enables or disables the view hooks to match config::pilot_twist(). Game thread, never under the loader lock: at
+/// game window creation and when an Options page is left. Idempotent.
+/// </summary>
+void pilot_twist_apply_setting();
+/// <summary>
+/// Developer (probe hotkey thread, Ctrl+Shift+W): turns the twist on or off for this session without touching the
+/// setting; the view hooks follow at once.
+/// </summary>
+void pilot_twist_dev_toggle();
+/// <summary>
+/// Developer (probe hotkey thread, Ctrl+Shift+H): steps the head hold off, 120 left, 160 left, 120 right, 160 right,
+/// off. The held yaw (pitch 0) is written to the view's head target angles before each update, so the game clamps
+/// and smooths it as it does a hat or tracker head movement.
+/// </summary>
+void pilot_twist_dev_cycle_hold();
+
+/// <summary>
 /// Hooks the exe's file service so the Options menu can offer Display Mode (Options.ini [GraphicsOptions]
 /// DisplayMode). Call from DllMain.
 /// </summary>
@@ -65,6 +87,8 @@ void menu_on_modules_loaded();
 
 /// <summary>Reads LAZYSF2_PROBE_DIR once. The probe (developer tool) is active only when it is set. Call from DllMain.</summary>
 void install_probe_hooks();
+/// <summary>DLL detach: waits at most 1 s for an automatic snapshot's writer thread, then leaves it. Not under any lock of ours.</summary>
+void probe_shutdown();
 /// <summary>Starts the developer features (recorder, replay, host, hotkeys) once the aircraft tracker is active.</summary>
 void probe_on_modules_loaded();
 

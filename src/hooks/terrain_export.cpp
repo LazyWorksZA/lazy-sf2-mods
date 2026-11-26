@@ -49,7 +49,8 @@ constexpr int kMaxTiles = 512;      // tiles per side
 constexpr int kMaxTextures = 512;
 constexpr int kTileToHeightRatio = 4;  // heightmap samples per tile, per side
 
-constexpr int kTexturePixelsPerTile = 8;  // 250 m per pixel at 2000 m tiles: a 4000 x 4000 image for 500 tiles
+constexpr int kTexturePixelsPerTile = 16;  // 125 m per pixel at 2000 m tiles: an 8000 x 8000 image for 500 tiles
+constexpr int kBandTileRows = 16;          // the base texture is composed this many tile rows at a time
 constexpr float kJpegQuality = 0.9f;
 
 struct Raw {
@@ -179,24 +180,46 @@ std::thread g_thread;
 std::atomic<bool> g_busy{false};    // set by the game thread at start, cleared by the thread as its last act
 std::atomic<bool> g_job_ok{false};  // the last job's result, stored before g_busy is cleared
 
-std::mutex g_aero_lock;
+std::mutex g_aero_lock;  // guards g_aero and g_struct
 // By theatre id: present once the export thread has read them (or it was decided that none will come).
-std::map<std::string, std::shared_ptr<const std::vector<AerodromeMark>>> g_aero;
+template <typename T>
+using ListMap = std::map<std::string, std::shared_ptr<const T>>;
+ListMap<std::vector<AerodromeMark>> g_aero;
+ListMap<StructureList> g_struct;
+
+bool list_empty(const std::vector<AerodromeMark>& l) { return l.empty(); }
+bool list_empty(const StructureList& l) { return l.marks.empty(); }
 
 // An empty list marks "none"; it never replaces a good non-empty one (a failed retry must not lose it).
-void publish_aerodromes(const std::string& id, std::vector<AerodromeMark>&& list) {
-    const bool empty = list.empty();
-    auto shared = std::make_shared<const std::vector<AerodromeMark>>(std::move(list));  // allocated outside the lock
+template <typename T>
+void publish_list(ListMap<T>& map, const std::string& id, T&& list) {
+    const bool empty = list_empty(list);
+    auto shared = std::make_shared<const T>(std::move(list));  // allocated outside the lock
+    std::shared_ptr<const T> old;  // freed after the lock is released
+    {
+        std::lock_guard<std::mutex> g(g_aero_lock);
+        auto& slot = map[id];
+        if (slot && empty && !list_empty(*slot)) return;
+        old = std::move(slot);
+        slot = std::move(shared);
+    }
+}
+
+template <typename T>
+StaticList lookup_list(const ListMap<T>& map, const std::string& id, std::shared_ptr<const T>& out) {
     std::lock_guard<std::mutex> g(g_aero_lock);
-    const auto it = g_aero.find(id);
-    if (it != g_aero.end() && empty && !it->second->empty()) return;
-    g_aero[id] = std::move(shared);
+    const auto it = map.find(id);
+    if (it == map.end() || !it->second) return StaticList::Pending;
+    if (list_empty(*it->second)) return StaticList::None;
+    out = it->second;
+    return StaticList::Ready;
 }
 
 // No job will run for this theatre now: the recorder stops waiting. The next flight tries again.
 void mark_no_aerodromes(const std::string& id) {
     try {
-        publish_aerodromes(id, {});
+        publish_list(g_aero, id, std::vector<AerodromeMark>{});
+        publish_list(g_struct, id, StructureList{});
     } catch (...) {
     }
 }
@@ -218,6 +241,7 @@ std::unique_ptr<TextureCapture> capture_texture(const Raw& raw) {
         auto t = std::make_unique<TextureCapture>();
         t->folder = raw.folder;
         t->targets_ini = raw.targets;
+        t->theatre_ini = std::wstring(raw.base) + L".ini";
         t->data_ini = raw.data;
         const bool sized = raw.tfd_w >= 1 && raw.tfd_h >= 1 && raw.tfd_w <= kMaxTiles && raw.tfd_h <= kMaxTiles &&
                            raw.w == raw.tfd_w * kTileToHeightRatio && raw.h == raw.tfd_h * kTileToHeightRatio;
@@ -357,21 +381,83 @@ bool export_heightmap(const Job& job, const std::wstring& dir) {
     return true;
 }
 
-/// <summary>Export thread: the theatre's airfields from its targets ini. Empty (logged) when it cannot be read.</summary>
-std::vector<acmi::Airfield> read_airfields(const Job& job) {
+/// <summary>Export thread: the theatre's targets ini; false (logged) when it cannot be read.</summary>
+bool read_targets(const Job& job, acmi::Ini& out) {
     const TextureCapture& t = *job.texture;
     std::vector<uint8_t> bytes;
     if (!read_game_file(t.folder + L"\\" + t.targets_ini, bytes)) {
-        LOG("tacview terrain: %s: could not read the targets ini; no aerodromes", job.id.c_str());
-        return {};
+        LOG("tacview terrain: %s: could not read the targets ini; no aerodromes or structures", job.id.c_str());
+        return false;
     }
-    const acmi::Ini targets = acmi::parse_ini(bytes.data(), bytes.size());
+    out = acmi::parse_ini(bytes.data(), bytes.size());
+    return true;
+}
+
+std::string narrow_utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+/// <summary>Export thread: the theatre's airfields from its targets ini.</summary>
+std::vector<acmi::Airfield> read_airfields(const Job& job, const acmi::Ini& targets, const acmi::Ini& types) {
+    const TextureCapture& t = *job.texture;
     const acmi::AirfieldLoader loader = [&](const std::string& name) {
         std::vector<uint8_t> file;
         if (!read_game_file(t.folder + L"\\" + widen_utf8(name), file)) file.clear();
         return file;
     };
-    return acmi::airfields_from(targets, loader);
+    return acmi::airfields_from(targets, loader, &types);
+}
+
+/// <summary>Export thread: the theatre's types ini (named by its theatre ini); empty (logged) when it cannot be read.</summary>
+acmi::Ini read_types(const Job& job) {
+    const TextureCapture& t = *job.texture;
+    std::vector<uint8_t> bytes;
+    acmi::Ini theatre;
+    if (read_game_file(t.folder + L"\\" + t.theatre_ini, bytes)) theatre = acmi::parse_ini(bytes.data(), bytes.size());
+    const std::string types_name = acmi::types_file_name(theatre, narrow_utf8(t.targets_ini));
+    if (!types_name.empty() && read_game_file(t.folder + L"\\" + widen_utf8(types_name), bytes))
+        return acmi::parse_ini(bytes.data(), bytes.size());
+    LOG("tacview terrain: %s: could not read the types ini; structures are named by type id, live types included",
+        job.id.c_str());
+    return {};
+}
+
+/// <summary>
+/// Export thread: the theatre's placed structures by target area, on the heightmap and inside it, published for the
+/// recorder. Logs the count once per theatre and session.
+/// </summary>
+void publish_structures(const Job& job, const acmi::Ini& targets, const acmi::Ini& types) {
+    acmi::PlacedStructures placed = acmi::structures_from(targets, types);
+    const double max_x = (job.w - 1) * job.spacing, max_y = (job.h - 1) * job.spacing;
+    StructureList list;
+    list.areas = std::move(placed.areas);
+    list.first.assign(list.areas.size() + 1, 0);
+    list.marks.reserve(placed.items.size());
+    size_t next = 0;  // placed.items is grouped by area in area order
+    for (size_t a = 0; a < list.areas.size(); ++a) {
+        list.first[a] = static_cast<uint32_t>(list.marks.size());
+        for (; next < placed.items.size() && placed.items[next].area == a; ++next) {
+            const acmi::Structure& s = placed.items[next];
+            if (!(s.x >= 0 && s.y >= 0 && s.x <= max_x && s.y <= max_y)) continue;  // off the map
+            StructureMark m;
+            m.name = s.name;
+            m.x = s.x;
+            m.y = s.y;
+            m.z = acmi::height_at(job.samples.get(), job.w, job.h, job.spacing, s.x, s.y);
+            m.heading = s.heading;
+            m.bridge = s.bridge;
+            list.marks.push_back(std::move(m));
+        }
+    }
+    list.first[list.areas.size()] = static_cast<uint32_t>(list.marks.size());
+    LOG("tacview terrain: %s: %zu structures in %zu target areas (%zu more off the map)", job.id.c_str(),
+        list.marks.size(), list.areas.size(), placed.items.size() - list.marks.size());
+    publish_list(g_struct, job.id, std::move(list));
 }
 
 void publish_airfields(const Job& job, const std::vector<acmi::Airfield>& airfields) {
@@ -386,7 +472,7 @@ void publish_airfields(const Job& job, const std::vector<acmi::Airfield>& airfie
         m.heading = a.heading;
         list.push_back(std::move(m));
     }
-    publish_aerodromes(job.id, std::move(list));
+    publish_list(g_aero, job.id, std::move(list));
 }
 
 struct TextureStats {
@@ -477,8 +563,70 @@ std::vector<acmi::RGB> entry_colours(const TextureCapture& t) {
 bool write_jpeg_file(const acmi::RGBImage& img, const std::wstring& path) {
     // The encoder opens the file itself: temporary name first, then moved into place.
     const std::wstring tmp = path + L".tmp";
-    bool ok = write_jpeg_wic(img, tmp, kJpegQuality);
+    bool ok = false;
+    try {
+        ok = write_jpeg_wic(img, tmp, kJpegQuality);
+    } catch (...) {  // out of memory in the encoder's row buffer
+    }
     if (ok) ok = MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    if (!ok) DeleteFileW(tmp.c_str());
+    return ok;
+}
+
+/// <summary>The size of the JPEG at path, from its first bytes. False when it is missing or not a JPEG.</summary>
+bool jpeg_file_size(const std::wstring& path, int& w, int& h) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    uint8_t head[16 * 1024];
+    DWORD got = 0;
+    const bool read = ReadFile(f, head, sizeof head, &got, nullptr) != 0;
+    CloseHandle(f);
+    return read && acmi::jpeg_size(head, got, w, h);
+}
+
+/// <summary>The base texture's bands into an open writer. See write_base_texture.</summary>
+bool write_base_bands(const TextureCapture& t, const std::vector<acmi::Airfield>& airfields,
+                      const std::vector<acmi::RGB>& colours, JpegStreamWriter& jw, TextureStats& stats) {
+    const int n = kTexturePixelsPerTile;
+    std::vector<acmi::Image> base;
+    load_base_tiles(t, base, stats);
+    const double mpp = t.tile_m / n;
+    acmi::RGBImage band;
+    for (int top = t.tiles_h; top > 0; top -= kBandTileRows) {
+        acmi::PatchTiles pt;
+        pt.ty0 = std::max(0, top - kBandTileRows);
+        pt.nx = t.tiles_w;
+        pt.ny = top - pt.ty0;
+        acmi::compose_patch(pt, t.tiles_w, n, t.index.data(), t.rot.data(), base, colours, band);
+        if (band.px.empty()) return false;
+        const double band_y0 = pt.ty0 * t.tile_m;  // paint_runway measures y from the image's south edge
+        for (const acmi::Airfield& a : airfields)
+            for (const acmi::Runway& r : a.runways)
+                acmi::paint_runway(band, mpp, r.x, r.y - band_y0, r.heading, r.length, r.width);
+        if (!jw.write_rows(band.px.data(), band.h)) return false;
+    }
+    return true;
+}
+
+/// <summary>
+/// Export thread: the base texture, composed and encoded one band of kBandTileRows tile rows at a time (north first),
+/// so the full image is never held. Runways are painted into each band. False (and no file, the old one kept) on
+/// failure, out of memory included.
+/// </summary>
+bool write_base_texture(const TextureCapture& t, const std::vector<acmi::Airfield>& airfields,
+                        const std::vector<acmi::RGB>& colours, const std::wstring& path, TextureStats& stats) {
+    const std::wstring tmp = path + L".tmp";
+    JpegStreamWriter jw;
+    bool ok = false;
+    try {
+        ok = jw.open(tmp, t.tiles_w * kTexturePixelsPerTile, t.tiles_h * kTexturePixelsPerTile, kJpegQuality) &&
+             write_base_bands(t, airfields, colours, jw, stats);
+    } catch (...) {
+        log_once(15, "tacview terrain: out of memory composing the texture");
+        ok = false;
+    }
+    const bool finished = jw.finish();  // always: it releases the encoder and closes the file
+    ok = ok && finished && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
     if (!ok) DeleteFileW(tmp.c_str());
     return ok;
 }
@@ -522,7 +670,9 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
     const std::wstring shown = log::log_path(dir);
     const int n = kTexturePixelsPerTile;
     const double extent_x = t.tiles_w * t.tile_m, extent_y = t.tiles_h * t.tile_m;
-    const bool have_jpg = exists(stem + L".jpg");
+    const int want_w = t.tiles_w * n, want_h = t.tiles_h * n;
+    int have_w = 0, have_h = 0;
+    const bool have_jpg = jpeg_file_size(stem + L".jpg", have_w, have_h);
 
     std::vector<PatchPlan> plans;
     std::vector<bool> want_patch(t.entries.size(), false);
@@ -559,30 +709,24 @@ void export_texture(const Job& job, const std::vector<acmi::Airfield>& airfields
         std::any_of(plans.begin(), plans.end(), [](const PatchPlan& p) { return !p.present; });
 
     const std::vector<acmi::RGB> colours = entry_colours(t);
-    // Phase 1, the base texture: its tiles, image and encoder buffers are gone before the patch cache is built.
-    if (!have_jpg) {
+    // Phase 1, the base texture, made once and kept, except one smaller than this version makes (the earlier 4000 px
+    // ones): replaced once. Composed in bands, so its buffers are gone before the patch cache is built.
+    if (!have_jpg || have_w < want_w || have_h < want_h) {
         TextureStats stats;
-        try {
-            std::vector<acmi::Image> base;
-            load_base_tiles(t, base, stats);
-            acmi::RGBImage img;
-            acmi::compose(t.tiles_w, t.tiles_h, n, t.index.data(), t.rot.data(), base, colours, img);
-            base = {};
-            if (img.px.empty()) {
-                LOG("tacview terrain: %s: could not compose the texture", job.id.c_str());
-                return;
-            }
-            const double mpp = t.tile_m / n;
-            for (const acmi::Airfield& a : airfields)
-                for (const acmi::Runway& r : a.runways) acmi::paint_runway(img, mpp, r.x, r.y, r.heading, r.length, r.width);
-            if (!write_jpeg_file(img, stem + L".jpg")) {
-                LOG("tacview terrain: %s: could not encode the texture; there will be none", job.id.c_str());
-                return;
-            }
-            LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
-                job.id.c_str(), img.w, img.h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
-        } catch (...) {
-            log_once(15, "tacview terrain: no texture: out of memory");
+        if (write_base_texture(t, airfields, colours, stem + L".jpg", stats)) {
+            if (have_jpg)
+                LOG("tacview terrain: replaced the smaller %s texture (%dx%d) with %dx%d (%d tiles' images decoded, %d from "
+                    "colour, %zu airfields) in %ls",
+                    job.id.c_str(), have_w, have_h, want_w, want_h, stats.decoded, stats.fallback, airfields.size(),
+                    shown.c_str());
+            else
+                LOG("tacview terrain: wrote the %s texture (%dx%d, %d tiles' images decoded, %d from colour, %zu airfields) to %ls",
+                    job.id.c_str(), want_w, want_h, stats.decoded, stats.fallback, airfields.size(), shown.c_str());
+        } else if (have_jpg) {
+            LOG("tacview terrain: %s: could not replace the smaller texture (%dx%d); kept the old texture", job.id.c_str(),
+                have_w, have_h);
+        } else {
+            LOG("tacview terrain: %s: could not compose or encode the texture; there will be none", job.id.c_str());
             return;
         }
     } else {
@@ -669,6 +813,70 @@ int remove_legacy_files(const std::wstring& dir, const std::string& id) {
     return removed;
 }
 
+/// <summary>True when dir, or a folder between appdata and it, is a junction or link (and so is skipped, logged).</summary>
+bool reparse_below(const std::wstring& appdata, const std::wstring& dir) {
+    for (size_t pos = appdata.size(); pos != std::wstring::npos && pos < dir.size();) {
+        pos = dir.find(L'\\', pos + 1);
+        const std::wstring part = pos == std::wstring::npos ? dir : dir.substr(0, pos);
+        const DWORD a = GetFileAttributesW(part.c_str());
+        if (a == INVALID_FILE_ATTRIBUTES) return false;  // missing: nothing below it to delete
+        if (a & FILE_ATTRIBUTE_REPARSE_POINT) {
+            LOG("tacview terrain: skipped the old-file cleanup in %ls: a junction or link in its path", log::log_path(dir).c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
+/// <summary>
+/// Deletes, in dir, the files whose names is_pre_rename_file accepts for one of exts, then dir itself if it is empty.
+/// Adds the counts.
+/// </summary>
+void remove_pre_rename_in(const std::wstring& dir, std::initializer_list<const char*> exts, int& files, int& folders) {
+    std::vector<std::wstring> found;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\LazySF2-*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::string name = narrow_utf8(fd.cFileName);
+            for (const char* ext : exts)
+                if (acmi::is_pre_rename_file(name, ext)) {
+                    found.push_back(fd.cFileName);
+                    break;
+                }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    for (const std::wstring& name : found)
+        if (DeleteFileW((dir + L"\\" + name).c_str())) ++files;
+    if (RemoveDirectoryW(dir.c_str())) ++folders;  // only when empty
+}
+
+/// <summary>
+/// Once per session: removes the files of the export before the rename (folders and files named LazySF2, not
+/// LazySF2Patch), only those exact patterns, then their folders if empty. One log line when anything went.
+/// </summary>
+void remove_pre_rename_files(const std::wstring& appdata) {
+    static bool done = false;  // export thread only
+    if (done) return;
+    done = true;
+    int files = 0, folders = 0;
+    const std::wstring tv = appdata + L"\\Tacview";
+    const std::wstring textures = tv + L"\\Data\\Terrain\\Textures\\LazySF2", custom = tv + L"\\Data\\Terrain\\Custom\\LazySF2";
+    if (!reparse_below(appdata, textures)) remove_pre_rename_in(textures, {".jpg", ".xml"}, files, folders);
+    if (!reparse_below(appdata, custom)) remove_pre_rename_in(custom, {".raw", ".xml"}, files, folders);
+    const std::wstring addon = tv + L"\\AddOns\\LazySF2";
+    if (!reparse_below(appdata, addon)) {
+        for (const wchar_t* name : {L"\\main.lua", L"\\main.lua.tmp"})
+            if (DeleteFileW((addon + name).c_str())) ++files;
+        if (RemoveDirectoryW(addon.c_str())) ++folders;
+    }
+    if (files + folders > 0)
+        LOG("tacview terrain: removed %d file(s) and %d empty folder(s) left by the export before the rename (LazySF2)",
+            files, folders);
+}
+
 // Writes the embedded Tacview add-on to %APPDATA%\Tacview\AddOns\LazySF2Patch\main.lua, only when the content differs.
 // Once per session: the export thread runs one job at a time, so a plain static is enough.
 void install_addon(const std::wstring& appdata) {
@@ -718,6 +926,7 @@ bool export_files(Job& job) {
         LOG("tacview terrain: %s: the AppData folder was not found", job.id.c_str());
         return false;
     }
+    remove_pre_rename_files(root);
     install_addon(root);
     root += L"\\Tacview\\Data\\Terrain";
     const int removed = remove_legacy_files(root + L"\\Custom\\LazySF2Patch", job.id) +
@@ -726,8 +935,14 @@ bool export_files(Job& job) {
     const bool ok = export_heightmap(job, root + L"\\Custom\\LazySF2Patch");
     if (!job.texture) return ok;
     try {
-        const std::vector<acmi::Airfield> airfields = read_airfields(job);
-        publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
+        acmi::Ini targets;
+        std::vector<acmi::Airfield> airfields;
+        if (read_targets(job, targets)) {
+            const acmi::Ini types = read_types(job);
+            airfields = read_airfields(job, targets, types);
+            publish_airfields(job, airfields);  // before the slow part: a recording started now gets its aerodromes
+            publish_structures(job, targets, types);
+        }
         export_texture(job, airfields, root + L"\\Textures\\LazySF2Patch");
     } catch (...) {  // the heightmap is done: only the texture and the airfields are lost
         log_once(18, "tacview terrain: no texture: out of memory");
@@ -755,37 +970,36 @@ void run_job(Job job) {
 
 }  // namespace
 
-// The stamp check, once per process (it logs a mismatch once).
-static bool terrain_build_ok(HMODULE m) {
+static bool capture_impl(TerrainInfo& out, bool basics_only) {
     static bool build_known = false, build_ok = false;
+    // The snapshot probe must not use up the recorder's once-only lines.
+    auto note = [basics_only](unsigned bit, const char* msg) {
+        if (!basics_only) log_once(bit, msg);
+    };
+    HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
+    if (!m) {
+        note(8, "tacview terrain: TerrainEngine.dll is not loaded; no Theater= for this recording");
+        return false;
+    }
     if (!build_known) {
         build_known = true;
         build_ok = is_expected_build(m, kStamp, kImageSize, "TerrainEngine.dll");
     }
-    return build_ok;
-}
-
-static bool capture_impl(TerrainInfo& out) {
-    HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
-    if (!m) {
-        log_once(8, "tacview terrain: TerrainEngine.dll is not loaded; no Theater= for this recording");
-        return false;
-    }
-    if (!terrain_build_ok(m)) return false;
+    if (!build_ok) return false;
 
     Raw raw;
     const int rc = read_raw(m, &raw);
-    if (rc == 2) log_once(0, "tacview terrain: the terrain engine's memory is not as expected; no Theater= for this recording");
-    if (rc == 1) log_once(9, "tacview terrain: no theatre is loaded; no Theater= for this recording");
+    if (rc == 2) note(0, "tacview terrain: the terrain engine's memory is not as expected; no Theater= for this recording");
+    if (rc == 1) note(9, "tacview terrain: no theatre is loaded; no Theater= for this recording");
     if (rc != 0) return false;
     if (raw.w < 2 || raw.h < 2 || raw.w > kMaxDim || raw.h > kMaxDim || !std::isfinite(raw.spacing) ||
         raw.spacing < 1.0 || raw.spacing > 100000.0) {
-        log_once(1, "tacview terrain: the heightfield size or spacing is out of range; no Theater= for this recording");
+        note(1, "tacview terrain: the heightfield size or spacing is out of range; no Theater= for this recording");
         return false;
     }
     out.id = acmi::terrain_id(raw.base);
     if (out.id.empty()) {
-        log_once(2, "tacview terrain: the theatre has no name; no Theater= for this recording");
+        note(2, "tacview terrain: the theatre has no name; no Theater= for this recording");
         return false;
     }
     out.full_name = narrow(raw.full, 100);
@@ -797,10 +1011,11 @@ static bool capture_impl(TerrainInfo& out) {
     out.geo_lat = raw.lat;
     out.samples.reset();
     out.texture.reset();
+    if (basics_only) return true;
     settle();
     if (g_exported.count(out.id)) return true;
     if (g_busy.load(std::memory_order_acquire)) {
-        log_once(10, "tacview terrain: an export is still running; this flight does not start another");
+        note(10, "tacview terrain: an export is still running; this flight does not start another");
         if (g_pending_id != out.id) mark_no_aerodromes(out.id);  // same theatre: its running job publishes the list
         return true;
     }
@@ -808,12 +1023,12 @@ static bool capture_impl(TerrainInfo& out) {
     const size_t count = static_cast<size_t>(raw.w) * static_cast<size_t>(raw.h);
     std::unique_ptr<uint16_t[]> buf(new (std::nothrow) uint16_t[count]);
     if (!buf) {
-        log_once(3, "tacview terrain: out of memory for the heightmap copy; no export");
+        note(3, "tacview terrain: out of memory for the heightmap copy; no export");
         mark_no_aerodromes(out.id);
         return true;
     }
     if (!copy_samples(buf.get(), raw.samples, count * 2)) {
-        log_once(4, "tacview terrain: the heightfield could not be read; no export");
+        note(4, "tacview terrain: the heightfield could not be read; no export");
         mark_no_aerodromes(out.id);
         return true;
     }
@@ -822,29 +1037,33 @@ static bool capture_impl(TerrainInfo& out) {
     return true;
 }
 
-bool terrain_theatre_id(std::string& id) {
-    id.clear();
-    HMODULE m = GetModuleHandleW(L"TerrainEngine.dll");
-    if (!m || !terrain_build_ok(m)) return false;
-    Raw raw;
-    if (read_raw(m, &raw) != 0) return false;
-    try {
-        id = acmi::terrain_id(raw.base);
-    } catch (...) {  // std::bad_alloc
-        id.clear();
-    }
-    return !id.empty();
-}
-
 bool terrain_capture(TerrainInfo& out) {
     try {
-        return capture_impl(out);
+        return capture_impl(out, false);
     } catch (...) {  // std::bad_alloc from the strings or the set
         out.samples.reset();
         out.texture.reset();
         log_once(7, "tacview terrain: out of memory reading the theatre; no Theater= for this recording");
         return false;
     }
+}
+
+bool terrain_basics(TerrainInfo& out) {
+    try {
+        return capture_impl(out, true);
+    } catch (...) {
+        out.samples.reset();
+        out.texture.reset();
+        return false;
+    }
+}
+
+bool terrain_theatre_id(std::string& id) {
+    TerrainInfo info;
+    id.clear();
+    if (!terrain_basics(info)) return false;
+    id = std::move(info.id);
+    return !id.empty();
 }
 
 void terrain_export_start(TerrainInfo& info, const acmi::Placement& placement) {
@@ -879,13 +1098,12 @@ void terrain_export_shutdown() {
     g_thread.detach();
 }
 
-AerodromeList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out) {
-    std::lock_guard<std::mutex> g(g_aero_lock);
-    const auto it = g_aero.find(id);
-    if (it == g_aero.end()) return AerodromeList::Pending;
-    if (it->second->empty()) return AerodromeList::None;
-    out = it->second;
-    return AerodromeList::Ready;
+StaticList terrain_aerodromes(const std::string& id, std::shared_ptr<const std::vector<AerodromeMark>>& out) {
+    return lookup_list(g_aero, id, out);
+}
+
+StaticList terrain_structures(const std::string& id, std::shared_ptr<const StructureList>& out) {
+    return lookup_list(g_struct, id, out);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

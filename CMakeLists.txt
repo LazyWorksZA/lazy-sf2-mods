@@ -48,6 +48,7 @@ add_library(lazysf2 SHARED
     src/hooks/window_hooks.cpp
     src/hooks/dxgi_hooks.cpp
     src/hooks/input_hooks.cpp
+    src/hooks/pilot_twist.cpp
     src/hooks/menu_hooks.cpp
     src/hooks/focus_hooks.cpp
     src/hooks/options_gameplay_splice.cpp
@@ -58,6 +59,7 @@ add_library(lazysf2 SHARED
     src/hooks/game_files.cpp
     src/hooks/wic_jpeg.cpp
     src/hooks/world_walk.cpp
+    src/hooks/mission_areas.cpp
     src/acmi/acmi_format.cpp
     src/acmi/tacview_core.cpp
     src/acmi/tacview_terrain.cpp

@@ -6,6 +6,7 @@
 
 #include "acmi/acmi_format.h"
 #include "acmi/airfields.h"
+#include "acmi/ini.h"
 
 namespace LazyWorks::SF2Patch::acmi {
 
@@ -416,6 +417,41 @@ void draw_runways(RGBImage& img, const Airfield& a, double x0, double y0, double
             }
         }
     }
+}
+
+bool jpeg_size(const uint8_t* d, size_t n, int& w, int& h) {
+    if (!d || n < 4 || d[0] != 0xff || d[1] != 0xd8) return false;
+    size_t i = 2;
+    while (i + 4 <= n) {
+        if (d[i] != 0xff) return false;
+        const uint8_t m = d[i + 1];
+        if (m == 0xff) {  // a fill byte
+            ++i;
+            continue;
+        }
+        if (m == 0x01 || (m >= 0xd0 && m <= 0xd8)) {  // markers without a length
+            i += 2;
+            continue;
+        }
+        if (m == 0xd9 || m == 0xda) return false;  // the end, or a scan before any frame header
+        const size_t len = (static_cast<size_t>(d[i + 2]) << 8) | d[i + 3];
+        if (len < 2) return false;
+        if (m >= 0xc0 && m <= 0xcf && m != 0xc4 && m != 0xc8 && m != 0xcc) {  // a frame header (SOFn)
+            if (i + 9 > n || len < 7) return false;
+            h = (d[i + 5] << 8) | d[i + 6];
+            w = (d[i + 7] << 8) | d[i + 8];
+            return w > 0 && h > 0;
+        }
+        i += 2 + len;
+    }
+    return false;
+}
+
+bool is_pre_rename_file(const std::string& name, const char* ext) {
+    const std::string lower = to_lower_ascii(name), e = to_lower_ascii(ext);
+    const std::string prefix = "lazysf2-";
+    return lower.size() > prefix.size() + e.size() && lower.compare(0, prefix.size(), prefix) == 0 &&
+           lower.compare(lower.size() - e.size(), e.size(), e) == 0 && lower.find_first_of("\\/") == std::string::npos;
 }
 
 std::string texture_xml(const std::string& id, const std::string& file, int /*w_px*/, int /*h_px*/, double extent_x_m,

@@ -29,11 +29,14 @@
 #include "acmi/terrain_texture.h"
 #include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
+#include "hooks/probe_snap_logic.h"
 #include "hooks/world_walk_logic.h"
 #include "hooks/aircraft_side.h"
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/focus_logic.h"
 #include "hooks/remote_avatar_logic.h"
+#include "hooks/pilot_twist_math.h"
+#include "config_parse.h"
 #include "bot_client.h"
 #include "bot_serve.h"
 #include "net/receiver_math.h"
@@ -3383,6 +3386,70 @@ void texture_tests() {
                "texture xml: patch corners from the world square");
         expect(has("<Visible>true</Visible>") && has("<Projection>Quad</Projection>"), "texture xml: patch structure");
     }
+
+    // The base texture in bands of tile rows (north first), runways painted per band, is the image composed whole.
+    {
+        std::vector<Image> tiles(3);
+        for (int k = 0; k < 3; ++k) {
+            tiles[k].w = tiles[k].h = 4;
+            tiles[k].px.resize(64);
+            for (size_t i = 0; i < 64; ++i) tiles[k].px[i] = static_cast<uint8_t>(k * 50 + i);
+        }
+        const std::vector<RGB> colours = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+        const uint16_t field[15] = {0, 1, 2, 2, 1, 0, 1, 1, 2, 0, 0, 2, 1, 2, 0};  // 3 wide, 5 high, row 0 south
+        const uint8_t frot[15] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2};
+        const double mpp = 2000.0 / 4;
+        RGBImage whole;
+        compose(3, 5, 4, field, frot, tiles, colours, whole);
+        paint_runway(whole, mpp, 3000, 4100, 0.3, 3000, 600);  // crosses the band edge at 4000 m
+        std::vector<uint8_t> banded;
+        for (int top = 5; top > 0; top -= 2) {
+            PatchTiles pt;
+            pt.ty0 = (std::max)(0, top - 2);
+            pt.nx = 3;
+            pt.ny = top - pt.ty0;
+            RGBImage band;
+            compose_patch(pt, 3, 4, field, frot, tiles, colours, band);
+            paint_runway(band, mpp, 3000, 4100 - pt.ty0 * 2000.0, 0.3, 3000, 600);
+            banded.insert(banded.end(), band.px.begin(), band.px.end());
+        }
+        expect(!whole.px.empty() && banded == whole.px,
+               "base texture bands: the same pixels as the whole image, runway across a band edge");
+    }
+
+    // The size of an existing texture, from its header.
+    {
+        const std::vector<uint8_t> j = {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x4a, 0x46, 0xff, 0xc4, 0x00, 0x03, 0x00,
+                                        0xff, 0xc0, 0x00, 0x11, 0x08, 0x1f, 0x40, 0x0f, 0xa0, 0x03};
+        int w = 0, h = 0;
+        expect(jpeg_size(j.data(), j.size(), w, h) && w == 4000 && h == 8000, "jpeg size: from the frame header, after other segments");
+        std::vector<uint8_t> prog = j;
+        prog[14] = 0xc2;
+        expect(jpeg_size(prog.data(), prog.size(), w, h) && w == 4000, "jpeg size: progressive");
+        std::vector<uint8_t> scan = j;
+        scan[14] = 0xda;
+        expect(!jpeg_size(scan.data(), scan.size(), w, h), "jpeg size: a scan before any frame header");
+        std::vector<uint8_t> dht = j;
+        dht[14] = 0xc4;  // a Huffman table, not a frame header
+        expect(!jpeg_size(dht.data(), dht.size(), w, h), "jpeg size: DHT is not a frame header");
+        expect(!jpeg_size(j.data(), 18, w, h), "jpeg size: cut short");
+        const uint8_t png[4] = {0x89, 'P', 'N', 'G'};
+        expect(!jpeg_size(png, 4, w, h) && !jpeg_size(nullptr, 0, w, h), "jpeg size: not a JPEG");
+    }
+
+    // The files of the export before the rename: exact shapes only.
+    {
+        expect(is_pre_rename_file("LazySF2-GermanyCE.jpg", ".jpg") && is_pre_rename_file("lazysf2-GermanyCE-AF001.JPG", ".jpg") &&
+                   is_pre_rename_file("LazySF2-GermanyCE.xml", ".xml") && is_pre_rename_file("LazySF2-GermanyCE.raw", ".raw"),
+               "pre-rename: LazySF2- names with the extension, any case");
+        expect(!is_pre_rename_file("LazySF2Patch-GermanyCE.jpg", ".jpg") && !is_pre_rename_file("LazySF2Patch-GermanyCE.xml", ".xml"),
+               "pre-rename: LazySF2Patch- names are never matched");
+        expect(!is_pre_rename_file("LazySF2-.jpg", ".jpg") && !is_pre_rename_file("LazySF2-GermanyCE.jpg", ".xml") &&
+                   !is_pre_rename_file("LazySF2-GermanyCE.jpg.bak", ".jpg") && !is_pre_rename_file("MyLazySF2-x.jpg", ".jpg") &&
+                   !is_pre_rename_file("LazySF2-a\\b.jpg", ".jpg") && !is_pre_rename_file("LazySF2-a/b.jpg", ".jpg") &&
+                   !is_pre_rename_file("LazySF2.GermanyCE.jpg", ".jpg"),
+               "pre-rename: nothing else (empty stem, other extension, suffix, prefix, path, dotted)");
+    }
 }
 }  // namespace
 
@@ -3431,6 +3498,261 @@ void aerodrome_core_tests() {
     expect(core.live_objects() == 0, "aerodromes: none left");
     static_assert(TacviewRec::series_of(TacviewRec::kAerodrome) == TacviewRec::kSeriesAerodrome, "series");
     static_assert(TacviewRec::kSeriesAerodrome != TacviewRec::kSeriesBullet && (TacviewRec::kSeriesAerodrome & 0x3f) == 0, "series bit is its own");
+}
+
+void structure_tests() {
+    using namespace LazyWorks::SF2Patch::acmi;
+    using LazyWorks::SF2Patch::hooks::AircraftSide;
+    std::printf("tacview structures\n");
+    const double deg = kPi / 180;
+    const auto targets = utf16le(
+        L"[TargetArea001]\r\nName=Base\r\nPosition=100000,200000\r\nAirfieldDataFile=af.ini\r\n"
+        L"Target[001].Type=Runway1\r\nTarget[001].Offset=0,0\r\nTarget[001].Heading=90\r\n"
+        L"Target[002].Type=Hangar1\r\nTarget[002].Offset=0,1000\r\nTarget[002].Heading=0\r\n"
+        L"Target[003].Type=AAA\r\nTarget[003].Offset=5,5\r\nTarget[003].Heading=0\r\n"
+        L"Target[004].Type=Unlisted1\r\nTarget[004].Offset=100,0\r\nTarget[004].Heading=-90\r\n\r\n"
+        L"[TargetArea002]\r\nName=USS Somebody\r\nPosition=5,5\r\nCarrierStation=TRUE\r\n"
+        L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,0\r\n\r\n"
+        L"[TargetArea003]\r\nName=Far Away\r\nPosition=5,5\r\nOffMapAirBase=1\r\n"
+        L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,0\r\n\r\n"
+        L"[TargetArea004]\r\nName=River\r\nPosition=5000,6000\r\nRotateToRunwayHeading=0\r\n"
+        L"Target[001].Type=Runway2\r\nTarget[001].Heading=90\r\n"
+        L"Target[002].Type=vBridge1\r\nTarget[002].Offset=10,20\r\nTarget[002].Heading=45\r\n\r\n"
+        L"[TargetArea005]\r\nName=Village\r\nPosition=1000,1000\r\n"
+        L"Target[001].Type=hangar1\r\nTarget[001].Offset=-100,50\r\nTarget[001].Heading=30\r\n");
+    const auto types = ansi(
+        "[TargetType001]\r\nName=Hangar1\r\nFullName=Hangar\r\nTargetType=HANGAR\r\nUseGroundObject=FALSE\r\n"
+        "[TargetType002]\r\nName=AAA\r\nFullName=AAA Site\r\nTargetType=AAA\r\nUseGroundObject=TRUE\r\n"
+        "[TargetType003]\r\nName=Runway1\r\nFullName=Runway\r\nTargetType=MEDIUM_RUNWAY\r\nUseGroundObject=FALSE\r\n"
+        "[TargetType004]\r\nName=vBridge1\r\nFullName=Paul Doumer Bridge\r\nTargetType=BRIDGE\r\nUseGroundObject=FALSE\r\n");
+    const Ini t = parse_ini(targets.data(), targets.size());
+    const Ini ty = parse_ini(types.data(), types.size());
+    const auto placed = structures_from(t, ty);
+    const auto& s = placed.items;
+    expect(s.size() == 4, "structures: runways, live types, carriers and off-map bases left out");
+    if (s.size() == 4) {
+        // A = 90 (the runway's heading): offset (0, 1000) turns to (+1000, 0), the heading to 90.
+        expect(s[0].name == "Hangar" && std::fabs(s[0].x - 101000) < 1e-6 && std::fabs(s[0].y - 200000) < 1e-6 &&
+                   std::fabs(s[0].heading - 90 * deg) < 1e-9 && !s[0].bridge,
+               "structures: an airfield's object is turned by the area heading, named by FullName");
+        // Offset (100, 0) at A = 90: (0, -100); heading 90 - 90 = 0.
+        expect(s[1].name == "Unlisted1" && std::fabs(s[1].x - 100000) < 1e-6 && std::fabs(s[1].y - 199900) < 1e-6 &&
+                   std::fabs(s[1].heading) < 1e-9,
+               "structures: a type the types ini does not list keeps its type id");
+        expect(s[2].bridge && s[2].name == "Paul Doumer Bridge" && std::fabs(s[2].x - 5010) < 1e-6 && std::fabs(s[2].y - 6020) < 1e-6 &&
+                   std::fabs(s[2].heading - 45 * deg) < 1e-9,
+               "structures: RotateToRunwayHeading=0 keeps offsets and headings as given; a BRIDGE type is a bridge");
+        expect(s[3].name == "Hangar" && std::fabs(s[3].x - 900) < 1e-6 && std::fabs(s[3].y - 1050) < 1e-6 &&
+                   std::fabs(s[3].heading - 30 * deg) < 1e-9,
+               "structures: an area without a runway has heading 0; type names match without case");
+    }
+    const Ini none = parse_ini(nullptr, 0);
+    const auto bare = structures_from(t, none).items;
+    expect(bare.size() == 5 && bare[1].name == "AAA" && !bare[3].bridge && bare[3].name == "vBridge1",
+           "structures: without a types ini, only runways (by name) are left out");
+    expect(structures_from(none, ty).items.empty() && structures_from(none, ty).areas.empty(), "structures: an empty targets ini has none");
+
+    const auto theatre = ansi("[Terrain]\r\nTargetFile=desert_targets.ini\r\nTargetTypeFile=desert_types.ini\r\n");
+    const Ini th = parse_ini(theatre.data(), theatre.size());
+    expect(types_file_name(th, "x_TARGETS.INI") == "desert_types.ini", "types file: the theatre ini names it");
+    expect(types_file_name(none, "GermanyCE_targets.INI") == "GermanyCE_TYPES.INI" && types_file_name(none, "foo.ini").empty(),
+           "types file: else from the targets ini's name, or none");
+
+    // The core: dedupe against live ground objects, the line format, written once, removed only by the final frame.
+    TacviewCoreConfig cfg;
+    cfg.ref_lat = -4.5;
+    cfg.ref_lon = -25.0;
+    TacviewCore core{cfg};
+    auto structure = [](uint64_t seq, const char* name, double x, double y, float heading, bool bridge) {
+        TacviewRec r = make_rec(seq, false, AircraftSide::Unknown, name, 2.0, x, y, 0, 0.0f, heading, 0.0f);
+        r.obj_class = bridge ? TacviewRec::kBridge : TacviewRec::kStructure;
+        return r;
+    };
+    std::string out;
+    TacviewRec gun = make_rec(7, false, AircraftSide::Enemy, "AAA", 1.0, 1000, 1000, 0, 0, 0, 0);
+    gun.obj_class = TacviewRec::kGroundStatic;
+    TacviewRec truck = make_rec(8, false, AircraftSide::Enemy, "Truck", 1.0, 3000, 3000, 0, 0, 0, 0);
+    truck.obj_class = TacviewRec::kGroundVehicle;
+    core.add(gun);
+    core.add(truck);
+    core.end_frame(1.0, out, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile);
+    std::string o1;
+    core.add(structure(1, "Hangar", 1010, 1000, 0.0f, false));          // 10 m from the gun: the game's own object
+    core.add(structure(2, "Hangar", 1020, 1000, static_cast<float>(kPi / 2), false));  // 20 m: kept
+    core.add(structure(3, "Bridge", 5000, 5000, 0.0f, true));
+    core.add(structure(4, "Shed", 3005, 3000, 0.0f, false));            // next to a vehicle: kept
+    core.end_frame(2.0, o1, 0);
+    const auto m = make_mapping(-4.5);
+    const std::string want2 = "7000002,T=" + num(1020 * m.lon_scale, 9) + "|" + num(1000 * m.lat_scale, 9) +
+                              "|0|0|0|90|1020|1000|90,Name=Hangar,Type=Ground+Static+Building";
+    const auto l1 = lines_of(o1);
+    expect(l1.size() == 4 && l1[0] == "#1.000" && l1[1] == want2, "structures: one line each, id 0x7000000+seq, Ground+Static+Building, no coalition");
+    expect(o1.find("7000001,") == std::string::npos, "structures: one within 15 m of a live ground object is skipped");
+    expect(o1.find("7000003,T=") != std::string::npos && o1.find(",Name=Bridge,Type=Ground+Static+Bridge\n") != std::string::npos,
+           "structures: a bridge is Ground+Static+Bridge");
+    expect(o1.find("7000004,T=") != std::string::npos, "structures: vehicles do not hide them");
+    // The next chunk: a repeat writes nothing; a new one is added; the earlier ones stay.
+    std::string o2;
+    core.add(structure(2, "Hangar", 1020, 1000, static_cast<float>(kPi / 2), false));
+    core.add(structure(5, "Barn", 8000, 8000, 0.0f, false));
+    core.end_frame(3.0, o2, 0);
+    expect(count_of(o2, "7000002") == 0 && count_of(o2, "\n7000005,T=") == 1 && o2.find("-700000") == std::string::npos,
+           "structures: written once; a later chunk does not remove the earlier ones");
+    expect(core.stats().structures == 4 && core.stats().structures_skipped == 1, "structures: the counts");
+    // Other series' frames leave them alone, even when the gun goes.
+    std::string o3;
+    core.add(make_rec(1, true, AircraftSide::Friendly, "P", 4.0, 0, 0, 100, 0, 0, 0));
+    core.end_frame(4.0, o3, TacviewRec::kSeriesAircraft | TacviewRec::kSeriesWeapon);
+    core.end_frame(5.0, o3, TacviewRec::kSeriesGroundStatic | TacviewRec::kSeriesGroundMobile | TacviewRec::kSeriesAerodrome);
+    expect(o3.find("-2000007\n") != std::string::npos && o3.find("-700000") == std::string::npos,
+           "structures: frames of other series never remove them");
+    std::string o4;
+    core.end_frame(6.0, o4);
+    expect(count_of(o4, "\n-700000") + (o4.rfind("-700000", 0) == 0 ? 1 : 0) == 4 && core.live_objects() == 0,
+           "structures: the final frame removes all of them");
+    static_assert(TacviewRec::series_of(TacviewRec::kStructure) == TacviewRec::kSeriesStructure &&
+                      TacviewRec::series_of(TacviewRec::kBridge) == TacviewRec::kSeriesStructure,
+                  "series");
+    static_assert((TacviewRec::kSeriesStructure & 0x7f) == 0 && (TacviewRec::kSeriesAll & TacviewRec::kSeriesStructure) != 0,
+                  "the structure series bit is its own, and the final frame names it");
+
+    // Areas: radius, index, and the game's rotation rule (airfield areas only, targets after a runway only).
+    expect(placed.areas.size() == 3 && s.size() == 4 && s[0].area == 0 && s[1].area == 0 && s[2].area == 1 && s[3].area == 2,
+           "structures: each belongs to its area; carriers and off-map bases have no area");
+    expect(placed.areas.size() == 3 && std::fabs(placed.areas[0].radius - 1000) < 1e-9 &&
+               std::fabs(placed.areas[2].radius - std::hypot(100.0, 50.0)) < 1e-9 && placed.areas[1].x == 5000,
+           "structures: an area's radius reaches its farthest placed object");
+    {
+        const auto t2b = utf16le(
+            L"[TargetArea001]\r\nName=Strip\r\nPosition=0,0\r\nRadius=5000\r\nAirfieldDataFile=x.ini\r\n"
+            L"Target[003].Type=Hangar1\r\nTarget[003].Offset=0,100\r\nTarget[003].Heading=0\r\n"
+            L"Target[001].Type=Hangar1\r\nTarget[001].Offset=0,100\r\nTarget[001].Heading=0\r\n"
+            L"Target[002].Type=RwyMod\r\nTarget[002].Heading=90\r\n\r\n"
+            L"[TargetArea002]\r\nName=Town\r\nPosition=1000,0\r\n"
+            L"Target[001].Type=Runway1\r\nTarget[001].Heading=90\r\n"
+            L"Target[002].Type=Hangar1\r\nTarget[002].Offset=0,100\r\nTarget[002].Heading=0\r\n");
+        const auto ty2b = ansi("[TargetType001]\r\nName=Hangar1\r\nFullName=Hangar\r\nTargetType=HANGAR\r\n"
+                               "[TargetType002]\r\nName=RwyMod\r\nTargetType=SMALL_RUNWAY\r\n"
+                               "[TargetType003]\r\nName=Runway1\r\nTargetType=MEDIUM_RUNWAY\r\n");
+        const Ini t2 = parse_ini(t2b.data(), t2b.size());
+        const Ini ty2 = parse_ini(ty2b.data(), ty2b.size());
+        const auto p2 = structures_from(t2, ty2);
+        const auto& i2 = p2.items;
+        expect(i2.size() == 3 && p2.areas.size() == 2 && p2.areas[0].radius == 5000, "structures: a runway by category is left out; Radius kept when larger");
+        if (i2.size() == 3) {
+            expect(std::fabs(i2[0].x) < 1e-9 && std::fabs(i2[0].y - 100) < 1e-9 && std::fabs(i2[0].heading) < 1e-12,
+                   "structures: a target before the runway is not turned (targets by number, not file order)");
+            expect(std::fabs(i2[1].x - 100) < 1e-6 && std::fabs(i2[1].y) < 1e-6 && std::fabs(i2[1].heading - 90 * deg) < 1e-9,
+                   "structures: a target after it is turned by its heading");
+            expect(std::fabs(i2[2].x - 1000) < 1e-9 && std::fabs(i2[2].y - 100) < 1e-9 && std::fabs(i2[2].heading) < 1e-12,
+                   "structures: an area without an airfield is never turned");
+        }
+        const AirfieldLoader none_loader = [](const std::string&) { return std::vector<uint8_t>{}; };
+        const auto af2 = airfields_from(t2, none_loader, &ty2);
+        const auto af3 = airfields_from(t2, none_loader);
+        expect(af2.size() == 1 && std::fabs(af2[0].heading - 90 * deg) < 1e-9 && af3.size() == 1 && std::fabs(af3[0].heading) < 1e-12,
+               "airfields: the runway by category with the types ini, by name without it");
+    }
+
+    // Picking areas: the game's own set, else near the player or holding a live ground object.
+    {
+        const TargetArea areas[3] = {{0, 0, 1000}, {50000, 0, 1000}, {100000, 0, 500}};
+        uint8_t on[3] = {9, 9, 9};
+        const double active[1][2] = {{50000.5, 0}};
+        AreaPick pk;
+        pk.use_active = true;
+        pk.active = active;
+        pk.n_active = 1;
+        pk.have_player = true;  // ignored with the game's set
+        expect(pick_areas(areas, 3, pk, on) == 1 && on[0] == 0 && on[1] == 1 && on[2] == 0, "pick: exactly the game's populated areas");
+        pk.n_active = 0;
+        expect(pick_areas(areas, 3, pk, on) == 0, "pick: an empty game set picks none");
+        const double ground[1][2] = {{100000, 500}};
+        AreaPick fb;
+        fb.have_player = true;
+        fb.player[0] = 0;
+        fb.player[1] = 31000;  // exactly radius + range
+        fb.range = 30000;
+        fb.ground = ground;
+        fb.n_ground = 1;
+        expect(pick_areas(areas, 3, fb, on) == 2 && on[0] == 1 && on[1] == 0 && on[2] == 1,
+               "pick: fallback by the player's reach and by a live ground object inside the radius");
+        fb.player[1] = 31001;
+        fb.n_ground = 0;
+        expect(pick_areas(areas, 3, fb, on) == 0, "pick: beyond the reach, no ground objects: none");
+    }
+
+    expect(utf8_prefix("abc", 2) == 2 && utf8_prefix("a\xc3\xbc", 2) == 1 && utf8_prefix("a\xc3\xbc", 3) == 3 &&
+               utf8_prefix("\xe2\x82\xac" "x", 2) == 0,
+           "utf8_prefix: never cuts a character");
+    expect(TacviewWriter::ring_fits(0, 0, 64, 63) && !TacviewWriter::ring_fits(0, 0, 64, 64) &&
+               TacviewWriter::ring_fits(10, 0, 64, 53) && !TacviewWriter::ring_fits(10, 0, 64, 54) &&
+               TacviewWriter::ring_fits(5, 0xfffffffeu, 64, 56) && !TacviewWriter::ring_fits(5, 0xfffffffeu, 64, 57),
+           "tacview writer: ring_fits at the boundary, and across the index wrap");
+
+    // The 15 m boundary, markers and repeats of a skipped one.
+    {
+        TacviewCore c2{cfg};
+        std::string ob;
+        TacviewRec g2 = make_rec(1, false, AircraftSide::Enemy, "AAA", 1.0, 0, 0, 0, 0, 0, 0);
+        g2.obj_class = TacviewRec::kGroundStatic;
+        c2.add(g2);
+        c2.end_frame(1.0, ob, TacviewRec::kSeriesGroundStatic);
+        c2.add(structure(1, "A", 15.0, 0, 0.0f, false));
+        c2.add(structure(2, "B", 15.001, 0, 0.0f, false));
+        TacviewRec dead = structure(3, "C", 9000, 0, 0.0f, false);
+        dead.destroyed = TacviewRec::kDestroyed;
+        c2.add(dead);
+        std::string oc;
+        c2.end_frame(2.0, oc, 0);
+        c2.add(structure(1, "A", 15.0, 0, 0.0f, false));
+        c2.end_frame(3.0, oc, 0);
+        expect(oc.find("7000001,") == std::string::npos && oc.find("7000002,T=") != std::string::npos &&
+                   oc.find("7000003") == std::string::npos && c2.stats().structures == 1,
+               "structures: 15 m is still the game's object, just over it is not; a marker or a repeat writes nothing");
+    }
+
+    // A destroyed structure: the event, an explosion, its removal; only once.
+    {
+        TacviewCore c3{cfg};
+        std::string o;
+        c3.add(structure(4, "Fuel Tank", 2000, 3000, 0.0f, false));
+        c3.add(structure(5, "Bridge", 2500, 3000, 0.0f, true));
+        c3.end_frame(1.0, o, 0);
+        std::string od;
+        TacviewRec boom = structure(4, "", 0, 0, 0.0f, false);
+        boom.destroyed = TacviewRec::kDestroyed;
+        boom.t = 2.0;
+        c3.add(boom);
+        TacviewRec bridge_boom = structure(5, "", 0, 0, 0.0f, false);
+        bridge_boom.obj_class = TacviewRec::kStructure;  // the marker's class need not say bridge: one family
+        bridge_boom.destroyed = TacviewRec::kDestroyed;
+        c3.add(bridge_boom);
+        c3.end_frame(2.0, od, 0);
+        const size_t ev = od.find("0,Event=Destroyed|7000004|"), rm = od.find("-7000004\n");
+        expect(ev != std::string::npos && rm != std::string::npos && ev < rm && od.find("Type=Misc+Explosion") != std::string::npos &&
+                   od.find("0,Event=Destroyed|7000005|") != std::string::npos && od.find("-7000005\n") != std::string::npos,
+               "structures: a destroyed one gets its Destroyed event, an explosion and its removal");
+        std::string oe;
+        c3.add(boom);
+        c3.end_frame(3.0, oe, 0);
+        std::string of;
+        c3.end_frame(9.0, of);
+        expect(oe.find("7000004") == std::string::npos && of.find("7000004") == std::string::npos && of.find("7000005") == std::string::npos &&
+                   c3.stats().structures_destroyed == 2 && c3.live_objects() == 0,
+               "structures: destroyed once; the final frame does not remove it again");
+    }
+    {
+        const double pts[4][2] = {{0, 0}, {10, 0}, {20, 0}, {10, 0.5}};
+        const uint8_t taken[4] = {0, 1, 0, 0};
+        expect(find_near(pts, 4, 10.4, 0, 2.0, nullptr) == 1 && find_near(pts, 4, 10.1, 0.4, 2.0, nullptr) == 3 &&
+                   find_near(pts, 4, 10.4, 0, 2.0, taken) == 3 && find_near(pts, 4, 0.5, 0, 2.0, taken) == 0 &&
+                   find_near(pts, 4, 50, 0, 2.0, nullptr) == 4 && find_near(pts, 0, 0, 0, 2.0, nullptr) == 0,
+               "find_near: the nearest within the tolerance, never a taken one; n when none");
+    }
+
+    TacviewWriter w(64);
+    expect(!w.can_take(1), "tacview writer: can_take is false while nothing is open");
 }
 
 void placement_tests() {
@@ -6707,6 +7029,231 @@ void acmi_ghost_tests() {
 
 }  // namespace
 
+void pilot_twist_tests() {
+    namespace pt = LazyWorks::SF2Patch::hooks::pilot_twist;
+    std::printf("pilot twist\n");
+    auto close_to = [](double a, double b, double eps) { return std::fabs(a - b) <= eps; };
+    const float d = pt::kDeg;
+
+    // Curve: zero up to the start angle, full from the full angle, smooth and signed in between.
+    expect(pt::target_weight(0.0f) == 0.0f && pt::target_weight(59.0f * d) == 0.0f, "twist: no effect below 60 degrees");
+    expect(pt::target_weight(150.0f * d) == 1.0f && pt::target_weight(170.0f * d) == 1.0f, "twist: full from 150 degrees");
+    expect(close_to(pt::target_weight(105.0f * d), 0.5, 1e-5), "twist: half way at the midpoint (smoothstep)");
+    expect(pt::target_weight(-120.0f * d) == -pt::target_weight(120.0f * d) && pt::target_weight(-120.0f * d) < 0,
+           "twist: signed like the yaw");
+    float prev = 0.0f;
+    bool monotonic = true;
+    for (int deg = 0; deg <= 180; ++deg) {
+        const float w = pt::target_weight(deg * d);
+        if (w < prev - 1e-6f || w < 0.0f || w > 1.0f) monotonic = false;
+        prev = w;
+    }
+    expect(monotonic, "twist: the curve rises monotonically within [0, 1]");
+    // Past +-180 degrees the side holds: the yaw is unwrapped against last frame's.
+    float c = pt::continuous_yaw(1e9f, 170.0f * d);
+    expect(close_to(c, 170.0f * d, 1e-5), "side: the first frame takes the wrapped yaw");
+    c = pt::continuous_yaw(c, -175.0f * d);
+    expect(close_to(c, 185.0f * d, 1e-4) && pt::target_weight(c) == 1.0f, "side: crossing 180 keeps the right side");
+    c = pt::continuous_yaw(c, 175.0f * d);
+    expect(close_to(c, 175.0f * d, 1e-4) && pt::target_weight(c) == 1.0f, "side: and back again");
+    expect(close_to(pt::continuous_yaw(400.0f * d, 10.0f * d), 10.0f * d, 1e-5), "side: re-anchored inside the start angle");
+    expect(pt::lean_body(pt::target_weight(pt::continuous_yaw(170.0f * d, -170.0f * d)), {0, 0, 0}).x > 0,
+           "side: the lean does not flip across 180");
+    expect(pt::target_weight(std::numeric_limits<float>::quiet_NaN()) == 0.0f, "twist: NaN yaw has no effect");
+
+    // Filter: a first-order lag of kFilterSeconds, never past the target, snaps after a long gap.
+    expect(pt::filter_step(0.0f, 1.0f, 0.0f) == 0.0f, "filter: no time, no change");
+    expect(close_to(pt::filter_step(0.0f, 1.0f, pt::kFilterSeconds), 1.0 - std::exp(-1.0), 1e-5),
+           "filter: 63% after one time constant");
+    expect(pt::filter_step(0.2f, 1.0f, 1.0f) == 1.0f, "filter: a long gap jumps to the target");
+    float w = 0.0f;
+    bool bounded = true;
+    for (int i = 0; i < 60; ++i) {  // one second at 60 fps
+        w = pt::filter_step(w, 1.0f, 1.0f / 60.0f);
+        if (w > 1.0f) bounded = false;
+    }
+    expect(bounded && w > 0.99f, "filter: converges in a second without overshoot");
+    expect(pt::filter_step(std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.01f) == 0.5f, "filter: recovers from NaN");
+
+    // Twist: adds up to kMaxTwist, within the widened seat limit and +-180 degrees.
+    const float lo = -145.0f * d, hi = 145.0f * d;
+    auto twisted_yaw = [](float yaw, float wt, float mn, float mx, bool lim) { return yaw + pt::twist_delta(yaw, wt, mn, mx, lim); };
+    expect(twisted_yaw(30.0f * d, 0.0f, lo, hi, true) == 30.0f * d, "twist: none at zero weight");
+    expect(close_to(twisted_yaw(100.0f * d, 0.5f, lo, hi, true), 100.0f * d + 0.5f * pt::kMaxTwist, 1e-5),
+           "twist: weight times the maximum");
+    expect(close_to(pt::kMaxTwist, 30.0f * d, 1e-6), "twist: at most 30 degrees extra");
+    expect(close_to(twisted_yaw(145.0f * d, 1.0f, lo, hi, true), 175.0f * d, 1e-4), "twist: the seat MaxYaw plus 30 at most");
+    expect(close_to(twisted_yaw(-145.0f * d, -1.0f, lo, hi, true), -175.0f * d, 1e-4), "twist: the seat MinYaw minus 30 at most");
+    expect(close_to(twisted_yaw(120.0f * d, 1.0f, -130.0f * d, 130.0f * d, true), 150.0f * d, 1e-4),
+           "twist: within the seat limit plus the twist");
+    expect(close_to(twisted_yaw(110.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 130.0f * d, 1e-4),
+           "twist: stops at the narrow seat limit plus the twist");
+    expect(close_to(twisted_yaw(140.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), 140.0f * d, 1e-4),
+           "twist: never pulls back a yaw already past the widened limit");
+    expect(close_to(twisted_yaw(140.0f * d, 1.0f, 0.0f, 0.0f, false), 170.0f * d, 1e-4), "twist: unlimited view, full twist");
+    expect(close_to(twisted_yaw(175.0f * d, 1.0f, 0.0f, 0.0f, false), 180.0f * d, 1e-4), "twist: unlimited view, +-180 only");
+    // No compounding: the game smooths its stored yaw (+0xdc) toward the head target every frame; the hook writes the
+    // twisted yaw only around the camera build and restores it. The stored yaw must settle on the target and the
+    // rendered one on target + twist. Without the restore the stored yaw would run off past the target.
+    {
+        pt::TwistState st;
+        const float target = 120.0f * d;
+        float stored = 0.0f, rendered = 0.0f;
+        for (int frame = 0; frame < 600; ++frame) {
+            stored += (target - stored) * 0.2f;  // the game's smoothing reads the value left from last frame
+            const float head = stored;
+            const float written = pt::camera_yaw(st, head, 1.0f / 60.0f, lo, hi, true);
+            rendered = written;              // the camera is built from it
+            stored = pt::restore_yaw(written, written, head);
+        }
+        expect(close_to(stored, target, 1e-4), "twist: the stored yaw settles on the target (no compounding)");
+        expect(close_to(rendered, target + pt::target_weight(target) * pt::kMaxTwist, 1e-4),
+               "twist: the rendered yaw is the target plus the twist");
+    }
+    expect(pt::restore_yaw(0.5f, 0.7f, 0.3f) == 0.5f, "twist: a change the game made during the camera build stands");
+    expect(pt::restore_yaw(0.7f, 0.7f, 0.3f) == 0.3f, "twist: otherwise the head yaw is put back");
+    {
+        pt::TwistState st;
+        const float first = pt::camera_yaw(st, 120.0f * d, 0.0f, lo, hi, true);
+        expect(close_to(first, 120.0f * d + pt::target_weight(120.0f * d) * pt::kMaxTwist, 1e-4), "twist: a fresh state starts at its target");
+    }
+
+    // Lean: toward the look side and up, in body axes; our lean shrinks so that it plus the game's tracker offset
+    // stays within the caps.
+    expect(close_to(pt::kLeanSide, 0.04, 1e-6) && close_to(pt::kLeanUp, 0.02, 1e-6), "lean: 4 cm sideways, 2 cm up by default");
+    {
+        const pt::Vec3 six = pt::lean_body(1.0f, {0, 0, 0}, 0.06f);
+        expect(close_to(six.x, 0.06, 1e-6) && close_to(six.z, 0.03, 1e-6), "lean: 6 cm sideways gives 3 cm up (half)");
+        const pt::Vec3 off = pt::lean_body(1.0f, {0, 0, 0}, 0.0f);
+        expect(off.x == 0.0 && off.z == 0.0, "lean: 0 cm is no lean");
+        expect(close_to(pt::lean_body(1.0f, {0.03, 0.0, 0.0}, 0.06f).x, 0.03, 1e-6),
+               "lean: the 6 cm cap with the tracker offset holds for a configured lean");
+        expect(pt::lean_body(1.0f, {0, 0, 0}, 0.5f).x == 0.0, "lean: a side past the cap is refused");
+        expect(close_to(pt::twist_delta(100.0f * d, 1.0f, -100.0f * d, 100.0f * d, true, 45.0f * d), 45.0f * d, 1e-5) &&
+                   pt::twist_delta(100.0f * d, 1.0f, -100.0f * d, 100.0f * d, true, 0.0f) == 0.0f,
+               "twist: a configured angle (45, 0)");
+    }
+    const pt::Vec3 zero{0, 0, 0};
+    const pt::Vec3 full = pt::lean_body(1.0f, zero);
+    expect(close_to(full.x, pt::kLeanSide, 1e-6) && full.y == 0.0 && close_to(full.z, pt::kLeanUp, 1e-6), "lean: full right and up");
+    const pt::Vec3 left = pt::lean_body(-0.5f, zero);
+    expect(close_to(left.x, -0.5 * pt::kLeanSide, 1e-6) && close_to(left.z, 0.5 * pt::kLeanUp, 1e-6), "lean: left is negative x, still up");
+    const pt::Vec3 none = pt::lean_body(0.0f, zero);
+    expect(none.x == 0.0 && none.z == 0.0, "lean: none at zero weight");
+    const pt::Vec3 tracked = pt::lean_body(1.0f, {0.05, 0.0, 0.02});
+    expect(close_to(tracked.x + 0.05, pt::kCapSide, 1e-6) && close_to(tracked.z + 0.02, pt::kCapUp, 1e-6),
+           "lean: the sum with the tracker offset is capped");
+    const pt::Vec3 big = pt::lean_body(1.0f, {0.08, 0.0, 0.04});
+    expect(big.x == 0.0 && big.z == 0.0, "lean: no room left when the tracker offset is already past the cap");
+    const pt::Vec3 opposite = pt::lean_body(1.0f, {-0.03, 0.0, -0.03});
+    expect(close_to(opposite.x, pt::kLeanSide, 1e-6) && close_to(opposite.z, pt::kLeanUp, 1e-6),
+           "lean: a tracker offset the other way leaves the lean whole");
+    const pt::Vec3 left_tracked = pt::lean_body(-1.0f, {-0.05, 0.0, 0.0});
+    expect(close_to(left_tracked.x - 0.05, -pt::kCapSide, 1e-6), "lean: the cap holds to the left too");
+    expect(close_to(pt::lean_body(1.0f, {0.03, 0.0, 0.015}).x, pt::kCapSide - 0.03, 1e-6),
+           "lean: with the stock 3 cm tracker range at full the lean is trimmed to the 6 cm cap");
+    expect(close_to(pt::lean_body(1.0f, {0.02, 0.0, 0.0}).x, pt::kLeanSide, 1e-6),
+           "lean: a 2 cm tracker offset still leaves room for the whole 4 cm lean");
+    {
+        const float mlo[3] = {0.03f, 0.0f, 0.03f}, mhi[3] = {0.03f, 0.0f, 0.03f};  // stock seat limits as the seat returns them
+        const pt::Vec3 n = pt::native_camera_offset(-16383, 16383, mlo, mhi);
+        expect(close_to(n.x, 0.03, 1e-6) && n.y == 0.0 && close_to(n.z, 0.03, 1e-6), "native: full tracker x and z give the seat limits");
+        expect(pt::native_camera_offset(0, 0, mlo, mhi).x == 0.0, "native: a centred tracker adds nothing");
+        const float m[9] = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+        const pt::Vec3 wv = pt::body_to_world(m, {0.01, 0.02, 0.03});
+        const pt::Vec3 back = pt::world_to_body(m, wv);
+        expect(close_to(back.x, 0.01, 1e-7) && close_to(back.y, 0.02, 1e-7) && close_to(back.z, 0.03, 1e-7),
+               "native: world_to_body undoes body_to_world");
+    }
+
+    // Body to world: rows are the body axes in world coordinates.
+    const float ident[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const pt::Vec3 wi = pt::body_to_world(ident, {0.06, 0.0, 0.03});
+    expect(wi.x == 0.06 && wi.y == 0.0 && close_to(wi.z, 0.03, 1e-9), "lean: identity orientation leaves the offset alone");
+    const float heading_east[9] = {0, -1, 0, 1, 0, 0, 0, 0, 1};  // nose east (+x), right wing south (-y)
+    const pt::Vec3 we = pt::body_to_world(heading_east, {0.06, 0.0, 0.0});
+    expect(close_to(we.x, 0.0, 1e-9) && close_to(we.y, -0.06, 1e-9), "lean: right of an east-heading jet is south");
+    const float inverted[9] = {-1, 0, 0, 0, 1, 0, 0, 0, -1};  // rolled 180 degrees
+    expect(close_to(pt::body_to_world(inverted, {0.0, 0.0, 0.03}).z, -0.03, 1e-9), "lean: up follows the airframe, not the world");
+    // Developer head hold: off, 120 left, 160 left, 120 right, 160 right, then off again.
+    int step = 0;
+    const int want_steps[] = {1, 2, 3, 4, 0, 1};
+    bool cycle_ok = true;
+    for (int i : want_steps) {
+        step = pt::next_hold(step);
+        if (step != i) cycle_ok = false;
+    }
+    expect(cycle_ok, "head hold: cycles off, 120 L, 160 L, 120 R, 160 R, off");
+    expect(pt::next_hold(-3) == 0 && pt::next_hold(99) == 0 && !pt::hold_active(-1) && !pt::hold_active(5) &&
+               pt::hold_yaw(7) == 0.0f && std::string(pt::hold_name(9)) == "off",
+           "head hold: out of range is off");
+    expect(!pt::hold_active(0) && pt::hold_yaw(0) == 0.0f && std::string(pt::hold_name(0)) == "off", "head hold: step 0 is off");
+    expect(close_to(pt::hold_yaw(1), 120.0f * d, 1e-6) && close_to(pt::hold_yaw(2), 160.0f * d, 1e-6) &&
+               close_to(pt::hold_yaw(3), -120.0f * d, 1e-6) && close_to(pt::hold_yaw(4), -160.0f * d, 1e-6),
+           "head hold: left is positive yaw (seen live), right negative, 120 and 160 degrees");
+    expect(pt::target_weight(pt::hold_yaw(2)) > 0 && pt::target_weight(pt::hold_yaw(4)) < 0,
+           "head hold: the twist follows the held side");
+    expect(pt::tracker_axis_from_angle(0.0f) == 0 && pt::tracker_axis_from_angle(pt::kPi) == 16383 &&
+               pt::tracker_axis_from_angle(-pt::kPi) == -16383 && pt::tracker_axis_from_angle(4.0f) == 16383 &&
+               pt::tracker_axis_from_angle(std::numeric_limits<float>::quiet_NaN()) == 0,
+           "head hold: tracker axis range +-16383 for +-180 degrees, clamped, NaN 0");
+    expect(pt::tracker_axis_from_angle(pt::hold_yaw(1)) == 10922 && pt::tracker_axis_from_angle(pt::hold_yaw(4)) == -14563,
+           "head hold: 120 left and 160 right as tracker axis values");
+    // A head yaw the hold could give but the seat never would (past the limit widened by the twist) gets no twist:
+    // why the hold must go through the game's own clamp (the head target), as real head tracking does.
+    expect(pt::twist_delta(160.0f * d, 1.0f, -100.0f * d, 100.0f * d, true) == 0.0f,
+           "head hold: a yaw past the widened seat limit gets no extra twist");
+    expect(close_to(pt::twist_delta(100.0f * d, 1.0f, -100.0f * d, 100.0f * d, true), pt::kMaxTwist, 1e-6),
+           "head hold: at the seat limit the full twist applies");
+}
+
+void pilot_twist_settings_tests() {
+    using LazyWorks::SF2Patch::config::parse_number_setting;
+    std::printf("pilot twist settings\n");
+    auto is = [](const LazyWorks::SF2Patch::config::NumberSetting& s, double v, bool def, bool clamp) {
+        return std::fabs(s.value - v) < 1e-9 && s.defaulted == def && s.clamped == clamp;
+    };
+    expect(is(parse_number_setting(nullptr, 30, 0, 45), 30, true, false), "settings: missing gives the default");
+    expect(is(parse_number_setting(L"", 30, 0, 45), 30, true, false) && is(parse_number_setting(L"  ", 30, 0, 45), 30, true, false),
+           "settings: empty gives the default");
+    expect(is(parse_number_setting(L"25", 30, 0, 45), 25, false, false) && is(parse_number_setting(L" 12.5 ", 30, 0, 45), 12.5, false, false),
+           "settings: a number, blanks allowed, decimals");
+    expect(is(parse_number_setting(L"60", 30, 0, 45), 45, false, true) && is(parse_number_setting(L"-3", 4, 0, 6), 0, false, true),
+           "settings: clamped to the range");
+    expect(is(parse_number_setting(L"abc", 4, 0, 6), 4, true, false) && is(parse_number_setting(L"5cm", 4, 0, 6), 4, true, false) &&
+               is(parse_number_setting(L"nan", 4, 0, 6), 4, true, false) && is(parse_number_setting(L"inf", 4, 0, 6), 4, true, false),
+           "settings: not a number gives the default");
+    expect(is(parse_number_setting(L"0", 4, 0, 6), 0, false, false) && is(parse_number_setting(L"6", 4, 0, 6), 6, false, false),
+           "settings: the limits themselves are kept");
+}
+
+void probe_snapshot_tests() {
+    using namespace LazyWorks::SF2Patch::hooks;
+    bool a = true;
+    expect(probe_snapshot_number(L"snap012_auto.txt", &a) == 12 && a, "probe snap: auto index file");
+    expect(probe_snapshot_number(L"snap012_auto_world.txt", &a) == 12 && a, "probe snap: auto world file");
+    expect(probe_snapshot_number(L"snap1000_auto_0a1b2c3d_f0010.bin", &a) == 1000 && a, "probe snap: auto dump");
+    expect(probe_snapshot_number(L"snap012_0a1b2c3d.bin", &a) == 12 && !a, "probe snap: manual dump is not auto");
+    expect(probe_snapshot_number(L"snap012.txt", &a) == 12 && !a, "probe snap: manual index is not auto");
+    expect(probe_snapshot_number(L"snap012_automatic.txt", &a) == 12 && !a, "probe snap: _automatic is not auto");
+    const wchar_t* const kNotOurs[] = {L"snap012_auto.bak",       L"snap012_auto_keep.txt",       L"snap012_auto.txt.old",
+                                       L"snap012_auto_world.txt.bak", L"snap012_auto_0a1b2c3.bin",  L"snap012_auto_0a1b2c3d.bin.old",
+                                       L"snap012_auto_0A1B2C3D.bin",  L"snap012_auto_0a1b2c3d_f001.bin", L"snap012_auto_0a1b2c3d_f00100.bin",
+                                       L"snap012_auto_0a1b2c3d_g0010.bin", L"snap012_auto_.bin", L"snap012_auto"};
+    for (const wchar_t* nm : kNotOurs) {
+        a = true;
+        expect(probe_snapshot_number(nm, &a) == 12 && !a, "probe snap: only the exact shapes we write are auto");
+    }
+    expect(probe_snapshot_number(L"snap012_auto_0a1b2c3d.bin", &a) == 12 && a, "probe snap: auto aircraft dump");
+    expect(probe_snapshot_number(L"snap12_auto.txt", &a) == -1 && !a, "probe snap: too few digits");
+    expect(probe_snapshot_number(L"rec_001.bin", &a) == -1 && !a, "probe snap: other files are not ours");
+    expect(probe_snapshot_number(L"xsnap012_auto.txt", &a) == -1, "probe snap: prefix must start the name");
+    const std::vector<long> del = probe_auto_numbers_to_delete({3, 9, 3, 1, 7, 5, 8, 2, 9}, 5);
+    expect(del.size() == 2 && del[0] == 2 && del[1] == 1, "probe snap: keeps the newest 5 flights");
+    expect(probe_auto_numbers_to_delete({4, 5}, 5).empty(), "probe snap: fewer than 5 deletes nothing");
+    expect(probe_auto_numbers_to_delete({}, 5).empty(), "probe snap: empty");
+}
+
 int main() {
     std::printf("protocol_selftest\n");
     const char* why = nullptr;
@@ -6764,11 +7311,15 @@ int main() {
     terrain_tests();
     texture_tests();
     aerodrome_core_tests();
+    structure_tests();
     placement_tests();
     remote_jet_tests();
     remote_avatar_tests();
     client_logic_tests();
     gameplay_row_splice_tests();
+    pilot_twist_tests();
+    probe_snapshot_tests();
+    pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

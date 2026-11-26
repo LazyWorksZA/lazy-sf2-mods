@@ -4,9 +4,10 @@ These are quality-of-life mods for **Strike Fighters 2**, the merged install wit
 
 - **Display Mode and Screen** in the game's own **Options → Graphics**: Borderless or stock exclusive Fullscreen, on the monitor of your choice.
 - **Mouse Pointer** in **Options → Controls**. The game normally builds its own pointer from raw mouse movement, so it never quite lines up with Windows' pointer and feels off (and wanders over remote desktop). "Match Windows cursor", the default, puts the game's pointer exactly on Windows' pointer.
-- **Tacview Recording** in **Options → Gameplay** (default Off). Every flight, single-player included, is recorded to a compact Tacview file (`.zip.acmi`, which Tacview opens directly): aircraft, weapons, ground units, ships, flares, chaff, tracers and explosions. Each theatre's terrain, ground texture and airfields are exported for Tacview too, and a small Tacview add-on shows the right theatre for each recording. See [`INSTALL.md`](INSTALL.md).
+- **Tacview Recording** in **Options → Gameplay** (default Off). Every flight, single-player included, is recorded to a compact Tacview file (`.zip.acmi`, which Tacview opens directly): aircraft, weapons, ground units, ships, flares, chaff, tracers and explosions. Buildings and bridges are recorded too, with their destruction. Each theatre's terrain, ground texture and airfields are exported for Tacview, and a small Tacview add-on, which the installer turns on, shows the right theatre for each recording (if Tacview's Add-ons menu shows **Lazy SF2 Patch** off, turn it on there). See [`INSTALL.md`](INSTALL.md).
 - **Fixes:** Alt-Tab back into Fullscreen works again (a stock bug), display scaling other than 100% no longer breaks the picture, the Windows key works in Borderless, and lock/unlock recovers.
-- **Installer:** a normal MSI wizard (license and third-party notices included) that copies one DLL into the game folder. No app, window or shortcut is left behind. Uninstall it from *Installed apps*.
+- **Pilot Twist** in **Options → Controls** (default Off): looking far to the side or behind turns the cockpit view a little further and leans you toward that side.
+- **Installer:** a normal MSI wizard (license and third-party notices included) that copies one DLL into the game folder and turns on the Tacview add-on. No app, window or shortcut is left behind. Uninstall it from *Installed apps*.
 - **Later: multiplayer.** The long-term goal is to bring multiplayer back. See `docs/SF2 Network Layer — Claude Code Brief.md`.
 
 > **Status:** the borderless brief is done, and Tacview recording is in. Multiplayer is in progress (developer-only so far).
@@ -66,15 +67,19 @@ The release notes also list each file's SHA-256.
 - Tacview Recording: aircraft, weapons, ground objects, ships, countermeasures, tracers and explosions; each theatre's terrain, ground texture and airfields; the Lazy SF2 Patch Tacview add-on.
 - Releases built on GitHub Actions with build provenance.
 
+**Done (v1.1.0)**
+
+- Tacview: buildings and bridges in recordings, with destruction; a sharper (8000 × 8000) ground texture; the add-on turned on by the installer; old pre-rename files cleaned up.
+- Pilot Twist: the cockpit view twists further and leans a little when looking far to the side or behind.
+- Developer tools: automatic probe world snapshot a few seconds into each flight.
+
 **Now: multiplayer** (the [network brief](docs/SF2%20Network%20Layer%20%E2%80%94%20Claude%20Code%20Brief.md))
 
-1. ~~Recon~~
-2. ~~Puppet spike~~: drive one AI aircraft from a recorded path.
-3. ~~Synthetic client and recording~~: host mode, a bot client, stream recording, ACMI export (developer-only).
-4. **Two real players** (next): replicated player jets, a shared clock, smoothing; the game keeps running (and optionally keeps its sound) without focus; the cursor stays on the game screen in Fullscreen.
-5. Weapons and damage.
-6. Sessions: handshake, content hashing, our own multiplayer screens, master server. Spawns use a theatre's dogfight file when it has one, otherwise a runway or air start.
-7. Public multiplayer release: NAT traversal with relay.
+Multiplayer comes in this order:
+
+1. **Co-op single missions** (in progress). Now: two players flying together. Then: both games running the same mission world, then weapons and damage, then sessions with our own multiplayer screens (encrypted, compressed traffic), then a public release.
+2. Co-op campaigns.
+3. PvP dogfights.
 
 **Quality of life** (the [QoL brief](docs/SF2%20Quality-of-Life%20Follow-up%20%E2%80%94%20Claude%20Code%20Brief.md); each item ships on its own)
 
@@ -83,11 +88,27 @@ The release notes also list each file's SHA-256.
 3. Per-mission start position, with end-of-runway starts.
 4. Clickable cockpits (feasibility first).
 
-Smaller items: automatic pilot lean when looking far to the side or behind (the view now only turns in place); Esc in flight pauses first instead of ending the flight; Tacview: move old recordings to a theatre's current position, non-ASCII aerodrome names.
+Smaller items:
+
+- A "Head Tracking…" button in Options that opens a settings popup (twist and lean amounts), replacing the single on/off row.
+- Device-aware bindings: controls stay bound to the right device when a HOTAS or stick is unplugged at start-up.
+- Ramp starts, using the airfields' parking spots.
+- Esc in flight pauses first instead of ending the flight.
+- Rebind controls while flying (needs our own in-flight pause screen, like the Esc item).
+- Voice commands to wingmen through a FoxVox plugin.
+- Tougher AI air combat: enemy pilots that are harder to out-turn and out-fly (needs recon on the AI skill settings and manoeuvre logic).
+- Rear-view mirror performance: the mirror re-renders the whole world every frame; make it optional or update it less often.
+- Tacview: non-ASCII aerodrome names show as "?"; check the IcelandNA theatre.
+
+**Developer tools**
+
+- Render probe: fix its aircraft LOD/cull readings.
 
 **Later**
 
 - Auto-update, and Authenticode signing of the installer.
+- Keep the game simulating in the background in exclusive Fullscreen during a network session (Phase 4 covers Borderless).
+- A headless dedicated server (needs its own licensed install; revisit after Phase 6).
 
 ## Contributing
 

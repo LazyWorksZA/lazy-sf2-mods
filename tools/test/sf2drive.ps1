@@ -5,7 +5,10 @@
 .DESCRIPTION
   A process started from a background shell isn't allowed to take the foreground, so SF2 waits
   "inactive". 'focus' uses a synthetic Alt key press to get past the foreground lock. 'away'
-  focuses the taskbar so the game loses focus. 'shot' saves a half-size PNG of the game's monitor.
+  focuses the taskbar so the game loses focus. 'shot' saves a full-size PNG of the game's monitor, plus <name>-small.png at 1280 px wide.
+  'key' takes a key or a chord (shift+f5, ctrl+shift+t): modifiers go down in order, then the key, then release in reverse.
+  'hold' holds a chord down for -Ms (default 1500) and, with -Out, takes the screenshot while it is held.
+  Key names: a-z, 0-9, f1-f12, numpad0-numpad9, numpadperiod, lshift, lctrl, lalt (shift, ctrl, alt are aliases), esc, enter, space, tab, arrows, backspace.
   This sends input to the desktop session, so use it only with the user's OK. When DxvkLogs is set,
   'start' turns on DXVK's log (written there) and HUD.
 
@@ -17,14 +20,17 @@
 
 .EXAMPLE
   .\tools\test\sf2drive.ps1 start; .\tools\test\sf2drive.ps1 focus
-  .\tools\test\sf2drive.ps1 shot -Out <scratch>\shot.png
+  .\tools\test\sf2drive.ps1 shot -Out <scratch>\shot.png               # also writes shot-small.png
+  .\tools\test\sf2drive.ps1 key -Key ctrl+shift+t
+  .\tools\test\sf2drive.ps1 hold -Key numpad4 -Ms 2000 -Out <scratch>\held.png
   .\tools\test\sf2drive.ps1 run -Seconds 30 -Shots <scratch>\drive   # launch, fly a Strike mission 30 s, debrief, quit; prints the log lines
   .\tools\test\sf2drive.ps1 fly -Seconds 30                             # from the main menu, back to the main menu
 #>
 param(
-    [ValidateSet('start', 'focus', 'shot', 'away', 'stop', 'click', 'key', 'fly', 'run')] [string]$Action,
+    [ValidateSet('start', 'focus', 'shot', 'away', 'stop', 'click', 'key', 'hold', 'fly', 'run')] [string]$Action,
     [double]$X = 0, [double]$Y = 0,
     [string]$Key = '',
+    [int]$Ms = 1500,   # hold: how long the chord stays down
     [int]$Seconds = 90,
     [ValidateSet('Strike', 'CloseAirSupport', 'AirDefenseSuppression', 'ArmedRecon', 'AntiShipping', 'Recon')] [string]$MissionType = 'Strike',
     [string]$Shots = '',
@@ -62,9 +68,16 @@ function Save-Shot($x, $y, $w, $h, $path) {
     $b = New-Object System.Drawing.Bitmap $w, $h
     $g = [System.Drawing.Graphics]::FromImage($b)
     $g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size $w, $h))
-    $s = New-Object System.Drawing.Bitmap $b, ([int]($w / 2)), ([int]($h / 2))
-    $s.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $b.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $small = Join-Path (Split-Path $path) (([System.IO.Path]::GetFileNameWithoutExtension($path)) + '-small.png')
+    $sh = [int]($h * 1280 / $w)
+    $s = New-Object System.Drawing.Bitmap 1280, $sh
+    $sg = [System.Drawing.Graphics]::FromImage($s)
+    $sg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $sg.DrawImage($b, 0, 0, 1280, $sh); $sg.Dispose()
+    $s.Save($small, [System.Drawing.Imaging.ImageFormat]::Png)
     $s.Dispose(); $g.Dispose(); $b.Dispose()
+    return $small
 }
 [void][D]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
@@ -74,17 +87,36 @@ function Get-GameWindow {
     $p.Refresh(); return $p.MainWindowHandle
 }
 
-$scan = @{ esc = 0x01; enter = 0x1C; space = 0x39; tab = 0x0F; up = 0x48; down = 0x50; left = 0x4B; right = 0x4D
-           f1 = 0x3B; f2 = 0x3C; f3 = 0x3D; f4 = 0x3E; f5 = 0x3F; f6 = 0x40; f7 = 0x41; f8 = 0x42; f9 = 0x43; f10 = 0x44
-           y = 0x15; n = 0x31; w = 0x11; a = 0x1E; s = 0x1F; d = 0x20; b = 0x30; p = 0x19; backspace = 0x0E }
-function Send-Key([string]$name) {
-    $k = $name.ToLower()
+$scan = @{ esc = 0x01; enter = 0x1C; space = 0x39; tab = 0x0F; up = 0x48; down = 0x50; left = 0x4B; right = 0x4D; backspace = 0x0E
+           f1 = 0x3B; f2 = 0x3C; f3 = 0x3D; f4 = 0x3E; f5 = 0x3F; f6 = 0x40; f7 = 0x41; f8 = 0x42; f9 = 0x43; f10 = 0x44; f11 = 0x57; f12 = 0x58
+           lshift = 0x2A; lctrl = 0x1D; lalt = 0x38; numpadperiod = 0x53
+           '1' = 0x02; '2' = 0x03; '3' = 0x04; '4' = 0x05; '5' = 0x06; '6' = 0x07; '7' = 0x08; '8' = 0x09; '9' = 0x0A; '0' = 0x0B
+           q = 0x10; w = 0x11; e = 0x12; r = 0x13; t = 0x14; y = 0x15; u = 0x16; i = 0x17; o = 0x18; p = 0x19
+           a = 0x1E; s = 0x1F; d = 0x20; f = 0x21; g = 0x22; h = 0x23; j = 0x24; k = 0x25; l = 0x26
+           z = 0x2C; x = 0x2D; c = 0x2E; v = 0x2F; b = 0x30; n = 0x31; m = 0x32 }
+# The numpad digits are not extended keys: numpad0..9 = 0x52 0x4F 0x50 0x51 0x4B 0x4C 0x4D 0x47 0x48 0x49.
+$np = 0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49
+for ($i = 0; $i -lt 10; $i++) { $scan["numpad$i"] = $np[$i] }
+$alias = @{ shift = 'lshift'; ctrl = 'lctrl'; alt = 'lalt' }
+function Get-KeyCode([string]$name) {
+    $k = $name.Trim().ToLower()
+    if ($alias.ContainsKey($k)) { $k = $alias[$k] }
     if (-not $scan.ContainsKey($k)) { throw "unknown key '$name'" }
-    $c = [byte]$scan[$k]
-    # KEYEVENTF_SCANCODE (8), plus KEYEVENTF_EXTENDEDKEY (1) for the arrow keys.
+    return $k
+}
+function Send-KeyEvent([string]$k, [bool]$up) {
+    # KEYEVENTF_SCANCODE (8), plus KEYEVENTF_EXTENDEDKEY (1) for the arrow keys, plus KEYEVENTF_KEYUP (2).
     $ext = if ($k -in 'up', 'down', 'left', 'right') { 1 } else { 0 }
-    [D]::keybd_event(0, $c, (8 -bor $ext), [UIntPtr]::Zero); Start-Sleep -Milliseconds 80
-    [D]::keybd_event(0, $c, (8 -bor $ext -bor 2), [UIntPtr]::Zero); Start-Sleep -Milliseconds 120
+    $f = 8 -bor $ext; if ($up) { $f = $f -bor 2 }
+    [D]::keybd_event(0, [byte]$scan[$k], $f, [UIntPtr]::Zero)
+}
+function Get-Chord([string]$chord) { @($chord -split '\+' | ForEach-Object { Get-KeyCode $_ }) }
+function Press-Chord([string[]]$keys) { foreach ($k in $keys) { Send-KeyEvent $k $false; Start-Sleep -Milliseconds 40 } }
+function Release-Chord([string[]]$keys) { for ($i = $keys.Count - 1; $i -ge 0; $i--) { Send-KeyEvent $keys[$i] $true; Start-Sleep -Milliseconds 40 } }
+function Send-Key([string]$name) {
+    $keys = Get-Chord $name
+    Press-Chord $keys; Start-Sleep -Milliseconds 80
+    Release-Chord $keys; Start-Sleep -Milliseconds 120
 }
 function Click-Virtual([double]$vx, [double]$vy) {
     $r = New-Object D+RECT; [void][D]::GetWindowRect((Get-GameWindow), [ref]$r)
@@ -134,7 +166,7 @@ function Save-Stage([string]$dir, [string]$name) {
     if (-not $dir) { return }
     New-Item -ItemType Directory -Force $dir | Out-Null
     $scr = [System.Windows.Forms.Screen]::FromHandle((Get-GameWindow)).Bounds
-    Save-Shot $scr.X $scr.Y $scr.Width $scr.Height (Join-Path $dir "$name.png")
+    [void](Save-Shot $scr.X $scr.Y $scr.Width $scr.Height (Join-Path $dir "$name.png"))
 }
 function Wait-Screen([string]$want, [int]$timeout, [string]$dir, [string]$name) {
     $end = (Get-Date).AddSeconds($timeout)
@@ -227,10 +259,25 @@ switch ($Action) {
         $h = Get-GameWindow; $r = New-Object D+RECT; [void][D]::GetWindowRect($h, [ref]$r)
         # Capture the monitor the game is on (fall back to the primary if minimised off-screen).
         $scr = [System.Windows.Forms.Screen]::FromHandle($h).Bounds
-        Save-Shot $scr.X $scr.Y $scr.Width $scr.Height $Out; "shot: $Out window=($($r.L),$($r.T))-($($r.R),$($r.B)) screen=$scr"
+        $small = Save-Shot $scr.X $scr.Y $scr.Width $scr.Height $Out; "shot: $Out, $small window=($($r.L),$($r.T))-($($r.R),$($r.B)) screen=$scr"
     }
     'click' { [void][D]::Focus((Get-GameWindow)); Click-Virtual $X $Y; "click: virtual ($X,$Y)" }
     'key' { [void][D]::Focus((Get-GameWindow)); Send-Key $Key; "key: $Key" }
+    'hold' {
+        [void][D]::Focus((Get-GameWindow))
+        $keys = Get-Chord $Key
+        $small = ''
+        Press-Chord $keys
+        try {
+            if ($Out) {
+                Start-Sleep -Milliseconds ([math]::Max(0, $Ms - 300))
+                $scr = [System.Windows.Forms.Screen]::FromHandle((Get-GameWindow)).Bounds
+                $small = Save-Shot $scr.X $scr.Y $scr.Width $scr.Height $Out
+                Start-Sleep -Milliseconds 300
+            } else { Start-Sleep -Milliseconds $Ms }
+        } finally { Release-Chord $keys }
+        "hold: $Key for $Ms ms" + $(if ($Out) { ", shot: $Out, $small" } else { '' })
+    }
     'stop' { Stop-Game }
     'fly' { Fly-Mission $Seconds $Shots $MissionType; 'fly: done, back at the main menu' }
     'run' {

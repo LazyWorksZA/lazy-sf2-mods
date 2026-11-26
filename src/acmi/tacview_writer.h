@@ -71,6 +71,10 @@ public:
     /// hold the frame (counted as dropped) or nothing is open. Fill slot(0..n-1), then commit_frame.
     /// </summary>
     bool begin_frame(size_t n);
+    /// <summary>Producer thread only. True when begin_frame(n) would succeed now; nothing is counted.</summary>
+    bool can_take(size_t n) const;
+    /// <summary>The ring arithmetic of begin_frame and can_take: n records plus the end marker fit (free-running indexes).</summary>
+    static bool ring_fits(uint32_t head, uint32_t tail, uint32_t cap, size_t n);
     TacviewRec& slot(size_t i) { return ring_[(head_.load(std::memory_order_relaxed) + static_cast<uint32_t>(i)) & (cap_ - 1)]; }
     /// <summary>
     /// Publishes the frame: the first `used` reserved slots (used &lt;= n) and an end marker at game time t. series_mask
@@ -93,7 +97,8 @@ private:
     void run();
     void join_previous();
     void flush_orphaned(const char* why);
-    void log_summary(uint64_t transforms, uint64_t bytes, const char* why);
+    void log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t structures = 0,
+                     uint64_t structures_skipped = 0, uint64_t structures_destroyed = 0);
 
     std::thread thread_;
     std::unique_ptr<TacviewRec[]> ring_;

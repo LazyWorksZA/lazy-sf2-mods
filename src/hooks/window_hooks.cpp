@@ -150,6 +150,7 @@ HWND WINAPI h_CreateWindowExW(DWORD ex_style, LPCWSTR cls, LPCWSTR title, DWORD 
         g_app_active = foreground_is_ours();
         LOG("window: game hwnd=%p%s, subclassed: %s", static_cast<void*>(hwnd),
             borderless ? " (WS_EX_TOPMOST removed)" : "", g_game_wndproc ? "ok" : "FAILED");
+        pilot_twist_apply_setting();  // settings are loaded now; a ViewManager.dll loaded later reads them by peek
     }
     return hwnd;
 }

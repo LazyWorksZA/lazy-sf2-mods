@@ -93,11 +93,20 @@ bool TacviewWriter::open(const std::wstring& dir, const SYSTEMTIME& t, const cha
     return true;
 }
 
+bool TacviewWriter::ring_fits(uint32_t head, uint32_t tail, uint32_t cap, size_t n) {
+    return n + 1 <= cap && head - tail <= cap - (n + 1);
+}
+
+bool TacviewWriter::can_take(size_t n) const {
+    if (!open_.load(std::memory_order_acquire) || failed_.load(std::memory_order_relaxed)) return false;
+    return ring_fits(head_.load(std::memory_order_relaxed), tail_.load(std::memory_order_acquire), cap_, n);
+}
+
 bool TacviewWriter::begin_frame(size_t n) {
     if (!open_.load(std::memory_order_acquire) || failed_.load(std::memory_order_relaxed)) return false;
     const uint32_t h = head_.load(std::memory_order_relaxed);
     const uint32_t t = tail_.load(std::memory_order_acquire);
-    if (n + 1 > cap_ || h - t > cap_ - (n + 1)) {
+    if (!ring_fits(h, t, cap_, n)) {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -132,13 +141,18 @@ void TacviewWriter::close(bool wait_and_detach, const char* why) {
     thread_.detach();
 }
 
-void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why) {
+void TacviewWriter::log_summary(uint64_t transforms, uint64_t bytes, const char* why, uint64_t structures,
+                                uint64_t structures_skipped, uint64_t structures_destroyed) {
     if (summary_logged_.exchange(true)) return;
-    char line[512];
+    char line[640];
     const std::string shown = narrow(display_ ? display_(path()) : path());
-    std::snprintf(line, sizeof(line), "tacview: stopped (%s): %s, %llu transforms, %llu bytes, %u frame(s) dropped",
-                  why ? why : "closed", shown.c_str(), static_cast<unsigned long long>(transforms),
-                  static_cast<unsigned long long>(bytes), dropped_.load(std::memory_order_relaxed));
+    const int n = std::snprintf(line, sizeof(line), "tacview: stopped (%s): %s, %llu transforms, %llu bytes, %u frame(s) dropped",
+                                why ? why : "closed", shown.c_str(), static_cast<unsigned long long>(transforms),
+                                static_cast<unsigned long long>(bytes), dropped_.load(std::memory_order_relaxed));
+    if (n > 0 && static_cast<size_t>(n) < sizeof(line) && (structures || structures_skipped))
+        std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), ", %llu structures (%llu skipped next to live ground objects, %llu destroyed)",
+                      static_cast<unsigned long long>(structures), static_cast<unsigned long long>(structures_skipped),
+                      static_cast<unsigned long long>(structures_destroyed));
     log_(line);
 }
 
@@ -311,7 +325,8 @@ void TacviewWriter::run() {
     flush();
     CloseHandle(f);
     file_ = nullptr;
-    log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed));
+    log_summary(core.stats().transforms, on_disk, why_.load(std::memory_order_relaxed), core.stats().structures,
+                core.stats().structures_skipped, core.stats().structures_destroyed);
     // Hand the closed file to the background compressor: this thread, and so the next recording, never waits for it.
     if (!failed && !no_zip_.load(std::memory_order_acquire)) zip_queue_submit(path, log_, display_);
     finished_.store(true, std::memory_order_release);

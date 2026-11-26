@@ -1,4 +1,4 @@
-// Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer (Controls), Tacview Recording
+// Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer and Pilot Twist (Controls), Tacview Recording
 // (Gameplay). Splices menu text as the file service reads it; hooks the OptionsScreen sub-menu classes at fixed RVAs.
 // See lazy-sf2-recon: option-trace.md.
 #include <windows.h>
@@ -144,8 +144,9 @@ void shift_rows(std::wstring& text, const std::vector<std::wstring>& names) {
     LOG("menu: moved %d Graphics page positions down one row", moved);
 }
 
-// Controls page: a "Mouse Pointer" row in the free slot below Keyboard Map (y=320), styled like it.
-// Nothing moves. Returns the new list's control ID, or 0 if the page isn't as expected.
+// Controls page: "Mouse Pointer" and "Pilot Twist" rows in the free slots below Keyboard Map (y=320), styled like it.
+// Nothing moves. Returns the Mouse Pointer list's control ID (Pilot Twist's list is that + 2), or 0 if the page isn't
+// as expected.
 int splice_controls(std::wstring& text) {
     constexpr wchar_t kHeader[] = L"[ControlOptionsSubMenu]";
     size_t sec = text.find(kHeader);
@@ -165,8 +166,11 @@ int splice_controls(std::wstring& text) {
     if (max_id <= 0 || max_id > 997) return 0;
     const int id = max_id + 1;
 
-    wchar_t items[128];
-    swprintf_s(items, L"MenuItem%03d=MouseModeList\r\nMenuItem%03d=MouseModeText\r\n", id, id + 1);
+    wchar_t items[192];
+    swprintf_s(items,
+               L"MenuItem%03d=MouseModeList\r\nMenuItem%03d=MouseModeText\r\n"
+               L"MenuItem%03d=PilotTwistList\r\nMenuItem%03d=PilotTwistText\r\n",
+               id, id + 1, id + 2, id + 3);
     text.insert(end, items);
     if (!text.empty() && text.back() != L'\n') text += L"\r\n";
     text +=
@@ -185,7 +189,23 @@ int splice_controls(std::wstring& text) {
         L"MenuItemType=TEXT\r\n"
         L"TextSetting=MediumTextLeft\r\n"
         L"TextStringID=Mouse Pointer\r\n"
-        L"TextPosition=0,363\r\n";
+        L"TextPosition=0,363\r\n"
+        L"\r\n"
+        L"[PilotTwistList]\r\n"
+        L"MenuItemType=LIST\r\n"
+        L"Position=200,400\r\n"
+        L"Width=240\r\n"
+        L"Height=22\r\n"
+        L"ListFieldSetting=MediumListField\r\n"
+        L"DropDownListSize=2\r\n"
+        L"InfoTextSetting=InfoTextSetting\r\n"
+        L"InfoTextStringID=TXT_LAZY_PILOT_TWIST_INFO\r\n"
+        L"\r\n"
+        L"[PilotTwistText]\r\n"
+        L"MenuItemType=TEXT\r\n"
+        L"TextSetting=MediumTextLeft\r\n"
+        L"TextStringID=Pilot Twist\r\n"
+        L"TextPosition=0,403\r\n";
     return id;
 }
 
@@ -327,9 +347,9 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
     g_list_id = list_id;
     g_mouse_list_id = mouse_id;
     g_tac_list_id = tac_id;
-    LOG("menu: added Display Mode as MenuItem%03d, Mouse Pointer as Controls MenuItem%03d, Tacview Recording as "
-        "Gameplay MenuItem%03d (%d -> %zu bytes)",
-        list_id, mouse_id, tac_id, n, need);
+    LOG("menu: added Display Mode as MenuItem%03d, Mouse Pointer and Pilot Twist as Controls MenuItem%03d and %03d, "
+        "Tacview Recording as Gameplay MenuItem%03d (%d -> %zu bytes)",
+        list_id, mouse_id, mouse_id ? mouse_id + 2 : 0, tac_id, n, need);
     return static_cast<int>(need);
 }
 
@@ -467,16 +487,21 @@ void __fastcall h_Exit(void* self, void* edx) {
     }
     o_Exit(self, edx);
     aircraft_track_reevaluate();  // leaving an Options page: no aircraft exist; apply a changed Tacview setting
+    pilot_twist_apply_setting();
 }
 
 // --- Controls sub-menu: Mouse Pointer. Options.ini [ControlOptions] MouseMode: 1 = match the Windows cursor
 // (default), 0 = stock. List index 0 = match, 1 = stock.
+// Pilot Twist: [ControlOptions] PilotTwist: 0 = Off (default), 1 = On. List index = value.
 
 Init_t o_CtlInit = nullptr;
 Method_t o_CtlRefresh = nullptr;
 Method_t o_CtlChanged = nullptr;
 Method_t o_CtlExit = nullptr;
 int g_mouse_selected = 0;  // list index (UI thread)
+int g_twist_selected = 0;  // list index (UI thread)
+bool g_twist_ready = false;  // Init filled the Pilot Twist list for this page instance; Exit writes only then
+constexpr int kTwistOffset = 2;  // Pilot Twist list ID = Mouse Pointer list ID + 2
 
 void* list_by_id(void* self, int id) {
     void* menu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);
@@ -485,6 +510,11 @@ void* list_by_id(void* self, int id) {
     using GetItem_t = int(__fastcall*)(void*, void*, int, int, void**);
     reinterpret_cast<GetItem_t>(vtable_slot(menu, kMenuGetItem))(menu, nullptr, id, kItemTypeList, &ctrl);
     return ctrl;
+}
+
+void* twist_list(void* self) {
+    const int id = g_mouse_list_id.load();
+    return id ? list_by_id(self, id + kTwistOffset) : nullptr;
 }
 
 void __fastcall h_CtlInit(void* self, void* edx, int* a, int* b) {
@@ -499,7 +529,19 @@ void __fastcall h_CtlInit(void* self, void* edx, int* a, int* b) {
                             ini, nullptr, L"ControlOptions", L"MouseMode", static_cast<int>(config::MouseMode::Cursor))
                       : static_cast<int>(config::MouseMode::Cursor);
     g_mouse_selected = v == static_cast<int>(config::MouseMode::Stock) ? 1 : 0;
-    LOG("menu: Controls page opened, MouseMode=%d", v);
+
+    int t = 0;
+    if (void* twist = twist_list(self)) {
+        auto add_twist = reinterpret_cast<AddItem_t>(vtable_slot(twist, kListAddItem));
+        add_twist(twist, nullptr, L"Off", 0);
+        add_twist(twist, nullptr, L"On", 1);
+        t = ini ? reinterpret_cast<IniReadInt_t>(at_rva(g_opts, kIniReadIntRva))(ini, nullptr, L"ControlOptions",
+                                                                                L"PilotTwist", 0)
+                : 0;
+        g_twist_selected = t == 1 ? 1 : 0;
+        g_twist_ready = true;
+    }
+    LOG("menu: Controls page opened, MouseMode=%d, PilotTwist=%d", v, t);
 }
 
 void __fastcall h_CtlRefresh(void* self, void* edx) {
@@ -507,6 +549,7 @@ void __fastcall h_CtlRefresh(void* self, void* edx) {
     if (void* list = list_by_id(self, g_mouse_list_id.load())) {
         reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_mouse_selected);
     }
+    if (void* list = twist_list(self)) reinterpret_cast<SetSel_t>(vtable_slot(list, kListSetSel))(list, nullptr, g_twist_selected);
 }
 
 void __fastcall h_CtlChanged(void* self, void* edx) {
@@ -514,6 +557,10 @@ void __fastcall h_CtlChanged(void* self, void* edx) {
     if (void* list = list_by_id(self, g_mouse_list_id.load())) {
         const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
         if (sel == 0 || sel == 1) g_mouse_selected = sel;
+    }
+    if (void* list = twist_list(self)) {
+        const int sel = reinterpret_cast<GetSel_t>(vtable_slot(list, kListGetSel))(list, nullptr);
+        if (sel == 0 || sel == 1) g_twist_selected = sel;
     }
 }
 
@@ -530,8 +577,18 @@ void __fastcall h_CtlExit(void* self, void* edx) {
             request_display_mode_apply();  // re-applies the mouse's cooperative level on the window thread
         }
     }
+    if (g_twist_ready) {
+        g_twist_ready = false;
+        const bool on = g_twist_selected == 1;
+        if (void* ini = options_ini()) {
+            reinterpret_cast<IniWriteInt_t>(at_rva(g_opts, kIniWriteIntRva))(ini, nullptr, L"ControlOptions",
+                                                                              L"PilotTwist", on ? 1 : 0);
+        }
+        config::set_pilot_twist(on);  // logs a change
+    }
     o_CtlExit(self, edx);
     aircraft_track_reevaluate();  // as in h_Exit
+    pilot_twist_apply_setting();  // in the menus: no view update is running
 }
 
 // --- Gameplay sub-menu: Tacview Recording. Options.ini [OtherOptions] TacviewRecording: 0 = Off (default), 1 = On.
@@ -588,6 +645,7 @@ void __fastcall h_GplExit(void* self, void* edx) {
     }
     o_GplExit(self, edx);
     aircraft_track_reevaluate();  // after config is updated: installs or removes the aircraft/weapon hooks
+    pilot_twist_apply_setting();
 }
 
 SRWLOCK g_opts_lock = SRWLOCK_INIT;
@@ -604,6 +662,7 @@ const wchar_t* our_text(const wchar_t* key) {
     if (wcscmp(key, kTacviewLabelKey) == 0) return L"Tacview Recording";
     if (wcscmp(key, kTacviewInfoKey) == 0) return L"Record every flight to a Tacview file in Saved Games.";
     if (wcscmp(key, L"TXT_LAZY_SCREEN_INFO") == 0) return L"Select the monitor to display the game on.";
+    if (wcscmp(key, L"TXT_LAZY_PILOT_TWIST_INFO") == 0) return L"Looking far behind turns the view further and leans a little.";
     // ~70 characters, like the longer stock hints; one line.
     if (wcscmp(key, L"TXT_LAZY_MOUSE_INFO") == 0) return L"Match Windows puts the game's pointer exactly on the Windows cursor.";
     return nullptr;

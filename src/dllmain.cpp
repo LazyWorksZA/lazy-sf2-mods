@@ -71,6 +71,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         }
         case DLL_PROCESS_DETACH:
             LazyWorks::SF2Patch::hooks::cursor_clip_release_at_exit();
+            LazyWorks::SF2Patch::hooks::probe_shutdown();
             LazyWorks::SF2Patch::hooks::tacview_recorder_shutdown(reserved != nullptr);  // also at process exit: the file stays readable
             if (reserved == nullptr) {  // FreeLibrary, not process exit
                 LazyWorks::SF2Patch::hooks::host_shutdown();
