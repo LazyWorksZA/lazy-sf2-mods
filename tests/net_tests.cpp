@@ -7325,10 +7325,9 @@ void world_stream_tests() {
     tr.observe(3, 12, 7, pl, &out);
     pl.level = 40;
     tr.observe(3, 12, 7, pl, &out);
-    expect(first_silent && out.size() == 5 && out[0].event == kEventAwake && out[1].event == kEventDamageLevel &&
-               out[1].value == 3 && out[2].event == kEventDamageLevel && out[3].event == kEventDestroyed &&
-               out[4].event == kEventPlacedDamage && out[4].value == 40,
-           "stream: events on change only: awake, damage, destroyed once, placed damage delta");
+    expect(first_silent && out.size() == 3 && out[0].event == kEventAwake && out[1].event == kEventDestroyed &&
+               out[2].event == kEventPlacedDamage && out[2].value == 40,
+           "stream: events on change only: awake, destroyed once, placed damage delta (no object damage levels)");
 
     // Bytes per second, the T6 estimate: 8 objects near (10 Hz) + 17 far (1 Hz) a second.
     const size_t per_s = world_states_bytes(8) * 10 + world_states_bytes(17);
@@ -7364,21 +7363,78 @@ void world_stream_tests() {
     h.core.stop(false);
 }
 
+void world_seat_rule_tests() {
+    std::printf("world seats and queues\n");
+    {
+        const SeatPlan host1{4, 0}, host2{4, 1}, pair{2, 0};
+        int taken[3] = {};
+        const int a1 = assign_seat(host1, taken, 0);
+        taken[0] = a1;
+        const int a2 = assign_seat(host1, taken, 1);
+        expect(a1 == 1 && a2 == 2, "seats: the host flies #1: clients get #2, then #3");
+        const int b1 = assign_seat(host2, taken, 0);
+        taken[0] = b1;
+        const int b2 = assign_seat(host2, taken, 1);
+        expect(b1 == 0 && b2 == 2, "seats: the host flies #2: clients get #1, then #3");
+        taken[0] = 1;
+        expect(assign_seat(pair, taken, 1) == -1 && assign_seat(SeatPlan{}, taken, 0) == -1,
+               "seats: none free in a two-ship with one client, or without a plan");
+    }
+    {
+        HostCore core;  // not started: the seat table and the queues work without the thread
+        core.set_mission(std::vector<uint8_t>(10, 1), 77, 10, SeatPlan{4, 1});
+        const int s1 = core.seat_for(0xAAAA), s2 = core.seat_for(0xBBBB);
+        expect(s1 == 0 && s2 == 2 && core.seat_for(0xAAAA) == 0 && core.seat_for(0) == -1 && core.mission_id() == 77,
+               "seats: two clients by tag, the same tag keeps its seat, tag 0 gets none");
+        core.set_mission(std::vector<uint8_t>(10, 2), 78, 10, SeatPlan{4, 0});
+        expect(core.seat_for(0xBBBB) == 1 && core.seat_plan().host_member == 0,
+               "seats: a new mission gives the seats out again");
+        uint8_t m[100] = {};
+        size_t states = 0, events = 0;
+        while (core.send_world(0, 0, m, sizeof(m), false)) ++states;
+        while (core.send_world(0, 0, m, sizeof(m), true)) ++events;
+        expect(states == HostCore::kWorldStatesCap && events == HostCore::kWorldEventsCap,
+               "queues: a full states queue leaves the events' queue free (64 states, then 256 events)");
+    }
+    {  // the client's events ring: never dropped; full ends the session (QueueFull)
+        FakeHost h;
+        if (!h.start()) return expect(false, "queues loopback: host core");
+        auto c = std::make_unique<ClientCore>();
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        CcRx rx;
+        const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
+        WorldEventRec ev{kEventAwake, 1, 1, 0, 0};
+        uint8_t b[64];
+        const size_t n = encode_world_events(1, 0, &ev, 1, b, sizeof(b));
+        size_t sent = 0;
+        const bool ended = cc_run(&h, nullptr, *c, rx, 8.0, [&] {
+            for (int k = 0; k < 32 && sent < 400; ++k)
+                if (h.core.send_world(h.slot, h.gen, b, n, true)) ++sent;
+            return rx.has(ClientEvent::Disconnected);
+        });
+        expect(welcomed && ended && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::QueueFull) &&
+                   c->counters().world == ClientCore::kWorldEventsIn,
+               "queues: a client that does not drain 256 world events ends with QueueFull, none silently dropped");
+        c->stop(false);
+        h.core.stop(false);
+    }
+}
+
 void world_mission_tests() {
     std::printf("world mission transfer\n");
     // Sizes are part of the wire format (v3); a chunk stays under ENet's 1,024-byte packet limit and one datagram.
-    expect(sizeof(MissionRequestMsg) == 8 && sizeof(MissionOfferMsg) == 22 && sizeof(MissionChunkHead) == 12 &&
+    expect(sizeof(MissionRequestMsg) == 12 && sizeof(MissionOfferMsg) == 23 && sizeof(MissionChunkHead) == 12 &&
                kMissionChunkMax == 972 && kMissionChunkMax < 1200,
-           "mission: message sizes (8, 22, 12 + 960)");
+           "mission: message sizes (12, 23, 12 + 960)");
     uint8_t b[kMissionChunkMax + 8];
     MissionRequestMsg rq{};
     rq.have_id = 7;
     MissionRequestMsg rq2{};
-    expect(encode(rq, b, sizeof(b)) == 8 && peek_world_type(b, 8) == 20 && decode(b, 8, rq2) == Status::Ok &&
-               rq2.have_id == 7 && decode(b, 7, rq2) == Status::Truncated,
+    expect(encode(rq, b, sizeof(b)) == 12 && peek_world_type(b, 12) == 20 && decode(b, 12, rq2) == Status::Ok &&
+               rq2.have_id == 7 && decode(b, 11, rq2) == Status::Truncated,
            "mission: request round trip");
     MsgType mt{};
-    expect(peek_type(b, 8, mt) == Status::BadType, "mission: the v2-style peek_type does not take world types");
+    expect(peek_type(b, 12, mt) == Status::BadType, "mission: the v2-style peek_type does not take world types");
 
     std::vector<uint8_t> msn(70000);
     for (size_t i = 0; i < msn.size(); ++i) msn[i] = static_cast<uint8_t>((i % 2) ? 0 : "[AircraftMission001]\n"[i / 2 % 21]);
@@ -7406,7 +7462,7 @@ void world_mission_tests() {
     o.chunk_bytes = kMissionChunkData;
     o.chunk_count = static_cast<uint16_t>(mission_chunk_count(packed.size()));
     MissionOfferMsg o2{};
-    expect(encode(o, b, sizeof(b)) == 22 && decode(b, 22, o2) == Status::Ok && o2.chunk_count == o.chunk_count,
+    expect(encode(o, b, sizeof(b)) == 23 && decode(b, 23, o2) == Status::Ok && o2.chunk_count == o.chunk_count,
            "mission: offer round trip");
     MissionAssembly as;
     expect(as.begin(o) && as.count() == o.chunk_count, "mission: assembly accepts the offer");
@@ -7460,18 +7516,18 @@ void world_mission_tests() {
         for (int i = 0; i < 2000 && core.state() != HostCore::State::Running; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         MissionFetch fetch;
-        const bool started = fetch.start("127.0.0.1", core.port(), nullptr);
+        const bool started = fetch.start("127.0.0.1", core.port(), 0x1234u, nullptr);
         for (int i = 0; i < 300 && none_seen.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         expect(started && none_seen.load() >= 1 && fetch.state() == MissionFetch::State::Running,
                "mission loopback: the host says none yet, the fetch keeps waiting");
-        core.set_mission(packed, id, raw);
+        core.set_mission(packed, id, raw, SeatPlan{4, 1});  // the host flies #2
         for (int i = 0; i < 1000 && fetch.state() == MissionFetch::State::Running; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         std::vector<uint8_t> got;
         MissionOfferMsg go{};
         expect(fetch.state() == MissionFetch::State::Done && fetch.take(&got, &go) && got == packed &&
-                   go.mission_id == id && go.seat >= 1 && !fetch.take(&got, &go),
-               "mission loopback: the fetch receives the packed mission once, with a seat");
+                   go.mission_id == id && go.seat == 0 && go.host_seat == 1 && !fetch.take(&got, &go),
+               "mission loopback: the fetch receives the mission once; the host (#2) gives it seat #1");
         expect(core.missions_sent() == 1, "mission loopback: the host counts one mission sent");
         fetch.stop();
         core.stop(false);
@@ -7660,10 +7716,10 @@ int main() {
         const size_t n = encode(v1, b, sizeof(b));
         b[2] = 1;
         MsgType t{};
-        expect(n == 56 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
+        expect(n == 60 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
-        expect(kVersion == 3 && sizeof(WelcomeMsg) == 58 && sizeof(PeerInfoMsg) == 54 && sizeof(PeerLeftMsg) == 7,
+        expect(kVersion == 3 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7,
                "v3 sizes");
     }
 
@@ -7706,6 +7762,7 @@ int main() {
     world_remote_tests();
     world_mission_tests();
     world_stream_tests();
+    world_seat_rule_tests();
     pilot_twist_settings_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

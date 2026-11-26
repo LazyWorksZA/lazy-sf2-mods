@@ -323,7 +323,8 @@ void world_on_modules_loaded();
 /// Host mode: the mission package (net/world_proto.h) to serve to clients that ask for it (T5). Any thread; kept
 /// until replaced, and handed to the network core once it runs. No-op without LAZYSF2_HOST.
 /// </summary>
-void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw);
+/// members and host_member describe the host's own flight, for the seat rule (net/world_proto.h assign_seat).
+void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw, int members, int host_member);
 /// <summary>Sends one world message to every welcomed client (reliable: WorldEvents). True if any took it.</summary>
 using WorldSendFn = bool (*)(const uint8_t* data, size_t len, bool reliable);
 /// <summary>True once this host serves a mission (T5): it then streams its world to its clients (T6).</summary>
@@ -336,10 +337,19 @@ void world_host_tick(double now, const double (*players)[3], int n_players, Worl
 /// <summary>Client in a world join, game thread: applies one WorldStates or WorldEvents message to the remote copies.</summary>
 void world_client_apply(const uint8_t* data, size_t len, double host_now);
 /// <summary>
-/// The aircraft a peer's avatar should be in a shared world: member peer_id of the player flight (the host member 0,
-/// client k member k). Null outside a shared world or when that member does not exist.
+/// The aircraft that is member `member` of the player flight, for a peer's avatar in a shared world (its seat, from
+/// the host: the Welcome or PeerInfo). Null outside a shared world, for kNoSeat, or when that member does not exist.
 /// </summary>
-void* world_seat_object(int peer_id);
+void* world_member_object(int member);
+/// <summary>Client in a world join: the tag its fetch and its Hello carry (the host's seat key); 0 when not joining.</summary>
+uint32_t world_client_tag();
+/// <summary>
+/// Client, game thread, on a Welcome: false when it flies another mission than the host's (the caller leaves with
+/// kByeWrongMission). Takes the host's seat numbers. True outside a world join.
+/// </summary>
+bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat);
+/// <summary>Client, game thread: the session ended; the next Accept flies only a mission fetched again.</summary>
+void world_client_session_end();
 /// <summary>True if the host's or the client's Phase 4 code drives this aircraft as an avatar (game thread).</summary>
 bool host_drives_object(const void* obj);
 bool client_drives_object(const void* obj);

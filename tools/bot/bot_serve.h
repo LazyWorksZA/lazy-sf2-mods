@@ -34,6 +34,7 @@ struct ServeConfig {
     std::atomic<uint16_t>* port_out = nullptr;  // set to the bound port once listening
     std::vector<uint8_t> mission;  // non-empty: a packed mission (net/world_proto.h) served to clients that ask
     uint32_t mission_id = 0, mission_raw = 0;
+    int seat_members = 4, host_member = 0;  // the seat plan for --mission (--seats N,HOST)
     /// <summary>A synthetic world stream (T6) for a welcomed client: aircraft that fly straight at 150 m/s from their
     /// manifest position and heading, sent at 10 Hz as WorldStates, and scripted events.</summary>
     struct WorldObj {

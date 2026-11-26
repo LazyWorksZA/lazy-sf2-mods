@@ -34,10 +34,30 @@ inline constexpr uint8_t kOfferOk = 0;       // chunks follow, in order, on the 
 inline constexpr uint8_t kOfferNone = 1;     // the host has no mission yet: ask again later
 inline constexpr uint8_t kOfferTooBig = 2;   // the host's mission is over kMissionMaxPacked
 
+/// <summary>What the host's seat table needs to know of its own flight.</summary>
+struct SeatPlan {
+    int members = 0;      // the host's flight's member count (0: no seats to give)
+    int host_member = 0;  // the member the host flies
+};
+/// <summary>
+/// The owner's seat rule: the first member of the host's flight, in slot order, that is neither the host's nor
+/// taken (taken[0..n)). -1 when none is free.
+/// </summary>
+inline int assign_seat(const SeatPlan& p, const int* taken, size_t n) {
+    for (int m = 0; m < p.members; ++m) {
+        if (m == p.host_member) continue;
+        bool used = false;
+        for (size_t i = 0; i < n && !used; ++i) used = taken[i] == m;
+        if (!used) return m;
+    }
+    return -1;
+}
+
 #pragma pack(push, 1)
 struct MissionRequestMsg {
     Header h;
     uint32_t have_id;  // the mission id the client already holds, 0 for none
+    uint32_t tag;      // the client's world tag (random per launch, never 0): the host keys its seat by it
 };
 struct MissionOfferMsg {
     Header h;
@@ -47,7 +67,8 @@ struct MissionOfferMsg {
     uint16_t chunk_bytes;   // kMissionChunkData
     uint16_t chunk_count;
     uint8_t status;         // kOffer*
-    uint8_t seat;           // the member index the host suggests for this client (0 = none)
+    uint8_t seat;           // the member of the host's flight the host assigned this client (kNoSeat: none free)
+    uint8_t host_seat;      // the member the host flies
 };
 struct MissionChunkHead {
     Header h;
@@ -56,8 +77,9 @@ struct MissionChunkHead {
     uint16_t len;  // payload bytes that follow (1..kMissionChunkData; only the last chunk may be shorter)
 };
 #pragma pack(pop)
-static_assert(sizeof(MissionRequestMsg) == 8);   // 4:4 have id
-static_assert(sizeof(MissionOfferMsg) == 22);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status, 21:1 seat
+static_assert(sizeof(MissionRequestMsg) == 12);  // 4:4 have id, 8:4 tag
+static_assert(sizeof(MissionOfferMsg) == 23);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status,
+                                                 // 21:1 seat, 22:1 host seat
 static_assert(sizeof(MissionChunkHead) == 12);   // 4:4 id, 8:2 index, 10:2 len, then the payload
 inline constexpr size_t kMissionChunkMax = sizeof(MissionChunkHead) + kMissionChunkData;
 static_assert(kMissionChunkMax == 972 && kMissionChunkMax < 1024);
@@ -140,7 +162,7 @@ inline constexpr uint8_t kEventDestroyed = 1;     // value: unused
 inline constexpr uint8_t kEventAwake = 2;         // the object woke (formation start, scramble)
 inline constexpr uint8_t kEventAsleep = 3;        // the object went to sleep (landed)
 inline constexpr uint8_t kEventPlacedDamage = 4;  // value: the placed record's damage 0..100 (a delta of its state)
-inline constexpr uint8_t kEventDamageLevel = 5;   // value: the object's damage level 0..5
+inline constexpr uint8_t kEventDamageLevel = 5;   // value: the object's damage level 0..5 (reserved: not sent yet)
 
 /// <summary>An unquantised object state (world metres, m/s, radians).</summary>
 struct ObjPose {

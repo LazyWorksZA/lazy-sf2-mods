@@ -82,9 +82,14 @@ enum class Mode { Off, Save, Load };
 Mode g_mode = Mode::Off;          // set once in world_install()
 std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
 bool g_join = false;              // LAZYSF2_WORLD_JOIN=1 (with LAZYSF2_CONNECT): fetch the host's mission in menus
-bool g_seat_from_env = false;     // LAZYSF2_WORLD_SEAT was given: it wins over the host's suggestion
+bool g_seat_from_env = false;     // LAZYSF2_WORLD_SEAT was given: it wins over the host's seat
+uint32_t g_tag = 0;               // join: this launch's world tag (the host keys our seat by it)
+uint32_t g_fetched_id = 0;        // join: the mission id behind g_load_path
+uint32_t g_flying_id = 0;         // join: the mission id of the flight under way (0: not the host's)
+int g_host_seat = 0;              // join: the member the host flies
 net::MissionFetch* g_fetch = nullptr;  // never freed (no join at DLL unload)
 std::atomic<bool> g_world_host{false};  // a mission was published: this host streams its world to clients
+uint32_t g_published_id = 0;  // the mission this host serves (game thread)
 bool g_remote = false;            // LAZYSF2_WORLD_REMOTE=1
 int g_seat = -1;                  // LAZYSF2_WORLD_SEAT: the player's member index, or -1 (stock)
 bool g_seed_from_env = false;
@@ -631,11 +636,17 @@ void take_fetched_mission() {
         LOG("world: ERR join: could not write %ls or its sidecar", msn_path.c_str());
         return;
     }
+    if (offer.seat == net::kNoSeat && !g_seat_from_env) {
+        LOG("world: join: the host has no free seat for us in its flight; flying the generated mission");
+        return;
+    }
     g_load_path = msn_path;
-    if (!g_seat_from_env && offer.seat >= 1 && offer.seat < kWorldMaxMembers) g_seat = offer.seat;
-    LOG("world: join: the host's mission 0x%08lx is %ls (%zu bytes); seat %d (%s)",
+    g_fetched_id = offer.mission_id;
+    g_host_seat = offer.host_seat == net::kNoSeat ? 0 : offer.host_seat;
+    if (!g_seat_from_env) g_seat = offer.seat;
+    LOG("world: join: the host's mission 0x%08lx is %ls (%zu bytes); we fly member %d (%s), the host member %d",
         static_cast<unsigned long>(offer.mission_id), msn_path.c_str(), msn.size(), g_seat,
-        g_seat_from_env ? "LAZYSF2_WORLD_SEAT" : "the host's suggestion");
+        g_seat_from_env ? "LAZYSF2_WORLD_SEAT" : "assigned by the host", g_host_seat);
 }
 
 void accept_load(const Ctx& c, void* page) {
@@ -843,6 +854,17 @@ void write_manifest(const Ctx& c, const Armed& a, int rnd_index, int rnd_seed) {
         format_manifest_counts(v).c_str() + 2, v.size(), player_key.c_str(), empty_formations);
 }
 
+void start_fetch();
+void restart_fetch() {
+    if (g_fetch && g_fetch->state() == net::MissionFetch::State::Running) return;
+    if (g_fetch) g_fetch->stop();  // the thread has ended (Done or Stopped): the join returns at once
+    delete g_fetch;
+    g_fetch = nullptr;
+    start_fetch();
+}
+
+bool own_flight(int* members, int* member);  // the player flight's size and our member (seat section)
+
 // Host: the saved file and its final sidecar, packed, for clients that ask (T5).
 void publish_mission(const Armed& a) {
     std::vector<uint8_t> msn, packed;
@@ -855,7 +877,10 @@ void publish_mission(const Armed& a) {
         LOG("world: the mission is too big to serve (%zu bytes)", msn.size());
         return;
     }
-    host_publish_mission(packed.data(), packed.size(), id, raw);
+    int members = 0, host_member = 0;
+    own_flight(&members, &host_member);
+    host_publish_mission(packed.data(), packed.size(), id, raw, members, host_member);
+    g_published_id = id;
     g_world_host.store(true, std::memory_order_release);
 }
 
@@ -874,6 +899,11 @@ int __fastcall h_Start(void* msn) {
     }
     Ctx c{};
     if (!resolve(&c, "mission start") || c.msn != msn) return o_Start(msn);
+    if (g_join) {
+        g_flying_id = g_load_path == a.msn_path ? g_fetched_id : 0;
+        g_load_path.clear();  // the next Accept flies only a mission fetched again (the host may have a new one)
+        restart_fetch();
+    }
     const bool seeded = call_seed(c.rnd, a.seed);
     // -1 makes the start read the density through the getter, where it is recorded (Save) or forced (Load).
     const bool density_reset = write_density(c.sm, -1);
@@ -941,6 +971,15 @@ bool read_player_flight(const void* msn, PlayerFlight* f) {
     }
 }
 
+bool own_flight(int* members, int* member) {
+    PlayerFlight f{};
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    if (!sm || !read_player_flight(at_rva(sm, kRvaMsn), &f)) return false;
+    *members = f.members;
+    *member = f.member;
+    return true;
+}
+
 bool write_player_member(void* msn, int member) {
     __try {
         std::memcpy(static_cast<BYTE*>(msn) + kOffPlayerMember, &member, sizeof(int));
@@ -978,7 +1017,7 @@ bool apply_seat(void* msn) {
         LOG("world: seat: refused (the player flight could not be read); stock seat");
         return false;
     }
-    const SeatDecision d = decide_seat(g_seat, f.members);
+    const SeatDecision d = g_join && g_seat == 0 ? SeatDecision{true, 0, "ok"} : decide_seat(g_seat, f.members);
     if (!d.apply) {
         LOG("world: seat: refused (%s: flight %d has %d members, seat %d asked); stock seat", d.why, f.index,
             f.members, g_seat);
@@ -1271,10 +1310,16 @@ bool read_i16(const void* p, int16_t* v) {
 struct StreamMasks {
     uint32_t awake = 0, asleep = 0, remote = 0;
 };
-bool read_stream_masks(StreamMasks* m) {
-    return read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoAwakeMask, &m->awake) &&
-           read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoAsleepMask, &m->asleep) &&
-           read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoRemoteMask, &m->remote);
+constexpr DWORD kRvaGoAwakeMask = 0x4d60c, kRvaGoAsleepMask = 0x4d610;
+// The flag masks per class: [0] aircraft (AircraftObject), [1] the GroundObject group (GroundObject's; vehicles and
+// ships get the same bits from the object manager by name, which the caller checks once).
+bool read_stream_masks(StreamMasks m[2]) {
+    return read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoAwakeMask, &m[0].awake) &&
+           read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoAsleepMask, &m[0].asleep) &&
+           read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoRemoteMask, &m[0].remote) &&
+           read_mask(L"GroundObject.dll", kGoStamp, kGoSize, "GroundObject.dll", kRvaGoAwakeMask, &m[1].awake) &&
+           read_mask(L"GroundObject.dll", kGoStamp, kGoSize, "GroundObject.dll", kRvaGoAsleepMask, &m[1].asleep) &&
+           read_mask(L"GroundObject.dll", kGoStamp, kGoSize, "GroundObject.dll", kRvaGoRemoteMask, &m[1].remote);
 }
 
 uintptr_t module_if(const wchar_t* name, DWORD stamp, DWORD size, const char* label) {
@@ -1282,8 +1327,7 @@ uintptr_t module_if(const wchar_t* name, DWORD stamp, DWORD size, const char* la
     return m && is_expected_build(m, stamp, size, label) ? reinterpret_cast<uintptr_t>(m) : 0;
 }
 
-// The object a member of the player flight is, for a peer's avatar: the host is member 0, client k member k (the T5
-// seat rule; an assumption until T3 is checked live). Game thread.
+// The aircraft that is a member of the player flight (a peer's seat, as the host assigned it). Game thread.
 void* seat_object(int member) {
     HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
     HMODULE omm = GetModuleHandleW(L"ObjectManager.dll");
@@ -1305,6 +1349,10 @@ void* seat_object(int member) {
 struct HostStream {
     const void* msn = nullptr;
     const BYTE* slots = nullptr;  // the slot array of the mission being streamed: a new one starts over
+    uint32_t epoch = 0, mission = 0;  // sim_player_epoch() and the published mission it was reset for
+    bool have_masks = false;      // read once per reset (the build checks are not repeated every frame)
+    StreamMasks masks[2];
+    uintptr_t gm = 0, nv = 0;
     net::WorldSendClock clock;
     net::WorldEventTracker tracker;
     uint32_t seq = 0, eseq = 0;
@@ -1319,9 +1367,9 @@ HostStream* g_hs = nullptr;  // game thread
 
 bool world_host_streaming() { return g_world_host.load(std::memory_order_acquire); }
 
-void* world_seat_object(int peer_id) {
-    if (!g_world_host.load(std::memory_order_acquire) && !g_join) return nullptr;
-    return seat_object(peer_id);
+void* world_member_object(int member) {
+    if ((!g_world_host.load(std::memory_order_acquire) && !g_join) || member == net::kNoSeat) return nullptr;
+    return seat_object(member);
 }
 
 void world_host_tick(double now, const double (*players)[3], int n_players, WorldSendFn send) {
@@ -1337,18 +1385,25 @@ void world_host_tick(double now, const double (*players)[3], int n_players, Worl
     Om om;
     uint32_t player = 0xffffffffu;
     if (!read_slot_table(msn, &t) || !read_om(omm, &om) || !read_player_obj(msn, &player)) return;
-    if (hs.msn != msn || hs.slots != t.arr) {
+    // A new flight (player epoch), a new published mission or a new slot array: everything starts over.
+    if (hs.msn != msn || hs.slots != t.arr || hs.epoch != sim_player_epoch() || hs.mission != g_published_id) {
         hs.clock.clear();
         hs.tracker.clear();
         hs.msn = msn;
         hs.slots = t.arr;
+        hs.epoch = sim_player_epoch();
+        hs.mission = g_published_id;
         hs.next_events = now;
         hs.logged_start = false;
+        hs.have_masks = read_stream_masks(hs.masks);
+        if (hs.have_masks && (hs.masks[0].awake != hs.masks[1].awake || hs.masks[0].asleep != hs.masks[1].asleep ||
+                              hs.masks[0].remote != hs.masks[1].remote))
+            LOG("world: stream: note the aircraft and ground flag masks differ; each class uses its own");
+        hs.gm = module_if(L"GroundMobileObject.dll", kGmStamp, kGmSize, "GroundMobileObject.dll");
+        hs.nv = module_if(L"NavalObject.dll", kNvStamp, kNvSize, "NavalObject.dll");
     }
-    StreamMasks masks;
-    const bool have_masks = read_stream_masks(&masks);
-    const uintptr_t gm = module_if(L"GroundMobileObject.dll", kGmStamp, kGmSize, "GroundMobileObject.dll");
-    const uintptr_t nv = module_if(L"NavalObject.dll", kNvStamp, kNvSize, "NavalObject.dll");
+    const bool have_masks = hs.have_masks;
+    const uintptr_t gm = hs.gm, nv = hs.nv;
     const bool event_walk = now >= hs.next_events || now < hs.next_events - 2 * kEventEvery;
     if (event_walk) hs.next_events = now + kEventEvery;
     std::vector<net::WorldObjState> out;
@@ -1365,8 +1420,9 @@ void world_host_tick(double now, const double (*players)[3], int n_players, Worl
             if (event_walk) {
                 net::WorldSeen seen;
                 seen.alive = ok && f.level < kDestroyedLevel;
-                seen.awake = ok && have_masks && (f.flags & masks.awake);
-                seen.asleep = ok && have_masks && (f.flags & masks.asleep);
+                const StreamMasks& mk = hs.masks[f.group == 2 ? 1 : 0];
+                seen.awake = ok && have_masks && (f.flags & mk.awake);
+                seen.asleep = ok && have_masks && (f.flags & mk.asleep);
                 seen.level = static_cast<int16_t>(ok ? f.level : 0);
                 hs.tracker.observe(kind, static_cast<uint16_t>(i), static_cast<uint16_t>(m), seen, &ev);
             }
@@ -1453,7 +1509,11 @@ namespace {
 
 struct ClientStream {
     const BYTE* slots = nullptr;
+    uint32_t epoch = 0, mission = 0;  // reset on a new flight or mission
+    bool have_masks = false;
+    StreamMasks masks[2];
     std::unordered_map<uint64_t, uint32_t> last_ms;  // per key: the newest state applied
+    std::unordered_map<uint64_t, bool> destroyed;    // keys the host destroyed: late states are not written on the wreck
     uint64_t applied = 0, stale = 0, missing = 0, not_remote = 0, events = 0;
     double next_report = 0;
     bool logged_first = false, logged_refresh = false;
@@ -1535,7 +1595,7 @@ bool write_i16(BYTE* p, int16_t v) {
 }  // namespace
 
 void world_client_apply(const uint8_t* data, size_t len, double host_now) {
-    if (!g_join) return;
+    if (!g_join || g_flying_id == 0) return;
     if (!g_cs) g_cs = new (std::nothrow) ClientStream;
     if (!g_cs) return;
     ClientStream& cs = *g_cs;
@@ -1546,13 +1606,16 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
     SlotTable t{};
     Om om;
     uint32_t player = 0xffffffffu;
-    StreamMasks masks;
-    if (!read_slot_table(msn, &t) || !read_om(omm, &om) || !read_player_obj(msn, &player) || !read_stream_masks(&masks))
-        return;
-    if (cs.slots != t.arr) {
+    if (!read_slot_table(msn, &t) || !read_om(omm, &om) || !read_player_obj(msn, &player)) return;
+    if (cs.slots != t.arr || cs.epoch != sim_player_epoch() || cs.mission != g_flying_id) {
         cs.slots = t.arr;
+        cs.epoch = sim_player_epoch();
+        cs.mission = g_flying_id;
         cs.last_ms.clear();
+        cs.destroyed.clear();
+        cs.have_masks = read_stream_masks(cs.masks);
     }
+    if (!cs.have_masks) return;
     auto object_of = [&](uint8_t kind, uint16_t a, uint16_t b, BYTE** obj, int* group) {
         uint32_t id = 0;
         if (kind != 1 && kind != 2) return false;
@@ -1576,9 +1639,9 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
                 ++cs.missing;
                 continue;
             }
-            if (client_drives_object(obj)) continue;
+            if (client_drives_object(obj) || cs.destroyed.count(net::world_key(q.kind, q.a, q.b))) continue;
             uint32_t flags = 0;
-            if (!read_flags(obj, &flags) || !(flags & masks.remote)) {
+            if (!read_flags(obj, &flags) || !(flags & cs.masks[group == 2 ? 1 : 0].remote)) {
                 ++cs.not_remote;
                 continue;
             }
@@ -1618,11 +1681,13 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
             BYTE* obj = nullptr;
             int group = 0;
             if (!object_of(e.kind, e.a, e.b, &obj, &group)) continue;
+            const StreamMasks& mk = cs.masks[group == 2 ? 1 : 0];
             if (e.event == net::kEventAwake) {
-                set_flags(obj, masks.awake, masks.asleep);
+                set_flags(obj, mk.awake, mk.asleep);
             } else if (e.event == net::kEventAsleep) {
-                set_flags(obj, masks.asleep, masks.awake);
+                set_flags(obj, mk.asleep, mk.awake);
             } else if (e.event == net::kEventDestroyed) {
+                cs.destroyed[net::world_key(e.kind, e.a, e.b)] = true;
                 const int r2 = destroy_copy(obj);
                 LOG("world: stream: %c %03u.%02u destroyed on the host: %s", e.kind == 1 ? 'A' : 'G',
                     static_cast<unsigned>(e.a), static_cast<unsigned>(e.b),
@@ -1726,6 +1791,10 @@ void world_install() {
             LOG("world: join off (it needs client mode: LAZYSF2_CONNECT)");
         } else {
             g_join = true;
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            g_tag = (static_cast<uint32_t>(qpc.QuadPart) ^ static_cast<uint32_t>(qpc.QuadPart >> 32) ^
+                     (GetCurrentProcessId() << 12)) | 1u;  // never 0
             g_mode = Mode::Load;  // the fetched file is loaded at the New page's Accept, as for LAZYSF2_WORLD_LOAD
             if (g_seat < 0) g_seat = 1;  // until the host suggests one
             g_remote = true;  // the host owns the world: every other object is a remote copy (T4), driven by the stream
@@ -1772,16 +1841,44 @@ void install_save_load() {
     LOG("world: load mode: each New-page Accept loads %ls with its sidecar's seed and options", full);
 }
 
-static void fetch_log(const char* line) { LOG("%s", line); }
+namespace {
+void fetch_log(const char* line) { LOG("%s", line); }
+
+void start_fetch() {
+    char host[64] = {};
+    uint16_t port = 0;
+    g_fetch = new (std::nothrow) net::MissionFetch;
+    if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !g_fetch->start(host, port, g_tag, fetch_log))
+        LOG("world: join: could not start the mission fetch");
+}
+}  // namespace
+
+uint32_t world_client_tag() { return g_join ? g_tag : 0; }
+
+bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) {
+    if (!g_join) return true;
+    if (g_flying_id == 0 || mission_id != g_flying_id) {
+        LOG("world: join: the host flies mission 0x%08lx and we fly %s0x%08lx; leaving (Bye 8)",
+            static_cast<unsigned long>(mission_id), g_flying_id ? "" : "a generated mission, not ",
+            static_cast<unsigned long>(g_flying_id));
+        return false;
+    }
+    if (seat != net::kNoSeat && static_cast<int>(seat) != g_seat)
+        LOG("world: join: WARNING the host's Welcome gives seat %u, we fly %d", static_cast<unsigned>(seat), g_seat);
+    if (host_seat != net::kNoSeat) g_host_seat = host_seat;
+    LOG("world: join: welcomed into mission 0x%08lx; we fly member %d, the host member %d",
+        static_cast<unsigned long>(mission_id), g_seat, g_host_seat);
+    return true;
+}
+
+void world_client_session_end() {
+    if (!g_join) return;
+    g_load_path.clear();
+    LOG("world: join: the session ended; the next Accept flies only a mission fetched again");
+}
 
 void world_on_modules_loaded() {
-    if (g_join && !g_fetch) {
-        char host[64] = {};
-        uint16_t port = 0;
-        g_fetch = new (std::nothrow) net::MissionFetch;
-        if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !g_fetch->start(host, port, fetch_log))
-            LOG("world: join: could not start the mission fetch");
-    }
+    if (g_join && !g_fetch) start_fetch();
     if (g_mode == Mode::Off && g_seat < 0 && !g_remote) return;
     static const HookDef kSms[] = {
         {kRvaNewEvent, reinterpret_cast<void*>(&h_NewEvent), reinterpret_cast<void**>(&o_NewEvent),

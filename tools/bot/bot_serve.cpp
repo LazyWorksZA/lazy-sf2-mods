@@ -59,6 +59,7 @@ struct Client {
     uint32_t gen = 0;
     char callsign[16] = {};
     char aircraft[32] = {};
+    uint32_t world_tag = 0;
     RemoteJet jet;
     bool got_state = false, coasting = false;
     // The two-step join (protocol.h, welcome_has_join): only when the first Welcome had no join position.
@@ -174,6 +175,10 @@ struct Serve {
         w.client_id = static_cast<uint16_t>(slot + 1);
         w.host_game_time = host_t;
         w.theatre_hash = cfg.theatre_hash;
+        w.mission_id = core.mission_id();
+        const int seat = core.seat_for(c.world_tag);
+        w.seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;
+        w.host_seat = cfg.mission.empty() ? kNoSeat : static_cast<uint8_t>(cfg.host_member);
         if (res.jet_started) {  // the join position on the jet's wing; otherwise none (welcome_has_join is false)
             const Flight::Sample s = flight.sample();
             join_position(s.pos, s.ang[1], slot, w.spawn_pos);
@@ -288,6 +293,7 @@ struct Serve {
             c.on = true;
             c.slot = e.slot;
             c.gen = e.gen;
+            c.world_tag = h.world_tag;
             set_str(c.callsign, h.callsign);
             set_str(c.aircraft, h.aircraft);
             ++res.clients;
@@ -446,7 +452,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
     sv.peers.set_host(cfg.callsign.c_str(), cfg.aircraft.c_str());
     sv.core.set_host_time(sv.host_t);
     if (!cfg.mission.empty()) {
-        sv.core.set_mission(cfg.mission, cfg.mission_id, cfg.mission_raw);
+        sv.core.set_mission(cfg.mission, cfg.mission_id, cfg.mission_raw, SeatPlan{cfg.seat_members, cfg.host_member});
         sv.say("bot serve: serving mission 0x%08x (%zu bytes packed)", static_cast<unsigned>(cfg.mission_id),
                cfg.mission.size());
     }

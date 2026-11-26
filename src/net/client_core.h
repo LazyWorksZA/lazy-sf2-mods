@@ -136,9 +136,13 @@ public:
     bool clock_snapshot(ClockSync* out) const;
     uint32_t rtt_ms() const { return rtt_.load(std::memory_order_relaxed); }  // ENet's smoothed round trip time
     ClientCounters counters() const;
-    /// <summary>Moves up to max queued world messages into out (game thread). They arrive only once welcomed.</summary>
+    /// <summary>
+    /// Moves up to max queued world messages into out (game thread), the events first. They arrive only once
+    /// welcomed. States are dropped (counted) when their ring is full; events never are: a full events ring ends the
+    /// connection (QueueFull), as a lost control event does, since the world would diverge.
+    /// </summary>
     size_t poll_world(WorldPacket* out, size_t max);
-    static constexpr size_t kWorldInCap = 64;
+    static constexpr size_t kWorldStatesIn = 64, kWorldEventsIn = 256;
 
     static constexpr size_t kInCap = 512, kOutCap = 64;
     static constexpr int kSources = kMaxClients + 1;  // State sources: the host (0) and clients 1..kMaxClients
@@ -190,9 +194,13 @@ private:
     ClientEvent end_{};                                 // under in_mx_: the Disconnected event
     std::atomic<uint32_t> in_count_{0};  // in_n_ plus a pending end, for the lock-free emptiness check
 
+    struct WorldRing {
+        explicit WorldRing(size_t c) : buf(std::make_unique<WorldPacket[]>(c)), cap(c) {}
+        std::unique_ptr<WorldPacket[]> buf;  // heap
+        size_t cap, head = 0, n = 0;
+    };
     std::mutex world_mx_;
-    std::unique_ptr<WorldPacket[]> world_in_ = std::make_unique<WorldPacket[]>(kWorldInCap);  // heap: 64 KB
-    size_t world_head_ = 0, world_n_ = 0;  // under world_mx_
+    WorldRing world_states_{kWorldStatesIn}, world_events_{kWorldEventsIn};  // under world_mx_
     std::atomic<uint32_t> n_world_{0}, n_world_drop_{0};
 
     std::mutex out_mx_;

@@ -53,6 +53,7 @@ net::HostCore* g_core = nullptr;
 std::mutex g_mission_mx;
 std::vector<uint8_t> g_mission;  // under g_mission_mx
 uint32_t g_mission_id = 0, g_mission_raw = 0;
+net::SeatPlan g_seat_plan{};
 std::atomic<bool> g_core_started{false};
 net::HostPeers* g_peers = nullptr;  // who is welcomed, and the fan-out of States, PeerInfos and PeerLefts
 net::StreamWriter* g_stream = nullptr;  // the recording of the session (stream_record.h): written by its own thread
@@ -90,6 +91,7 @@ struct Avatar {
     float shown_a[3] = {};
     double next_retake = 0;
     uint32_t flag_clears = 0;  // in the current one-second window
+    int seat = -1;  // shared world: the member of the host's flight this client flies (the host assigns it)
 };
 Avatar* g_av = nullptr;  // net::kMaxClients entries (see above)
 int g_nclients = 0;
@@ -294,8 +296,15 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     // The join position on the host's wing (plan 2.7): the client moves its jet there, and its avatar holds there.
     double join[3];
     net::join_position(ppos, pang[1], slot, join);
+    // Shared world: the client's seat, by the tag its mission fetch carried (never by slot number).
+    const int seat = world_host_streaming() ? g_core->seat_for(h.world_tag) : -1;
+    if (world_host_streaming() && seat < 0) {
+        reject(slot, gen, kByeNoAvatar, h.world_tag ? "no free seat in the host's flight" : "it did not fetch the mission",
+               callsign);
+        return;
+    }
     const AvatarPick pick{aircraft, {join[0], join[1], join[2]}, pang[1], {pvel[0], pvel[1], pvel[2]},
-                          world_seat_object(slot + 1)};
+                          seat >= 0 ? world_member_object(seat) : nullptr};
     AvatarHandle taken[net::kMaxClients];
     handles(taken);
     const uint32_t air_gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
@@ -335,6 +344,7 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     std::memcpy(a.aircraft, aircraft, sizeof(a.aircraft));
     std::memcpy(a.spawn, pick.place, sizeof(a.spawn));
     a.spawn_heading = pick.heading;
+    a.seat = seat;
     set_clients(g_nclients + 1);
 
     {
@@ -351,6 +361,12 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     w.host_game_time = now;
     std::memcpy(w.spawn_vel, pick.vel, sizeof(w.spawn_vel));
     w.theatre_hash = theatre_hash;
+    w.mission_id = world_host_streaming() ? g_core->mission_id() : 0;
+    w.seat = seat >= 0 ? static_cast<uint8_t>(seat) : net::kNoSeat;
+    w.host_seat = world_host_streaming() ? static_cast<uint8_t>(g_core->seat_plan().host_member) : net::kNoSeat;
+    if (seat >= 0)
+        LOG("net: client %d flies seat %d of the host's flight (the host flies %d), mission 0x%08lx", slot + 1, seat,
+            static_cast<int>(w.host_seat), static_cast<unsigned long>(w.mission_id));
     char host_type[33] = {};
     probe_with_aircraft(player_type_cb, host_type);
     g_peers->set_host(g_callsign, host_type);
@@ -635,10 +651,15 @@ void check_order(void* aircraft, bool is_player) {
         g_order_shift ? "avatars are shown at the game time plus the player's step" : "the game time is current");
 }
 
+bool g_world_behind[net::kMaxClients] = {};  // a client whose world events could not be queued (ended after the tick)
+
 bool world_send(const uint8_t* data, size_t len, bool reliable) {
     bool any = false;
-    for (int s = 0; s < net::kMaxClients; ++s)
-        if (g_av[s].active && g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, data, len, reliable)) any = true;
+    for (int s = 0; s < net::kMaxClients; ++s) {
+        if (!g_av[s].active) continue;
+        if (g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, data, len, reliable)) any = true;
+        else if (reliable) g_world_behind[s] = true;  // an event lost would make its world diverge
+    }
     return any;
 }
 
@@ -649,6 +670,16 @@ void world_tick(void* player, double now) {
     for (int s = 0; s < net::kMaxClients; ++s)
         if (g_av[s].active && g_av[s].h.obj) obj_read(g_av[s].h.obj, kOffPos, pl[np++], 3);
     world_host_tick(now, pl, np, world_send);
+    for (int s = 0; s < net::kMaxClients; ++s) {
+        if (!g_world_behind[s]) continue;
+        g_world_behind[s] = false;
+        if (!g_av[s].active) continue;
+        bool live[net::kMaxClients];
+        check_live(live);
+        const uint32_t gen = g_av[s].gen;
+        release(s, "its world events could not be queued", live[s], net::kByeWorldBehind, net::LeaveReason::HostEnded);
+        request_disconnect(s, gen);
+    }
 }
 
 void on_step(void* aircraft, float dt, bool is_player) {
@@ -752,7 +783,7 @@ void host_on_modules_loaded() {
     }
     std::lock_guard<std::mutex> lock(g_mission_mx);
     g_core_started.store(true);
-    if (!g_mission.empty()) g_core->set_mission(g_mission, g_mission_id, g_mission_raw);
+    if (!g_mission.empty()) g_core->set_mission(g_mission, g_mission_id, g_mission_raw, g_seat_plan);
 }
 
 bool host_drives_object(const void* obj) {
@@ -762,15 +793,16 @@ bool host_drives_object(const void* obj) {
     return false;
 }
 
-void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw) {
+void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t raw, int members, int host_member) {
     if (!g_enabled) return;
     std::lock_guard<std::mutex> lock(g_mission_mx);
     g_mission.assign(packed, packed + n);
     g_mission_id = id;
     g_mission_raw = raw;
-    if (g_core_started.load()) g_core->set_mission(g_mission, id, raw);
-    LOG("net: host serves mission 0x%08lx (%zu bytes packed, %lu unpacked) to clients that ask",
-        static_cast<unsigned long>(id), n, static_cast<unsigned long>(raw));
+    g_seat_plan = net::SeatPlan{members, host_member};
+    if (g_core_started.load()) g_core->set_mission(g_mission, id, raw, g_seat_plan);
+    LOG("net: host serves mission 0x%08lx (%zu bytes packed, %lu unpacked); seats: %d members, the host flies %d",
+        static_cast<unsigned long>(id), n, static_cast<unsigned long>(raw), members, host_member);
 }
 
 void host_shutdown() {

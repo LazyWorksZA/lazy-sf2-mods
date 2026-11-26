@@ -108,6 +108,7 @@ struct Remote {
     bool announced = false;  // announced again since the latest Welcome
     char callsign[17] = {};
     char aircraft[33] = {};
+    uint8_t seat = net::kNoSeat;  // shared world: its member of the host's flight (from its PeerInfo)
     AvatarHandle h;
     net::RemoteJet jet{net::JetParams{}};  // Predict mode (plan 2.5)
     bool got_state = false;
@@ -207,6 +208,7 @@ void end_session(const char* why) {
         sim_set_run_active(false);
     }
     g_stream->close(false);  // the writer thread drains, flushes and closes the file
+    if (g_session) world_client_session_end();
     g_session = false;
     g_welcomed.store(false, std::memory_order_relaxed);
     g_snap_ok = false;
@@ -333,6 +335,11 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
         g_blocked = true;
         return;
     }
+    if (first && !world_client_welcome(w.mission_id, w.seat, w.host_seat)) {
+        g_core->bye(net::kByeWrongMission);
+        g_leaving = true;
+        return;
+    }
     g_welcome = w;
     ++g_welcomes;
     for (int i = 0; i < kSources; ++i) g_rm[i].announced = false;
@@ -390,6 +397,7 @@ void handle_peer_info(const ClientEvent& e) {
     }
     r.known = true;
     r.announced = true;
+    r.seat = m.seat;
     std::memcpy(r.callsign, callsign, sizeof(r.callsign));
     std::memcpy(r.aircraft, aircraft, sizeof(r.aircraft));
 }
@@ -412,7 +420,7 @@ bool take(int id, const net::StateMsg& s) {
     if (g_now < r.next_take) return false;
     r.next_take = g_now + kTakeEvery;
     const AvatarPick pick{r.aircraft, {s.pos[0], s.pos[1], s.pos[2]}, s.ang[1], {s.vel[0], s.vel[1], s.vel[2]},
-                          world_seat_object(id)};
+                          r.seat != net::kNoSeat ? world_member_object(r.seat) : nullptr};
     AvatarHandle taken[kSources];
     handles(taken);
     AvatarHandle got;
@@ -679,6 +687,7 @@ void maybe_connect(void* player, double wall) {
     net::set_str(h.callsign, g_callsign);
     net::set_str(h.aircraft, g_own_type[0] ? g_own_type : "unknown");
     h.theatre_hash = g_theatre_hash;
+    h.world_tag = world_client_tag();
     g_core_quiet.store(g_retry_quiet, std::memory_order_relaxed);
     if (!g_core->start(g_host, g_port, h, client_core_log)) {
         LOG("net: client: could not start the network thread; trying again in 5 s");

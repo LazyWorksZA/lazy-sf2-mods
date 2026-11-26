@@ -31,6 +31,7 @@ const char* known(const char* s) { return s && s[0] ? s : "unknown"; }
 
 void HostPeers::set_host(const char* callsign, const char* aircraft) {
     host_.id = 0;
+    host_.seat = kNoSeat;
     set_str(host_.callsign, known(callsign));
     set_str(host_.aircraft, known(aircraft));
 }
@@ -52,10 +53,12 @@ bool HostPeers::welcome(uint8_t slot, uint32_t gen, const WelcomeMsg& w, const c
         core_.set_welcomed(slot, gen, false);
         return false;
     }
+    host_.seat = w.host_seat;
     send(slot, gen, host_, true);
     Peer& p = peers_[slot];
     p = Peer{};
     p.info.id = static_cast<uint16_t>(slot + 1);
+    p.info.seat = w.seat;
     set_str(p.info.callsign, known(callsign));
     set_str(p.info.aircraft, known(aircraft));
     for (int s = 0; s < kMaxClients; ++s) {

@@ -27,7 +27,7 @@ void usage() {
         "            [--loss PERCENT] [--jitter MS] [--lag MS] [--log-remote] [--drop] [--log FILE]\n"
         "lazysf2-bot --serve PORT [--bind ADDR] [--callsign BOTHOST] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
         "            [--start X,Y,Z,HEADING] [--lag MS] [--pause-at S --pause-for S] [--record DIR] [--duration SECONDS]\n"
-        "            [--mission world_NNN.msn] [--world world_NNN.manifest.txt]\n"
+        "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
         "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
@@ -164,7 +164,8 @@ int run_fetch(const std::string& spec, const std::string& dir, double duration) 
     const int port = colon == std::string::npos ? 0 : std::atoi(spec.c_str() + colon + 1);
     if (colon == std::string::npos || port <= 0 || port > 65535 || dir.empty()) return 1;
     net::MissionFetch fetch;
-    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), fetch_log)) return 2;
+    const uint32_t tag = (GetTickCount() ^ (GetCurrentProcessId() << 12)) | 1u;
+    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, fetch_log)) return 2;
     const double limit = duration > 0 ? duration : 60.0;
     for (int i = 0; i < static_cast<int>(limit * 50) && !g_cancel.load(); ++i) {
         if (fetch.state() != net::MissionFetch::State::Running) break;
@@ -191,7 +192,7 @@ int run_fetch(const std::string& spec, const std::string& dir, double duration) 
         return 3;
     }
     char b[400];
-    std::snprintf(b, sizeof(b), "bot fetch: wrote %s (%zu bytes) and its sidecar; seat %u suggested", out.c_str(),
+    std::snprintf(b, sizeof(b), "bot fetch: wrote %s (%zu bytes) and its sidecar; seat %u assigned", out.c_str(),
                   msn.size(), static_cast<unsigned>(offer.seat));
     log_line(b);
     return 0;
@@ -219,7 +220,7 @@ int main(int argc, char** argv) {
                                                  "--duration", "--loss",   "--jitter",   "--log",      "--lag",
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
                                                  "--pause-at", "--pause-for", "--mission", "--fetch",
-                                                 "--out", "--world", "--world-event"};
+                                                 "--out", "--world", "--world-event", "--seats"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -320,6 +321,10 @@ int main(int argc, char** argv) {
                 ok = e.event != 0;
                 scfg.world_events.push_back(e);
             }
+            serve_only = true;
+        } else if (a == "--seats" && (v = val())) {
+            ok = sscanf_s(v, "%d,%d", &scfg.seat_members, &scfg.host_member) == 2 && scfg.seat_members > 0 &&
+                 scfg.host_member >= 0 && scfg.host_member < scfg.seat_members;
             serve_only = true;
         } else if (a == "--fetch" && (v = val())) {
             fetch_spec = v;

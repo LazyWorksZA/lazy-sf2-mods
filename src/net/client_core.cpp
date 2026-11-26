@@ -178,10 +178,12 @@ size_t ClientCore::poll_world(WorldPacket* out, size_t max) {
     if (!out) return 0;
     std::lock_guard<std::mutex> lock(world_mx_);
     size_t n = 0;
-    while (n < max && world_n_ > 0) {
-        out[n++] = world_in_[world_head_];
-        world_head_ = (world_head_ + 1) % kWorldInCap;
-        --world_n_;
+    for (WorldRing* r : {&world_events_, &world_states_}) {
+        while (n < max && r->n > 0) {
+            out[n++] = r->buf[r->head];
+            r->head = (r->head + 1) % r->cap;
+            --r->n;
+        }
     }
     return n;
 }
@@ -391,17 +393,31 @@ void ClientCore::run() {
                         (wt == static_cast<uint8_t>(WorldType::WorldEvents) && channel == kChannelReliable &&
                          decode_world_events(data, len, eh, &er) == Status::Ok);
         if (!ok) return drop(n_format_);
-        std::lock_guard<std::mutex> lock(world_mx_);
-        if (!welcomed || world_n_ >= kWorldInCap || len > sizeof(WorldPacket::data)) {
-            n_world_drop_.fetch_add(1, std::memory_order_relaxed);
+        if (!welcomed || len > sizeof(WorldPacket::data)) return drop(n_state_);
+        const bool event = wt == static_cast<uint8_t>(WorldType::WorldEvents);
+        bool full = false;
+        {
+            std::lock_guard<std::mutex> lock(world_mx_);
+            WorldRing& r = event ? world_events_ : world_states_;
+            if (r.n >= r.cap) {
+                full = true;
+            } else {
+                WorldPacket& p = r.buf[(r.head + r.n) % r.cap];
+                p.wall_rx = rx;
+                p.len = static_cast<uint16_t>(len);
+                std::memcpy(p.data, data, len);
+                ++r.n;
+            }
+        }
+        if (!full) {
+            n_world_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        WorldPacket& p = world_in_[(world_head_ + world_n_) % kWorldInCap];
-        p.wall_rx = rx;
-        p.len = static_cast<uint16_t>(len);
-        std::memcpy(p.data, data, len);
-        ++world_n_;
-        n_world_.fetch_add(1, std::memory_order_relaxed);
+        n_world_drop_.fetch_add(1, std::memory_order_relaxed);
+        if (!event) return;  // a state: the next one replaces it
+        say("net: client connection ended: a world event could not be queued (the game is not draining)");
+        enet_peer_disconnect_now(peer, 0);
+        end(ClientEnd::QueueFull, Phase::Closed);
     };
 
     auto handle_packet = [&](uint8_t channel, const uint8_t* data, size_t len, double rx) {

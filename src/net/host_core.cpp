@@ -186,18 +186,43 @@ HostCounters HostCore::counters() const {
 bool HostCore::send_world(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, bool reliable) {
     if (slot >= kMaxClients || !data || len == 0 || len > sizeof(WorldOut::data)) return false;
     std::lock_guard<std::mutex> lock(world_mx_);
-    if (world_n_ >= kWorldOutCap) return false;
-    WorldOut& m = world_out_[(world_head_ + world_n_) % kWorldOutCap];
+    WorldRing& r = reliable ? world_events_ : world_states_;
+    if (r.n >= r.cap) return false;
+    WorldOut& m = r.buf[(r.head + r.n) % r.cap];
     m.slot = slot;
     m.gen = gen;
     m.reliable = reliable ? 1 : 0;
     m.len = static_cast<uint16_t>(len);
     std::memcpy(m.data, data, len);
-    ++world_n_;
+    ++r.n;
     return true;
 }
 
-void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw) {
+int HostCore::seat_for(uint32_t tag) {
+    if (tag == 0) return -1;
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    for (size_t i = 0; i < n_seats_; ++i)
+        if (seat_table_[i].tag == tag) return seat_table_[i].seat;
+    if (n_seats_ >= sizeof(seat_table_) / sizeof(seat_table_[0])) return -1;
+    int taken[8];
+    for (size_t i = 0; i < n_seats_; ++i) taken[i] = seat_table_[i].seat;
+    const int s = assign_seat(seats_, taken, n_seats_);
+    if (s < 0) return -1;
+    seat_table_[n_seats_++] = SeatEntry{tag, s};
+    return s;
+}
+
+SeatPlan HostCore::seat_plan() const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    return seats_;
+}
+
+uint32_t HostCore::mission_id() const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    return mission_ ? mission_->id : 0;
+}
+
+void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw, const SeatPlan& seats) {
     std::shared_ptr<const MissionBlob> b;
     if (!packed.empty()) {
         auto nb = std::make_shared<MissionBlob>();
@@ -208,6 +233,8 @@ void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t ra
     }
     std::lock_guard<std::mutex> lock(mission_mx_);
     mission_ = std::move(b);
+    seats_ = seats;  // a new mission: seats are given out again
+    n_seats_ = 0;
 }
 
 // The network thread. Everything below runs on it, and only it touches ENet.
@@ -253,7 +280,7 @@ void HostCore::run() {
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
     uint32_t gens[kMaxClients] = {};
-    uint32_t mission_asks[kMaxClients] = {};
+    uint64_t mission_ask_ms[kMaxClients] = {};
     uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
@@ -265,7 +292,7 @@ void HostCore::run() {
         hello_seen[slot] = false;
         bye_seen[slot] = false;
         version_refused[slot] = false;
-        mission_asks[slot] = 0;
+        mission_ask_ms[slot] = 0;
         rtt_[slot].store(0, std::memory_order_relaxed);
     };
     auto drop = [&](std::atomic<uint32_t>& counter) { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -287,15 +314,17 @@ void HostCore::run() {
         if (wt != static_cast<uint8_t>(WorldType::MissionRequest) || channel != kChannelReliable ||
             decode(data, len, rq) != Status::Ok)
             return drop(n_format_);
-        if (++mission_asks[slot] > 8) return drop(n_state_);  // per connection
-        std::shared_ptr<const MissionBlob> b;
+        const uint64_t ask_now = now_ms();
+        if (mission_ask_ms[slot] && ask_now - mission_ask_ms[slot] < 1000) return drop(n_state_);  // 1 a second at most
+        mission_ask_ms[slot] = ask_now;        std::shared_ptr<const MissionBlob> b;
         {
             std::lock_guard<std::mutex> lock(mission_mx_);
             b = mission_;
         }
         MissionOfferMsg o{};
         o.chunk_bytes = static_cast<uint16_t>(kMissionChunkData);
-        o.seat = static_cast<uint8_t>(slot + 1);  // a suggestion: client 1 flies #2, and so on (network-recon §10.14)
+        o.seat = kNoSeat;
+        o.host_seat = kNoSeat;
         if (!b) {
             o.status = kOfferNone;
         } else if (b->packed.size() > kMissionMaxPacked) {
@@ -306,6 +335,10 @@ void HostCore::run() {
             o.packed_bytes = static_cast<uint32_t>(b->packed.size());
             o.raw_bytes = b->raw;
             o.chunk_count = static_cast<uint16_t>(mission_chunk_count(b->packed.size()));
+            // The host gives the seats, by the client's tag, never by connection slot (network-recon §10.16).
+            const int seat = seat_for(rq.tag);
+            o.seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;
+            o.host_seat = static_cast<uint8_t>(seat_plan().host_member);
         }
         uint8_t out[kMissionChunkMax];
         if (!send_raw(slot, out, encode(o, out, sizeof(out)))) return;
@@ -320,9 +353,10 @@ void HostCore::run() {
                                                          sizeof(out))))
                 ++sent;
         n_missions_.fetch_add(1, std::memory_order_relaxed);
-        say("net: mission 0x%08x sent to peer %u: %u bytes in %u of %u chunks (suggested seat %u)",
+        say("net: mission 0x%08x sent to peer %u: %u bytes in %u of %u chunks (seat %u, host seat %u)",
             static_cast<unsigned>(o.mission_id), static_cast<unsigned>(slot + 1), static_cast<unsigned>(o.packed_bytes),
-            static_cast<unsigned>(sent), static_cast<unsigned>(o.chunk_count), static_cast<unsigned>(o.seat));
+            static_cast<unsigned>(sent), static_cast<unsigned>(o.chunk_count), static_cast<unsigned>(o.seat),
+            static_cast<unsigned>(o.host_seat));
     };
 
     auto handle_packet = [&](int slot, uint8_t channel, const uint8_t* data, size_t len) {
@@ -506,10 +540,11 @@ void HostCore::run() {
             WorldOut m;
             {
                 std::lock_guard<std::mutex> lock(world_mx_);
-                if (world_n_ == 0) return;
-                m = world_out_[world_head_];
-                world_head_ = (world_head_ + 1) % kWorldOutCap;
-                --world_n_;
+                WorldRing& r = world_events_.n ? world_events_ : world_states_;  // events first
+                if (r.n == 0) return;
+                m = r.buf[r.head];
+                r.head = (r.head + 1) % r.cap;
+                --r.n;
             }
             ENetPeer* peer = peers[m.slot];
             if (!peer || m.gen != gens[m.slot]) continue;

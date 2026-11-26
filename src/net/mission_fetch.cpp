@@ -18,10 +18,11 @@ constexpr uint64_t kConnectMs = 5000, kRetryMs = 5000, kAskAgainMs = 3000, kSile
 
 }  // namespace
 
-bool MissionFetch::start(const char* host, uint16_t port, LogFn log) {
-    if (state_.load() != State::Idle || !host || !*host || port == 0) return false;
+bool MissionFetch::start(const char* host, uint16_t port, uint32_t tag, LogFn log) {
+    if (state_.load() != State::Idle || !host || !*host || port == 0 || tag == 0) return false;
     host_ = host;
     port_ = port;
+    tag_ = tag;
     log_ = log;
     stop_.store(false);
     state_.store(State::Running, std::memory_order_release);
@@ -80,8 +81,9 @@ void MissionFetch::run() {
 
     MissionAssembly as;
     bool done = false;
-    bool logged_wait = false;
-    while (!stop_.load() && !done) {
+    bool logged_wait = false, refused = false, wait_none = false;
+    while (!stop_.load() && !done && !refused) {
+        wait_none = false;
         ENetPeer* peer = enet_host_connect(host, &addr, kChannelCount, 0);
         if (!peer) break;
         bool connected = false;
@@ -102,20 +104,26 @@ void MissionFetch::run() {
                     const uint8_t* d = ev.packet->data;
                     const size_t n = ev.packet->dataLength;
                     const uint8_t wt = peek_world_type(d, n);
+                    if (!wt && n >= sizeof(Header) && d[0] == 'L' && d[1] == 'Z' && d[2] != kVersion) {
+                        say("net: mission fetch: the host speaks protocol v%u (this client is v%u); not asking again",
+                            static_cast<unsigned>(d[2]), static_cast<unsigned>(kVersion));
+                        refused = true;
+                    }
                     MissionOfferMsg o;
                     MissionChunkHead ch;
                     const uint8_t* payload = nullptr;
                     if (wt == static_cast<uint8_t>(WorldType::MissionOffer) && decode(d, n, o) == Status::Ok) {
                         if (o.status == kOfferOk && as.begin(o)) {
-                            say("net: mission offer 0x%08x: %u bytes in %u chunks (seat %u suggested)",
+                            say("net: mission offer 0x%08x: %u bytes in %u chunks (seat %u assigned, host seat %u)",
                                 static_cast<unsigned>(o.mission_id), static_cast<unsigned>(o.packed_bytes),
-                                static_cast<unsigned>(o.chunk_count), static_cast<unsigned>(o.seat));
+                                static_cast<unsigned>(o.chunk_count), static_cast<unsigned>(o.seat),
+                                static_cast<unsigned>(o.host_seat));
                         } else {
                             if (!logged_wait)
                                 say("net: the host has %s; asking again every 3 s",
                                     o.status == kOfferNone ? "no mission yet" : "a mission it cannot send");
                             logged_wait = true;
-                            next_ask = now + kAskAgainMs;
+                            wait_none = true;  // leave, so the waiting fetch does not hold a host slot
                         }
                     } else if (wt == static_cast<uint8_t>(WorldType::MissionChunk) &&
                                decode_mission_chunk(d, n, ch, &payload) == Status::Ok) {
@@ -127,10 +135,12 @@ void MissionFetch::run() {
                         }
                     }
                     enet_packet_destroy(ev.packet);
+                    if (wait_none || refused) break;
                 }
             }
             if (connected && next_ask && now >= next_ask) {
                 MissionRequestMsg rq{};
+                rq.tag = tag_;
                 uint8_t b[sizeof(rq)];
                 const size_t len = encode(rq, b, sizeof(b));
                 if (ENetPacket* p = enet_packet_create(b, len, ENET_PACKET_FLAG_RELIABLE))
@@ -148,10 +158,15 @@ void MissionFetch::run() {
             }
             break;
         }
+        if (wait_none) {
+            enet_peer_disconnect(peer, 0);
+            enet_host_flush(host);
+        }
         enet_peer_reset(peer);
-        if (!stop_.load()) {
-            say("net: mission fetch: %s; trying again in 5 s", connected ? "connection lost" : "no answer from the host");
-            const uint64_t until = ms_now() + kRetryMs;
+        if (!stop_.load() && !refused) {
+            if (!wait_none)
+                say("net: mission fetch: %s; trying again in 5 s", connected ? "connection lost" : "no answer from the host");
+            const uint64_t until = ms_now() + (wait_none ? kAskAgainMs : kRetryMs);
             while (!stop_.load() && ms_now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }

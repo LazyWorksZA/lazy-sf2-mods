@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "net/protocol.h"
+#include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::net {
 
@@ -124,14 +125,23 @@ public:
     /// The mission package (world_proto.h pack_mission) that the network thread sends, offer and chunks, to any peer
     /// that asks with a MissionRequest, in menus as in flight. Any thread; replaces the previous one. Empty = none.
     /// </summary>
-    void set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw);
+    void set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t raw, const SeatPlan& seats = {});
     /// <summary>
-    /// Queues a world message (world_proto.h, up to 1,000 bytes: WorldStates unreliable on channel 1, WorldEvents
-    /// reliable on channel 0) for a slot, on a queue of its own (kWorldOutCap entries) so the world stream can never
-    /// crowd out the session's control messages. False if full or too large; gen as for send().
+    /// The seat (member of the host's flight) of the client with this world tag: assigned on the first ask by the
+    /// owner's rule (assign_seat), then the same for that tag until the next set_mission. -1 for tag 0, no plan or no
+    /// free member. Any thread.
+    /// </summary>
+    int seat_for(uint32_t tag);
+    SeatPlan seat_plan() const;
+    uint32_t mission_id() const;
+    /// <summary>
+    /// Queues a world message (world_proto.h, up to 1,000 bytes) for a slot. WorldStates (unreliable, channel 1) and
+    /// WorldEvents (reliable, channel 0) have queues of their own, apart from the session's: the states can never
+    /// fill the events' queue. False if that queue is full or the message too large; gen as for send(). A false for a
+    /// reliable message means the client would diverge: the caller ends that client's session.
     /// </summary>
     bool send_world(uint8_t slot, uint32_t gen, const uint8_t* data, size_t len, bool reliable);
-    static constexpr size_t kWorldOutCap = 64;
+    static constexpr size_t kWorldStatesCap = 64, kWorldEventsCap = 256;
     /// <summary>Missions sent in full since start (offers with chunks).</summary>
     uint32_t missions_sent() const { return n_missions_.load(std::memory_order_relaxed); }
     HostCounters counters() const;
@@ -195,10 +205,21 @@ private:
         uint32_t gen = 0;
         uint8_t data[1000] = {};
     };
+    struct WorldRing {
+        explicit WorldRing(size_t c) : buf(std::make_unique<WorldOut[]>(c)), cap(c) {}
+        std::unique_ptr<WorldOut[]> buf;  // heap
+        size_t cap, head = 0, n = 0;
+    };
     std::mutex world_mx_;
-    std::unique_ptr<WorldOut[]> world_out_ = std::make_unique<WorldOut[]>(kWorldOutCap);  // heap: 64 KB
-    size_t world_head_ = 0, world_n_ = 0;  // under world_mx_
-    std::mutex mission_mx_;
+    WorldRing world_states_{kWorldStatesCap}, world_events_{kWorldEventsCap};  // under world_mx_
+    struct SeatEntry {
+        uint32_t tag = 0;
+        int seat = -1;
+    };
+    SeatPlan seats_{};               // under mission_mx_
+    SeatEntry seat_table_[8] = {};   // under mission_mx_
+    size_t n_seats_ = 0;             // under mission_mx_
+    mutable std::mutex mission_mx_;
     std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer
     std::atomic<uint32_t> n_missions_{0};
 

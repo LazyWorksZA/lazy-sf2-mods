@@ -26,8 +26,12 @@ public:
     MissionFetch(const MissionFetch&) = delete;
     MissionFetch& operator=(const MissionFetch&) = delete;
 
-    /// <summary>Starts the thread and returns at once. host is a name or numeric IPv4 address.</summary>
-    bool start(const char* host, uint16_t port, LogFn log);
+    /// <summary>
+    /// Starts the thread and returns at once. host is a name or numeric IPv4 address; tag is the client's world tag
+    /// (not 0), which the host keys its seat by. A host with no mission yet is asked again every 3 s on a new
+    /// connection, so a waiting client holds no host slot.
+    /// </summary>
+    bool start(const char* host, uint16_t port, uint32_t tag, LogFn log);
     /// <summary>Ends the thread (joins it). Safe to call twice.</summary>
     void stop();
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -40,6 +44,7 @@ private:
     std::thread thread_;
     std::string host_;
     uint16_t port_ = 0;
+    uint32_t tag_ = 0;
     LogFn log_ = nullptr;
     std::atomic<State> state_{State::Idle};
     std::atomic<bool> stop_{false};

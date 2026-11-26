@@ -48,6 +48,7 @@ struct HelloMsg {
     char callsign[16];
     char aircraft[32];
     uint32_t theatre_hash;  // FNV-1a of the theatre id, 0 = unknown
+    uint32_t world_tag;     // shared world: the tag the client's MissionRequest carried (its seat key), 0 = none
 };
 struct WelcomeMsg {
     Header h;
@@ -57,7 +58,11 @@ struct WelcomeMsg {
     double host_game_time;
     float spawn_vel[3];
     uint32_t theatre_hash;
+    uint32_t mission_id;  // shared world: the host's mission (world_proto.h), 0 = none
+    uint8_t seat;         // shared world: the member of the host's flight the client flies, kNoSeat = none
+    uint8_t host_seat;    // ... and the one the host flies
 };
+inline constexpr uint8_t kNoSeat = 0xff;
 struct PingMsg {
     Header h;
     double client_send_time;
@@ -87,6 +92,7 @@ struct PeerInfoMsg {
     uint16_t id;  // 0 = the host, 1..kMaxClients = a client
     char callsign[16];
     char aircraft[32];
+    uint8_t seat;  // shared world: that peer's member of the host's flight, kNoSeat = none
 };
 struct PeerLeftMsg {
     Header h;
@@ -97,13 +103,14 @@ struct PeerLeftMsg {
 
 // Wire layout (offset:size), all little-endian. Header: 0:2 magic, 2:1 version, 3:1 type.
 static_assert(sizeof(Header) == 4);
-static_assert(sizeof(HelloMsg) == 56);    // 4:16 callsign, 20:32 aircraft, 52:4 theatre hash
-static_assert(sizeof(WelcomeMsg) == 58);  // 4:2 id, 6:24 pos, 30:4 heading, 34:8 host time, 42:12 vel, 54:4 theatre hash
+static_assert(sizeof(HelloMsg) == 60);    // 4:16 callsign, 20:32 aircraft, 52:4 theatre hash, 56:4 world tag
+static_assert(sizeof(WelcomeMsg) == 64);  // 4:2 id, 6:24 pos, 30:4 heading, 34:8 host time, 42:12 vel, 54:4 theatre hash,
+                                          // 58:4 mission id, 62:1 seat, 63:1 host seat
 static_assert(sizeof(PingMsg) == 12);     // 4:8 client send time
 static_assert(sizeof(PongMsg) == 20);     // 4:8 client send time, 12:8 host time
 static_assert(sizeof(StateMsg) == 78);    // 4:2 id, 6:4 seq, 10:8 time, 18:24 pos, 42:12 vel, 54:12 ang, 66:12 rates
 static_assert(sizeof(ByeMsg) == 7);       // 4:2 id, 6:1 reason
-static_assert(sizeof(PeerInfoMsg) == 54); // 4:2 id, 6:16 callsign, 22:32 aircraft
+static_assert(sizeof(PeerInfoMsg) == 55); // 4:2 id, 6:16 callsign, 22:32 aircraft, 54:1 seat
 static_assert(sizeof(PeerLeftMsg) == 7);  // 4:2 id, 6:1 reason
 
 /// <summary>
@@ -136,6 +143,9 @@ inline constexpr uint8_t kPeerLeftRemoved = 2;  // the host ended it (avatar los
 /// <summary>Bye reasons added in v2.</summary>
 inline constexpr uint8_t kByeWrongTheatre = 5;
 inline constexpr uint8_t kByeWrongVersion = 6;
+/// <summary>Bye reasons added in v3 (shared world).</summary>
+inline constexpr uint8_t kByeWorldBehind = 7;   // host: this client's world events could not be queued
+inline constexpr uint8_t kByeWrongMission = 8;  // client: it flies another mission than the host's
 
 /// <summary>A Bye reason in words, for log lines (the host's reasons; any number is safe).</summary>
 inline const char* bye_reason_name(uint8_t reason) {
@@ -147,6 +157,8 @@ inline const char* bye_reason_name(uint8_t reason) {
         case 4: return "the host lost our avatar";
         case kByeWrongTheatre: return "another theatre";
         case kByeWrongVersion: return "another protocol version";
+        case kByeWorldBehind: return "the client could not keep up with the world events";
+        case kByeWrongMission: return "another mission than the host's";
         default: return "unknown reason";
     }
 }

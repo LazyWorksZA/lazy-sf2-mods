@@ -48,7 +48,7 @@ struct WorldSeen {
 /// <summary>
 /// The events between walks: the first sighting of a key only remembers it (the client starts from the same mission
 /// file, so the start state is shared); later changes give Destroyed (once), Awake/Asleep on the bit turning on, and
-/// the new damage when it changes.
+/// a placed record's new damage when it changes (objects' damage levels are not sent).
 /// </summary>
 class WorldEventTracker {
 public:
@@ -63,7 +63,8 @@ public:
         WorldSeen& p = it->second;
         auto ev = [&](uint8_t e, int16_t v) { out->push_back(WorldEventRec{e, kind, a, b, v}); };
         if (!p.alive) return;  // nothing after a destruction
-        if (s.level != p.level) ev(kind == static_cast<uint8_t>(KeyKind::Placed) ? kEventPlacedDamage : kEventDamageLevel, s.level);
+        // Objects' damage levels are not sent (the client cannot apply them yet); placed records' damage is.
+        if (kind == static_cast<uint8_t>(KeyKind::Placed) && s.level != p.level) ev(kEventPlacedDamage, s.level);
         if (s.awake && !p.awake) ev(kEventAwake, 0);
         if (s.asleep && !p.asleep) ev(kEventAsleep, 0);
         if (!s.alive) ev(kEventDestroyed, 0);
