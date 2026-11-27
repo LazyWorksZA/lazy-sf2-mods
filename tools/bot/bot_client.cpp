@@ -115,6 +115,8 @@ struct Runner {
     ENetPeer* peer = nullptr;
     bool connected = false, disconnected = false, welcomed = false;
     bool host_bye = false;
+    bool have_challenge = false;  // the host's password challenge arrived (once per connection)
+    AuthChallengeMsg challenge{};
     double host_bye_at = 0, welcomed_at = 0;
     WelcomeMsg welcome{};
     double offset[3] = {};  // formation: --offset, or the Welcome's slot (150 m right per client id, 50 m back)
@@ -239,6 +241,12 @@ struct Runner {
         MsgType type{};
         if (peek_type(data, len, type) != Status::Ok) return refuse();
         switch (type) {
+            case MsgType::AuthChallenge: {
+                if (channel != kChannelReliable || decode(data, len, challenge) != Status::Ok || have_challenge)
+                    return refuse();
+                have_challenge = true;
+                return;
+            }
             case MsgType::Welcome: {
                 WelcomeMsg w{};
                 if (channel != kChannelReliable || decode(data, len, w) != Status::Ok || w.client_id == 0 ||
@@ -605,10 +613,26 @@ BotResult run_bot(const BotConfig& cfg) {
     }
     r.last_rx = wall_now();
     if (cfg.lag_ms > 0) r.say("bot: --lag: every packet is held %.0f ms each way", cfg.lag_ms);
+    // The session password: the host's challenge comes first; the answer goes before anything else.
+    AuthKey key;
+    if (!make_auth_key(cfg.password, &key)) {
+        r.say("bot: a session password is required");
+        res.code = 1;
+        return res;
+    }
+    for (double t0 = wall_now(); !r.have_challenge && !r.disconnected && wall_now() - t0 < kWelcomeWait && !r.cancelled();)
+        r.service(1);
+    AuthAnswerMsg answer;
+    if (!r.have_challenge || !auth_answer(key, r.challenge, &answer)) {
+        r.say("bot: no password challenge from the host (%s)", r.disconnected ? "it closed the connection" : "timed out");
+        res.code = r.disconnected ? 4 : 3;
+        return res;
+    }
     HelloMsg hello{};
     set_str(hello.callsign, cfg.callsign.c_str());
     set_str(hello.aircraft, cfg.aircraft.c_str());
     uint8_t buf[128];
+    r.post(buf, encode(answer, buf, sizeof(buf)), kChannelReliable, false);
     if (cfg.world_join) {
         // The host keys a shared-world seat by the tag of a mission request: ask first, on the same connection.
         res.world_tag = (static_cast<uint32_t>(wall_now() * 1e6) ^ (cfg.rng_seed * 2654435761u)) | 1u;

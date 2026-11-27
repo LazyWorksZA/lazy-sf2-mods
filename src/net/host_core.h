@@ -21,6 +21,7 @@
 #include <thread>
 #include <vector>
 
+#include "net/auth.h"
 #include "net/protocol.h"
 #include "net/world_proto.h"
 
@@ -72,9 +73,10 @@ public:
     /// <summary>
     /// Starts the network thread and returns at once (never waits for it, so it is safe under the loader lock).
     /// address is a numeric IPv4 address; port 0 picks a free port (see port()). The thread binds, logs
-    /// "net: host on udp addr:port" or the failure through log, and sets state().
+    /// "net: host on udp addr:port" or the failure through log, and sets state(). key: the session password's key
+    /// (required): every connection must answer the host's challenge with it before anything of it is handled or queued.
     /// </summary>
-    bool start(const char* address, uint16_t port, LogFn log);
+    bool start(const char* address, uint16_t port, LogFn log, const AuthKey& key);
     /// <summary>
     /// Ends the thread. With in_loader_lock the thread is not joined (a join can deadlock there): waits at most
     /// 1 s for it to report clean-up, then detaches it. Accepted residual risk: on FreeLibrary the thread may
@@ -178,6 +180,7 @@ private:
     char addr_[48] = {};
     uint16_t req_port_ = 0;
     LogFn log_ = nullptr;
+    AuthKey key_{};
     std::atomic<State> state_{State::Idle};
     std::atomic<uint16_t> port_{0};
     std::atomic<bool> stop_{false};

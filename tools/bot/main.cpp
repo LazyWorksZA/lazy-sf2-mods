@@ -32,6 +32,8 @@ void usage() {
         "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S]\n"
         "            [--stores [WEAPON]] [--damage [A,SLOT,MEMBER]] [--clock S] [--seat-state] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
+        "Every mode needs the session password: --password TEXT, or LAZYSF2_PASSWORD (the host proves it by challenge;\n"
+        "the password never travels).\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
         "(default 150,50,0); before the first host State it flies straight on from the Welcome's join position.\n"
@@ -172,14 +174,16 @@ bool load_world(const char* path, std::vector<LazyWorks::SF2Patch::bot::ServeCon
 }
 
 // --fetch: asks a host for its mission, as the game's join does, and writes DIR\world_fetched.msn and its sidecar.
-int run_fetch(const std::string& spec, const std::string& dir, double duration) {
+int run_fetch(const std::string& spec, const std::string& dir, double duration, const std::string& password) {
     namespace net = LazyWorks::SF2Patch::net;
     const size_t colon = spec.rfind(':');
     const int port = colon == std::string::npos ? 0 : std::atoi(spec.c_str() + colon + 1);
     if (colon == std::string::npos || port <= 0 || port > 65535 || dir.empty()) return 1;
     net::MissionFetch fetch;
+    net::AuthKey key;
+    if (!net::make_auth_key(password, &key)) return 1;
     const uint32_t tag = (GetTickCount() ^ (GetCurrentProcessId() << 12)) | 1u;
-    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, fetch_log)) return 2;
+    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, key, fetch_log)) return 2;
     const double limit = duration > 0 ? duration : 60.0;
     std::vector<uint8_t> packed, msn;
     net::MissionOfferMsg offer{};
@@ -193,7 +197,7 @@ int run_fetch(const std::string& spec, const std::string& dir, double duration) 
     std::string sidecar;
     const char* why = "";
     if (!got) {
-        log_line("bot fetch: no mission received");
+        log_line(fetch.wrong_password() ? "bot fetch: the host refused the session password" : "bot fetch: no mission received");
         return 3;
     }
     if (!net::unpack_mission(packed, offer.mission_id, offer.raw_bytes, &sidecar, &msn, &why)) {
@@ -226,7 +230,7 @@ int main(int argc, char** argv) {
     bool serve = false, script_given = false;
     bool client_only = false, serve_only = false;  // options of one mode only
     double pause_at = -1, pause_for = -1;
-    std::string fetch_spec, fetch_out, mission_path;
+    std::string fetch_spec, fetch_out, mission_path, password;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto val = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -236,7 +240,8 @@ int main(int argc, char** argv) {
                                                  "--duration", "--loss",   "--jitter",   "--log",      "--lag",
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
                                                  "--pause-at", "--pause-for", "--mission", "--fetch",
-                                                 "--out", "--world", "--world-event", "--seats", "--jet", "--hit", "--launch", "--clock"};
+                                                 "--out", "--world", "--world-event", "--seats", "--jet", "--hit", "--launch", "--clock",
+                                                 "--password"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -397,6 +402,8 @@ int main(int argc, char** argv) {
             fetch_spec = v;
         } else if (a == "--out" && (v = val())) {
             fetch_out = v;
+        } else if (a == "--password" && (v = val())) {
+            password = v;
         } else {
             ok = false;
         }
@@ -431,10 +438,21 @@ int main(int argc, char** argv) {
         std::printf("cannot open the log file %s\n", log_path);
         return 1;
     }
+    if (password.empty()) {
+        char env[128] = {};
+        const DWORD n = GetEnvironmentVariableA("LAZYSF2_PASSWORD", env, sizeof(env));
+        if (n > 0 && n < sizeof(env)) password = env;
+    }
+    if (password.empty()) {
+        std::printf("a session password is required: --password TEXT or LAZYSF2_PASSWORD\n");
+        usage();
+        return 1;
+    }
+    cfg.password = scfg.password = password;
     SetConsoleCtrlHandler(on_ctrl, TRUE);
     int code = 0;
     if (!fetch_spec.empty()) {
-        code = run_fetch(fetch_spec, fetch_out, cfg.duration);
+        code = run_fetch(fetch_spec, fetch_out, cfg.duration, password);
         if (code == 1) usage();
         if (g_logfile) std::fclose(g_logfile);
         g_logfile = nullptr;

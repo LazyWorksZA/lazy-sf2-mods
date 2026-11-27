@@ -52,8 +52,9 @@ It exits 2 if Tacview is already running. It prints add-on lines from the newest
 
 Developer tools, off unless enabled. Bots build to `build\Release\tools\` (not next to `winmm.dll`).
 
-- Host: start the game with `LAZYSF2_HOST=port` or `address:port` (also needs `LAZYSF2_PROBE_DIR`).
-- Client in a second game: `LAZYSF2_CONNECT=address:port`, where the build supports it.
+- Host: start the game with `LAZYSF2_HOST=port` or `address:port` (also needs `LAZYSF2_PROBE_DIR` and, from protocol v5, `LAZYSF2_PASSWORD`). Or use the Multiplayer screen's Host with a session password.
+- Client in a second game: `LAZYSF2_CONNECT=address:port` with the same `LAZYSF2_PASSWORD`, where the build supports it.
+- `lazysf2-bot` needs `--password TEXT` (or `LAZYSF2_PASSWORD` in its environment) in every mode from v5.
 - Synthetic peer: `build\Release\tools\lazysf2-bot.exe --host 127.0.0.1:7777 --script straight|orbit|breaks|climb [--duration S --loss P --jitter MS]`. Use `--serve`, `--script formation` and `--lag` where `lazysf2-bot` usage lists them.
 - Unit tests: `build\Release\tools\lazysf2-net-tests.exe` (loopback tests are sometimes flaky; rerun once before calling a failure).
 

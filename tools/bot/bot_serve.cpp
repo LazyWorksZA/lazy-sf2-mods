@@ -827,7 +827,13 @@ ServeResult run_serve(const ServeConfig& cfg) {
         sv.say("bot serve: serving mission 0x%08x (%zu bytes packed)", static_cast<unsigned>(cfg.mission_id),
                cfg.mission.size());
     }
-    if (!sv.core.start(addr, cfg.port, core_log)) {
+    AuthKey key;
+    if (!make_auth_key(cfg.password, &key)) {
+        sv.say("bot serve: a session password is required");
+        res.code = 1;
+        return res;
+    }
+    if (!sv.core.start(addr, cfg.port, core_log, key)) {
         res.code = 2;
         return res;
     }

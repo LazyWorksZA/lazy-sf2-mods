@@ -96,6 +96,7 @@ add_library(lazysf2 SHARED
     src/hooks/handover.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
+    src/net/auth.cpp
     src/net/world_proto.cpp
     src/net/handover_format.cpp
     src/net/mission_fetch.cpp
@@ -116,7 +117,7 @@ target_compile_options(lazysf2 PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2 PRIVATE src "${CMAKE_BINARY_DIR}/generated")
 # ENet is linked statically. Do NOT link winmm here: this DLL is itself winmm.dll, and ENet's three winmm imports
 # are satisfied by src/net/enet_winmm_shim.cpp (they call the real system DLL).
-target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet miniz::miniz ws2_32 delayimp shell32 ole32 uuid)
+target_link_libraries(lazysf2 PRIVATE minhook::minhook unofficial::enet::enet miniz::miniz ws2_32 delayimp shell32 ole32 uuid bcrypt)
 # ws2_32 is delay-loaded: it is only touched by ENet (enet_initialize, on the network thread, which only exists in
 # host mode), so a player with host mode off never has it loaded into the game.
 target_link_options(lazysf2 PRIVATE /DELAYLOAD:ws2_32.dll)
@@ -125,6 +126,7 @@ target_link_options(lazysf2 PRIVATE /DELAYLOAD:ws2_32.dll)
 add_executable(lazysf2-net-tests
     tests/net_tests.cpp
     src/net/protocol.cpp
+    src/net/auth.cpp
     src/net/world_proto.cpp
     src/net/handover_format.cpp
     src/net/mission_fetch.cpp
@@ -155,7 +157,7 @@ add_executable(lazysf2-net-tests
 target_compile_features(lazysf2-net-tests PRIVATE cxx_std_20)
 target_compile_options(lazysf2-net-tests PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2-net-tests PRIVATE src tools tools/bot "${CMAKE_BINARY_DIR}/generated")
-target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet miniz::miniz ws2_32 winmm)
+target_link_libraries(lazysf2-net-tests PRIVATE unofficial::enet::enet miniz::miniz ws2_32 winmm bcrypt)
 # The developer tools go to their own folder (build\<Config>	ools): next to the proxy they would load it as their winmm.dll.
 set_target_properties(lazysf2-net-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
 
@@ -166,6 +168,7 @@ add_executable(lazysf2-bot
     tools/bot/bot_client.cpp
     tools/bot/bot_serve.cpp
     src/net/protocol.cpp
+    src/net/auth.cpp
     src/net/world_proto.cpp
     src/net/handover_format.cpp
     src/net/mission_fetch.cpp
@@ -179,7 +182,7 @@ target_compile_features(lazysf2-bot PRIVATE cxx_std_20)
 target_compile_definitions(lazysf2-bot PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(lazysf2-bot PRIVATE /W4 /permissive-)
 target_include_directories(lazysf2-bot PRIVATE src tools/bot)
-target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet miniz::miniz ws2_32 winmm)
+target_link_libraries(lazysf2-bot PRIVATE unofficial::enet::enet miniz::miniz ws2_32 winmm bcrypt)
 set_target_properties(lazysf2-bot PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/tools")
 
 # Converts a recorded host stream to Tacview ACMI text (console, developer tool, not shipped).

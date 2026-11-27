@@ -38,6 +38,8 @@ inline constexpr LobbyText kLobbyTexts[] = {
     {L"TXT_LAZY_LOBBY_PILOTS", L"Pilots"},
     {L"TXT_LAZY_LOBBY_SEAT", L"Seat"},
     {L"TXT_LAZY_LOBBY_COL_STATUS", L"Status"},
+    {L"TXT_LAZY_LOBBY_PASSWORD", L"Session password"},
+    {L"TXT_LAZY_LOBBY_PASS_HINT", L"Required. The host sets it; players type the same."},
 };
 
 /// <summary>MenuItemNNN numbers of the connect screen's items (the menu code addresses them by number).</summary>
@@ -46,9 +48,10 @@ inline constexpr int kBack = 1;  // also what Esc reports (menu-code click idiom
 inline constexpr int kHost = 2;
 inline constexpr int kJoin = 3;
 inline constexpr int kCallsign = 7;
-inline constexpr int kAddress = 9;  // the lobby's only EDIT field: identifies the connect screen
+inline constexpr int kAddress = 9;  // an EDIT field: only the connect screen has one, which identifies it
 inline constexpr int kStatus = 11;
-inline constexpr int kCount = 13;
+inline constexpr int kPassword = 15;  // EDIT; not masked (the menu system's EDIT has no mask option)
+inline constexpr int kCount = 16;
 }  // namespace lobby_item
 
 /// <summary>Item numbers shared by the host and join screens.</summary>
@@ -67,8 +70,9 @@ inline constexpr int kHostCount = 15;
 inline constexpr int kJoinCount = 16;
 }  // namespace session_item
 
-/// <summary>Characters the Address field holds (TextBufferSize minus the terminator).</summary>
+/// <summary>Characters the Address and Session password fields hold (TextBufferSize minus the terminator).</summary>
 inline constexpr int kLobbyAddressChars = 63;
+inline constexpr int kLobbyPasswordChars = 31;
 
 /// <summary>
 /// Shows the stock Multiplayer button: makes [MultiplayerHotspot] active and enabled and moves it into the gap between

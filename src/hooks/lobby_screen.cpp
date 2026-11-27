@@ -172,11 +172,34 @@ std::string wire_callsign() {
     return lobby_callsign(callsign, "PLAYER");
 }
 
+// The session password: kept for this game session only (never in Options.ini, never logged), so the field is
+// filled again when the connect screen opens.
+std::wstring g_password;
+
+/// <summary>Reads the Session password field into g_password; its UTF-8 bytes (empty if none).</summary>
+std::string take_password() {
+    wchar_t buf[kLobbyPasswordChars + 1] = {};
+    if (void* e = item_iface(lobby_item::kPassword, kIfaceEdit)) {
+        reinterpret_cast<GetText_t>(vtable_slot(e, kEditGet))(e, nullptr, buf, _countof(buf));
+    }
+    buf[kLobbyPasswordChars] = L'\0';
+    g_password = buf;
+    char utf8[4 * kLobbyPasswordChars + 1] = {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8), nullptr, nullptr);
+    return n > 1 ? std::string(utf8, static_cast<size_t>(n - 1)) : std::string();
+}
+
 void start_host() {
     take_address();
+    const std::string password = take_password();
+    if (password.empty()) {
+        LOG("lobby: Host refused: no session password");
+        set_status(L"Type a session password first: players join with it.");
+        return;
+    }
     const std::string cs = wire_callsign();
     std::string why;
-    if (!net_session_host(kLobbyPort, cs.c_str(), &why)) {
+    if (!net_session_host(kLobbyPort, cs.c_str(), password, &why)) {
         LOG("lobby: Host refused: %s", why.c_str());
         set_status((L"Could not host: " + std::wstring(why.begin(), why.end()) + L".").c_str());
         return;
@@ -199,9 +222,15 @@ void start_join() {
         set_status(L"That is not an address: use a name or IP, with :port if not 7777.");
         return;
     }
+    const std::string password = take_password();
+    if (password.empty()) {
+        LOG("lobby: Join refused: no session password");
+        set_status(L"Type the host's session password first.");
+        return;
+    }
     const std::string cs = wire_callsign();
     std::string why;
-    if (!net_session_join(host, port, cs.c_str(), &why)) {
+    if (!net_session_join(host, port, cs.c_str(), password, &why)) {
         LOG("lobby: Join refused: %s", why.c_str());
         set_status((L"Could not join: " + std::wstring(why.begin(), why.end()) + L".").c_str());
         return;
@@ -251,6 +280,15 @@ void session_click(int item) {
 }
 
 // Host screen: the header follows the network thread (binding takes a moment; a port in use fails).
+// Join screen: the mission fetch reports a refused password once.
+bool g_join_refused_shown = false;
+void join_frame() {
+    if (g_join_refused_shown || !net_session_wrong_password()) return;
+    g_join_refused_shown = true;
+    LOG("lobby: the host refused the session password");
+    set_status(L"Wrong session password. Leave, and type the host's password.");
+}
+
 bool g_host_bound = false;
 void host_frame() {
     if (g_host_bound) return;
@@ -276,6 +314,7 @@ class LobbyHandler {
 public:
     virtual void frame() {
         if (g_mnu && g_screen == Screen::Host) host_frame();
+        if (g_mnu && g_screen == Screen::Join) join_frame();
     }
     // 0 when a popup or another screen opens over this one (MenuSystem +0xbde0), 1 when it is on top again (+0xbe70).
     virtual void activate(int /*on_top*/) {}
@@ -316,6 +355,9 @@ void init_connect_screen() {
     if (void* e = item_iface(lobby_item::kAddress, kIfaceEdit)) {
         reinterpret_cast<SetText_t>(vtable_slot(e, kEditSet))(e, nullptr, address);
     }
+    if (void* e = item_iface(lobby_item::kPassword, kIfaceEdit)) {
+        reinterpret_cast<SetText_t>(vtable_slot(e, kEditSet))(e, nullptr, g_password.c_str());
+    }
     set_text(lobby_item::kStatus, L"Not connected.");
     LOG("lobby: connect screen opened (callsign \"%ls\", saved address \"%ls\"%s)", callsign, address,
         have_options ? "" : ", Options.ini not available");
@@ -335,6 +377,7 @@ void init_session_screen() {
         set_status(L"Opening UDP port 7777...");
     } else {
         header = L"Host at " + g_join_address;
+        g_join_refused_shown = false;
         set_status(L"Waiting for the host's mission.");
     }
     set_text(session_item::kHeader, header.c_str());

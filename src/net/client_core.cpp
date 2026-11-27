@@ -81,12 +81,14 @@ double ClientCore::wall_now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool ClientCore::start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const ClientLimits& limits) {
-    if (thread_.joinable() || !host || !*host || std::strlen(host) >= sizeof(host_) || port == 0) return false;
+bool ClientCore::start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const AuthKey& key,
+                       const ClientLimits& limits) {
+    if (thread_.joinable() || !host || !*host || std::strlen(host) >= sizeof(host_) || port == 0 || !key.set) return false;
     if (started_ && !finished_.load()) return false;  // a thread detached by stop(true) is still cleaning up
     std::snprintf(host_, sizeof(host_), "%s", host);
     port_ = port;
     hello_ = hello;
+    key_ = key;
     limits_ = limits;
     log_ = log;
     // No other thread runs now: reset everything a previous session left.
@@ -356,6 +358,7 @@ void ClientCore::run() {
     host->maximumWaitingData = 64 * 1024;
 
     bool connected = false, welcomed = false, bye_seen = false, refused = false;
+    bool answered = false;  // the password challenge was answered (once per connection)
     bool bye_started = false, bye_sent = false, disconnect_sent = false;
     bool peer_known[kSources] = {};  // PeerInfo seen and no PeerLeft since: duplicates are dropped
     double bye_seen_at = 0, welcomed_at = 0;
@@ -572,6 +575,26 @@ void ClientCore::run() {
                 what = "PeerLeft";
                 break;
             }
+            case MsgType::AuthChallenge: {
+                AuthChallengeMsg m;
+                if (channel != kChannelReliable || decode(data, len, m) != Status::Ok) return drop(n_format_);
+                if (!connected || answered || bye_seen || refused) return drop(n_state_);
+                answered = true;
+                AuthAnswerMsg a;
+                uint8_t out[sizeof(HelloMsg)];
+                if (!auth_answer(key_, m, &a)) {
+                    say("net: client could not answer the password challenge; leaving");
+                    enet_peer_disconnect(peer, 0);
+                    disconnect_sent = true;
+                    disconnect_at = rx;
+                    return;
+                }
+                // Reliable and in order: the host reads the answer before the Hello.
+                send_now(out, encode(a, out, sizeof(out)), kChannelReliable);
+                send_now(out, encode(hello_, out, sizeof(out)), kChannelReliable);
+                say("net: client answered the password challenge; Hello sent");
+                return;
+            }
             case MsgType::Bye: {
                 ByeMsg m;
                 // A Bye carries its sender's id (protocol.h): from the host always 0.
@@ -609,11 +632,10 @@ void ClientCore::run() {
                 // jittery link does all the time; States and Pings are better lost to the network than to the throttle.
                 // This also configures the host's side of the connection.
                 enet_peer_throttle_configure(peer, 5000, 0, 0);
-                uint8_t out[sizeof(HelloMsg)];
-                const size_t n = encode(hello_, out, sizeof(out));
-                if (n) send_now(out, n, kChannelReliable);
+                // The Hello goes out with the answer to the host's password challenge (handle_packet).
                 phase_.store(Phase::AwaitWelcome, std::memory_order_release);
-                say("net: client connected; Hello sent (ENet packet throttle off for this connection)");
+                say("net: client connected; waiting for the host's password challenge (ENet packet throttle off for "
+                    "this connection)");
                 break;
             }
             case ENET_EVENT_TYPE_DISCONNECT: {

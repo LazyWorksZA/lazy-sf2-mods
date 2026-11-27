@@ -69,6 +69,16 @@
 
 using namespace LazyWorks::SF2Patch::net;
 
+constexpr char kTestPassword[] = "test-password";
+const AuthKey& test_key() {
+    static const AuthKey k = [] {
+        AuthKey a;
+        make_auth_key(kTestPassword, &a);
+        return a;
+    }();
+    return k;
+}
+
 namespace {
 
 int g_fail = 0;
@@ -242,11 +252,27 @@ struct TestClient {
             if (ev.type == ENET_EVENT_TYPE_CONNECT) connected = true;
             if (ev.type == ENET_EVENT_TYPE_DISCONNECT) disconnected = true;
             if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
-                got.push_back(
-                    {ev.channelID, std::vector<uint8_t>(ev.packet->data, ev.packet->data + ev.packet->dataLength)});
+                AuthChallengeMsg ch;
+                if (decode(ev.packet->data, ev.packet->dataLength, ch) == Status::Ok) {
+                    challenge = ch;
+                    ++challenges;
+                    if (auto_auth) answer(ch);
+                } else {
+                    got.push_back(
+                        {ev.channelID, std::vector<uint8_t>(ev.packet->data, ev.packet->data + ev.packet->dataLength)});
+                }
                 enet_packet_destroy(ev.packet);
             }
         }
+    }
+    bool auto_auth = true;  // answer the host's password challenge with test_key()
+    AuthChallengeMsg challenge{};
+    int challenges = 0;
+    void answer(const AuthChallengeMsg& ch, const AuthKey& key = test_key()) {
+        AuthAnswerMsg a;
+        auth_answer(key, ch, &a);
+        uint8_t b[sizeof(a)];
+        send(b, encode(a, b, sizeof(b)), kChannelReliable);
     }
     bool throttle_off = false;
     void send(const uint8_t* d, size_t n, uint8_t channel) {
@@ -305,7 +331,7 @@ size_t enc(const M& m, uint8_t* out) {
 void host_core_tests() {
     std::printf("host core\n");
     HostCore core;
-    expect(core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); }), "start");
+    expect(core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); }, test_key()), "start");
     for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     expect(core.state() == HostCore::State::Running && core.port() != 0, "the network thread bound a free port");
@@ -595,7 +621,7 @@ void host_core_tests() {
         TestClient y;
         y.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
         y.peer = enet_host_connect(y.host, &addr, kChannelCount, 0);
-        for (int i = 0; i < 2000 && !y.connected; ++i) {
+        for (int i = 0; i < 2000 && y.challenges == 0; ++i) {  // connected, and answered the password challenge
             x.service(0);
             y.service(0);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1002,7 +1028,7 @@ BotSession run_bot_session(bot::Script script, double rate, double duration, dou
                            double loss, bool drop = false, double jitter_ms = 0.0) {
     BotSession out;
     HostCore core;
-    core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); });
+    core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); }, test_key());
     for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (core.state() != HostCore::State::Running) {
@@ -1016,6 +1042,7 @@ BotSession run_bot_session(bot::Script script, double rate, double duration, dou
     core.set_host_time(host_time);
 
     bot::BotConfig cfg;
+    cfg.password = kTestPassword;
     cfg.host = "127.0.0.1:" + std::to_string(core.port());
     cfg.script = script;
     cfg.rate = rate;
@@ -1186,6 +1213,7 @@ void bot_loopback_tests() {
     {  // argument checks that return before any network use
         auto code = [](double rate, double dur, double loss, double jit, const char* host) {
             bot::BotConfig c;
+            c.password = kTestPassword;
             c.rate = rate;
             c.duration = dur;
             c.loss_pct = loss;
@@ -1209,6 +1237,7 @@ void bot_loopback_tests() {
         };
         auto timed = [](const std::string& host) {
             bot::BotConfig c;
+            c.password = kTestPassword;
             c.host = host;
             c.duration = 20.0;
             Run r;
@@ -1236,6 +1265,13 @@ void bot_loopback_tests() {
                 while (!done) {
                     ENetEvent ev;
                     while (enet_host_service(srv, &ev, 1) > 0) {
+                        if (ev.type == ENET_EVENT_TYPE_CONNECT) {  // a v5 host challenges first (any answer will do here)
+                            AuthChallengeMsg ch{};
+                            uint8_t cb[sizeof(ch)];
+                            ENetPacket* p = enet_packet_create(cb, encode(ch, cb, sizeof(cb)), ENET_PACKET_FLAG_RELIABLE);
+                            if (p && enet_peer_send(ev.peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
+                            enet_host_flush(srv);
+                        }
                         if (ev.type != ENET_EVENT_TYPE_RECEIVE) continue;
                         MsgType t{};
                         if (send_welcome && !res.welcomed && peek_type(ev.packet->data, ev.packet->dataLength, t) == Status::Ok &&
@@ -1266,7 +1302,7 @@ void bot_loopback_tests() {
         Run kicked;
         {
             HostCore core;  // accepts the connection, but no game thread ever sends the Welcome
-            core.start("127.0.0.1", 0, [](const char*) {});
+            core.start("127.0.0.1", 0, [](const char*) {}, test_key());
             for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (core.state() == HostCore::State::Running) kicked = timed("127.0.0.1:" + std::to_string(core.port()));
@@ -1725,7 +1761,7 @@ void acmi_tests() {
         LazyWorks::SF2Patch::acmi::ReportOptions ro3;
         LazyWorks::SF2Patch::acmi::Report r3;
         expect(!LazyWorks::SF2Patch::acmi::make_report(g.data(), m, g.data(), m, ro3, r3) &&
-                   r3.error.find("protocol v3; this build reads v4") != std::string::npos,
+                   r3.error.find("protocol v3; this build reads v5") != std::string::npos,
                "a v3 recording: the report refuses it and names both versions");
     }
     {  // A client joins again while its object is still shown: the old one is removed first. Headings that print as 360 or -0 are 0.
@@ -3138,7 +3174,7 @@ void lobby_splice_tests() {
            "three screens, each with this DLL as menu code");
     expect(items(c) == lobby_item::kCount && items(h) == session_item::kHostCount &&
                items(j) == session_item::kJoinCount,
-           "contiguous item counts: connect 13, host 15, join 16");
+           "contiguous item counts: connect 16, host 15, join 16");
     expect(has(c, lobby_item::kBack, L"DestinationMenu=MainScreen") &&
                has(c, lobby_item::kHost, L"DestinationMenu=" + h) && has(c, lobby_item::kJoin, L"DestinationMenu=" + j),
            "connect: Back to the main menu, Host and Join to their screens");
@@ -3163,6 +3199,9 @@ void lobby_splice_tests() {
                    has(screen, session_item::kStatus, L"MenuItemType=TEXT");
     }
     expect(session, "host and join: Leave to the connect screen, buttons, header, summary, pilot columns, status");
+    expect(has(c, lobby_item::kPassword, L"MenuItemType=EDIT") && has(c, lobby_item::kPassword, L"TextBufferSize=32") &&
+               has(c, lobby_item::kPassword, L"EditFieldSetting=EditFieldSetting"),
+           "connect: the Session password field (31 characters) at the menu code's number");
     expect(has(j, session_item::kYouFly, L"MenuItemType=TEXT") && item_name(h, session_item::kYouFly).empty(),
            "only the join screen has the 'you fly' line");
     expect(has(h, session_item::kAction, L"TextStringID=TXT_LAZY_LOBBY_LAUNCH") &&
@@ -3247,17 +3286,17 @@ void session_lifecycle_tests() {
     bool all_ran = true, all_fetched = true;
     for (int round = 0; round < 3; ++round) {
         auto* host = new HostCore;
-        all_ran &= host->start("127.0.0.1", 0, quiet);
+        all_ran &= host->start("127.0.0.1", 0, quiet, test_key());
         for (int i = 0; i < 2000 && host->state() == HostCore::State::Starting; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         all_ran &= host->state() == HostCore::State::Running;
         const uint16_t port = host->port();
         auto* fetch = new MissionFetch;
-        all_fetched &= fetch->start("127.0.0.1", port, 0x1234u + round, quiet, 200);
+        all_fetched &= fetch->start("127.0.0.1", port, 0x1234u + round, test_key(), quiet, 200);
         auto* client = new ClientCore;
         HelloMsg hello{};
         set_str(hello.callsign, "LIFECYCLE");
-        all_ran &= client->start("127.0.0.1", port, hello, quiet);
+        all_ran &= client->start("127.0.0.1", port, hello, quiet, test_key());
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
         client->stop(false);
         delete client;
@@ -3274,6 +3313,152 @@ void session_lifecycle_tests() {
     expect(all_fetched, "a mission fetch starts in each session and is deleted with it");
     expect(threads1 <= threads0, "no thread left after three sessions");
     expect(handles1 <= handles0 + 8, "no handles leaked (within the CRT's own slack)");
+}
+
+void session_password_tests() {
+    std::printf("session password (v5 challenge and answer)\n");
+    AuthKey none, right, wrong;
+    expect(!make_auth_key("", &none) && !none.set, "an empty password gives no key");
+    AuthKey abc;
+    static const uint8_t kSha256Abc[32] = {0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40,
+                                           0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17,
+                                           0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad};
+    expect(make_auth_key("abc", &abc) && std::memcmp(abc.k, kSha256Abc, 32) == 0, "SHA-256(\"abc\") matches FIPS 180-2");
+    expect(make_auth_key(kTestPassword, &right) && make_auth_key("not-the-password", &wrong) &&
+               std::memcmp(right.k, test_key().k, sizeof(right.k)) == 0 && std::memcmp(right.k, wrong.k, sizeof(right.k)) != 0,
+           "the key is SHA-256 of the password: the same password gives the same key");
+    AuthChallengeMsg c1{}, c2{};
+    expect(auth_random(c1.nonce, kAuthNonce) && auth_random(c2.nonce, kAuthNonce) &&
+               std::memcmp(c1.nonce, c2.nonce, kAuthNonce) != 0,
+           "nonces are random");
+    AuthAnswerMsg a1{}, bad{};
+    expect(auth_answer(right, c1, &a1) && auth_verify(right, c1.nonce, a1), "the right password's answer verifies");
+    expect(auth_answer(wrong, c1, &bad) && !auth_verify(right, c1.nonce, bad), "a wrong password's answer is refused");
+    AuthAnswerMsg tampered = a1;
+    tampered.mac[31] ^= 1;
+    expect(!auth_verify(right, c1.nonce, tampered), "a changed answer is refused");
+    expect(!auth_verify(right, c2.nonce, a1), "an old answer does not verify for another connection's nonce (replay)");
+    uint8_t wire[sizeof(AuthAnswerMsg)];
+    expect(encode(a1, wire, sizeof(wire)) == 52 &&
+               std::search(wire, wire + sizeof(wire), kTestPassword, kTestPassword + sizeof(kTestPassword) - 1) ==
+                   wire + sizeof(wire),
+           "the answer on the wire does not contain the password");
+    HostCore idle;
+    HelloMsg hh{};
+    ClientCore cc;
+    MissionFetch mf;
+    expect(!idle.start("127.0.0.1", 0, [](const char*) {}, none) && !cc.start("127.0.0.1", 7777, hh, nullptr, none) &&
+               !mf.start("127.0.0.1", 7777, 1, none, nullptr),
+           "host, client and mission fetch refuse to start without a password");
+
+    HostCore core;
+    static std::atomic<int> refusals{0};
+    refusals = 0;
+    core.start("127.0.0.1", 0, [](const char* l) {
+        if (std::strstr(l, "refused")) refusals.fetch_add(1);
+    }, right);
+    for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (core.state() != HostCore::State::Running) {
+        expect(false, "password host runs");
+        return;
+    }
+    core.set_mission(std::vector<uint8_t>(10, 1), 77, 10, SeatPlan{4, 1});
+    ENetAddress addr{};
+    enet_address_set_host_ip(&addr, "127.0.0.1");
+    addr.port = core.port();
+    auto connect = [&](TestClient& c) {
+        c.auto_auth = false;
+        c.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+        c.peer = enet_host_connect(c.host, &addr, kChannelCount, 0);
+        for (int i = 0; i < 2000 && c.challenges == 0 && !c.disconnected; ++i) c.idle(1);
+    };
+    auto events = [&](int ms) {
+        std::vector<HostEvent> all;
+        for (int i = 0; i < ms; ++i) {
+            HostEvent e[16];
+            const size_t n = core.poll(e, 16);
+            all.insert(all.end(), e, e + n);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return all;
+    };
+    auto bye_reason = [](const TestClient& c) {
+        for (const auto& g : c.got) {
+            ByeMsg b;
+            if (decode(g.bytes.data(), g.bytes.size(), b) == Status::Ok) return static_cast<int>(b.reason);
+        }
+        return -1;
+    };
+    uint8_t buf[128];
+
+    // Before the answer nothing counts: a Hello and a mission request are dropped unread.
+    TestClient early;
+    connect(early);
+    HelloMsg h{};
+    set_str(h.callsign, "EARLY");
+    early.send(buf, encode(h, buf, sizeof(buf)), kChannelReliable);
+    MissionRequestMsg rq{};
+    rq.tag = 0x55u;
+    early.send(buf, encode(rq, buf, sizeof(buf)), kChannelReliable);
+    early.idle(150);
+    std::vector<HostEvent> ev = events(50);
+    expect(early.challenges == 1 && ev.empty() && early.got.empty(),
+           "before the answer: no Connect, no Hello for the game, and no mission offer");
+    early.answer(early.challenge, right);
+    early.idle(150);
+    ev = events(50);
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "the right answer: the game hears of the connection");
+    early.send(buf, encode(rq, buf, sizeof(buf)), kChannelReliable);
+    early.idle(200);
+    MissionOfferMsg offer{};
+    bool offered = false;
+    for (const auto& g : early.got) offered = offered || decode(g.bytes.data(), g.bytes.size(), offer) == Status::Ok;
+    expect(offered && offer.mission_id == 77, "after the answer the mission request is answered");
+    const AuthChallengeMsg old_challenge = early.challenge;
+    AuthAnswerMsg recorded{};
+    auth_answer(right, old_challenge, &recorded);
+
+    // A wrong password: Bye 9, the connection ends, the game never hears of it.
+    TestClient w;
+    connect(w);
+    w.answer(w.challenge, wrong);
+    for (int i = 0; i < 1000 && !w.disconnected; ++i) w.idle(1);
+    ev = events(50);
+    expect(bye_reason(w) == kByeWrongPassword && w.disconnected && ev.empty(),
+           "a wrong password: Bye 9 (wrong session password), disconnected, no Connect or Disconnect for the game");
+
+    // A replayed answer (valid for another connection's nonce) is refused the same way.
+    TestClient r;
+    connect(r);
+    r.send(buf, encode(recorded, buf, sizeof(buf)), kChannelReliable);
+    for (int i = 0; i < 1000 && !r.disconnected; ++i) r.idle(1);
+    ev = events(50);
+    expect(std::memcmp(r.challenge.nonce, old_challenge.nonce, kAuthNonce) != 0 && bye_reason(r) == kByeWrongPassword &&
+               r.disconnected && ev.empty(),
+           "a replayed answer from another connection is refused (a fresh nonce per connection)");
+    expect(refusals.load() == 2, "the host logs each refusal");
+
+    // The mission fetch with the wrong password stops asking and gets no mission bytes.
+    MissionFetch bad_fetch;
+    bad_fetch.start("127.0.0.1", core.port(), 0x99u, wrong, nullptr, 200);
+    for (int i = 0; i < 300 && !bad_fetch.wrong_password(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::vector<uint8_t> packed;
+    MissionOfferMsg o{};
+    expect(bad_fetch.wrong_password() && !bad_fetch.take(&packed, &o), "a fetch with the wrong password is refused, no mission");
+    bad_fetch.stop();
+    MissionFetch good_fetch;
+    good_fetch.start("127.0.0.1", core.port(), 0x9au, right, nullptr, 200);
+    bool got = false;
+    for (int i = 0; i < 300 && !got; ++i) {
+        got = good_fetch.take(&packed, &o);
+        if (!got) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    expect(got && o.mission_id == 77 && !good_fetch.wrong_password(), "a fetch with the right password gets the mission");
+    good_fetch.stop();
+    enet_peer_disconnect_now(early.peer, 0);
+    early.idle(20);
+    core.stop(false);
 }
 
 namespace {
@@ -4991,7 +5176,7 @@ struct FakeHost {
 
     bool start() {
         peers.set_host("HOST", "F-4E");
-        core.start("127.0.0.1", 0, cc_host_log);
+        core.start("127.0.0.1", 0, cc_host_log, test_key());
         for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         core.set_host_time(time());
@@ -5117,7 +5302,11 @@ struct RawHost {
     void service() {
         ENetEvent ev;
         while (enet_host_service(host, &ev, 0) > 0) {
-            if (ev.type == ENET_EVENT_TYPE_CONNECT) peer = ev.peer;
+            if (ev.type == ENET_EVENT_TYPE_CONNECT) {
+                peer = ev.peer;
+                AuthChallengeMsg ch{};
+                send(ch, kChannelReliable);
+            }
             if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
                 MsgType t{};
                 if (peek_type(ev.packet->data, ev.packet->dataLength, t) == Status::Ok && t == MsgType::Hello) got_hello = true;
@@ -5293,7 +5482,7 @@ void client_core_relay_tests() {
     auto nothing = [] {};
     // One after the other, so the slots are known: ONE is client 1, TWO client 2.
     for (int i = 0; i < 2; ++i) {
-        c[i]->start("127.0.0.1", h.core.port(), hello[i], cc_client_log);
+        c[i]->start("127.0.0.1", h.core.port(), hello[i], cc_client_log, test_key());
         run(5.0, [&] { return rx[i].has(ClientEvent::Welcome); }, nothing);
     }
     expect(c[0]->client_id() == 1 && c[1]->client_id() == 2, "two clients welcomed as 1 and 2");
@@ -5445,7 +5634,7 @@ void client_core_hitch_tests() {
         char cs[8];
         std::snprintf(cs, sizeof(cs), "C%d", i + 1);
         set_str(hello.callsign, cs);
-        c[i]->start("127.0.0.1", h.core.port(), hello, cc_client_log);
+        c[i]->start("127.0.0.1", h.core.port(), hello, cc_client_log, test_key());
         run(5.0, true, [&] { return rx[i].has(ClientEvent::Welcome); }, nothing);
     }
     if (c[0]->client_id() != 1 || c[1]->client_id() != 2 || c[2]->client_id() != 3) {
@@ -5473,7 +5662,7 @@ void client_core_hitch_tests() {
             c[3] = std::make_unique<ClientCore>();
             HelloMsg hello = cc_hello(0);
             set_str(hello.callsign, "C4");
-            c[3]->start("127.0.0.1", h.core.port(), hello, cc_client_log);
+            c[3]->start("127.0.0.1", h.core.port(), hello, cc_client_log, test_key());
         }
         if (!bye3 && el > 0.3) {
             bye3 = true;
@@ -5529,8 +5718,8 @@ void client_core_session_tests() {
     h.theatre = fnv1a("Korea");
     if (!h.start()) return expect(false, "host core running");
     auto c = std::make_unique<ClientCore>();
-    expect(c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("Korea")), cc_client_log), "client start");
-    expect(!c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log), "a second start is refused");
+    expect(c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("Korea")), cc_client_log, test_key()), "client start");
+    expect(!c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key()), "a second start is refused");
     CcRx rx;
     const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
     expect(welcomed && c->phase() == ClientCore::Phase::Welcomed && c->client_id() == 1, "connect, Hello, Welcome: client 1");
@@ -5657,7 +5846,7 @@ void client_core_host_bye_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("localhost", h.core.port(), cc_hello(0), cc_client_log);
+        c->start("localhost", h.core.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         expect(ok, "a host name is resolved on the network thread: localhost, Welcome");
@@ -5674,7 +5863,7 @@ void client_core_host_bye_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         h.core.stop(false);
@@ -5688,7 +5877,7 @@ void client_core_host_bye_tests() {
         RawHost raw;
         if (!raw.open()) return expect(false, "raw host");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
         raw.welcome(50.0);
@@ -5713,7 +5902,7 @@ void client_core_refusal_tests() {
         h.theatre = fnv1a("Korea");
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("GermanyCE")), cc_client_log);
+        c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("GermanyCE")), cc_client_log, test_key());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
         const int b = rx.find(ClientEvent::Bye), d = rx.find(ClientEvent::Disconnected);
@@ -5727,7 +5916,7 @@ void client_core_refusal_tests() {
         RawHost raw;
         if (!raw.open()) return expect(false, "raw host");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
         ByeMsg v1{};
@@ -5745,7 +5934,7 @@ void client_core_refusal_tests() {
         RawHost raw;
         if (!raw.open()) return expect(false, "raw host");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
         raw.send(cc_jet(0, 1, 50.0), kChannelUnreliable);  // before the Welcome: wrong phase
@@ -5789,8 +5978,8 @@ void client_core_connect_tests() {
     {
         ClientCore c;
         HelloMsg h = cc_hello(0);
-        expect(!c.start(nullptr, 7777, h, cc_client_log) && !c.start("", 7777, h, cc_client_log) &&
-                   !c.start("127.0.0.1", 0, h, cc_client_log) && c.phase() == ClientCore::Phase::Idle,
+        expect(!c.start(nullptr, 7777, h, cc_client_log, test_key()) && !c.start("", 7777, h, cc_client_log, test_key()) &&
+                   !c.start("127.0.0.1", 0, h, cc_client_log, test_key()) && c.phase() == ClientCore::Phase::Idle,
                "start refuses a missing host or port 0");
     }
     {  // no answer to the connect request
@@ -5798,7 +5987,7 @@ void client_core_connect_tests() {
         ClientLimits lim;
         lim.connect_ms = 600;
         const double t0 = ClientCore::wall_now();
-        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, lim);
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_key(), lim);
         CcRx rx;
         const bool ok = cc_run(nullptr, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
         const double dt = ClientCore::wall_now() - t0;
@@ -5810,7 +5999,7 @@ void client_core_connect_tests() {
     }
     {  // a name that does not resolve
         auto c = std::make_unique<ClientCore>();
-        c->start("no-such-host.invalid", 7777, cc_hello(0), cc_client_log);
+        c->start("no-such-host.invalid", 7777, cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         const bool ok = cc_run(nullptr, nullptr, *c, rx, 20.0, [&] { return rx.has(ClientEvent::Disconnected); });
         expect(ok && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::CannotConnect) && c->phase() == ClientCore::Phase::Failed,
@@ -5823,7 +6012,7 @@ void client_core_connect_tests() {
         auto c = std::make_unique<ClientCore>();
         ClientLimits lim;
         lim.welcome_ms = 800;
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, lim);
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key(), lim);
         CcRx rx;
         bool awaiting = false;
         const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] {
@@ -5838,7 +6027,7 @@ void client_core_connect_tests() {
     }
     for (int loader = 0; loader < 2; ++loader) {  // stop while the connect is still pending
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_key());
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const ClientCore::Phase before = c->phase();
         const double t0 = ClientCore::wall_now();
@@ -5877,7 +6066,7 @@ void cc_idle_raw(RawHost& raw, double seconds) {
 // A raw host that has welcomed the client, with the Welcome already polled.
 bool cc_welcomed_raw(RawHost& raw, ClientCore& c, CcRx& rx) {
     if (!raw.open()) return false;
-    c.start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log);
+    c.start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
     cc_run(nullptr, &raw, c, rx, 5.0, [&] { return raw.got_hello; });
     raw.welcome(50.0);
     return cc_run(nullptr, &raw, c, rx, 3.0, [&] { return rx.has(ClientEvent::Welcome); });
@@ -5889,7 +6078,7 @@ void client_core_lookup_tests() {
     slow.resolve = cc_slow_resolve;
     for (int loader = 0; loader < 2; ++loader) {
         auto c = std::make_unique<ClientCore>();
-        c->start("slow.example", 7777, cc_hello(0), cc_client_log, slow);
+        c->start("slow.example", 7777, cc_hello(0), cc_client_log, test_key(), slow);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const double t0 = ClientCore::wall_now();
         c->stop(loader != 0);
@@ -5904,7 +6093,7 @@ void client_core_lookup_tests() {
         ClientLimits lim = slow;
         lim.connect_ms = 500;
         const double t0 = ClientCore::wall_now();
-        c->start("slow.example", 7777, cc_hello(0), cc_client_log, lim);
+        c->start("slow.example", 7777, cc_hello(0), cc_client_log, test_key(), lim);
         CcRx rx;
         const bool ok = cc_run(nullptr, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
         const double dt = ClientCore::wall_now() - t0;
@@ -5961,7 +6150,7 @@ void client_core_flood_tests() {
         expect(bi >= 0 && cc_bye_reason(rx.ev[bi]) == 2 && di == static_cast<int>(rx.ev.size()) - 1 && rx.count(ClientEvent::Disconnected) == 1 &&
                    rx.ev[di].reason == static_cast<uint8_t>(ClientEnd::HostClosed) && c->phase() == ClientCore::Phase::Closed,
                "the Bye survives the flood; the client leaves after the host's Bye by itself; Disconnected last, once");
-        expect(!c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log), "start after an end without stop() is refused");
+        expect(!c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key()), "start after an end without stop() is refused");
     }
     {  // Control events beyond the whole ring: the session ends (QueueFull), and everything queued is still delivered.
         RawHost raw;
@@ -6066,7 +6255,7 @@ void client_core_bye_stop_tests() {
             if (tmp.open()) dead_port = tmp.port();
         }
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_key());
         c->bye(0);
         CcRx rx;
         const double t0 = ClientCore::wall_now();
@@ -6080,7 +6269,7 @@ void client_core_bye_stop_tests() {
         h.answer_hello = false;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return c->phase() == ClientCore::Phase::AwaitWelcome && h.got_hello; });
         c->bye(0);
@@ -6094,7 +6283,7 @@ void client_core_bye_stop_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         c->bye(4);
@@ -6103,7 +6292,7 @@ void client_core_bye_stop_tests() {
         expect(h.byes.size() == 1 && h.byes[0].reason == 4, "a Bye pending at stop() reaches the host");
         rx.ev.clear();
         h.got_disconnect = false;
-        expect(c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log), "restart after stop()");
+        expect(c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key()), "restart after stop()");
         const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         expect(ok && rx.ev[0].kind == ClientEvent::Welcome && c->phase() == ClientCore::Phase::Welcomed && c->client_id() == 1,
                "the second session is welcomed, with nothing left over from the first");
@@ -6117,7 +6306,7 @@ void client_core_concurrency_tests() {
     FakeHost h;
     if (!h.start()) return expect(false, "host core running");
     auto c = std::make_unique<ClientCore>();
-    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
     CcRx rx;
     if (!cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); })) return expect(false, "welcomed");
     h.send_jet = true;
@@ -6290,6 +6479,7 @@ void bot_host_traffic_tests() {
     h.send_jet = true;
     if (!h.start()) return expect(false, "host core running");
     bot::BotConfig cfg;
+    cfg.password = kTestPassword;
     cfg.script = bot::Script::Straight;
     cfg.rate = 20.0;
     cfg.duration = 10.0;
@@ -6325,6 +6515,8 @@ void bot_relay_tests() {
     h.send_jet = true;
     if (!h.start()) return expect(false, "host core running");
     bot::BotConfig a, b;
+    a.password = kTestPassword;
+    b.password = kTestPassword;
     a.callsign = "ALPHA";
     b.callsign = "BRAVO";
     a.rate = b.rate = 20.0;
@@ -6375,6 +6567,7 @@ void bot_formation_tests() {
         h.flight = &fly;
         if (!h.start()) return expect(false, "host core running");
         bot::BotConfig cfg;
+        cfg.password = kTestPassword;
         cfg.script = bot::Script::Formation;
         cfg.rate = 20.0;
         cfg.duration = duration;
@@ -6436,6 +6629,7 @@ struct ServeRun {
     std::thread th;
     bool start() {
         cfg.port = 0;
+        cfg.password = kTestPassword;
         cfg.port_out = &port;
         cfg.cancel = &stop;
         cfg.log = bot_log;
@@ -6544,7 +6738,7 @@ void bot_serve_tests() {
         s.cfg.record_dir = dir;
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
-        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
         serve_run_for(c, 6.0, [] { return false; });
         s.finish();
         serve_run_for(c, 2.0, [&] { return c.ended; });
@@ -6644,7 +6838,7 @@ void bot_serve_tests() {
         s.cfg.script = bot::Script::Straight;
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
-        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
         const double p0[3] = {c.pos[0], c.pos[1], c.pos[2]}, h = c.heading;
         serve_run_for(c, 5.0, [&] { return c.welcomes.size() >= 2 && c.host.size() >= 20; });
         serve_run_for(c, 2.5, [] { return false; });  // the client is on the wing now: no more Welcomes
@@ -6687,7 +6881,7 @@ void bot_serve_tests() {
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
         c.follow_join = false;
-        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
         serve_run_for(c, 8.0, [&] { return c.welcomes.size() >= 4; });
         s.finish();
         c.core.stop(false);
@@ -7823,7 +8017,7 @@ void world_stream_tests() {
     FakeHost h;
     if (!h.start()) return expect(false, "stream loopback: host core");
     auto c = std::make_unique<ClientCore>();
-    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
     CcRx rx;
     const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
     const bool sent = h.core.send_world(h.slot, h.gen, b, en, true) &&
@@ -7916,7 +8110,7 @@ void world_snapshot_tests() {
     FakeHost fh;
     if (!fh.start()) return expect(false, "snapshot loopback: host core");
     auto c = std::make_unique<ClientCore>();
-    c->start("127.0.0.1", fh.core.port(), cc_hello(0), cc_client_log);
+    c->start("127.0.0.1", fh.core.port(), cc_hello(0), cc_client_log, test_key());
     CcRx rx;
     const bool welcomed = cc_run(&fh, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
     uint8_t e[600];
@@ -8039,7 +8233,7 @@ void world_seat_rule_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "queues loopback: host core");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log);
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
         CcRx rx;
         const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         WorldEventRec ev{kEventAwake, 1, 1, 0, 0};
@@ -8151,7 +8345,7 @@ void world_mission_tests() {
         none_seen = 0;
         core.start("127.0.0.1", 0, [](const char* line) {
             if (std::strstr(line, "none yet")) none_seen.fetch_add(1);
-        });
+        }, test_key());
         for (int i = 0; i < 2000 && core.state() != HostCore::State::Running; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         auto wait_take = [](MissionFetch& f, std::vector<uint8_t>* g, MissionOfferMsg* o, int ms) {
@@ -8162,7 +8356,7 @@ void world_mission_tests() {
             return false;
         };
         auto fetch = std::make_unique<MissionFetch>();
-        const bool started = fetch->start("127.0.0.1", core.port(), 0x1234u, nullptr, 200);
+        const bool started = fetch->start("127.0.0.1", core.port(), 0x1234u, test_key(), nullptr, 200);
         for (int i = 0; i < 300 && none_seen.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         expect(started && none_seen.load() >= 1 && fetch->state() == MissionFetch::State::Running,
                "mission loopback: the host says none yet, the fetch keeps asking");
@@ -8192,7 +8386,7 @@ void world_mission_tests() {
         for (int i = 0; i < 200 && core.seat_active(0x1234u); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         expect(!core.seat_active(0x1234u), "seats: a closed fetch connection releases its seat");
         auto again = std::make_unique<MissionFetch>();
-        again->start("127.0.0.1", core.port(), 0x1234u, nullptr, 200);
+        again->start("127.0.0.1", core.port(), 0x1234u, test_key(), nullptr, 200);
         const bool back = wait_take(*again, &got, &go, 10000);
         expect(back && go.seat == seat_a, "seats: a restarted client with the same tag gets its old seat back");
         again->stop();
@@ -8416,7 +8610,7 @@ void jet_census_tests() {
 
 void jet_controls_tests() {
     std::printf("jet controls (Phase 5 T2: engine and afterburner)\n");
-    expect(kVersion == 4 && sizeof(AvatarStateMsg) == 20, "protocol v4: the jet state grew to 20 bytes");
+    expect(kVersion >= 4 && sizeof(AvatarStateMsg) == 20, "protocol v4 and later: the jet state is 20 bytes");
     expect(throttle_to_wire(0.0f) == 0 && throttle_to_wire(1.0f) == 255 && throttle_to_wire(0.7f) == 179 &&
                throttle_to_wire(2.0f) == 255 && throttle_to_wire(-1.0f) == 0 &&
                throttle_to_wire(std::numeric_limits<float>::quiet_NaN()) == 0 && throttle_from_wire(255) == 1.0f &&
@@ -8462,7 +8656,7 @@ void jet_controls_tests() {
     s.cfg.jet = bot::JetScript::Ab;
     if (!s.start()) return expect(false, "bot serve listening (--jet ab)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<AvatarStateMsg> got;
     bool sent_own = false;
     WorldPacket wp[8];
@@ -8661,7 +8855,7 @@ void hit_claim_tests() {
     s.cfg.hit_every = 1.0;
     if (!s.start()) return expect(false, "bot serve listening (--jet guns --hit)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<HitMsg> hits;
     bool saw_guns = false;
     int claims = 0;
@@ -8800,7 +8994,7 @@ void weapon_launch_tests() {
     s.cfg.launch_every = 1.0;
     if (!s.start()) return expect(false, "bot serve listening (--launch)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<WeaponLaunchMsg> got;
     bool sent = false;
     WorldPacket wp[8];
@@ -8942,7 +9136,7 @@ void stores_tests() {
     s.cfg.stores = true;
     if (!s.start()) return expect(false, "bot serve listening (--stores)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<LoadoutMsg> los;
     std::vector<ConsumablesMsg> cos;
     int sent = 0;
@@ -9095,7 +9289,7 @@ void damage_tests() {
     sv.cfg.damage = true;
     if (!sv.start()) return expect(false, "bot serve listening (--damage)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<DamageStateMsg> got;
     int cms = 0;
     bool sent = false;
@@ -9175,7 +9369,7 @@ void clock_ground_tests() {
     s.cfg.clock_start = 600.0;
     if (!s.start()) return expect(false, "bot serve listening (--clock)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<MissionClockMsg> got;
     WorldPacket wp[8];
     serve_run_for(c, 4.5, [&] {
@@ -9232,7 +9426,7 @@ void seat_takeover_tests() {
     s.cfg.seat_state = true;
     if (!s.start()) return expect(false, "bot serve listening (--seat-state)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::vector<SeatStateMsg> got;
     WorldPacket wp[8];
     serve_run_for(c, 2.5, [&] {
@@ -9361,7 +9555,7 @@ void handover_tests() {
     sv.cfg.start[2] = 3000.0;
     if (!sv.start()) return expect(false, "bot serve listening (handover)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log), "client start");
+    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log, test_key()), "client start");
     std::deque<std::vector<uint8_t>> q;
     {
         std::vector<uint8_t> m(sizeof(b));
@@ -9417,6 +9611,7 @@ void bot_world_join_tests() {
     s.cfg.world.push_back(o);
     if (!s.start()) return expect(false, "bot serve listening (mission and world)");
     bot::BotConfig bc;
+    bc.password = kTestPassword;
     bc.host = "127.0.0.1:" + std::to_string(s.port.load());
     bc.duration = 2.5;
     bc.world_join = true;
@@ -9455,8 +9650,9 @@ int main() {
         expect(n == 60 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
-        expect(kVersion == 4 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7,
-               "v4 sizes (as v3)");
+        expect(kVersion == 5 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7 &&
+                   sizeof(AuthChallengeMsg) == 20 && sizeof(AuthAnswerMsg) == 52,
+               "v5 sizes (v4's, plus the password challenge and answer)");
     }
 
     loopback();
@@ -9495,6 +9691,7 @@ int main() {
     lobby_splice_tests();
     lobby_logic_tests();
     session_lifecycle_tests();
+    session_password_tests();
     pilot_twist_tests();
     probe_snapshot_tests();
     world_files_tests();

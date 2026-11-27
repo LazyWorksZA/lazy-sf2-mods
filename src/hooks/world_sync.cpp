@@ -2769,7 +2769,9 @@ void start_fetch() {
     char host[64] = {};
     uint16_t port = 0;
     if (!g_fetch) g_fetch = new (std::nothrow) net::MissionFetch;
-    if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !g_fetch->start(host, port, g_tag, fetch_log))
+    net::AuthKey key;
+    if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !client_auth_key(&key) ||
+        !g_fetch->start(host, port, g_tag, key, fetch_log))
         LOG("world: join: could not start the mission fetch");
 }
 
@@ -2825,6 +2827,8 @@ void world_session_end() {
 }
 
 uint32_t world_client_tag() { return g_join ? g_tag : 0; }
+
+bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password(); }
 
 bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) {
     if (!g_join) return true;

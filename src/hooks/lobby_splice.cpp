@@ -97,6 +97,21 @@ struct Ini {
         if (x >= 0) line(L"TextPosition", pos(x, y));
         t += L"\r\n";
     }
+    void edit(const wchar_t* name, int x, int y, int chars, const wchar_t* info) {
+        t += L"[" + std::wstring(name) + L"]\r\n";
+        line(L"MenuItemType", L"EDIT");
+        line(L"Position", pos(x, y));
+        line(L"Width", L"280");
+        line(L"Height", L"22");
+        line(L"EditFieldSetting", L"EditFieldSetting");
+        line(L"TextBufferSize", std::to_wstring(chars + 1));
+        line(L"NumberOnly", L"FALSE");
+        line(L"TabSelectable", L"TRUE");
+        line(L"DefaultTextStringID", L"");
+        line(L"InfoTextSetting", L"InfoTextSetting");
+        line(L"InfoTextStringID", info);
+        t += L"\r\n";
+    }
     void area(const wchar_t* name, int x, int y, int w, int h, bool scroll) {
         t += L"[" + std::wstring(name) + L"]\r\n";
         line(L"MenuItemType", L"TEXTAREA");
@@ -182,36 +197,28 @@ bool splice_lobby_screen(std::wstring& text, const std::wstring& menu_code_dll) 
                {L"LazyLobbyBackButton", L"LazyLobbyHostButton", L"LazyLobbyJoinButton", L"LazyLobbyTitle",
                 L"LazyLobbyPanelTitle", L"LazyLobbyCallsignLabel", L"LazyLobbyCallsign", L"LazyLobbyAddressLabel",
                 L"LazyLobbyAddress", L"LazyLobbyAddressHint", L"LazyLobbyStatus", L"LazyLobbyNetHint1",
-                L"LazyLobbyNetHint2"},
+                L"LazyLobbyNetHint2", L"LazyLobbyPasswordLabel", L"LazyLobbyPassword", L"LazyLobbyPasswordHint"},
                menu_code_dll);
     ini.button(L"LazyLobbyBackButton", L"MainScreen", L"LargerTextLeft", L"TXT_MENU_BACK", 48, 694,
                L"TXT_MENU_BACK_MAIN_INFO");
-    ini.button(L"LazyLobbyHostButton", kLobbyHostScreen, L"LargerTextCenter", L"TXT_MENU_HOST", 112, 292,
+    ini.button(L"LazyLobbyHostButton", kLobbyHostScreen, L"LargerTextCenter", L"TXT_MENU_HOST", 112, 350,
                L"TXT_MENU_HOST_INFO");
-    ini.button(L"LazyLobbyJoinButton", kLobbyJoinScreen, L"LargerTextCenter", L"TXT_MENU_JOIN", 257, 292,
+    ini.button(L"LazyLobbyJoinButton", kLobbyJoinScreen, L"LargerTextCenter", L"TXT_MENU_JOIN", 257, 350,
                L"TXT_LAZY_LOBBY_JOIN_INFO");
     ini.text(L"LazyLobbyTitle", L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
     ini.text(L"LazyLobbyPanelTitle", L"LargerTextCenter", L"TXT_MENU_TYPE_MISSION", 257, 120);
     ini.text(L"LazyLobbyCallsignLabel", L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 46, 172);
     ini.text(L"LazyLobbyCallsign", L"MediumTextLeft", L"", 180, 172);
     ini.text(L"LazyLobbyAddressLabel", L"MediumTextLeft", L"TXT_MENU_ADDRESS_TEXT", 46, 209);
-    ini.t += L"[LazyLobbyAddress]\r\n";
-    ini.line(L"MenuItemType", L"EDIT");
-    ini.line(L"Position", L"180,206");
-    ini.line(L"Width", L"280");
-    ini.line(L"Height", L"22");
-    ini.line(L"EditFieldSetting", L"EditFieldSetting");
-    ini.line(L"TextBufferSize", std::to_wstring(kLobbyAddressChars + 1));
-    ini.line(L"NumberOnly", L"FALSE");
-    ini.line(L"TabSelectable", L"TRUE");
-    ini.line(L"DefaultTextStringID", L"");
-    ini.line(L"InfoTextSetting", L"InfoTextSetting");
-    ini.line(L"InfoTextStringID", L"TXT_MENU_TCPIP_INFO");
-    ini.t += L"\r\n";
+    ini.edit(L"LazyLobbyAddress", 180, 206, kLobbyAddressChars, L"TXT_MENU_TCPIP_INFO");
     ini.text(L"LazyLobbyAddressHint", L"MediumTextLeft", L"TXT_MENU_TCPIP_INFO", 46, 240);
-    ini.text(L"LazyLobbyStatus", L"MediumTextLeft", L"TXT_LAZY_LOBBY_STATUS", 46, 340);
-    ini.text(L"LazyLobbyNetHint1", L"MediumTextLeft", L"TXT_LAZY_LOBBY_NET_HINT1", 46, 372);
-    ini.text(L"LazyLobbyNetHint2", L"MediumTextLeft", L"TXT_LAZY_LOBBY_NET_HINT2", 46, 392);
+    ini.text(L"LazyLobbyStatus", L"MediumTextLeft", L"TXT_LAZY_LOBBY_STATUS", 46, 400);
+    ini.text(L"LazyLobbyNetHint1", L"MediumTextLeft", L"TXT_LAZY_LOBBY_NET_HINT1", 46, 432);
+    ini.text(L"LazyLobbyNetHint2", L"MediumTextLeft", L"TXT_LAZY_LOBBY_NET_HINT2", 46, 452);
+    // Under the Address and its hint: the label, the field and its hint line (the field's info text).
+    ini.text(L"LazyLobbyPasswordLabel", L"MediumTextLeft", L"TXT_LAZY_LOBBY_PASSWORD", 46, 275);
+    ini.edit(L"LazyLobbyPassword", 180, 272, kLobbyPasswordChars, L"TXT_LAZY_LOBBY_PASS_HINT");
+    ini.text(L"LazyLobbyPasswordHint", L"MediumTextLeft", L"TXT_LAZY_LOBBY_PASS_HINT", 46, 304);
 
     session_screen(ini, true, menu_code_dll);
     session_screen(ini, false, menu_code_dll);

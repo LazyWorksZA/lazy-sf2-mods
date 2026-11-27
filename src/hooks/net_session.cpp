@@ -74,6 +74,7 @@ void apply_trackers() {
 }  // namespace
 
 NetRole net_session_role() { return g_role.load(); }
+bool net_session_wrong_password() { return g_role.load() == NetRole::Client && world_fetch_wrong_password(); }
 bool net_session_wanted() { return g_role.load() != NetRole::None; }
 
 // The variables configured host or client mode for this launch: the lobby stays out of it.
@@ -87,7 +88,7 @@ static bool env_session(std::string* why) {
     return false;
 }
 
-bool net_session_host(uint16_t port, const char* callsign, std::string* why) {
+bool net_session_host(uint16_t port, const char* callsign, const std::string& password, std::string* why) {
     if (g_role.load() != NetRole::None) {
         *why = "a session is already open";
         return false;
@@ -95,7 +96,7 @@ bool net_session_host(uint16_t port, const char* callsign, std::string* why) {
     if (env_session(why)) return false;
     if (!prepare_dir(why)) return false;
     const char* reason = "";
-    if (!host_session_start("0.0.0.0", port, callsign, &reason)) {
+    if (!host_session_start("0.0.0.0", port, callsign, password, &reason)) {
         *why = reason;
         return false;
     }
@@ -110,7 +111,8 @@ bool net_session_host(uint16_t port, const char* callsign, std::string* why) {
     return true;
 }
 
-bool net_session_join(const char* host, uint16_t port, const char* callsign, std::string* why) {
+bool net_session_join(const char* host, uint16_t port, const char* callsign, const std::string& password,
+                      std::string* why) {
     if (g_role.load() != NetRole::None) {
         *why = "a session is already open";
         return false;
@@ -118,7 +120,7 @@ bool net_session_join(const char* host, uint16_t port, const char* callsign, std
     if (env_session(why)) return false;
     if (!prepare_dir(why)) return false;
     const char* reason = "";
-    if (!client_session_start(host, port, callsign, &reason)) {
+    if (!client_session_start(host, port, callsign, password, &reason)) {
         *why = reason;
         return false;
     }

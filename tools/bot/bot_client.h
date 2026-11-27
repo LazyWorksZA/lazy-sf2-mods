@@ -13,6 +13,7 @@ namespace LazyWorks::SF2Patch::bot {
 struct BotConfig {
     std::string host = "127.0.0.1:7777";  // numeric address or name, and port
     std::string callsign = "BOT1";
+    std::string password;  // the host's session password (--password or LAZYSF2_PASSWORD); required
     std::string aircraft = "F-4E";
     Script script = Script::Straight;
     double rate = 30.0;      // States per second

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "hooks/aircraft_side.h"
+#include "net/auth.h"
 #include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -362,8 +363,13 @@ void world_on_modules_loaded();
 /// with them set, a start is refused with the reason in why.
 /// </summary>
 enum class NetRole { None, Host, Client };
-bool net_session_host(uint16_t port, const char* callsign, std::string* why);
-bool net_session_join(const char* host, uint16_t port, const char* callsign, std::string* why);
+bool net_session_host(uint16_t port, const char* callsign, const std::string& password, std::string* why);
+bool net_session_join(const char* host, uint16_t port, const char* callsign, const std::string& password,
+                      std::string* why);
+/// <summary>A joined session's mission fetch was refused for the password. Menus.</summary>
+bool net_session_wrong_password();
+/// <summary>world_sync.cpp: the mission fetch was refused for the password.</summary>
+bool world_fetch_wrong_password();
 void net_session_close();
 NetRole net_session_role();
 /// <summary>A lobby session is open: the aircraft and weapon trackers are wanted. Any thread.</summary>
@@ -371,12 +377,16 @@ bool net_session_wanted();
 /// <summary>host.cpp: host mode is on (the variable or a lobby session). Any thread.</summary>
 bool host_configured();
 /// <summary>host.cpp, menus only: starts or stops host mode for a lobby session; why: a reason literal.</summary>
-bool host_session_start(const char* addr, uint16_t port, const char* callsign, const char** why);
+bool host_session_start(const char* addr, uint16_t port, const char* callsign, const std::string& password,
+                        const char** why);
 void host_session_stop();
 /// <summary>host.cpp: the bound port once the network thread runs (false before); failed: it could not bind.</summary>
 bool host_session_port(uint16_t* port, bool* failed);
 /// <summary>client.cpp, menus only: starts or stops client mode for a lobby session (it connects when a flight starts).</summary>
-bool client_session_start(const char* host, uint16_t port, const char* callsign, const char** why);
+bool client_session_start(const char* host, uint16_t port, const char* callsign, const std::string& password,
+                          const char** why);
+/// <summary>client.cpp: the session password's key of the configured client (for the mission fetch).</summary>
+bool client_auth_key(net::AuthKey* out);
 void client_session_stop();
 /// <summary>world_sync.cpp, menus only: the shared world for a lobby session (host: save and serve each Accept;
 /// client: fetch the host's mission and fly it). dir holds the world files unless the probe is on.</summary>

@@ -18,8 +18,9 @@ constexpr uint64_t kConnectMs = 5000, kRetryMs = 5000, kSilenceMs = 10000;
 
 }  // namespace
 
-bool MissionFetch::start(const char* host, uint16_t port, uint32_t tag, LogFn log, uint32_t poll_ms) {
-    if (state_.load() != State::Idle || !host || !*host || port == 0 || tag == 0) return false;
+bool MissionFetch::start(const char* host, uint16_t port, uint32_t tag, const AuthKey& key, LogFn log, uint32_t poll_ms) {
+    if (state_.load() != State::Idle || !host || !*host || port == 0 || tag == 0 || !key.set) return false;
+    key_ = key;
     host_ = host;
     port_ = port;
     tag_ = tag;
@@ -91,15 +92,8 @@ void MissionFetch::run() {
             const int r = enet_host_service(host, &ev, 10);
             const uint64_t now = ms_now();
             if (r > 0 && ev.type == ENET_EVENT_TYPE_CONNECT) {
-                connected = true;
+                connected = true;  // the request goes out with the answer to the host's password challenge
                 last_rx = now;
-                MissionRequestMsg rq{};
-                rq.have_id = have;
-                rq.tag = tag_;
-                uint8_t b[sizeof(rq)];
-                const size_t len = encode(rq, b, sizeof(b));
-                if (ENetPacket* p = enet_packet_create(b, len, ENET_PACKET_FLAG_RELIABLE))
-                    if (enet_peer_send(peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
             } else if (r > 0 && ev.type == ENET_EVENT_TYPE_DISCONNECT) {
                 break;
             } else if (r > 0 && ev.type == ENET_EVENT_TYPE_RECEIVE) {
@@ -110,7 +104,28 @@ void MissionFetch::run() {
                 MissionOfferMsg o;
                 MissionChunkHead ch;
                 const uint8_t* payload = nullptr;
-                if (!wt && n >= sizeof(Header) && d[0] == 'L' && d[1] == 'Z' && d[2] != kVersion) {
+                AuthChallengeMsg chal;
+                ByeMsg bye;
+                if (!wt && decode(d, n, chal) == Status::Ok) {
+                    AuthAnswerMsg a;
+                    MissionRequestMsg rq{};
+                    rq.have_id = have;
+                    rq.tag = tag_;
+                    uint8_t ab[sizeof(AuthAnswerMsg)], rb[sizeof(MissionRequestMsg)];
+                    auto send = [&](const uint8_t* src, size_t len) {
+                        if (ENetPacket* p = enet_packet_create(src, len, ENET_PACKET_FLAG_RELIABLE))
+                            if (enet_peer_send(peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
+                    };
+                    if (auth_answer(key_, chal, &a)) {
+                        // Reliable and in order: the host reads the answer before the request.
+                        send(ab, encode(a, ab, sizeof(ab)));
+                        send(rb, encode(rq, rb, sizeof(rb)));
+                    }
+                } else if (!wt && decode(d, n, bye) == Status::Ok && bye.reason == kByeWrongPassword) {
+                    say("net: mission fetch: the host refused the session password; not asking again");
+                    wrong_password_.store(true, std::memory_order_release);
+                    refused = true;
+                } else if (!wt && n >= sizeof(Header) && d[0] == 'L' && d[1] == 'Z' && d[2] != kVersion) {
                     say("net: mission fetch: the host speaks protocol v%u (this client is v%u); not asking again",
                         static_cast<unsigned>(d[2]), static_cast<unsigned>(kVersion));
                     refused = true;

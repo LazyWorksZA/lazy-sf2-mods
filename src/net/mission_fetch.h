@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "net/auth.h"
 #include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::net {
@@ -30,9 +31,10 @@ public:
 
     /// <summary>
     /// Starts the thread and returns at once. host is a name or numeric IPv4 address; tag is the client's world tag
-    /// (not 0), which the host keys its seat by; poll_ms is the time between asks.
+    /// (not 0), which the host keys its seat by; key answers the host's password challenge on each connection (no
+    /// request goes out before it); poll_ms is the time between asks.
     /// </summary>
-    bool start(const char* host, uint16_t port, uint32_t tag, LogFn log, uint32_t poll_ms = 5000);
+    bool start(const char* host, uint16_t port, uint32_t tag, const AuthKey& key, LogFn log, uint32_t poll_ms = 5000);
     /// <summary>Ends the thread (joins it). Safe to call twice.</summary>
     void stop();
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -42,6 +44,8 @@ public:
     uint32_t latest_id() const { return latest_id_.load(std::memory_order_acquire); }
     /// <summary>The seat the host gave in its latest offer (kNoSeat: none).</summary>
     uint8_t latest_seat() const { return latest_seat_.load(std::memory_order_acquire); }
+    /// <summary>The host refused the session password: the fetch has stopped asking. Any thread.</summary>
+    bool wrong_password() const { return wrong_password_.load(std::memory_order_acquire); }
 
 private:
     void run();
@@ -55,6 +59,8 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<uint32_t> latest_id_{0};
     std::atomic<uint8_t> latest_seat_{kNoSeat};
+    std::atomic<bool> wrong_password_{false};
+    AuthKey key_{};
     std::mutex mx_;
     bool fresh_ = false;           // under mx_: packed_ is not taken yet
     std::vector<uint8_t> packed_;  // under mx_

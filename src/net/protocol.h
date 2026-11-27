@@ -8,9 +8,9 @@
 namespace LazyWorks::SF2Patch::net {
 
 inline constexpr uint16_t kMagic = 0x5A4C;  // bytes 'L','Z' on the wire (little-endian)
-// v3 adds the shared-world messages (world_proto.h); v4 the jet controls in AvatarState (Phase 5). Each version is a
-// clean break: an older peer is refused with BadVersion.
-inline constexpr uint8_t kVersion = 4;
+// v3 adds the shared-world messages (world_proto.h); v4 the jet controls in AvatarState (Phase 5); v5 the session
+// password (AuthChallenge, AuthAnswer). Each version is a clean break: an older peer is refused with BadVersion.
+inline constexpr uint8_t kVersion = 5;
 
 /// <summary>ENet channels.</summary>
 inline constexpr uint8_t kChannelReliable = 0;    // Hello, Welcome, PeerInfo, PeerLeft, Bye
@@ -26,6 +26,8 @@ enum class MsgType : uint8_t {
     Bye = 6,
     PeerInfo = 7,  // host to client only
     PeerLeft = 8,  // host to client only
+    AuthChallenge = 9,  // host to client, first on every connection
+    AuthAnswer = 10,    // client to host, before anything else
 };
 
 enum class Status {
@@ -99,6 +101,16 @@ struct PeerLeftMsg {
     uint16_t id;
     uint8_t reason;
 };
+inline constexpr size_t kAuthNonce = 16, kAuthMac = 32;
+struct AuthChallengeMsg {
+    Header h;
+    uint8_t nonce[kAuthNonce];  // fresh random bytes for this connection
+};
+struct AuthAnswerMsg {
+    Header h;
+    uint8_t client_nonce[kAuthNonce];
+    uint8_t mac[kAuthMac];  // net/auth.h auth_mac: proves the password without sending it
+};
 #pragma pack(pop)
 
 // Wire layout (offset:size), all little-endian. Header: 0:2 magic, 2:1 version, 3:1 type.
@@ -112,6 +124,8 @@ static_assert(sizeof(StateMsg) == 78);    // 4:2 id, 6:4 seq, 10:8 time, 18:24 p
 static_assert(sizeof(ByeMsg) == 7);       // 4:2 id, 6:1 reason
 static_assert(sizeof(PeerInfoMsg) == 55); // 4:2 id, 6:16 callsign, 22:32 aircraft, 54:1 seat
 static_assert(sizeof(PeerLeftMsg) == 7);  // 4:2 id, 6:1 reason
+static_assert(sizeof(AuthChallengeMsg) == 20);  // 4:16 nonce
+static_assert(sizeof(AuthAnswerMsg) == 52);     // 4:16 client nonce, 20:32 mac
 
 /// <summary>
 /// The two-step join (a Phase 4 protocol rule). A host that does not yet know where its own jet should be relative to
@@ -146,6 +160,8 @@ inline constexpr uint8_t kByeWrongVersion = 6;
 /// <summary>Bye reasons added in v3 (shared world).</summary>
 inline constexpr uint8_t kByeWorldBehind = 7;   // host: this client's world events could not be queued
 inline constexpr uint8_t kByeWrongMission = 8;  // client: it flies another mission than the host's
+/// <summary>Bye reason added in v5: the AuthAnswer did not prove the session password (or did not come in time).</summary>
+inline constexpr uint8_t kByeWrongPassword = 9;
 
 /// <summary>A Bye reason in words, for log lines (the host's reasons; any number is safe).</summary>
 inline const char* bye_reason_name(uint8_t reason) {
@@ -159,6 +175,7 @@ inline const char* bye_reason_name(uint8_t reason) {
         case kByeWrongVersion: return "another protocol version";
         case kByeWorldBehind: return "the client could not keep up with the world events";
         case kByeWrongMission: return "another mission than the host's";
+        case kByeWrongPassword: return "wrong session password";
         default: return "unknown reason";
     }
 }
@@ -166,7 +183,8 @@ inline const char* bye_reason_name(uint8_t reason) {
 /// <summary>The largest message. HostCore's queues carry at most this many bytes per message.</summary>
 inline constexpr size_t kMaxMessage = 96;
 static_assert(sizeof(HelloMsg) <= kMaxMessage && sizeof(WelcomeMsg) <= kMaxMessage && sizeof(StateMsg) <= kMaxMessage &&
-              sizeof(PeerInfoMsg) <= kMaxMessage && sizeof(PeerLeftMsg) <= kMaxMessage && sizeof(ByeMsg) <= kMaxMessage);
+              sizeof(PeerInfoMsg) <= kMaxMessage && sizeof(PeerLeftMsg) <= kMaxMessage && sizeof(ByeMsg) <= kMaxMessage &&
+              sizeof(AuthAnswerMsg) <= kMaxMessage);
 
 /// <summary>Encoders fill in the header and write the message to out. They return the byte count, or 0 if cap is too small.</summary>
 size_t encode(const HelloMsg& m, uint8_t* out, size_t cap);
@@ -177,6 +195,8 @@ size_t encode(const StateMsg& m, uint8_t* out, size_t cap);
 size_t encode(const ByeMsg& m, uint8_t* out, size_t cap);
 size_t encode(const PeerInfoMsg& m, uint8_t* out, size_t cap);
 size_t encode(const PeerLeftMsg& m, uint8_t* out, size_t cap);
+size_t encode(const AuthChallengeMsg& m, uint8_t* out, size_t cap);
+size_t encode(const AuthAnswerMsg& m, uint8_t* out, size_t cap);
 
 /// <summary>Reads the type of a packet after checking length, magic and version.</summary>
 Status peek_type(const uint8_t* data, size_t len, MsgType& type);
@@ -193,6 +213,8 @@ Status decode(const uint8_t* data, size_t len, StateMsg& out);
 Status decode(const uint8_t* data, size_t len, ByeMsg& out);
 Status decode(const uint8_t* data, size_t len, PeerInfoMsg& out);
 Status decode(const uint8_t* data, size_t len, PeerLeftMsg& out);
+Status decode(const uint8_t* data, size_t len, AuthChallengeMsg& out);
+Status decode(const uint8_t* data, size_t len, AuthAnswerMsg& out);
 
 /// <summary>Copies at most N-1 bytes of src into a fixed field and always NUL-terminates it (zero-fills the rest).</summary>
 template <size_t N>

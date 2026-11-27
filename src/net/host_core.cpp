@@ -66,8 +66,9 @@ bool parse_host_spec(const char* spec, char* addr, size_t cap, uint16_t* port) {
     return true;
 }
 
-bool HostCore::start(const char* address, uint16_t port, LogFn log) {
-    if (thread_.joinable() || !address) return false;
+bool HostCore::start(const char* address, uint16_t port, LogFn log, const AuthKey& key) {
+    if (thread_.joinable() || !address || !key.set) return false;
+    key_ = key;
     std::snprintf(addr_, sizeof(addr_), "%s", address);
     req_port_ = port;
     log_ = log;
@@ -283,6 +284,12 @@ void HostCore::run() {
     uint32_t gens[kMaxClients] = {};
     uint64_t mission_ask_ms[kMaxClients] = {};
     uint32_t slot_tag[kMaxClients] = {};  // the world tag each connection carried (request or Hello)
+    // The session password: a connection is nothing to the game (no Connect event, no message, no mission) until its
+    // AuthAnswer proves the key for the nonce sent to it.
+    bool authed[kMaxClients] = {};
+    bool auth_refused[kMaxClients] = {};
+    uint8_t nonce[kMaxClients][kAuthNonce] = {};
+    uint64_t auth_deadline[kMaxClients] = {};
     uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
@@ -294,6 +301,9 @@ void HostCore::run() {
         hello_seen[slot] = false;
         bye_seen[slot] = false;
         version_refused[slot] = false;
+        authed[slot] = false;
+        auth_refused[slot] = false;
+        auth_deadline[slot] = 0;
         mission_ask_ms[slot] = 0;
         // The connection's seat is released when no other open connection carries the same tag.
         if (const uint32_t tag = slot_tag[slot]) {
@@ -459,9 +469,51 @@ void HostCore::run() {
             static_cast<unsigned>(o.host_seat));
     };
 
+    auto send_bye = [&](int slot, uint8_t reason) {
+        ByeMsg bye{};
+        bye.client_id = 0;
+        bye.reason = reason;
+        uint8_t out[sizeof(ByeMsg)];
+        send_raw(slot, out, encode(bye, out, sizeof(out)));
+        enet_peer_disconnect_later(peers[slot], 0);
+    };
+    auto refuse_auth = [&](int slot, const char* why) {
+        auth_refused[slot] = true;
+        auth_deadline[slot] = 0;
+        say("net: peer %u refused: %s", static_cast<unsigned>(slot + 1), why);
+        if (peers[slot]) send_bye(slot, kByeWrongPassword);
+    };
+    // Before the answer only the answer counts (and a version refusal, so an older build hears why).
+    auto handle_auth = [&](int slot, uint8_t channel, const uint8_t* data, size_t len) {
+        MsgType type{};
+        const Status ps = peek_type(data, len, type);
+        if (ps == Status::BadVersion && channel == kChannelReliable && !version_refused[slot] && peers[slot]) {
+            version_refused[slot] = true;
+            say("net: client %u speaks another protocol version (this host is v%u); refused", static_cast<unsigned>(slot + 1),
+                static_cast<unsigned>(kVersion));
+            send_bye(slot, kByeWrongVersion);
+            return;
+        }
+        if (auth_refused[slot]) return drop(n_state_);
+        AuthAnswerMsg a;
+        if (ps != Status::Ok || type != MsgType::AuthAnswer || channel != kChannelReliable ||
+            decode(data, len, a) != Status::Ok)
+            return drop(n_state_);  // anything else before the answer is dropped unread
+        if (!auth_verify(key_, nonce[slot], a)) return refuse_auth(slot, "wrong session password");
+        authed[slot] = true;
+        auth_deadline[slot] = 0;
+        // No log line: the client's mission fetch connects every few seconds.
+        HostEvent e;
+        e.kind = HostEvent::Connect;
+        e.slot = static_cast<uint8_t>(slot);
+        e.gen = gens[slot];
+        push_in(e, true);
+    };
+
     auto handle_packet = [&](int slot, uint8_t channel, const uint8_t* data, size_t len) {
         n_received_.fetch_add(1, std::memory_order_relaxed);
         if (len > kMaxPacket) return drop(n_format_);
+        if (!authed[slot]) return handle_auth(slot, channel, data, len);
         if (const uint8_t wt = peek_world_type(data, len)) return handle_world(slot, channel, wt, data, len);
         MsgType type{};
         const Status ps = peek_type(data, len, type);
@@ -532,8 +584,8 @@ void HostCore::run() {
                 bye_seen[slot] = true;
                 break;
             }
-            default:  // Welcome, Pong, PeerInfo and PeerLeft only travel from the host to a client
-                return drop(n_format_);
+            default:  // Welcome, Pong, PeerInfo, PeerLeft and AuthChallenge only travel from the host to a client;
+                return drop(n_format_);  // a second AuthAnswer is dropped too
         }
         HostEvent e;
         e.kind = HostEvent::Message;
@@ -572,11 +624,21 @@ void HostCore::run() {
                 bye_seen[slot] = false;
                 last_rx[slot] = now_ms();
                 pings[slot] = 0;
-                HostEvent e;
-                e.kind = HostEvent::Connect;
-                e.slot = static_cast<uint8_t>(slot);
-                e.gen = gens[slot];
-                push_in(e, true);
+                authed[slot] = false;
+                auth_refused[slot] = false;
+                // The Connect event waits for the answer (handle_auth). A fresh nonce per connection: an answer
+                // recorded from another one does not fit.
+                AuthChallengeMsg ch{};
+                uint8_t out[sizeof(AuthChallengeMsg)];
+                if (!auth_random(ch.nonce, kAuthNonce) || !send_raw(slot, out, encode(ch, out, sizeof(out)))) {
+                    say("net: peer %u: could not send the password challenge; connection ended", static_cast<unsigned>(slot + 1));
+                    enet_peer_disconnect_now(ev.peer, 0);
+                    ev.peer->data = nullptr;
+                    free_slot(slot);
+                    break;
+                }
+                std::memcpy(nonce[slot], ch.nonce, kAuthNonce);
+                auth_deadline[slot] = now_ms() + kAuthTimeoutMs;
                 break;
             }
             case ENET_EVENT_TYPE_DISCONNECT: {  // the peer left, or ENet's own timeout fired
@@ -588,8 +650,9 @@ void HostCore::run() {
                     e.kind = HostEvent::Disconnect;
                     e.slot = static_cast<uint8_t>(slot);
                     e.gen = gens[slot];
+                    const bool known = authed[slot];  // the game heard of it only once it gave the password
                     free_slot(slot);
-                    push_in(e, true);
+                    if (known) push_in(e, true);
                 }
                 break;
             }
@@ -671,6 +734,7 @@ void HostCore::run() {
         for (int i = 0; i < kMaxClients; ++i) {
             if (!peers[i]) continue;
             rtt_[i].store(peers[i]->roundTripTime, std::memory_order_relaxed);
+            if (auth_deadline[i] && now >= auth_deadline[i]) refuse_auth(i, "no password answer in time");
             if (now - last_rx[i] >= kTimeoutMs) {
                 enet_peer_disconnect_now(peers[i], 0);
                 HostEvent e;
@@ -678,8 +742,9 @@ void HostCore::run() {
                 e.slot = static_cast<uint8_t>(i);
                 e.gen = gens[i];
                 e.reason = 1;
+                const bool known = authed[i];
                 free_slot(i);
-                push_in(e, true);
+                if (known) push_in(e, true);
             }
         }
         if (now >= next_report) {

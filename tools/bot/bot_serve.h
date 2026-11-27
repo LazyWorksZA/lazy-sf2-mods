@@ -15,6 +15,7 @@ struct ServeConfig {
     uint16_t port = 7777;  // 0: any free port (see port_out)
     std::string bind = "127.0.0.1";  // numeric IPv4
     std::string callsign = "BOTHOST";
+    std::string password;  // the session password clients must prove (--password or LAZYSF2_PASSWORD); required
     std::string aircraft = "F-4E";
     Script script = Script::Orbit;  // not Formation
     /// <summary>

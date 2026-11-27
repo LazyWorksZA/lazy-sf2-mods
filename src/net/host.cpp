@@ -46,6 +46,7 @@ using avatar_logic::dist3;
 // no step runs then, and the network thread copies the address at its start).
 std::atomic<bool> g_enabled{false};
 bool g_from_env = false;
+net::AuthKey g_key;  // the session password's key (LAZYSF2_PASSWORD or the lobby); the password itself is not kept
 char g_addr[48] = {};
 uint16_t g_port = 0;
 char g_callsign[17] = "HOST";  // LAZYSF2_CALLSIGN, printable ASCII; the wire field keeps 15 characters
@@ -834,6 +835,16 @@ void on_step(void* aircraft, float dt, bool is_player) {
 
 }  // namespace
 
+// LAZYSF2_PASSWORD as UTF-8 (the developer flows' session password), or empty.
+static std::string env_password() {
+    wchar_t w[128] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LAZYSF2_PASSWORD", w, 128);
+    if (n == 0 || n >= 128) return {};
+    char u[512] = {};
+    const int m = WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(n), u, sizeof(u) - 1, nullptr, nullptr);
+    return m > 0 ? std::string(u, static_cast<size_t>(m)) : std::string();
+}
+
 void host_install() {
     wchar_t w[96] = {};
     const DWORD n = GetEnvironmentVariableW(L"LAZYSF2_HOST", w, 96);
@@ -863,6 +874,10 @@ void host_install() {
     const DWORD nc = GetEnvironmentVariableW(L"LAZYSF2_CALLSIGN", cs, 32);
     if (nc > 0 && nc < 32) avatar_logic::to_ascii(g_callsign, sizeof(g_callsign), cs);
     if (!g_callsign[0]) std::snprintf(g_callsign, sizeof(g_callsign), "HOST");
+    if (!net::make_auth_key(env_password(), &g_key)) {
+        LOG("net: host off (a session password is required: set LAZYSF2_PASSWORD)");
+        return;
+    }
     g_from_env = true;
     g_enabled = true;
 }
@@ -905,7 +920,7 @@ bool start_running() {
     g_epoch = sim_player_epoch();
     g_running.store(true);
     // Returns at once; the thread binds and logs "net: host on udp <addr>:<port>" (or why it could not).
-    if (!g_core->start(g_addr, g_port, core_log)) {
+    if (!g_core->start(g_addr, g_port, core_log, g_key)) {
         g_running.store(false);
         LOG("net: host off (could not start the network thread)");
         return false;
@@ -926,13 +941,18 @@ void host_on_modules_loaded() {
 
 bool host_configured() { return g_enabled.load(); }
 
-bool host_session_start(const char* addr, uint16_t port, const char* callsign, const char** why) {
+bool host_session_start(const char* addr, uint16_t port, const char* callsign, const std::string& password,
+                        const char** why) {
     if (g_from_env) {
         *why = "LAZYSF2_HOST is set for this launch";
         return false;
     }
     if (g_enabled.load() || g_running.load()) {
         *why = "a host session is already running";
+        return false;
+    }
+    if (!net::make_auth_key(password, &g_key)) {
+        *why = "a session password is required";
         return false;
     }
     std::snprintf(g_addr, sizeof(g_addr), "%s", addr);
@@ -977,6 +997,7 @@ void host_session_stop() {
         g_seat_plan = net::SeatPlan{};
     }
     g_enabled = false;
+    g_key = net::AuthKey{};
     LOG("net: host session closed");
 }
 
