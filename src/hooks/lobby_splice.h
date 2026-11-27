@@ -47,6 +47,9 @@ inline constexpr LobbyText kLobbyTexts[] = {
     {L"TXT_LAZY_LOBBY_COL_STATUS", L"Status"},
     {L"TXT_LAZY_LOBBY_PASSWORD", L"Session password"},
     {L"TXT_LAZY_LOBBY_PASS_HINT", L"Required. The host sets it; players type the same."},
+    {L"TXT_LAZY_LOBBY_DONE", L"Done"},
+    {L"TXT_LAZY_LOBBY_DONE_INFO", L"Back to the lobby: the players get this mission."},
+    {L"TXT_LAZY_LOBBY_HANGAR_READY", L"Ready: back to the lobby."},
     {L"TXT_LAZY_LOBBY_SEAT_PREV", L"< Seat"},
     {L"TXT_LAZY_LOBBY_SEAT_NEXT", L"Seat >"},
     {L"TXT_LAZY_LOBBY_SEAT_INFO", L"Take the previous or next free seat in your flight."},
@@ -99,5 +102,18 @@ bool splice_main_screen_button(std::wstring& text);
 /// already defined or the path is not usable in an ini value.
 /// </summary>
 bool splice_lobby_screen(std::wstring& text, const std::wstring& menu_code_dll);
+
+/// <summary>
+/// SINGLEMISSIONSCREEN.INI while hosting a lobby session (L5): Cancel goes back to the host screen, and the Mission
+/// Editor button is hidden. False (text untouched) if the file is not as expected.
+/// </summary>
+bool splice_single_mission_for_lobby(std::wstring& text);
+
+/// <summary>
+/// HANGARSCREEN.INI in a lobby session (L5, L6): Fly reads Done (host) or Ready (client), the client's Loadout button
+/// is hidden, and a hidden button going back to the lobby screen is added as the next MenuItem. Returns that item's
+/// number (the Hangar hook posts it instead of Fly), or 0 and leaves the text untouched if the file is not as expected.
+/// </summary>
+int splice_hangar_for_lobby(std::wstring& text, bool host);
 
 }  // namespace LazyWorks::SF2Patch::hooks

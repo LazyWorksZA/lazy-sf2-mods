@@ -152,7 +152,7 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     ini.button(at(session_item::kAction), L"", L"LargerTextRight",
                host ? L"TXT_LAZY_LOBBY_LAUNCH" : L"TXT_LAZY_LOBBY_READY", 976, 694,
                host ? L"TXT_LAZY_LOBBY_LAUNCH_INFO" : L"TXT_LAZY_LOBBY_READY_INFO");
-    ini.button(at(session_item::kMissionButton), L"", L"LargerTextCenter",
+    ini.button(at(session_item::kMissionButton), host ? L"SingleMissionScreen" : L"HangarScreen", L"LargerTextCenter",
                host ? L"TXT_LAZY_LOBBY_SETUP" : L"TXT_LAZY_LOBBY_BRIEFING", 298, 575,
                host ? L"TXT_LAZY_LOBBY_SETUP_INFO" : L"TXT_LAZY_LOBBY_BRIEFING_INFO");
     ini.text(at(4), L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
@@ -195,6 +195,63 @@ bool splice_main_screen_button(std::wstring& text) {
     }
     text = std::move(t);
     return true;
+}
+
+bool splice_single_mission_for_lobby(std::wstring& text) {
+    std::wstring t = text;
+    size_t b = 0, e = 0;
+    if (!section_range(t, L"CancelButton", b, e)) return false;
+    set_key(t, b, e, L"DestinationMenu", kLobbyHostScreen);
+    if (section_range(t, L"MissionEditorButton", b, e)) {
+        set_key(t, b, e, L"Active", L"FALSE");
+        set_key(t, b, e, L"Enabled", L"FALSE");
+    }
+    text = std::move(t);
+    return true;
+}
+
+int splice_hangar_for_lobby(std::wstring& text, bool host) {
+    std::wstring t = text;
+    size_t b = 0, e = 0;
+    if (!section_range(t, L"HangarScreen", b, e) || lower(t).find(L"[lazylobbyreturn]") != std::wstring::npos) return 0;
+    // The next free MenuItem number of the screen, and the line after its last MenuItem line.
+    int max_id = 0;
+    size_t ins = b;
+    for (size_t p = t.find(L"MenuItem", b); p != std::wstring::npos && p < e; p = t.find(L"MenuItem", p + 8)) {
+        if (p > 0 && t[p - 1] != L'\n') continue;
+        int id = 0;
+        if (swscanf_s(t.c_str() + p, L"MenuItem%d=", &id) != 1) continue;
+        if (id > max_id) max_id = id;
+        const size_t eol = t.find(L'\n', p);
+        ins = (eol == std::wstring::npos) ? t.size() : eol + 1;
+    }
+    if (max_id <= 0 || max_id > 998) return 0;
+    const int id = max_id + 1;
+    wchar_t line[64];
+    swprintf_s(line, L"MenuItem%03d=LazyLobbyReturn\r\n", id);
+    t.insert(ins, line);
+    if (section_range(t, L"FlyButton", b, e)) {
+        set_key(t, b, e, L"TextStringID", host ? L"TXT_LAZY_LOBBY_DONE" : L"TXT_LAZY_LOBBY_READY");
+        set_key(t, b, e, L"InfoTextStringID", host ? L"TXT_LAZY_LOBBY_DONE_INFO" : L"TXT_LAZY_LOBBY_HANGAR_READY");
+    }
+    if (!host && section_range(t, L"LoadoutButton", b, e)) {  // clients fly the host's loadout (v1)
+        set_key(t, b, e, L"Active", L"FALSE");
+        set_key(t, b, e, L"Enabled", L"FALSE");
+    }
+    if (!t.empty() && t.back() != L'\n') t += L"\r\n";
+    t += L"\r\n[LazyLobbyReturn]\r\n"
+         L"MenuItemType=TEXTBUTTON\r\n"
+         L"DestinationMenu=";
+    t += host ? kLobbyHostScreen : kLobbyJoinScreen;
+    t += L"\r\n"
+         L"TextSetting=LargerTextLeft\r\n"
+         L"ButtonSetting=MenuButtonSetting\r\n"
+         L"TextStringID=TXT_LAZY_LOBBY_BLANK\r\n"
+         L"TextPosition=-200,-200\r\n"
+         L"Active=FALSE\r\n"
+         L"Enabled=FALSE\r\n";
+    text = std::move(t);
+    return id;
 }
 
 bool splice_lobby_screen(std::wstring& text, const std::wstring& menu_code_dll) {

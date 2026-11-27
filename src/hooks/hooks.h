@@ -106,6 +106,15 @@ void menu_on_modules_loaded();
 /// loaded yet, an unexpected build, an unknown path). Decides once and logs it. Menu thread.
 /// </summary>
 std::wstring lobby_menu_code_path();
+/// <summary>menu_hooks.cpp: the Hangar's hidden back-to-lobby item number in this lobby session's Hangar (0: none).</summary>
+int lobby_hangar_return_item();
+/// <summary>lobby_flow.cpp: hooks HangarScreen.dll's event handler (Fly in a lobby session goes back to the lobby).</summary>
+void lobby_flow_on_modules_loaded();
+/// <summary>lobby_screen.cpp: an int from the game's Options.ini object; false if it is not there.</summary>
+bool game_option_int(const wchar_t* section, const wchar_t* key, int* out);
+/// <summary>lobby_screen.cpp: the Hangar's handler (self) got an event in a lobby session; true if the lobby took it
+/// (Fly: back to the lobby).</summary>
+bool lobby_hangar_event(void* self, const int* ev);
 
 /// <summary>Reads LAZYSF2_PROBE_DIR once. The probe (developer tool) is active only when it is set. Call from DllMain.</summary>
 void install_probe_hooks();

@@ -73,7 +73,8 @@ std::atomic<bool> g_lobby_spliced{false};  // the last MenuSystem.ini read got t
 int g_selected = 0;                  // current selection on the Graphics page (UI thread)
 
 // Menu inis we edit as the file service reads them.
-enum class MenuFile : int { None, Options, MenuSystem, MainScreen };
+enum class MenuFile : int { None, Options, MenuSystem, MainScreen, SingleMission, Hangar };
+std::atomic<int> g_hangar_return{0};  // the Hangar's hidden back-to-lobby item in this menu session (0: none)
 
 bool ends_with_file(const wchar_t* name, const wchar_t* file) {
     const size_t n = wcslen(name), k = wcslen(file);
@@ -86,6 +87,12 @@ MenuFile menu_file(const wchar_t* name) {
     if (ends_with_file(name, L"OptionsScreen.ini")) return MenuFile::Options;
     if (ends_with_file(name, L"MenuSystem.ini")) return MenuFile::MenuSystem;
     if (ends_with_file(name, L"MainScreen.ini")) return MenuFile::MainScreen;
+    // Only while a lobby session is open: otherwise these screens stay stock.
+    if (net_session_role() != NetRole::None) {
+        if (ends_with_file(name, L"SingleMissionScreen.ini") && net_session_role() == NetRole::Host)
+            return MenuFile::SingleMission;
+        if (ends_with_file(name, L"HangarScreen.ini")) return MenuFile::Hangar;
+    }
     return MenuFile::None;
 }
 
@@ -359,6 +366,23 @@ size_t encode_ini(const std::wstring& out, bool wide, char* buf, unsigned bytes)
 int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
     bool wide = false;
     std::wstring text = decode_ini(buf, n, wide);
+    if (kind == MenuFile::SingleMission || kind == MenuFile::Hangar) {
+        const bool host = net_session_role() == NetRole::Host;
+        int item = 0;
+        const bool ok = kind == MenuFile::SingleMission ? splice_single_mission_for_lobby(text)
+                                                        : (item = splice_hangar_for_lobby(text, host)) != 0;
+        const size_t need = ok ? encode_ini(text, wide, buf, bytes) : 0;
+        if (!need) {
+            LOG("menu: %s left stock in the lobby session (not as expected, or no room)",
+                kind == MenuFile::SingleMission ? "SINGLEMISSIONSCREEN.INI" : "HANGARSCREEN.INI");
+            if (kind == MenuFile::Hangar) g_hangar_return = 0;
+            return n;
+        }
+        if (kind == MenuFile::Hangar) g_hangar_return = item;
+        LOG("menu: %s set for the lobby session%s", kind == MenuFile::SingleMission ? "Single Mission" : "Hangar",
+            kind == MenuFile::Hangar ? (host ? " (Fly reads Done)" : " (Fly reads Ready, no Loadout)") : " (Cancel returns to the lobby)");
+        return static_cast<int>(need);
+    }
     if (kind == MenuFile::MenuSystem) {
         g_lobby_spliced = false;
         const std::wstring dll = lobby_menu_code_path();
@@ -852,6 +876,8 @@ bool old_opts_still_loaded(HMODULE base) {
 }
 
 }  // namespace
+
+int lobby_hangar_return_item() { return g_hangar_return.load(); }
 
 bool install_menu_hooks() {
     HMODULE exe = GetModuleHandleW(nullptr);

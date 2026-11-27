@@ -608,6 +608,8 @@ bool load_page_path(const void* page, wchar_t* out, size_t cap) {
     return true;
 }
 
+void publish_mission(const Armed& a);  // below, with the start
+
 // source: null for the generated mission (written by MSN Save); else the Load page's file, copied byte for byte (loose
 // or from a cat, through the exe's file manager) so hand-made keys survive.
 void accept_save(const Ctx& c, void* page, const wchar_t* source) {
@@ -669,6 +671,20 @@ void accept_save(const Ctx& c, void* page, const wchar_t* source) {
     AcquireSRWLockExclusive(&g_lock);
     g_armed = Armed{true, c.msn, seed, n, s, msn_path, side_path};
     ReleaseSRWLockExclusive(&g_lock);
+    // A lobby session shares the mission now, in the menus, so the clients can read its briefing before the flight: the
+    // two values the start reads (density, mission start) come from the same Options.ini it reads them from. The start
+    // records them again and publishes the same mission.
+    if (net_session_role() == NetRole::Host) {
+        Armed early{true, c.msn, seed, n, s, msn_path, side_path};
+        if (game_option_int(L"GraphicsOptions", L"GroundObjectDensity", &early.sidecar.density) &&
+            game_option_int(L"GameplayOptions", L"MissionStart", &early.sidecar.mission_start) &&
+            write_text(side_path, format_sidecar(early.sidecar), false)) {
+            publish_mission(early);
+            LOG("world: shared at Accept (density %d, mission start %d)", early.sidecar.density, early.sidecar.mission_start);
+        } else {
+            LOG("world: not shared at Accept (Options.ini density or mission start not readable); shared at the start");
+        }
+    }
 }
 
 // Join: a mission fetched from the host becomes the file to load (written to the probe folder as world_NNN.msn and

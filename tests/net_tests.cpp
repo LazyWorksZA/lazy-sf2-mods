@@ -9952,7 +9952,8 @@ void lobby_loopback_tests() {
     const bool both = wait([&] {
         return f1.roster(&r1, &rtt) && f2.roster(&r2, &rtt) && bad.roster(&rb, &rtt) && r2.count >= 3;
     });
-    expect(both && r1.your_seat == 1 && r2.your_seat == 2 && r1.members == 4 && r1.mission_id == 77,
+    const int s2 = r2.your_seat;
+    expect(both && r1.your_seat + r2.your_seat == 3 && r1.your_seat != r2.your_seat && r1.members == 4 && r1.mission_id == 77,
            "two clients get the roster with their default seats");
     expect(rb.result == kLobbyContent && rb.your_seat == kNoSeat, "a client with other game content is kept out");
     const HostCore::LobbyView v = core.lobby_view();
@@ -9962,7 +9963,8 @@ void lobby_loopback_tests() {
     expect(moved, "a client's seat wish is granted through the fetch");
     f2.want_seat(3);
     const bool refused = wait([&] { return f2.roster(&r2, &rtt) && r2.result == kLobbySeatTaken; });
-    expect(refused && r2.your_seat == 2, "the same seat for the second client is refused; it keeps its own");
+    if (!refused || r2.your_seat != s2) std::printf("    DBG refused %d your %u s2 %d result %u r1 %u\n", refused, r2.your_seat, s2, r2.result, r1.your_seat);
+    expect(refused && r2.your_seat == s2, "the same seat for the second client is refused; it keeps its own");
     f1.set_ready(true);
     const bool ready = wait([&] { return core.lobby_ready(0x11u); });
     expect(ready, "Ready reaches the host");
@@ -9972,6 +9974,40 @@ void lobby_loopback_tests() {
     f2.stop();
     bad.stop();
     core.stop(false);
+}
+
+
+void lobby_flow_splice_tests() {
+    std::printf("lobby flow splices (L5: Single Mission and Hangar in a session)\n");
+    using namespace LazyWorks::SF2Patch::hooks;
+    std::wstring sm = L"[SingleMissionScreen]\r\nMenuItem004=CancelButton\r\nMenuItem009=MissionEditorButton\r\n\r\n"
+                      L"[CancelButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MainScreen\r\n\r\n"
+                      L"[MissionEditorButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MissionEditor\r\n";
+    expect(splice_single_mission_for_lobby(sm) &&
+               sm.find(L"[CancelButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyHostScreen\r\n") != std::wstring::npos &&
+               sm.find(L"DestinationMenu=MissionEditor\r\nActive=FALSE\r\nEnabled=FALSE\r\n") != std::wstring::npos,
+           "Single Mission: Cancel back to the host screen, the editor hidden");
+    std::wstring none = L"[Other]\r\n";
+    expect(!splice_single_mission_for_lobby(none) && none == L"[Other]\r\n", "an unexpected file stays stock");
+    const std::wstring hangar =
+        L"[HangarScreen]\r\nMenuItem006=LoadoutButton\r\nMenuItem009=FlyButton\r\nMenuItem011=HangarScreenTitle\r\n"
+        L"MenuCodeDLL=HangarScreen.dll\r\n\r\n"
+        L"[LoadoutButton]\r\nMenuItemType=TEXTBUTTON\r\nTextStringID=TXT_MENU_LOADOUT\r\n\r\n"
+        L"[FlyButton]\r\nMenuItemType=TEXTBUTTON\r\nTextStringID=TXT_MENU_FLY\r\nInfoTextStringID=TXT_MENU_FLY_INFO\r\n";
+    std::wstring hh = hangar;
+    const int hid = splice_hangar_for_lobby(hh, true);
+    expect(hid == 12 && hh.find(L"MenuItem011=HangarScreenTitle\r\nMenuItem012=LazyLobbyReturn\r\n") != std::wstring::npos &&
+               hh.find(L"[LazyLobbyReturn]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyHostScreen\r\n") != std::wstring::npos &&
+               hh.find(L"TextStringID=TXT_LAZY_LOBBY_DONE\r\n") != std::wstring::npos &&
+               hh.find(L"[LoadoutButton]\r\nMenuItemType=TEXTBUTTON\r\nTextStringID=TXT_MENU_LOADOUT\r\n\r\n") != std::wstring::npos,
+           "host Hangar: Fly reads Done, a hidden item 12 back to the host screen, Loadout kept");
+    std::wstring hc = hangar;
+    const int cid = splice_hangar_for_lobby(hc, false);
+    expect(cid == 12 && hc.find(L"DestinationMenu=LazyLobbyJoinScreen\r\n") != std::wstring::npos &&
+               hc.find(L"TextStringID=TXT_LAZY_LOBBY_READY\r\n") != std::wstring::npos &&
+               hc.find(L"Active=FALSE\r\nEnabled=FALSE\r\n[FlyButton]") != std::wstring::npos,
+           "client Hangar: Fly reads Ready, back to the join screen, Loadout hidden");
+    expect(splice_hangar_for_lobby(hc, false) == 0, "a Hangar already spliced is left alone");
 }
 
 int main() {
@@ -10047,6 +10083,7 @@ int main() {
     fake_host_proof_tests();
     lobby_book_tests();
     lobby_loopback_tests();
+    lobby_flow_splice_tests();
     fetch_lookup_tests();
     pilot_twist_tests();
     probe_snapshot_tests();

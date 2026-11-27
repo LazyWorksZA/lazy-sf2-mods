@@ -39,6 +39,10 @@ constexpr int kTextSet = 0x0c / 4;  // TEXT SetText(text)
 constexpr int kEditSet = 0x18 / 4;  // EDIT SetText(text)
 constexpr int kEditGet = 0x1c / 4;  // EDIT GetText(buf, n)
 constexpr int kCmdGoTo = 3;         // go to the item's DestinationMenu
+constexpr DWORD kMmgStamp = 0x51d21faa, kMmgSize = 0x25000;  // Core\MissionManager.dll
+constexpr DWORD kMmgVtableRva = 0x1b2c4;
+constexpr int kMmgSelectMission = 0x14 / 4;  // SelectMission(name): loads SingleMission, Campaign or InstantAction
+constexpr int kHangarFly = 9;               // the Hangar's Fly button (HANGARSCREEN.INI MenuItem009)
 constexpr int kCmdArg = 10;         // third PostCommand argument, as the stock screens pass it
 
 constexpr wchar_t kAddressSection[] = L"OtherOptions";
@@ -151,6 +155,30 @@ std::wstring take_address() {
         }
     }
     return a;
+}
+
+bool parse_int(const wchar_t* s, int* out) {
+    wchar_t* end = nullptr;
+    const long v = std::wcstol(s, &end, 10);
+    if (!s[0] || !end || *end) return false;
+    *out = static_cast<int>(v);
+    return true;
+}
+
+/// <summary>Selects the Single Mission mission DLL through MMG, as the main menu's Single Mission button does.</summary>
+bool select_single_mission() {
+    HMODULE mm = GetModuleHandleW(L"MissionManager.dll");
+    if (!g_sys || !mm || !is_expected_build(mm, kMmgStamp, kMmgSize, "MissionManager.dll")) return false;
+    void* mmg = nullptr;
+    reinterpret_cast<Service_t>(vtable_slot(g_sys, kSysGetService))(g_sys, nullptr, L"MMG", &mmg);
+    if (!mmg) return false;
+    const bool ok = *static_cast<void**>(mmg) == at_rva(mm, kMmgVtableRva);
+    if (ok) {
+        using Select_t = int(__fastcall*)(void*, void*, const wchar_t*);
+        reinterpret_cast<Select_t>(vtable_slot(mmg, kMmgSelectMission))(mmg, nullptr, L"SingleMission");
+    }
+    reinterpret_cast<Service_t>(vtable_slot(g_sys, kSysReleaseService))(g_sys, nullptr, L"MMG", &mmg);
+    return ok;
 }
 
 void post(int cmd, int a) {
@@ -485,8 +513,18 @@ void session_click(int item) {
             }
             break;
         case session_item::kMissionButton:
-            LOG("lobby: %s clicked; not wired up yet", host ? "Set up mission" : "Briefing");
-            set_status(host ? L"Mission set-up is not available yet." : L"The briefing is not available yet.");
+            if (host) {
+                if (!select_single_mission()) {
+                    LOG("lobby: Set up mission: the mission manager is not as expected");
+                    set_status(L"The Single Mission screen cannot be opened from here.");
+                    break;
+                }
+                LOG("lobby: Set up mission: opening Single Mission");
+                post(kCmdGoTo, item);  // its DestinationMenu: SingleMissionScreen
+            } else {
+                LOG("lobby: Briefing clicked; not wired up yet");
+                set_status(L"The briefing is not available yet.");
+            }
             break;
         case session_item::kSeatPrev:
         case session_item::kSeatNext:
@@ -595,6 +633,37 @@ void pin_this_module() {
 }
 
 }  // namespace
+
+bool game_option_int(const wchar_t* section, const wchar_t* key, int* out) {
+    wchar_t buf[32] = {};
+    return read_option(section, key, buf, _countof(buf)) && parse_int(buf, out);
+}
+
+bool lobby_hangar_event(void* self, const int* ev) {
+    if (!self || !ev) return false;
+    void* mnu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);  // the menu-code base class keeps MNU there
+    HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
+    if (!mnu || !mnu_dll || *static_cast<void**>(mnu) != at_rva(mnu_dll, kMnuVtableRva)) return false;
+    if (ev[0] != 3 || (ev[3] & 0xf) != 0 || ev[2] != 0) return false;  // a left-button release
+    const int item = reinterpret_cast<ItemUnderPointer_t>(vtable_slot(mnu, kMnuItemUnderPointer))(mnu, nullptr);
+    if (item != kHangarFly) return false;
+    const int back = lobby_hangar_return_item();
+    void* sel = nullptr;
+    if (back <= 0) return false;
+    reinterpret_cast<GetItem_t>(vtable_slot(mnu, kMnuGetItem))(mnu, nullptr, back, kIfaceSelection, &sel);
+    if (!sel) {
+        LOG("lobby: the Hangar's way back to the lobby is missing; Fly starts the flight");
+        return false;
+    }
+    const bool host = net_session_role() == NetRole::Host;
+    if (!host) {
+        g_ready = true;
+        world_lobby_ready(true);
+    }
+    LOG("lobby: Hangar %s: back to the lobby", host ? "Done" : "Ready");
+    reinterpret_cast<PostCommand_t>(vtable_slot(mnu, kMnuPostCommand))(mnu, nullptr, kCmdGoTo, back, kCmdArg);
+    return true;
+}
 
 std::wstring lobby_menu_code_path() {
     static int state = 0;  // 0 = undecided, 1 = ok, -1 = not available
