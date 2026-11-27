@@ -10485,8 +10485,10 @@ void mission_content_tests() {
     expect(w.size() == 2 && w[0] == "M117" && w[1] == "MER_F105", "content: the weapons and racks of the mission's loadout section, each once");
     const auto all = hk::loadout_weapons(lo, "Nope");
     const auto def = hk::loadout_weapons(ini("[Default]\r\nLoadout[01].WeaponType=Mk82\r\n[Other]\r\nLoadout[01].WeaponType=Mk84\r\n"), "");
-    expect(all.size() == 3 && all[2] == "AIM-9B" && def.size() == 1 && def[0] == "Mk82",
-           "content: no loadout section named: the [Default] one, else every section");
+    bool none = false;
+    hk::loadout_weapons(lo, "Nope", nullptr, &none);
+    expect(all.empty() && none && def.size() == 1 && def[0] == "Mk82",
+           "content: no loadout section named: the [Default] one, else none (not every section)");
     const auto ty = ini("[TargetType001]\r\nName=barrack1\r\nUseGroundObject=FALSE\r\n[TargetType002]\r\nName=SA-2\r\n"
                         "UseGroundObject=TRUE\r\n[TargetType003]\r\nName=sa-2\r\nUseGroundObject=TRUE\r\n");
     const auto g = hk::theatre_ground_objects(ty);

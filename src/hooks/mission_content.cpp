@@ -136,7 +136,12 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
         if (!have('A', type)) out.push_back({'A', type, h});
         for (const auto& [key, bytes] : named) {
             if (key != "loadoutfile") continue;
-            for (const auto& w : loadout_weapons(acmi::parse_ini(bytes.data(), bytes.size()), loadout, &dropped)) {
+            bool no_section = false;
+            const auto ws = loadout_weapons(acmi::parse_ini(bytes.data(), bytes.size()), loadout, &dropped, &no_section);
+            if (no_section && !loadout.empty())  // the header's player type names no loadout: its flight does
+                LOG("lobby: %s has no loadout \"%s\" and no [Default] one; its weapons are not compared", type.c_str(),
+                    loadout.c_str());
+            for (const auto& w : ws) {
                 bool seen = false;
                 for (const auto& x : weapons) seen = seen || acmi::to_lower_ascii(x) == acmi::to_lower_ascii(w);
                 if (!seen) weapons.push_back(w);

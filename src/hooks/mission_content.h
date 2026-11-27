@@ -73,18 +73,20 @@ inline MissionUses mission_uses(const acmi::Ini& msn) {
 }
 
 /// <summary>The weapons and racks a loadout section of an aircraft's loadout ini names (Loadout[nn].WeaponType and
-/// .RackType), each once. Without that section (none named, or not in the file) the [Default] section, else every
-/// section: the flight may fly any of them.</summary>
+/// .RackType), each once. Without that section (none named, or not in the file) the [Default] section, else none:
+/// listing every section would name weapons nobody flies and refuse a smaller install (*no_section is set then).
+/// </summary>
 inline std::vector<std::string> loadout_weapons(const acmi::Ini& loadout_ini, const std::string& section,
-                                                std::vector<std::string>* dropped = nullptr) {
+                                                std::vector<std::string>* dropped = nullptr, bool* no_section = nullptr) {
     std::vector<std::string> out;
     std::vector<const acmi::IniSection*> from;
+    if (no_section) *no_section = false;
     if (const acmi::IniSection* s = section.empty() ? nullptr : loadout_ini.find(section)) {
         from.push_back(s);
     } else if (const acmi::IniSection* d = loadout_ini.find("Default")) {
         from.push_back(d);
-    } else {
-        for (const acmi::IniSection& sec : loadout_ini.sections) from.push_back(&sec);
+    } else if (no_section) {
+        *no_section = true;
     }
     for (const acmi::IniSection* s : from) {
         for (const auto& kv : s->items) {
