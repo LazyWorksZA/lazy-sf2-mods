@@ -3,7 +3,7 @@
 // starts, it offers its world to the host as a snapshot (aircraft poses, state, throttle, fuel and stores; vehicles'
 // poses, speeds and headings; flights' waypoints; the mission clock) and marks its world remote. The host takes the
 // offer only if the client's mission clock is ahead of its own (the client loaded first), writes it into its world and
-// answers. The probe's Ctrl+Shift+N hands the local world over to "itself" for the solo test: capture and mark remote,
+// answers. The probe's Ctrl+Shift+C hands the local world over to "itself" for the solo test: capture and mark remote,
 // then rewind to the capture and hand every copy back to its AI. Weapons in flight stay with their launcher (their
 // later hits are blocked or claimed as before). Game thread. See lazy-sf2-recon: network-recon §12.
 #include <windows.h>
@@ -279,7 +279,7 @@ void answer(int slot, uint32_t epoch, bool taken) {
     if (n) host_world_send_to(slot, buf, n, true);
 }
 
-// ---- the solo probe (Ctrl+Shift+N) ----
+// ---- the solo probe (Ctrl+Shift+C) ----
 
 std::atomic<bool> g_probe_request{false};
 net::HandoverSnapshot g_probe_snap;

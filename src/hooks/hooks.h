@@ -485,7 +485,7 @@ int world_set_mission_clock(float t10, float t14);
 /// <summary>The ground-contact step's detour (remote_ground.cpp, handover task 2).</summary>
 void __fastcall h_ground_contact(void* obj);
 extern void* g_o_ground_contact;
-/// <summary>Authority handover (handover.cpp, task 4): the probe's solo hand-back (Ctrl+Shift+N); the step callback;
+/// <summary>Authority handover (handover.cpp, task 4): the probe's solo hand-back (Ctrl+Shift+C); the step callback;
 /// the client's offer when the host's session starts (if it loaded first); the host's handling of an offer; the
 /// client's handling of the answer.</summary>
 void handover_probe_request();
