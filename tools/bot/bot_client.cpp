@@ -653,7 +653,8 @@ BotResult run_bot(const BotConfig& cfg) {
     r.post(buf, encode(answer, buf, sizeof(buf)), kChannelReliable, false);
     if (cfg.world_join) {
         // The host keys a shared-world seat by the tag of a mission request: ask first, on the same connection.
-        res.world_tag = (static_cast<uint32_t>(wall_now() * 1e6) ^ (cfg.rng_seed * 2654435761u)) | 1u;
+        res.world_tag = cfg.world_tag ? cfg.world_tag
+                                      : (static_cast<uint32_t>(wall_now() * 1e6) ^ (cfg.rng_seed * 2654435761u)) | 1u;
         MissionRequestMsg rq{};
         rq.have_id = 0;
         rq.tag = res.world_tag;

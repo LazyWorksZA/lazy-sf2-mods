@@ -33,6 +33,7 @@ struct BotConfig {
     /// the bot's seat by it; the chunks are counted, not kept), then Hello with that tag, and count the world
     /// messages that follow (the stream, events, jet states...).</summary>
     bool world_join = false;
+    uint32_t world_tag = 0;  // world_join: this tag (a lobby pilot's, whose seat the host keeps) instead of a fresh one
     uint32_t rng_seed = 12345;
     std::function<void(const char*)> log;     // may be empty
     const std::atomic<bool>* cancel = nullptr;  // set to end the run early (with a Bye)

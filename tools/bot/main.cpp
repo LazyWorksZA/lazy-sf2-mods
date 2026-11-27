@@ -32,6 +32,7 @@ void usage() {
         "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S]\n"
         "            [--stores [WEAPON]] [--damage [A,SLOT,MEMBER]] [--clock S] [--seat-state] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
+        "lazysf2-bot --lobby ADDR:PORT --content HEX [--callsign BOT1] [--seat N] [--duration SECONDS] [--log FILE]\n"
         "Every mode needs the session password: --password TEXT, or LAZYSF2_PASSWORD (the host proves it by challenge;\n"
         "the password never travels).\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
@@ -43,6 +44,12 @@ void usage() {
         "--log-remote logs one line per second per remote jet. --drop exits without Bye (tests the host's 5 s timeout).\n"
         "--world-join joins a shared-world host: asks for its mission (a seat tag), then Hello with that tag, and counts\n"
         "the world stream and events it gets.\n"
+        "--lobby joins a host's lobby as a pilot, as the game's join screen does: it shows in the roster with its\n"
+        "callsign, asks for seat N (1-based, as the lobby shows it) once the host has a mission, presses Ready for that\n"
+        "mission (again after each new one), logs each roster change, and when the host launches follows it as a\n"
+        "--world-join client with the lobby's tag for --duration (default 30 s), then leaves. --content is the host's\n"
+        "content hash (its lazysf2.log: \"lobby: content hash 0x...\"); another value is kept out. Exit code 0 ok\n"
+        "(the flight's code if it flew), 2 refused or stopped, 3 no roster within 15 s.\n"
         "Client exit code 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no ENet connection within\n"
         "4 s, or no Welcome within 15 s of connecting, 4 the host closed the connection or went silent for 4 s.\n"
         "Serve defaults: bind 127.0.0.1, BOTHOST, F-4E, orbit, until Ctrl+C. The jet's States go out at 20 Hz. Without\n"
@@ -173,6 +180,113 @@ bool load_world(const char* path, std::vector<LazyWorks::SF2Patch::bot::ServeCon
     return !out->empty();
 }
 
+// --lobby: a pilot in a host's lobby (roster, seat, Ready), following the host's Launch as a world-join client.
+int run_lobby(const std::string& spec, uint32_t content, int seat, LazyWorks::SF2Patch::bot::BotConfig cfg) {
+    namespace net = LazyWorks::SF2Patch::net;
+    namespace bot = LazyWorks::SF2Patch::bot;
+    const size_t colon = spec.rfind(':');
+    const int port = colon == std::string::npos ? 0 : std::atoi(spec.c_str() + colon + 1);
+    if (colon == std::string::npos || port <= 0 || port > 65535) return 1;
+    net::MissionFetch fetch;
+    const net::AuthClient auth(cfg.password);
+    const uint32_t tag = (GetTickCount() ^ (GetCurrentProcessId() << 12)) | 1u;
+    fetch.enable_lobby(cfg.callsign.c_str(), content);
+    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, auth, fetch_log, 1000)) return 2;
+    char b[300];
+    std::snprintf(b, sizeof(b), "bot lobby: joining %s as \"%s\" (tag 0x%08x, content 0x%08x)", spec.c_str(),
+                  cfg.callsign.c_str(), static_cast<unsigned>(tag), static_cast<unsigned>(content));
+    log_line(b);
+    uint32_t ready_for = 0, flown = 0, shown_id = 0xffffffffu;
+    int shown_seat = -2, shown_count = -1;
+    uint32_t shown_launch = 0xffffffffu;
+    bool asked = false, kept_out = false;
+    int code = 0;
+    const ULONGLONG give_up = GetTickCount64() + 600000;  // ten minutes in the lobby at most
+    const ULONGLONG no_host = GetTickCount64() + 15000;   // ... and 15 s without a roster
+    bool have_roster = false;
+    while (!g_cancel.load() && GetTickCount64() < give_up) {
+        if (!have_roster && GetTickCount64() > no_host) {
+            log_line("bot lobby: no roster from the host in 15 s");
+            code = 3;
+            break;
+        }
+        if (fetch.state() != net::MissionFetch::State::Running || fetch.wrong_password() || fetch.host_unknown()) {
+            log_line(fetch.wrong_password() ? "bot lobby: the host refused the session password"
+                                            : "bot lobby: the fetch stopped (no host?)");
+            code = 2;
+            break;
+        }
+        net::LobbyRosterMsg r{};
+        uint32_t rtt = 0;
+        if (fetch.roster(&r, &rtt)) {
+            have_roster = true;
+            if (r.result == net::kLobbyContent) {
+                if (!kept_out) log_line("bot lobby: the host's content hash differs; kept out (check --content)");
+                kept_out = true;
+            }
+            const int you = r.your_seat == net::kNoSeat ? -1 : r.your_seat;
+            if (r.mission_id != shown_id || you != shown_seat || r.count != shown_count || r.launch_seq != shown_launch) {
+                shown_id = r.mission_id;
+                shown_seat = you;
+                shown_count = r.count;
+                shown_launch = r.launch_seq;
+                std::string rows;
+                for (size_t i = 0; i < r.count; ++i) {
+                    const net::LobbyRow& row = r.rows[i];
+                    char one[64];
+                    std::snprintf(one, sizeof(one), "%s#%d %s%s", i ? ", " : "", row.seat == net::kNoSeat ? 0 : row.seat + 1,
+                                  row.callsign[0] ? row.callsign : "AI",
+                                  (row.flags & net::kLobbyRowHost) ? " (host)" : (row.flags & net::kLobbyRowReady) ? " (ready)" : "");
+                    rows += one;
+                }
+                std::snprintf(b, sizeof(b), "bot lobby: mission 0x%08x, %u seats, our seat #%d, launch %u%s, ping %u ms: %s",
+                              static_cast<unsigned>(r.mission_id), static_cast<unsigned>(r.members), you + 1,
+                              static_cast<unsigned>(r.launch_seq & ~net::kLaunchFlying),
+                              (r.launch_seq & net::kLaunchFlying) ? " (flying)" : "", static_cast<unsigned>(rtt), rows.c_str());
+                log_line(b);
+            }
+            if (seat > 0 && !asked && r.members > 0 && r.result != net::kLobbyContent) {
+                asked = true;
+                fetch.want_seat(seat - 1);
+                std::snprintf(b, sizeof(b), "bot lobby: asking for seat #%d", seat);
+                log_line(b);
+            }
+            int ws = -1;
+            uint8_t wr = 0;
+            if (fetch.wish_answer(&ws, &wr)) {
+                std::snprintf(b, sizeof(b), "bot lobby: seat #%d %s", ws + 1, wr == net::kLobbyOk ? "granted" : "refused");
+                log_line(b);
+            }
+            if (r.mission_id && you >= 0 && ready_for != r.mission_id && r.result != net::kLobbyContent) {
+                ready_for = r.mission_id;
+                fetch.set_ready(true, r.mission_id);
+                std::snprintf(b, sizeof(b), "bot lobby: Ready for mission 0x%08x", static_cast<unsigned>(r.mission_id));
+                log_line(b);
+            }
+            const uint32_t launch = r.launch_seq & ~net::kLaunchFlying;
+            if ((r.launch_seq & net::kLaunchFlying) && launch != flown && ready_for == r.mission_id && you >= 0) {
+                flown = launch;
+                std::snprintf(b, sizeof(b), "bot lobby: the host launched (Launch %u); following as seat #%d",
+                              static_cast<unsigned>(launch), you + 1);
+                log_line(b);
+                cfg.host = spec;
+                cfg.world_join = true;
+                cfg.world_tag = tag;
+                const bot::BotResult res = bot::run_bot(cfg);
+                std::snprintf(b, sizeof(b), "bot lobby: the flight ended (code %d); back in the lobby", res.code);
+                log_line(b);
+                code = res.code;
+                break;  // one flight per run
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    fetch.leave(1000);
+    fetch.stop();
+    log_line("bot lobby: left");
+    return code;
+}
+
 // --fetch: asks a host for its mission, as the game's join does, and writes DIR\world_fetched.msn and its sidecar.
 int run_fetch(const std::string& spec, const std::string& dir, double duration, const std::string& password) {
     namespace net = LazyWorks::SF2Patch::net;
@@ -229,7 +343,9 @@ int main(int argc, char** argv) {
     bool serve = false, script_given = false;
     bool client_only = false, serve_only = false;  // options of one mode only
     double pause_at = -1, pause_for = -1;
-    std::string fetch_spec, fetch_out, mission_path, password;
+    std::string fetch_spec, fetch_out, mission_path, password, lobby_spec;
+    uint32_t lobby_content = 0;
+    int lobby_seat = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto val = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -240,7 +356,7 @@ int main(int argc, char** argv) {
                                                  "--offset", "--serve",    "--bind",     "--start",    "--record",
                                                  "--pause-at", "--pause-for", "--mission", "--fetch",
                                                  "--out", "--world", "--world-event", "--seats", "--jet", "--hit", "--launch", "--clock",
-                                                 "--password"};
+                                                 "--password", "--lobby", "--content", "--seat"};
         bool needs_value = false;
         for (const char* o : kNeedValue) needs_value = needs_value || a == o;
         if (needs_value && i + 1 >= argc) {
@@ -403,6 +519,15 @@ int main(int argc, char** argv) {
             fetch_out = v;
         } else if (a == "--password" && (v = val())) {
             password = v;
+        } else if (a == "--lobby" && (v = val())) {
+            lobby_spec = v;
+        } else if (a == "--content" && (v = val())) {
+            char* end = nullptr;
+            lobby_content = static_cast<uint32_t>(std::strtoul(v, &end, 16));
+            ok = end && end != v && !*end;
+        } else if (a == "--seat" && (v = val())) {
+            lobby_seat = std::atoi(v);
+            ok = lobby_seat >= 1 && lobby_seat <= 255;
         } else {
             ok = false;
         }
@@ -450,6 +575,14 @@ int main(int argc, char** argv) {
     cfg.password = scfg.password = password;
     SetConsoleCtrlHandler(on_ctrl, TRUE);
     int code = 0;
+    if (!lobby_spec.empty()) {
+        code = run_lobby(lobby_spec, lobby_content, lobby_seat, cfg);
+        if (code == 1) usage();
+        if (g_logfile) std::fclose(g_logfile);
+        g_logfile = nullptr;
+        g_done.store(true);
+        return code;
+    }
     if (!fetch_spec.empty()) {
         code = run_fetch(fetch_spec, fetch_out, cfg.duration, password);
         if (code == 1) usage();
