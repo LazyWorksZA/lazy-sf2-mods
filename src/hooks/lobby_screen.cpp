@@ -270,13 +270,15 @@ void host_frame() {
     }
 }
 
-/// <summary>The handler object the menu system calls (thiscall slots: 0 frame, 2 refresh, 3 input event).</summary>
+/// <summary>The handler object the menu system calls (thiscall slots: 0 frame(), 1 activate(int), 2 refresh(),
+/// 3 handle_event(event*); MenuSystem calls no other slot). The signatures must match: thiscall pops the arguments.</summary>
 class LobbyHandler {
 public:
     virtual void frame() {
         if (g_mnu && g_screen == Screen::Host) host_frame();
     }
-    virtual void unused() {}
+    // 0 when a popup or another screen opens over this one (MenuSystem +0xbde0), 1 when it is on top again (+0xbe70).
+    virtual void activate(int /*on_top*/) {}
     virtual void refresh() {}
     virtual void handle_event(const int* ev) {
         if (!g_mnu || !ev) return;
