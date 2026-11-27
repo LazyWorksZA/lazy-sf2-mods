@@ -3106,16 +3106,28 @@ void lobby_splice_tests() {
     expect(s.find(L"\r\n[NetworkConnectScreen]\r\nMenuType=NORMAL_MENU\r\n") != std::wstring::npos &&
                s.find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos,
            "screen section with this DLL as menu code");
+    const std::pair<int, const wchar_t*> numbered[] = {
+        {lobby_item::kBack, L"LazyLobbyBackButton\r\n"}, {lobby_item::kHost, L"LazyLobbyHostButton\r\n"},
+        {lobby_item::kJoin, L"LazyLobbyJoinButton\r\n"}, {lobby_item::kCallsign, L"LazyLobbyCallsign\r\n"},
+        {lobby_item::kAddress, L"LazyLobbyAddress\r\n"}, {lobby_item::kStatus, L"LazyLobbyStatus\r\n"},
+        {lobby_item::kPlayers, L"LazyLobbyPlayers\r\n"}};
+    bool items = true;
     wchar_t key[64];
-    swprintf_s(key, L"MenuItem%03d=LazyLobbyBackButton\r\n", lobby_item::kBack);
-    expect(s.find(key) != std::wstring::npos, "Back has the item number the menu code uses");
+    for (const auto& [n, name] : numbered) {
+        swprintf_s(key, L"MenuItem%03d=%ls", n, name);
+        items &= s.find(key) != std::wstring::npos;
+    }
+    expect(items, "item numbers match the menu code's");
     int count = 0;
-    for (int i = 1; i <= 3; ++i) {
+    for (int i = 1; i <= 13; ++i) {
         swprintf_s(key, L"MenuItem%03d=", i);
         if (s.find(key) == std::wstring::npos) break;
         count = i;
     }
-    expect(count == 2, "2 contiguous items (Back, title)");
+    expect(count == 12, "12 contiguous items");
+    expect(s.find(L"[LazyLobbyAddress]\r\nMenuItemType=EDIT\r\n") != std::wstring::npos &&
+               s.find(L"TextBufferSize=64\r\n") != std::wstring::npos && kLobbyAddressChars == 63,
+           "address is an EDIT field of 63 characters");
     expect(s.find(L"[LazyLobbyBackButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MainScreen\r\n") !=
                std::wstring::npos,
            "Back goes to the main screen");

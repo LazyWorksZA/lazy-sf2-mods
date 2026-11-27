@@ -8,10 +8,23 @@ namespace LazyWorks::SF2Patch::hooks {
 /// <summary>The screen the stock (hidden) Multiplayer button goes to; the lobby is defined under this name.</summary>
 inline constexpr wchar_t kLobbyScreen[] = L"NetworkConnectScreen";
 
+/// <summary>Keys answered by the text hook (see menu_hooks.cpp). String IDs are cut at about 31 characters.</summary>
+inline constexpr wchar_t kLobbyStatusKey[] = L"TXT_LAZY_LOBBY_STATUS";
+inline constexpr wchar_t kLobbyJoinInfoKey[] = L"TXT_LAZY_LOBBY_JOIN_INFO";
+
 /// <summary>MenuItemNNN numbers of the lobby screen's items (the menu code addresses them by number).</summary>
 namespace lobby_item {
 inline constexpr int kBack = 1;  // also what Esc reports (menu-code click idiom)
+inline constexpr int kHost = 2;
+inline constexpr int kJoin = 3;
+inline constexpr int kCallsign = 7;
+inline constexpr int kAddress = 9;
+inline constexpr int kStatus = 10;
+inline constexpr int kPlayers = 12;
 }  // namespace lobby_item
+
+/// <summary>Characters the Address field holds (TextBufferSize minus the terminator).</summary>
+inline constexpr int kLobbyAddressChars = 63;
 
 /// <summary>
 /// Shows the stock Multiplayer button: makes [MultiplayerHotspot] active and enabled and moves it into the gap between

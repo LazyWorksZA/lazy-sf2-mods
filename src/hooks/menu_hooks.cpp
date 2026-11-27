@@ -737,6 +737,8 @@ const wchar_t* our_text(const wchar_t* key) {
     if (wcscmp(key, kTacviewLabelKey) == 0) return L"Tacview Recording";
     if (wcscmp(key, kTacviewInfoKey) == 0) return L"Record every flight to a Tacview file in Saved Games.";
     if (wcscmp(key, L"TXT_LAZY_SCREEN_INFO") == 0) return L"Select the monitor to display the game on.";
+    if (wcscmp(key, kLobbyStatusKey) == 0) return L"Not connected.";
+    if (wcscmp(key, kLobbyJoinInfoKey) == 0) return L"Join the game at the address above.";
     if (wcscmp(key, L"TXT_LAZY_PILOT_TWIST_INFO") == 0) return L"Looking far behind turns the view further and leans a little.";
     // ~70 characters, like the longer stock hints; one line.
     if (wcscmp(key, L"TXT_LAZY_MOUSE_INFO") == 0) return L"Match Windows puts the game's pointer exactly on the Windows cursor.";
