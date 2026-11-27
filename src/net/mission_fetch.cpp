@@ -87,6 +87,11 @@ void MissionFetch::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
+bool MissionFetch::has_fresh() const {
+    std::lock_guard<std::mutex> lock(mx_);
+    return fresh_;
+}
+
 bool MissionFetch::take(std::vector<uint8_t>* packed, MissionOfferMsg* offer) {
     std::lock_guard<std::mutex> lock(mx_);
     if (!fresh_) return false;

@@ -462,6 +462,8 @@ constexpr uint64_t kHostGoneMs = 5000;
 
 struct Roster;
 std::wstring content_refusal_text(const Roster& r);
+std::string mission_lacks(uint32_t mission_id);
+std::wstring mission_lacks_text(const std::string& diff);
 
 Roster read_roster(bool host) {
     Roster r;
@@ -636,13 +638,22 @@ void session_frame() {
                 set_status(L"The host has launched: press Ready to join the flight.");
             }
         }
+        const std::string lacks = r.result == net::kLobbyContent ? std::string() : mission_lacks(r.mission_id);
         if (r.result == net::kLobbyContent) {
             // Kept on the status line for as long as the host keeps us out (the host sends no mission meanwhile).
             if (!g_refusal_shown)
-                LOG("lobby: the host's game content 0x%08lx differs from ours 0x%08lx; not in its lobby",
+                LOG("lobby: the host's build check 0x%08lx differs from ours 0x%08lx; not in its lobby",
                     static_cast<unsigned long>(r.host_content), static_cast<unsigned long>(world_lobby_hash()));
             g_refusal_shown = true;
             set_status(content_refusal_text(r).c_str());
+        } else if (!lacks.empty()) {
+            // Kept on the status line while the host's mission needs what this PC lacks; Ready is refused meanwhile.
+            if (g_ready) {
+                g_ready = false;
+                g_ready_mission = 0;
+                world_lobby_ready(false, 0);
+            }
+            set_status(mission_lacks_text(lacks).c_str());
         } else {
             int seat = -1;
             uint8_t res = 0;
@@ -658,10 +669,20 @@ void session_frame() {
 
 std::wstring content_refusal_text(const Roster& r) {
     wchar_t b[200];
-    swprintf_s(b, L"Your game content differs from the host's (yours %08lX, the host's %08lX): aircraft, weapons, "
-                  L"ground objects, terrains or game files.",
+    swprintf_s(b, L"Your game build or Lazy SF2 Patch version differs from the host's (yours %08lX, the host's %08lX).",
                static_cast<unsigned long>(world_lobby_hash()), static_cast<unsigned long>(r.host_content));
     return b;
+}
+
+/// <summary>Client: what this PC lacks of the host's current mission ("missing: ...; differs: ..."), empty when it
+/// has everything or the mission has not been checked yet.</summary>
+std::string mission_lacks(uint32_t mission_id) {
+    std::string diff;
+    return world_lobby_content(mission_id, &diff) ? diff : std::string();
+}
+
+std::wstring mission_lacks_text(const std::string& diff) {
+    return L"The host's mission uses content you lack or have otherwise - " + widen_ansi(diff) + L".";
 }
 
 /// <summary>Client: Ready for the host's current mission, if this pilot has a seat in it. Returns nullptr, or why
@@ -670,6 +691,11 @@ const wchar_t* try_ready() {
     const Roster r = read_roster(false);
     if (!r.have || r.result == net::kLobbyContent) return L"Not in the host's lobby.";
     if (r.mission_id == 0) return L"The host has not set up a mission yet.";
+    if (const std::string lacks = mission_lacks(r.mission_id); !lacks.empty()) {
+        static std::wstring text;  // the status line keeps a pointer to it
+        text = mission_lacks_text(lacks);
+        return text.c_str();
+    }
     if (r.you < 0) return L"Pick a seat first.";
     g_ready = true;
     g_ready_mission = r.mission_id;
@@ -695,6 +721,12 @@ void change_seat(int dir) {
     if (g_screen == Screen::Join && r.result == net::kLobbyContent) {
         set_status(content_refusal_text(r).c_str());
         return;
+    }
+    if (g_screen == Screen::Join) {
+        if (const std::string lacks = mission_lacks(r.mission_id); !lacks.empty()) {
+            set_status(mission_lacks_text(lacks).c_str());
+            return;
+        }
     }
     const int seat = next_free_seat(r, dir);
     if (seat < 0) {

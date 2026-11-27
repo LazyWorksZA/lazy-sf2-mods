@@ -30,6 +30,7 @@
 #include "acmi/tacview_writer.h"
 #include "acmi/terrain_texture.h"
 #include "hooks/lobby_logic.h"
+#include "hooks/mission_content.h"
 #include "hooks/lobby_splice.h"
 #include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
@@ -10463,6 +10464,48 @@ void bot_lobby_loop_test() {
     core.stop(false);
 }
 
+void mission_content_tests() {
+    std::printf("mission content list (what a shared mission uses)\n");
+    namespace hk = LazyWorks::SF2Patch::hooks;
+    auto ini = [](const std::string& s) {
+        return LazyWorks::SF2Patch::acmi::parse_ini(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    };
+    const auto msn = ini("[MissionHeader]\r\nAircraftType=F-105D\r\nMissionMap=GERMANYCE\r\n\r\n"
+                         "[AircraftMission001]\r\nAircraftType=F-105D\r\nLoadout=Strike_66\r\n\r\n"
+                         "[AircraftMission002]\r\nAircraftType=MiG-17F\r\nLoadout=AirToAir\r\n\r\n"
+                         "[AircraftMission003]\r\nAircraftType=MiG-17F\r\nLoadout=AirToAir\r\n\r\n"
+                         "[AircraftMission004]\r\nAircraftType=..\\evil\r\nLoadout=X\r\n");
+    const hk::MissionUses u = hk::mission_uses(msn);
+    expect(u.theatre == "GERMANYCE" && u.aircraft.size() == 3 && u.aircraft[0].first == "F-105D" && u.aircraft[0].second.empty() &&
+               u.aircraft[1].second == "Strike_66" && u.aircraft[2].first == "MiG-17F",
+           "content: the theatre and each aircraft type with its loadout, once; a bad name is left out");
+    const auto lo = ini("[Strike_66]\r\nLoadout[01].WeaponType=M117\r\nLoadout[01].RackType=MER_F105\r\n"
+                        "Loadout[02].WeaponType=M117\r\nLoadout[03].Quantity=2\r\n[AirToAir]\r\nLoadout[06].WeaponType=AIM-9B\r\n");
+    const auto w = hk::loadout_weapons(lo, "Strike_66");
+    expect(w.size() == 2 && w[0] == "M117" && w[1] == "MER_F105" && hk::loadout_weapons(lo, "Nope").empty(),
+           "content: the weapons and racks of the mission's loadout section, each once");
+    const auto ty = ini("[TargetType001]\r\nName=barrack1\r\nUseGroundObject=FALSE\r\n[TargetType002]\r\nName=SA-2\r\n"
+                        "UseGroundObject=TRUE\r\n[TargetType003]\r\nName=sa-2\r\nUseGroundObject=TRUE\r\n");
+    const auto g = hk::theatre_ground_objects(ty);
+    expect(g.size() == 1 && g[0] == "SA-2", "content: the theatre's ground object types, each once");
+    const std::vector<hk::ContentEntry> host = {{'T', "GERMANYCE", 0x11}, {'A', "F-105D", 0x22}, {'A', "F-4E_67", 0x33},
+                                                {'W', "AGM-12B", 0x44}, {'G', "SA-2", 0}};
+    const std::string lines = hk::format_content(host);
+    const auto back = hk::parse_content("# sidecar\nversion=1\n" + lines + "content=X:bad:1\ncontent=A:no-hash:\n");
+    expect(back.size() == 5 && back[2].name == "F-4E_67" && back[2].hash == 0x33 && back[4].hash == 0,
+           "content: sidecar lines round trip; malformed ones are skipped");
+    std::vector<hk::ContentEntry> mine = {{'T', "germanyce", 0x11}, {'A', "F-105D", 0x22}, {'A', "F-4E_67", 0},
+                                          {'W', "AGM-12B", 0x45}, {'G', "SA-2", 0}};
+    expect(hk::content_diff(host, mine) == "missing: F-4E_67; differs: AGM-12B",
+           "content: missing and different entries named; names compare without case; absent on both sides matches");
+    mine[2].hash = 0x33;
+    mine[3].hash = 0x44;
+    expect(hk::content_diff(host, mine).empty(), "content: all the same: nothing to report");
+    std::vector<hk::ContentEntry> many;
+    for (int i = 0; i < 7; ++i) many.push_back({'W', "W" + std::to_string(i), 1});
+    expect(hk::content_diff(many, {}, 4) == "missing: W0, W1, W2, W3; and 3 more", "content: at most four named");
+}
+
 void lobby_flow_splice_tests() {
     std::printf("lobby flow splices (L5: Single Mission and Hangar in a session; L8: Debrief)\n");
     using namespace LazyWorks::SF2Patch::hooks;
@@ -10619,6 +10662,7 @@ int main(int argc, char** argv) {
     lobby_loopback_tests();
     lobby_launch_tests();
     lobby_flow_splice_tests();
+    mission_content_tests();
     fetch_lookup_tests();
     pilot_twist_tests();
     probe_snapshot_tests();

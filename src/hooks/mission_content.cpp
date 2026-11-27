@@ -1,0 +1,161 @@
+// The files behind a mission's content list (mission_content.h): read from the player's own folder first (mods),
+// then through the exe's file manager (loose files in the game folder, then the cats), as the game finds them.
+#include <windows.h>
+
+#include <string>
+#include <vector>
+
+#include "acmi/airfields.h"
+#include "config.h"
+#include "hooks/game_files.h"
+#include "hooks/hook_util.h"
+#include "hooks/hooks.h"
+#include "hooks/mission_content.h"
+#include "log.h"
+
+namespace LazyWorks::SF2Patch::hooks {
+namespace {
+
+std::wstring game_dir() {
+    wchar_t exe[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    std::wstring d(exe);
+    d.resize(d.find_last_of(L'\\'));
+    return d;
+}
+
+bool read_loose(const std::wstring& path, std::vector<uint8_t>* out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    bool ok = GetFileSizeEx(h, &size) && size.QuadPart >= 0 && size.QuadPart <= static_cast<LONGLONG>(kMaxGameFileBytes);
+    if (ok) {
+        out->resize(static_cast<size_t>(size.QuadPart));
+        DWORD got = 0;
+        ok = out->empty() || (ReadFile(h, out->data(), static_cast<DWORD>(out->size()), &got, nullptr) && got == out->size());
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+// rel: a path under the game folder, as "Objects\Aircraft\F-4E\F-4E.ini".
+bool read_content_file(const std::wstring& rel, std::vector<uint8_t>* out) {
+    const std::wstring user = config::game_data_dir();
+    if (!user.empty() && read_loose(user + L"\\" + rel, out)) return true;
+    const std::wstring game = game_dir();
+    return !game.empty() && read_game_file(game + L"\\" + rel, *out);
+}
+
+uint32_t add_file(uint32_t h, const std::string& name, const std::vector<uint8_t>& bytes) {
+    const std::string low = acmi::to_lower_ascii(name);
+    h = content_fnv(h, reinterpret_cast<const uint8_t*>(low.data()), low.size());
+    return content_fnv(h, bytes.data(), bytes.size());
+}
+
+constexpr uint32_t kSeed = 0x811C9DC5u;
+
+// The hash of a main ini and the files it names (same folder) under any of keys; 0 if the main ini is missing.
+uint32_t hash_object(const std::wstring& folder, const std::string& name, const std::vector<std::string>& keys,
+                     acmi::Ini* main_out = nullptr, std::vector<std::pair<std::string, std::vector<uint8_t>>>* named = nullptr) {
+    std::vector<uint8_t> bytes;
+    if (!read_content_file(folder + L"\\" + widen_ansi(name) + L".ini", &bytes)) return 0;
+    uint32_t h = add_file(kSeed, name + ".ini", bytes);
+    const acmi::Ini ini = acmi::parse_ini(bytes.data(), bytes.size());
+    for (const acmi::IniSection& s : ini.sections) {
+        for (const auto& kv : s.items) {
+            bool wanted = false;
+            for (const auto& k : keys) wanted = wanted || kv.first == k;
+            if (!wanted || !content_name_ok(kv.second)) continue;
+            std::vector<uint8_t> f;
+            const bool have = read_content_file(folder + L"\\" + widen_ansi(kv.second), &f);
+            h = add_file(h, kv.second, have ? f : std::vector<uint8_t>{});
+            if (named && have) named->emplace_back(acmi::to_lower_ascii(kv.first), std::move(f));
+        }
+    }
+    if (main_out) *main_out = ini;
+    return h ? h : 1u;
+}
+
+uint32_t hash_theatre(const std::string& map, std::vector<std::string>* ground) {
+    const std::wstring folder = L"Terrains\\" + widen_ansi(map);
+    std::vector<uint8_t> bytes;
+    if (!read_content_file(folder + L"\\" + widen_ansi(map) + L".ini", &bytes)) return 0;
+    uint32_t h = add_file(kSeed, map + ".ini", bytes);
+    const acmi::Ini th = acmi::parse_ini(bytes.data(), bytes.size());
+    const std::string* targets = th.get("Terrain", "TargetFile");
+    if (targets && content_name_ok(*targets)) {
+        std::vector<uint8_t> f;
+        h = add_file(h, *targets, read_content_file(folder + L"\\" + widen_ansi(*targets), &f) ? f : std::vector<uint8_t>{});
+        const std::string types = acmi::types_file_name(th, *targets);
+        if (content_name_ok(types)) {
+            std::vector<uint8_t> tf;
+            const bool have = read_content_file(folder + L"\\" + widen_ansi(types), &tf);
+            h = add_file(h, types, have ? tf : std::vector<uint8_t>{});
+            if (have && ground) *ground = theatre_ground_objects(acmi::parse_ini(tf.data(), tf.size()));
+        }
+    }
+    return h ? h : 1u;
+}
+
+const std::vector<std::string> kAircraftFiles = {"aircraftdatafile", "loadoutfile", "avionicsdatafilename"};
+
+}  // namespace
+
+uint32_t content_entry_hash(char kind, const std::string& name) {
+    if (!content_name_ok(name)) return 0;
+    switch (kind) {
+        case 'T': return hash_theatre(name, nullptr);
+        case 'A': return hash_object(L"Objects\\Aircraft\\" + widen_ansi(name), name, kAircraftFiles);
+        case 'W': return hash_object(L"Objects\\Weapons\\" + widen_ansi(name), name, {});
+        case 'G': return hash_object(L"Objects\\GroundObject\\" + widen_ansi(name), name, {});
+        default: return 0;
+    }
+}
+
+std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
+    std::vector<ContentEntry> out;
+    const MissionUses uses = mission_uses(acmi::parse_ini(msn.data(), msn.size()));
+    auto have = [&](char kind, const std::string& n) {
+        for (const auto& e : out)
+            if (e.kind == kind && acmi::to_lower_ascii(e.name) == acmi::to_lower_ascii(n)) return true;
+        return false;
+    };
+    std::vector<std::string> ground;
+    if (!uses.theatre.empty()) out.push_back({'T', uses.theatre, hash_theatre(uses.theatre, &ground)});
+    std::vector<std::string> weapons;
+    for (const auto& [type, loadout] : uses.aircraft) {
+        acmi::Ini main;
+        std::vector<std::pair<std::string, std::vector<uint8_t>>> named;
+        const uint32_t h = hash_object(L"Objects\\Aircraft\\" + widen_ansi(type), type, kAircraftFiles, &main, &named);
+        if (!have('A', type)) out.push_back({'A', type, h});
+        for (const auto& [key, bytes] : named) {
+            if (key != "loadoutfile") continue;
+            for (const auto& w : loadout_weapons(acmi::parse_ini(bytes.data(), bytes.size()), loadout)) {
+                bool seen = false;
+                for (const auto& x : weapons) seen = seen || acmi::to_lower_ascii(x) == acmi::to_lower_ascii(w);
+                if (!seen) weapons.push_back(w);
+            }
+        }
+    }
+    for (const auto& w : weapons) out.push_back({'W', w, content_entry_hash('W', w)});
+    for (const auto& g : ground) out.push_back({'G', g, content_entry_hash('G', g)});
+    size_t missing = 0;
+    for (const auto& e : out) missing += e.hash == 0;
+    LOG("lobby: the mission uses %zu content entries (theatre %s, %zu aircraft types, %zu weapons, %zu ground objects); "
+        "%zu not found here",
+        out.size(), uses.theatre.c_str(), uses.aircraft.size(), weapons.size(), ground.size(), missing);
+    return out;
+}
+
+std::string mission_content_check(const std::string& sidecar_text) {
+    std::vector<ContentEntry> host = parse_content(sidecar_text);
+    if (host.empty()) return {};  // a host that sends no list: nothing to compare
+    std::vector<ContentEntry> mine;
+    mine.reserve(host.size());
+    for (const auto& e : host) mine.push_back({e.kind, e.name, content_entry_hash(e.kind, e.name)});
+    return content_diff(host, mine);
+}
+
+}  // namespace LazyWorks::SF2Patch::hooks

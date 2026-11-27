@@ -48,7 +48,7 @@ void usage() {
         "callsign, asks for seat N (1-based, as the lobby shows it) once the host has a mission, presses Ready for that\n"
         "mission (again after each new one), logs each roster change, and when the host launches follows it as a\n"
         "--world-join client with the lobby's tag for --duration (default 30 s), then leaves. --content is the host's\n"
-        "content hash (its lazysf2.log: \"lobby: content hash 0x...\"); another value is kept out. Exit code 0 ok\n"
+        "build check (its lazysf2.log: \"lobby: build check 0x...\"); another value is kept out. Exit code 0 ok\n"
         "(the flight's code if it flew), 2 refused or stopped, 3 no roster within 15 s.\n"
         "Client exit code 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no ENet connection within\n"
         "4 s, or no Welcome within 60 s of the Hello, 4 the host closed the connection or went silent for 4 s.\n"

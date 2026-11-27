@@ -42,6 +42,8 @@ public:
     /// <summary>A mission received since the last take(): true once per mission.</summary>
     bool take(std::vector<uint8_t>* packed, MissionOfferMsg* offer);
     /// <summary>The mission id the host named in its latest offer (0: none yet). Any thread.</summary>
+    /// <summary>Any thread: a whole mission is waiting for take().</summary>
+    bool has_fresh() const;
     uint32_t latest_id() const { return latest_id_.load(std::memory_order_acquire); }
     /// <summary>The seat the host gave in its latest offer (kNoSeat: none).</summary>
     uint8_t latest_seat() const { return latest_seat_.load(std::memory_order_acquire); }
@@ -93,7 +95,7 @@ private:
     uint64_t roster_ms_ = 0;    // under roster_mx_: when it came
     static constexpr int kLookupMs = 10000;
     AuthClient auth_;
-    std::mutex mx_;
+    mutable std::mutex mx_;
     bool fresh_ = false;           // under mx_: packed_ is not taken yet
     std::vector<uint8_t> packed_;  // under mx_
     MissionOfferMsg offer_{};      // under mx_

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "hooks/aircraft_side.h"
 #include "net/auth.h"
@@ -417,9 +418,19 @@ void host_lobby_launch(uint32_t launch_seq);
 int host_lobby_seat_for(int members);
 /// <summary>world_sync.cpp: a host session's mission is armed for the next flight (Set up mission was Accepted).</summary>
 bool world_host_armed();
-/// <summary>content_hash.cpp: this install's content (game cats; the player's aircraft, weapons, ground objects and
-/// terrains folders with the names and sizes of their .ini files), computed for each session. Menu thread.</summary>
+/// <summary>content_hash.cpp: the build check (the exe's build and the mod's protocol) host and clients compare.
+/// </summary>
 uint32_t content_hash();
+/// <summary>mission_content.cpp: what a mission file uses, each entry hashed from this PC's files (host). Menu thread.
+/// </summary>
+struct ContentEntry;
+std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn);
+/// <summary>mission_content.cpp: the host's list (sidecar content lines) checked against this PC: "missing: ...;
+/// differs: ..." or empty when all match. Menu thread.</summary>
+std::string mission_content_check(const std::string& sidecar_text);
+/// <summary>world_sync.cpp: the fetched mission's content check (client): true once the mission with this id was
+/// checked; *diff is empty when this PC has everything the mission uses.</summary>
+bool world_lobby_content(uint32_t mission_id, std::string* diff);
 /// <summary>world_sync.cpp: the member of the player flight this PC's player flies (the host's lobby seat; -1: stock).</summary>
 void world_set_own_seat(int member);
 /// <summary>world_sync.cpp, a joined lobby session: the latest roster (and round trip), Ready, a seat wish.</summary>

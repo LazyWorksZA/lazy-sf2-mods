@@ -23,6 +23,7 @@
 
 #include "hooks/aircraft_side.h"
 #include "hooks/hook_util.h"
+#include "hooks/mission_content.h"
 #include "hooks/game_files.h"
 #include "hooks/hooks.h"
 #include "hooks/jet_mirror.h"
@@ -692,6 +693,9 @@ void accept_save(const Ctx& c, void* page, const wchar_t* source) {
     }
 }
 
+uint32_t g_content_id = 0;      // join: the fetched mission whose content list was checked
+std::string g_content_diff;     // ... and what this PC lacks or has otherwise (empty: all there)
+
 // Join, lobby session: the seat the host's book gives this pilot now (it may have changed since the mission arrived;
 // the host repeats it in every roster and offer). Menu thread.
 void apply_lobby_seat() {
@@ -741,6 +745,15 @@ void take_fetched_mission() {
     if (!write_bytes(msn_path, msn) || !write_text(side_path, sidecar, true)) {
         LOG("world: ERR join: could not write %ls or its sidecar", msn_path.c_str());
         return;
+    }
+    if (g_lobby_hash) {
+        g_content_diff = mission_content_check(sidecar);
+        g_content_id = offer.mission_id;
+        if (g_content_diff.empty())
+            LOG("world: join: this PC has everything the host's mission 0x%08lx uses", static_cast<unsigned long>(offer.mission_id));
+        else
+            LOG("world: join: the host's mission 0x%08lx uses content this PC lacks or has otherwise: %s",
+                static_cast<unsigned long>(offer.mission_id), g_content_diff.c_str());
     }
     if (offer.seat == net::kNoSeat && !g_seat_from_env) {
         LOG("world: join: the host has no free seat for us in its flight; flying the generated mission");
@@ -1049,7 +1062,16 @@ void publish_mission(const Armed& a) {
         LOG("world: ERR could not read %ls back to serve it", a.msn_path.c_str());
         return;
     }
-    if (!net::pack_mission(format_sidecar(a.sidecar), msn, &packed, &id, &raw)) {
+    // The content list (what the mission uses, hashed), once per saved file: clients check it against their install.
+    static std::wstring listed_path;
+    static size_t listed_size = 0;
+    static std::string listed;
+    if (a.msn_path != listed_path || msn.size() != listed_size) {
+        listed = format_content(mission_content(msn));
+        listed_path = a.msn_path;
+        listed_size = msn.size();
+    }
+    if (!net::pack_mission(format_sidecar(a.sidecar) + listed, msn, &packed, &id, &raw)) {
         LOG("world: the mission is too big to serve (%zu bytes)", msn.size());
         return;
     }
@@ -2907,6 +2929,8 @@ void world_session_end() {
     g_tag = 0;
     g_load_path.clear();
     g_fetched_id = g_flying_id = 0;
+    g_content_id = 0;
+    g_content_diff.clear();
     g_session_dir.clear();
     g_lobby_hash = 0;
     world_set_own_seat(-1);
@@ -2918,6 +2942,15 @@ uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password(); }
 
 uint32_t world_lobby_hash() { return g_lobby_hash; }
+
+bool world_lobby_content(uint32_t mission_id, std::string* diff) {
+    if (!g_join || !mission_id) return false;
+    // A newer mission has arrived: take it now (files written, its content checked), not at the briefing.
+    if (g_fetch && g_content_id != mission_id && g_fetch->has_fresh()) take_fetched_mission();
+    if (g_content_id != mission_id) return false;
+    *diff = g_content_diff;
+    return true;
+}
 
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms) {
     return g_fetch && g_fetch->roster(out, rtt_ms, age_ms);
