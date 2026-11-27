@@ -807,10 +807,12 @@ struct SeatStateMsg {
     uint8_t damage;
     uint8_t n;
     LoadoutEntry e[12];
+    uint32_t state;  // the seat's +0x5f0 masked to kSeatStateMask (airborne, gear, flaps, lights...)
 };
 #pragma pack(pop)
-static_assert(sizeof(SeatStateMsg) == 135);  // 4:1 seat, 5:1 flags, 6:4 ms, 10:35 pose, 45:4 fuel, 49:1 damage, 50:1 n,
-                                             // 51:84 entries
+static_assert(sizeof(SeatStateMsg) == 139);  // 4:1 seat, 5:1 flags, 6:4 ms, 10:35 pose, 45:4 fuel, 49:1 damage, 50:1 n,
+                                             // 51:84 entries, 135:4 state
+inline constexpr uint32_t kSeatStateMask = 0x0080ff00u;
 inline constexpr uint8_t kSeatAlive = 0x01, kSeatAirborne = 0x02;
 size_t encode(const SeatStateMsg& m, uint8_t* out, size_t cap);
 /// <summary>Checks the size and n <= 12.</summary>
@@ -819,11 +821,12 @@ Status decode(const uint8_t* data, size_t len, SeatStateMsg& out);
 /// <summary>Metres between the client's jet and the seat's state below which it is already there (a reconnect).</summary>
 inline constexpr double kSeatTakeoverMin = 50.0;
 /// <summary>
-/// Whether the client's jet takes the seat's state: the seat aircraft lives and flies on the host, and the jet is not
-/// already there. A seat still parked where the mission put it needs nothing (the jet is parked there too).
+/// Whether the client's jet takes the seat's state: the seat aircraft lives and flies on the host, the jet is not
+/// already there, and the client joined a world the host owns. A client that loaded first ran the world itself and
+/// offered it (handover): the host's seat is a stale copy then, and the client's own jet is the truth.
 /// </summary>
-inline bool seat_takeover_due(const SeatStateMsg& m, double dist) {
-    return (m.flags & kSeatAlive) && (m.flags & kSeatAirborne) && dist >= kSeatTakeoverMin;
+inline bool seat_takeover_due(const SeatStateMsg& m, double dist, bool we_owned_the_world = false) {
+    return !we_owned_the_world && (m.flags & kSeatAlive) && (m.flags & kSeatAirborne) && dist >= kSeatTakeoverMin;
 }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>

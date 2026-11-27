@@ -2247,6 +2247,8 @@ bool world_remote_on() { return g_remote_on.load(std::memory_order_acquire); }
 
 bool world_remote_deferred() { return g_remote_deferred != nullptr; }
 
+int world_destroy_object(void* obj) { return obj ? destroy_copy(static_cast<BYTE*>(obj)) : 1; }
+
 void world_remote_now() {
     void* msn = g_remote_deferred;
     g_remote_deferred = nullptr;

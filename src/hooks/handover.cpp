@@ -3,7 +3,7 @@
 // starts, it offers its world to the host as a snapshot (aircraft poses, state, throttle, fuel and stores; vehicles'
 // poses, speeds and headings; flights' waypoints; the mission clock) and marks its world remote. The host takes the
 // offer only if the client's mission clock is ahead of its own (the client loaded first), writes it into its world and
-// answers. The probe's Ctrl+Shift+G hands the local world over to "itself" for the solo test: capture and mark remote,
+// answers. The probe's Ctrl+Shift+N hands the local world over to "itself" for the solo test: capture and mark remote,
 // then rewind to the capture and hand every copy back to its AI. Weapons in flight stay with their launcher (their
 // later hits are blocked or claimed as before). Game thread. See lazy-sf2-recon: network-recon §12.
 #include <windows.h>
@@ -74,7 +74,11 @@ void collect(uint8_t kind, uint16_t a, uint16_t b, void* obj, void* ctx) {
     net::HandoverSnapshot& s = *static_cast<Build*>(ctx)->s;
     const BYTE* o = static_cast<const BYTE*>(obj);
     int32_t level = 0;
-    if (!rd(o + jet::kDamage, &level) || level >= 5) return;
+    if (!rd(o + jet::kDamage, &level)) return;
+    if (level >= 5) {
+        s.dead.push_back(net::HandoverDead{kind, a, b});
+        return;
+    }
     if (kind == 1) {
         net::HandoverAircraft x{};
         if (!read_pose(o, &x.pose)) return;
@@ -133,7 +137,7 @@ net::HandoverSnapshot build_snapshot(uint32_t epoch) {
 }
 
 struct Applied {
-    int aircraft = 0, vehicles = 0, flights = 0, missing = 0;
+    int aircraft = 0, vehicles = 0, flights = 0, missing = 0, destroyed = 0;
 };
 
 // Writes a snapshot into our world, `age` seconds after it was taken. The objects keep their REMOTEOBJECT state.
@@ -145,8 +149,10 @@ Applied apply_snapshot(const net::HandoverSnapshot& s, double age) {
     for (const net::HandoverAircraft& x : s.aircraft) {
         uint32_t id = 0xffffffffu;
         BYTE* o = static_cast<BYTE*>(world_object_of_key(x.pose.kind, x.pose.a, x.pose.b, &id));
-        // Never our own jet (the offerer ran our seat with its AI) nor a player's avatar.
-        if (!o || id == player || host_drives_object(o) || client_drives_object(o)) {
+        // Never our own jet (the offerer ran our seat with its AI) nor a player's avatar; nor one destroyed here.
+        int32_t here = 0;
+        if (!o || id == player || host_drives_object(o) || client_drives_object(o) || !rd(o + jet::kDamage, &here) ||
+            here >= 5) {
             ++r.missing;
             continue;
         }
@@ -185,7 +191,8 @@ Applied apply_snapshot(const net::HandoverSnapshot& s, double age) {
     }
     for (const net::HandoverVehicle& x : s.vehicles) {
         BYTE* o = static_cast<BYTE*>(world_object_of_key(x.pose.kind, x.pose.a, x.pose.b, nullptr));
-        if (!o) {
+        int32_t here = 0;
+        if (!o || !rd(o + jet::kDamage, &here) || here >= 5) {
             ++r.missing;
             continue;
         }
@@ -198,6 +205,15 @@ Applied apply_snapshot(const net::HandoverSnapshot& s, double age) {
         wr(o + kObjSpeed, static_cast<float>(x.speed / 20.0));
         wr(o + kObjHeading, ang_back(x.heading));
         ++r.vehicles;
+    }
+    for (const net::HandoverDead& d : s.dead) {
+        uint32_t id = 0xffffffffu;
+        BYTE* o = static_cast<BYTE*>(world_object_of_key(d.kind, d.a, d.b, &id));
+        int32_t here = 0;
+        if (!o || id == player || host_drives_object(o) || client_drives_object(o) || !rd(o + jet::kDamage, &here) ||
+            here >= 5)
+            continue;
+        if (world_destroy_object(o) == 0) ++r.destroyed;
     }
     for (const net::HandoverFlight& f : s.flights) {
         int wp = -1;
@@ -212,6 +228,7 @@ Applied apply_snapshot(const net::HandoverSnapshot& s, double age) {
 
 std::deque<std::vector<uint8_t>> g_out;  // the offer's messages not yet queued (paced: the out queue holds 64)
 uint32_t g_epoch_seq = 0;
+uint32_t g_owned_epoch = 0xffffffffu;  // the player epoch in which we ran the world and offered it
 
 uint32_t new_epoch() { return (sim_player_epoch() << 16) | (++g_epoch_seq & 0xffff); }
 
@@ -249,7 +266,9 @@ bool queue_offer(const net::HandoverSnapshot& s) {
 }
 
 net::HandoverAssembly g_in[4];  // the host: per client slot
-bool g_refused[4] = {};
+net::OfferArbiter g_arbiter;
+uint32_t g_arbiter_epoch = 0xffffffffu;
+double wall_s() { return static_cast<double>(GetTickCount64()) / 1000.0; }
 
 void answer(int slot, uint32_t epoch, bool taken) {
     net::HandoverDoneMsg d{};
@@ -260,7 +279,7 @@ void answer(int slot, uint32_t epoch, bool taken) {
     if (n) host_world_send_to(slot, buf, n, true);
 }
 
-// ---- the solo probe (Ctrl+Shift+G) ----
+// ---- the solo probe (Ctrl+Shift+N) ----
 
 std::atomic<bool> g_probe_request{false};
 net::HandoverSnapshot g_probe_snap;
@@ -324,6 +343,18 @@ void probe_step() {
 void step_cb(void*, float, bool is_player) {
     if (!is_player) return;
     probe_step();
+    if (g_arbiter_epoch != sim_player_epoch()) {
+        g_arbiter_epoch = sim_player_epoch();
+        g_arbiter.reset();
+        for (auto& a : g_in) a.reset();
+    }
+    const int late = g_arbiter.on_tick(wall_s());
+    if (late >= 0) {
+        LOG("handover: client %d's offer did not complete within %.0f s; dropped", late + 1, net::OfferArbiter::kTimeout);
+        const uint32_t epoch = g_in[late].offer().epoch;
+        g_in[late].reset();
+        answer(late, epoch, false);
+    }
     // The client's paced offer: a few messages a step, in order.
     for (int i = 0; i < kChunksPerStep && !g_out.empty(); ++i) {
         if (!client_world_send(g_out.front().data(), g_out.front().size(), true)) break;
@@ -342,9 +373,24 @@ void handover_on_modules_loaded() {
     if (!sim_register_step_callback(step_cb)) LOG("handover: no free step callback slot; no handover");
 }
 
+bool handover_we_owned_world() { return g_owned_epoch == sim_player_epoch(); }
+
+void handover_session_end() {
+    if (!g_out.empty()) LOG("handover: the session ended with %zu offer message(s) unsent; dropped", g_out.size());
+    g_out.clear();
+}
+
+void handover_host_forget(int slot) {
+    if (slot < 0 || slot > 3) return;
+    if (g_in[slot].active()) LOG("handover: client %d left during its offer; dropped", slot + 1);
+    g_in[slot].reset();
+    g_arbiter.on_disconnect(slot);
+}
+
 void handover_client_welcomed() {
     if (!world_remote_deferred()) return;
     // We ran the world: offer it to the host, then follow (our copies coast until the host's stream drives them).
+    g_owned_epoch = sim_player_epoch();
     g_out.clear();
     if (!queue_offer(build_snapshot(new_epoch()))) LOG("handover: our world could not be packed; not offered");
     world_remote_now();
@@ -358,10 +404,16 @@ void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt
         if (net::decode(data, len, b) != net::Status::Ok) return;
         float t10 = 0, t14 = 0;
         const uint32_t own = world_mission_clock(&t10, &t14) ? net::clock_to_wire(t10) : 0;
-        g_refused[slot] = !net::take_handover(b.clock_ms, own);
-        if (g_refused[slot] || !g_in[slot].begin(b)) {
+        const net::OfferArbiter::Verdict v = g_arbiter.on_begin(slot, b.clock_ms, own, wall_s());
+        const bool ok = v == net::OfferArbiter::Verdict::Take && g_in[slot].begin(b);
+        if (!ok) {
+            if (v == net::OfferArbiter::Verdict::Take) g_arbiter.on_complete(slot, false);
             LOG("handover: client %d offers its world (clock %.1f s, ours %.1f s): %s", slot + 1, b.clock_ms / 1000.0,
-                own / 1000.0, g_refused[slot] ? "refused, we loaded first and own the world" : "refused (bad offer)");
+                own / 1000.0,
+                v == net::OfferArbiter::Verdict::RefuseOwner  ? "refused, we loaded first and own the world"
+                : v == net::OfferArbiter::Verdict::RefuseBusy ? "refused, another client's offer is being taken"
+                : v == net::OfferArbiter::Verdict::RefuseDone ? "refused, a world was taken over already this flight"
+                                                              : "refused (bad offer)");
             g_in[slot].reset();
             answer(slot, b.epoch, false);
             return;
@@ -381,14 +433,16 @@ void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt
                     net::deserialize(raw.data(), raw.size(), &s);
     g_in[slot].reset();
     if (!ok) {
+        g_arbiter.on_complete(slot, false);
         LOG("handover: client %d's world did not unpack (CRC or sizes); refused", slot + 1);
         answer(slot, b.epoch, false);
         return;
     }
     const Applied a = apply_snapshot(s, rtt_s * 0.5);
-    LOG("handover: client %d's world taken over: %d aircraft, %d vehicles, %d flights written (%d not found here), the "
-        "mission clock set to %.1f s; we own the world and stream it",
-        slot + 1, a.aircraft, a.vehicles, a.flights, a.missing, s.head.clock_ms / 1000.0);
+    g_arbiter.on_complete(slot, true);
+    LOG("handover: client %d's world taken over: %d aircraft, %d vehicles, %d flights written, %d destroyed as there "
+        "(%d not found or destroyed here), the mission clock set to %.1f s; we own the world and stream it",
+        slot + 1, a.aircraft, a.vehicles, a.flights, a.destroyed, a.missing, s.head.clock_ms / 1000.0);
     answer(slot, b.epoch, true);
 }
 

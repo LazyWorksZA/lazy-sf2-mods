@@ -206,6 +206,7 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
     g_avatar_states.forget(slot + 1);
     world_avatar_forget(slot + 1);
     hits_forget(slot);
+    handover_host_forget(slot);
     void* const obj = a.h.obj;
     avatar_release(a.h, aircraft_live);
     if (bye_reason != kByeNone) {

@@ -41,6 +41,23 @@ bool read_pose(const void* obj, Pose* p) {
     }
 }
 
+bool read_state(const void* obj, uint32_t* s) {
+    __try {
+        std::memcpy(s, static_cast<const BYTE*>(obj) + jet::kStateWord, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool write_state(void* obj, uint32_t s) {
+    __try {
+        std::memcpy(static_cast<BYTE*>(obj) + jet::kStateWord, &s, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 }  // namespace
 
 bool seat_state_capture(int seat, void* obj, net::SeatStateMsg* out) {
@@ -71,6 +88,7 @@ bool seat_state_capture(int seat, void* obj, net::SeatStateMsg* out) {
         m.fuel_ext = net::fuel_to_wire(external);
     }
     m.damage = static_cast<uint8_t>(p.damage < 0 ? 0 : p.damage > 5 ? 5 : p.damage);
+    m.state = p.state & net::kSeatStateMask;
     m.n = static_cast<uint8_t>(stores_read_entries(obj, m.e, 12));
     return true;
 }
@@ -85,7 +103,7 @@ void seat_state_send(int slot, const net::SeatStateMsg& m) {
         net::fuel_from_wire(m.fuel), net::fuel_from_wire(m.fuel_ext));
 }
 
-void seat_state_apply(const uint8_t* data, size_t len, double host_now) {
+void seat_state_apply(const uint8_t* data, size_t len, double /*host_now*/) {
     net::SeatStateMsg m;
     if (net::decode(data, len, m) != net::Status::Ok) return;
     void* player = world_player_object();
@@ -94,20 +112,24 @@ void seat_state_apply(const uint8_t* data, size_t len, double host_now) {
     if (!read_pose(player, &own)) return;
     net::ObjPose p{};
     net::dequantise(m.pose, &p);
-    double age = host_now - m.host_ms / 1000.0;
-    if (!(age > 0)) age = 0;
-    if (age > 2.0) age = 2.0;
+    // The state was read on the host's game thread just before the Welcome went out: it is half a round trip old
+    // (the clock rule: owner time + RTT/2), whatever the two machines' game clocks say.
+    const double age = client_rtt_s() * 0.5;
     for (int i = 0; i < 3; ++i) p.pos[i] += p.vel[i] * age;
     const double dx = p.pos[0] - own.pos[0], dy = p.pos[1] - own.pos[1], dz = p.pos[2] - own.pos[2];
     const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
     g_applied_epoch = sim_player_epoch();
-    if (!net::seat_takeover_due(m, dist)) {
-        LOG("seat: our seat's state from the host: %s, %.0f m away: no takeover",
+    const bool owned = handover_we_owned_world();
+    if (!net::seat_takeover_due(m, dist, owned)) {
+        LOG("seat: our seat's state from the host: %s, %.0f m away: no takeover%s",
             !(m.flags & net::kSeatAlive) ? "destroyed" : !(m.flags & net::kSeatAirborne) ? "on the ground" : "airborne",
-            dist);
+            dist, owned ? " (we ran the world and offered it: our jet is the truth)" : "");
         return;
     }
     client_place_player(player, p.pos, p.vel, p.ang);
+    // Airborne, gear, flaps and lights as the seat had them (a parked jet put in the air, or the reverse).
+    uint32_t st = 0;
+    if (read_state(player, &st)) write_state(player, (st & ~net::kSeatStateMask) | (m.state & net::kSeatStateMask));
     stores_set_fuel(player, net::fuel_from_wire(m.fuel), net::fuel_from_wire(m.fuel_ext));
     stores_apply_entries(player, m.e, m.n, "our seat's stores (takeover)");
     LOG("seat: took over our seat in place: moved %.0f m to (%.0f, %.0f, %.0f), speed %.0f m/s, fuel %.0f + %.0f kg, "

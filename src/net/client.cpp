@@ -219,6 +219,7 @@ void end_session(const char* why) {
     }
     g_session = false;
     g_join_deferred = false;
+    handover_session_end();
     g_welcomed.store(false, std::memory_order_relaxed);
     g_snap_ok = false;
     g_hold = true;

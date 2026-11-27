@@ -8983,9 +8983,11 @@ void seat_takeover_tests() {
     uint8_t b[160];
     SeatStateMsg r{};
     const size_t n = encode(m, b, sizeof(b));
-    expect(n == 135 && peek_world_type(b, n) == 35 && decode(b, n, r) == Status::Ok && r.pose.pos[0] == 5000000 &&
-               r.e[0].station == 4 && r.fuel == 500,
-           "seat: 135 bytes, round trip");
+    m.state = 0x00800800u;
+    const size_t n2 = encode(m, b, sizeof(b));
+    expect(n == 139 && n2 == 139 && peek_world_type(b, n2) == 35 && decode(b, n2, r) == Status::Ok &&
+               r.pose.pos[0] == 5000000 && r.e[0].station == 4 && r.fuel == 500 && r.state == 0x00800800u,
+           "seat: 139 bytes (with the airborne and configuration bits), round trip");
     m.n = 13;
     expect(decode(b, encode(m, b, sizeof(b)), r) == Status::BadType, "seat: at most 12 stations");
     m.n = 1;
@@ -8994,10 +8996,10 @@ void seat_takeover_tests() {
     SeatStateMsg dead = m;
     dead.flags = kSeatAirborne;
     expect(seat_takeover_due(m, 8000.0) && !seat_takeover_due(m, 20.0) && !seat_takeover_due(parked, 8000.0) &&
-               !seat_takeover_due(dead, 8000.0),
+               !seat_takeover_due(dead, 8000.0) && !seat_takeover_due(m, 8000.0, true),
            "seat: a late joiner takes over a live, flying seat it is far from; not a parked or destroyed one, not when "
-           "already there (a reconnect)");
-    std::printf("    estimate: 135 B once per Welcome\n");
+           "already there (a reconnect), and never after it ran the world itself and offered it (the host's seat is stale)");
+    std::printf("    estimate: 139 B once per Welcome\n");
 
     ServeRun s;
     s.cfg.script = bot::Script::Straight;
@@ -9052,9 +9054,11 @@ void handover_tests() {
         s.vehicles.push_back(v);
     }
     for (int i = 0; i < 30; ++i) s.flights.push_back(HandoverFlight{static_cast<uint16_t>(i), 3});
+    for (int i = 0; i < 20; ++i) s.dead.push_back(HandoverDead{1, static_cast<uint16_t>(30 + i), 0});
     const std::vector<uint8_t> raw = serialize(s);
     HandoverSnapshot back;
-    expect(raw.size() == 22 + 80 * 60 + 200 * 40 + 30 * 3 && deserialize(raw.data(), raw.size(), &back) &&
+    expect(raw.size() == 24 + 80 * 60 + 200 * 40 + 30 * 3 + 20 * 5 && deserialize(raw.data(), raw.size(), &back) &&
+               back.dead.size() == 20 && back.dead[19].a == 49 &&
                back.aircraft.size() == 80 && back.aircraft[79].pose.pos[0] == 7900000 && back.vehicles[5].speed == 200 &&
                back.flights[29].waypoint == 3 && back.head.clock_ms == 812000 && !deserialize(raw.data(), raw.size() - 1, &back),
            "handover: a busy mission's snapshot (80 aircraft, 200 vehicles, 30 flights) round trips; a short one is refused");
@@ -9098,6 +9102,31 @@ void handover_tests() {
            "handover: messages fit the 96-byte queues; an empty chunk is refused");
     expect(take_handover(60000, 10000) && !take_handover(10000, 60000) && !take_handover(10500, 10000),
            "handover: the side whose mission clock is ahead loaded first and keeps the world");
+    {
+        OfferArbiter ar;
+        using V = OfferArbiter::Verdict;
+        const bool first = ar.on_begin(0, 90000, 10000, 1.0) == V::Take;
+        const bool second = ar.on_begin(1, 95000, 10000, 1.5) == V::RefuseBusy;  // two first-loaders: one at a time
+        ar.on_complete(0, true);
+        const bool later = ar.on_begin(1, 95000, 10000, 3.0) == V::RefuseDone;  // a world was taken this flight
+        expect(first && second && later, "races: two clients that loaded first: the first offer is taken, the other refused");
+        OfferArbiter ar2;
+        ar2.on_begin(2, 90000, 10000, 1.0);
+        ar2.on_disconnect(2);  // the client left mid-offer
+        const bool freed = ar2.active() == -1 && ar2.on_begin(3, 90000, 10000, 2.0) == V::Take;
+        expect(freed, "races: a disconnect mid-offer frees the host for another client's offer");
+        OfferArbiter ar3;
+        ar3.on_begin(1, 90000, 10000, 1.0);
+        const bool not_yet = ar3.on_tick(10.0) == -1;
+        const bool timed_out = ar3.on_tick(17.0) == 1 && ar3.active() == -1;
+        expect(not_yet && timed_out, "races: an offer that does not complete in 15 s is dropped (dropped chunks, a stall)");
+        OfferArbiter ar4;
+        // The host loads while the offer is under way: the decision made at the offer stands; a host that loaded
+        // first refuses outright.
+        const bool host_first = ar4.on_begin(0, 10000, 90000, 1.0) == V::RefuseOwner;
+        const bool host_later = ar4.on_begin(0, 90000, 2000, 2.0) == V::Take && ar4.active() == 0;
+        expect(host_first && host_later, "races: the host loading during an offer does not change the decision made at the offer");
+    }
 
     ServeRun sv;
     sv.cfg.script = bot::Script::Straight;

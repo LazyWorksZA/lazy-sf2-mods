@@ -16,7 +16,7 @@ struct HandoverHead {
     uint32_t epoch;  // the handover's id (the old owner's player epoch and a counter)
     uint32_t t_ms;
     uint32_t clock_ms, clock2_ms;
-    uint16_t aircraft, vehicles, flights;
+    uint16_t aircraft, vehicles, flights, dead;
 };
 /// <summary>A live AI aircraft: pose (WorldObjState, kind/a/b its key), state word +0x5f0, damage level, throttle
 /// (input 3, 0..255), fuel (kg / 4), and up to 8 loaded stations' counts.</summary>
@@ -37,13 +37,19 @@ struct HandoverVehicle {
     int16_t heading;
     uint8_t damage;
 };
+/// <summary>An aircraft or ground object the old owner has destroyed (it dies on the receiver too).</summary>
+struct HandoverDead {
+    uint8_t kind;
+    uint16_t a, b;
+};
 /// <summary>A flight's current waypoint (its formation AI +0x18).</summary>
 struct HandoverFlight {
     uint16_t slot;
     uint8_t waypoint;
 };
 #pragma pack(pop)
-static_assert(sizeof(HandoverHead) == 22);
+static_assert(sizeof(HandoverHead) == 24);
+static_assert(sizeof(HandoverDead) == 5);
 static_assert(sizeof(HandoverAircraft) == 60);  // 0:35 pose, 35:4 state, 39:1 damage, 40:1 throttle, 41:2 fuel,
                                                 // 43:1 stations, 44:8 station, 52:8 count
 static_assert(sizeof(HandoverVehicle) == 40);
@@ -55,8 +61,9 @@ struct HandoverSnapshot {
     std::vector<HandoverAircraft> aircraft;
     std::vector<HandoverVehicle> vehicles;
     std::vector<HandoverFlight> flights;
+    std::vector<HandoverDead> dead;
 };
-/// <summary>The bytes: the head, then the aircraft, vehicles and flights back to back (counts in the head).</summary>
+/// <summary>The bytes: the head, then the aircraft, vehicles, flights and dead back to back (counts in the head).</summary>
 std::vector<uint8_t> serialize(const HandoverSnapshot& s);
 /// <summary>The reverse; false if the sizes do not add up.</summary>
 bool deserialize(const uint8_t* data, size_t len, HandoverSnapshot* out);
@@ -123,6 +130,31 @@ private:
     HandoverBeginMsg offer_{};
     std::vector<uint8_t> bytes_, got_;
     size_t have_ = 0, count_ = 0;
+};
+
+/// <summary>
+/// The host's offers, one at a time: the first acceptable offer of a flight wins (two clients that loaded first:
+/// the second is refused), an offer that does not complete within kTimeout is dropped (its client is told), and a
+/// disconnect drops its client's offer. The decision is made at the offer: the host loading or advancing meanwhile
+/// does not change it. Times are seconds (any monotonic clock).
+/// </summary>
+class OfferArbiter {
+public:
+    static constexpr double kTimeout = 15.0;
+    enum class Verdict : uint8_t { Take, RefuseOwner, RefuseBusy, RefuseDone };
+    Verdict on_begin(int slot, uint32_t offer_clock_ms, uint32_t own_clock_ms, double now);
+    /// <summary>The offer of slot completed (applied or failed): no other offer is taken this flight if it applied.</summary>
+    void on_complete(int slot, bool applied);
+    /// <summary>The slot whose offer timed out (and is dropped), or -1.</summary>
+    int on_tick(double now);
+    void on_disconnect(int slot);
+    void reset() { *this = OfferArbiter{}; }
+    int active() const { return slot_; }
+
+private:
+    int slot_ = -1;
+    double since_ = 0;
+    bool done_ = false;
 };
 
 /// <summary>Who loaded first owns the world: the receiver takes the offer when the offerer's mission clock is ahead

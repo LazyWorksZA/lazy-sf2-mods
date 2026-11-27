@@ -47,12 +47,14 @@ std::vector<uint8_t> serialize(const HandoverSnapshot& s) {
     h.aircraft = static_cast<uint16_t>(s.aircraft.size());
     h.vehicles = static_cast<uint16_t>(s.vehicles.size());
     h.flights = static_cast<uint16_t>(s.flights.size());
+    h.dead = static_cast<uint16_t>(s.dead.size());
     v.reserve(sizeof(h) + s.aircraft.size() * sizeof(HandoverAircraft) + s.vehicles.size() * sizeof(HandoverVehicle) +
-              s.flights.size() * sizeof(HandoverFlight));
+              s.flights.size() * sizeof(HandoverFlight) + s.dead.size() * sizeof(HandoverDead));
     put(v, h);
     for (const auto& a : s.aircraft) put(v, a);
     for (const auto& x : s.vehicles) put(v, x);
     for (const auto& f : s.flights) put(v, f);
+    for (const auto& d : s.dead) put(v, d);
     return v;
 }
 
@@ -61,7 +63,8 @@ bool deserialize(const uint8_t* data, size_t len, HandoverSnapshot* out) {
     HandoverSnapshot s;
     std::memcpy(&s.head, data, sizeof(s.head));
     const size_t want = sizeof(HandoverHead) + s.head.aircraft * sizeof(HandoverAircraft) +
-                        s.head.vehicles * sizeof(HandoverVehicle) + s.head.flights * sizeof(HandoverFlight);
+                        s.head.vehicles * sizeof(HandoverVehicle) + s.head.flights * sizeof(HandoverFlight) +
+                        s.head.dead * sizeof(HandoverDead);
     if (len != want) return false;
     const uint8_t* p = data + sizeof(HandoverHead);
     s.aircraft.resize(s.head.aircraft);
@@ -72,6 +75,9 @@ bool deserialize(const uint8_t* data, size_t len, HandoverSnapshot* out) {
     if (!s.vehicles.empty()) std::memcpy(s.vehicles.data(), p, s.vehicles.size() * sizeof(HandoverVehicle));
     p += s.vehicles.size() * sizeof(HandoverVehicle);
     if (!s.flights.empty()) std::memcpy(s.flights.data(), p, s.flights.size() * sizeof(HandoverFlight));
+    p += s.flights.size() * sizeof(HandoverFlight);
+    s.dead.resize(s.head.dead);
+    if (!s.dead.empty()) std::memcpy(s.dead.data(), p, s.dead.size() * sizeof(HandoverDead));
     *out = std::move(s);
     return true;
 }
@@ -112,6 +118,32 @@ bool unpack_handover(const std::vector<uint8_t>& packed, uint32_t crc, uint32_t 
         return false;
     *raw = std::move(out);
     return true;
+}
+
+OfferArbiter::Verdict OfferArbiter::on_begin(int slot, uint32_t offer_clock_ms, uint32_t own_clock_ms, double now) {
+    if (done_) return Verdict::RefuseDone;
+    if (slot_ >= 0 && slot_ != slot) return Verdict::RefuseBusy;
+    if (!take_handover(offer_clock_ms, own_clock_ms)) return Verdict::RefuseOwner;
+    slot_ = slot;
+    since_ = now;
+    return Verdict::Take;
+}
+
+void OfferArbiter::on_complete(int slot, bool applied) {
+    if (slot != slot_) return;
+    slot_ = -1;
+    if (applied) done_ = true;
+}
+
+int OfferArbiter::on_tick(double now) {
+    if (slot_ < 0 || now - since_ < kTimeout) return -1;
+    const int s = slot_;
+    slot_ = -1;
+    return s;
+}
+
+void OfferArbiter::on_disconnect(int slot) {
+    if (slot == slot_) slot_ = -1;
 }
 
 bool HandoverAssembly::begin(const HandoverBeginMsg& b) {
