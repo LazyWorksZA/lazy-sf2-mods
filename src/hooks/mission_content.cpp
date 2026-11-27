@@ -78,23 +78,27 @@ uint32_t hash_object(const std::wstring& folder, const std::string& name, const 
     return h ? h : 1u;
 }
 
+// The theatre's main ini and the files the sim reads from its [Terrain] section (tile and height data, targets,
+// target types, movement, nations); maps, bitmaps and briefing text are left out.
 uint32_t hash_theatre(const std::string& map, std::vector<std::string>* ground) {
     const std::wstring folder = L"Terrains\\" + widen_ansi(map);
     std::vector<uint8_t> bytes;
     if (!read_content_file(folder + L"\\" + widen_ansi(map) + L".ini", &bytes)) return 0;
     uint32_t h = add_file(kSeed, map + ".ini", bytes);
     const acmi::Ini th = acmi::parse_ini(bytes.data(), bytes.size());
+    for (const char* key : {"DataFile", "TargetFile", "MovementFile", "NationsFile"}) {
+        const std::string* f = th.get("Terrain", key);
+        if (!f || !content_name_ok(*f)) continue;
+        std::vector<uint8_t> b;
+        h = add_file(h, *f, read_content_file(folder + L"\\" + widen_ansi(*f), &b) ? b : std::vector<uint8_t>{});
+    }
     const std::string* targets = th.get("Terrain", "TargetFile");
-    if (targets && content_name_ok(*targets)) {
-        std::vector<uint8_t> f;
-        h = add_file(h, *targets, read_content_file(folder + L"\\" + widen_ansi(*targets), &f) ? f : std::vector<uint8_t>{});
-        const std::string types = acmi::types_file_name(th, *targets);
-        if (content_name_ok(types)) {
-            std::vector<uint8_t> tf;
-            const bool have = read_content_file(folder + L"\\" + widen_ansi(types), &tf);
-            h = add_file(h, types, have ? tf : std::vector<uint8_t>{});
-            if (have && ground) *ground = theatre_ground_objects(acmi::parse_ini(tf.data(), tf.size()));
-        }
+    const std::string types = acmi::types_file_name(th, targets ? *targets : std::string());
+    if (content_name_ok(types)) {
+        std::vector<uint8_t> tf;
+        const bool have = read_content_file(folder + L"\\" + widen_ansi(types), &tf);
+        h = add_file(h, types, have ? tf : std::vector<uint8_t>{});
+        if (have && ground) *ground = theatre_ground_objects(acmi::parse_ini(tf.data(), tf.size()));
     }
     return h ? h : 1u;
 }
@@ -124,7 +128,7 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
     };
     std::vector<std::string> ground;
     if (!uses.theatre.empty()) out.push_back({'T', uses.theatre, hash_theatre(uses.theatre, &ground)});
-    std::vector<std::string> weapons;
+    std::vector<std::string> weapons, dropped = uses.dropped;
     for (const auto& [type, loadout] : uses.aircraft) {
         acmi::Ini main;
         std::vector<std::pair<std::string, std::vector<uint8_t>>> named;
@@ -132,7 +136,7 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
         if (!have('A', type)) out.push_back({'A', type, h});
         for (const auto& [key, bytes] : named) {
             if (key != "loadoutfile") continue;
-            for (const auto& w : loadout_weapons(acmi::parse_ini(bytes.data(), bytes.size()), loadout)) {
+            for (const auto& w : loadout_weapons(acmi::parse_ini(bytes.data(), bytes.size()), loadout, &dropped)) {
                 bool seen = false;
                 for (const auto& x : weapons) seen = seen || acmi::to_lower_ascii(x) == acmi::to_lower_ascii(w);
                 if (!seen) weapons.push_back(w);
@@ -143,6 +147,13 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
     for (const auto& g : ground) out.push_back({'G', g, content_entry_hash('G', g)});
     size_t missing = 0;
     for (const auto& e : out) missing += e.hash == 0;
+    if (!dropped.empty()) {
+        std::string names;
+        for (size_t i = 0; i < dropped.size() && i < 6; ++i) names += (i ? ", " : "") + dropped[i];
+        LOG("lobby: %zu name(s) in the mission cannot be listed (control characters, path characters or too long), so "
+            "they are not compared: %s%s",
+            dropped.size(), names.c_str(), dropped.size() > 6 ? ", ..." : "");
+    }
     LOG("lobby: the mission uses %zu content entries (theatre %s, %zu aircraft types, %zu weapons, %zu ground objects); "
         "%zu not found here",
         out.size(), uses.theatre.c_str(), uses.aircraft.size(), weapons.size(), ground.size(), missing);
@@ -152,6 +163,8 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
 std::string mission_content_check(const std::string& sidecar_text) {
     std::vector<ContentEntry> host = parse_content(sidecar_text);
     if (host.empty()) return {};  // a host that sends no list: nothing to compare
+    if (host.size() > kMaxContentEntries)
+        return "the host's list is too long to check (" + std::to_string(host.size()) + " entries)";
     std::vector<ContentEntry> mine;
     mine.reserve(host.size());
     for (const auto& e : host) mine.push_back({e.kind, e.name, content_entry_hash(e.kind, e.name)});

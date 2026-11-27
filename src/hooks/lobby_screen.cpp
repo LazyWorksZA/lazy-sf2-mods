@@ -674,15 +674,25 @@ std::wstring content_refusal_text(const Roster& r) {
     return b;
 }
 
-/// <summary>Client: what this PC lacks of the host's current mission ("missing: ...; differs: ..."), empty when it
-/// has everything or the mission has not been checked yet.</summary>
+/// <summary>Client: why this pilot cannot take part in the host's current mission yet, as a status line: its content
+/// not checked yet, not checkable, or lacking. Empty once the check has passed (or with no mission).</summary>
 std::string mission_lacks(uint32_t mission_id) {
-    std::string diff;
-    return world_lobby_content(mission_id, &diff) ? diff : std::string();
+    if (!mission_id) return {};
+    std::string text;
+    switch (world_lobby_content(mission_id, &text)) {
+        case ContentCheck::Passed: return {};
+        case ContentCheck::Pending: return "\x01";  // shown as "checking"
+        case ContentCheck::Failed: return "\x02" + text;
+        case ContentCheck::Lacks: return text;
+    }
+    return {};
 }
 
-std::wstring mission_lacks_text(const std::string& diff) {
-    return L"The host's mission uses content you lack or have otherwise - " + widen_ansi(diff) + L".";
+std::wstring mission_lacks_text(const std::string& lacks) {
+    if (!lacks.empty() && lacks[0] == '\x01') return L"Checking the host's mission against your game files...";
+    if (!lacks.empty() && lacks[0] == '\x02')
+        return L"The host's mission could not be checked here (" + widen_ansi(lacks.substr(1)) + L"); asking again.";
+    return L"The host's mission uses content you lack or have otherwise - " + widen_ansi(lacks) + L".";
 }
 
 /// <summary>Client: Ready for the host's current mission, if this pilot has a seat in it. Returns nullptr, or why

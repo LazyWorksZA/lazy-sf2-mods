@@ -20,27 +20,41 @@ struct ContentEntry {
     uint32_t hash = 0;
 };
 
-/// <summary>A name taken from a game file, usable in a path and a sidecar line: 1..40 printable ASCII characters
-/// without path separators, ':' or "..".</summary>
+/// <summary>A name taken from a game file, usable in a path and a sidecar line: 1..64 printable ASCII characters
+/// (spaces inside, as folder names may have) without path separators, ':', '=' or "..".</summary>
 inline bool content_name_ok(const std::string& n) {
-    if (n.empty() || n.size() > 40 || n.find("..") != std::string::npos) return false;
+    if (n.empty() || n.size() > 64 || n.find("..") != std::string::npos || n.front() == ' ' || n.back() == ' ')
+        return false;
     for (char c : n)
-        if (c < 0x21 || c > 0x7e || c == '\\' || c == '/' || c == ':' || c == '=') return false;
+        if (c < 0x20 || c > 0x7e || c == '\\' || c == '/' || c == ':' || c == '=') return false;
     return true;
 }
+
+/// <summary>The most content lines a client checks; a longer list is refused (it would cost the menu thread too
+/// much).</summary>
+inline constexpr size_t kMaxContentEntries = 512;
 
 /// <summary>The mission file's theatre and its flights' aircraft types with their loadout names (in file order,
 /// repeated types kept once per loadout).</summary>
 struct MissionUses {
     std::string theatre;
     std::vector<std::pair<std::string, std::string>> aircraft;  // type, loadout section (may be empty)
+    std::vector<std::string> dropped;                           // names that cannot be used (logged by the caller)
 };
 
 inline MissionUses mission_uses(const acmi::Ini& msn) {
     MissionUses u;
-    if (const std::string* m = msn.get("MissionHeader", "MissionMap"); m && content_name_ok(*m)) u.theatre = *m;
+    if (const std::string* m = msn.get("MissionHeader", "MissionMap")) {
+        if (content_name_ok(*m))
+            u.theatre = *m;
+        else
+            u.dropped.push_back(*m);
+    }
     auto add = [&](const std::string& type, const std::string& loadout) {
-        if (!content_name_ok(type)) return;
+        if (!content_name_ok(type)) {
+            if (!type.empty()) u.dropped.push_back(type);
+            return;
+        }
         for (const auto& a : u.aircraft)
             if (acmi::to_lower_ascii(a.first) == acmi::to_lower_ascii(type) && a.second == loadout) return;
         u.aircraft.emplace_back(type, loadout);
@@ -59,19 +73,33 @@ inline MissionUses mission_uses(const acmi::Ini& msn) {
 }
 
 /// <summary>The weapons and racks a loadout section of an aircraft's loadout ini names (Loadout[nn].WeaponType and
-/// .RackType), each once.</summary>
-inline std::vector<std::string> loadout_weapons(const acmi::Ini& loadout_ini, const std::string& section) {
+/// .RackType), each once. Without that section (none named, or not in the file) the [Default] section, else every
+/// section: the flight may fly any of them.</summary>
+inline std::vector<std::string> loadout_weapons(const acmi::Ini& loadout_ini, const std::string& section,
+                                                std::vector<std::string>* dropped = nullptr) {
     std::vector<std::string> out;
-    const acmi::IniSection* s = section.empty() ? nullptr : loadout_ini.find(section);
-    if (!s) return out;
-    for (const auto& kv : s->items) {
-        const size_t dot = kv.first.rfind('.');
-        if (dot == std::string::npos) continue;
-        const std::string field = kv.first.substr(dot + 1);
-        if ((field != "weapontype" && field != "racktype") || !content_name_ok(kv.second)) continue;
-        bool seen = false;
-        for (const auto& w : out) seen = seen || acmi::to_lower_ascii(w) == acmi::to_lower_ascii(kv.second);
-        if (!seen) out.push_back(kv.second);
+    std::vector<const acmi::IniSection*> from;
+    if (const acmi::IniSection* s = section.empty() ? nullptr : loadout_ini.find(section)) {
+        from.push_back(s);
+    } else if (const acmi::IniSection* d = loadout_ini.find("Default")) {
+        from.push_back(d);
+    } else {
+        for (const acmi::IniSection& sec : loadout_ini.sections) from.push_back(&sec);
+    }
+    for (const acmi::IniSection* s : from) {
+        for (const auto& kv : s->items) {
+            const size_t dot = kv.first.rfind('.');
+            if (dot == std::string::npos) continue;
+            const std::string field = kv.first.substr(dot + 1);
+            if (field != "weapontype" && field != "racktype") continue;
+            if (!content_name_ok(kv.second)) {
+                if (dropped && !kv.second.empty()) dropped->push_back(kv.second);
+                continue;
+            }
+            bool seen = false;
+            for (const auto& w : out) seen = seen || acmi::to_lower_ascii(w) == acmi::to_lower_ascii(kv.second);
+            if (!seen) out.push_back(kv.second);
+        }
     }
     return out;
 }
@@ -143,8 +171,8 @@ inline std::vector<ContentEntry> parse_content(const std::string& text) {
 }
 
 /// <summary>"missing: F-4E_67, AIM-9B; differs: AGM-12B": the host's entries this PC lacks (hash 0 here) or has
-/// otherwise, at most max_names named (then "and N more"). Empty when all match (an entry the host lacks too
-/// counts as matching).</summary>
+/// otherwise, at most max_names named (then "and N more"). Empty when all match. An entry the host lacks (hash 0)
+/// matches whatever this PC has: the host's flight never uses it.</summary>
 inline std::string content_diff(const std::vector<ContentEntry>& host, const std::vector<ContentEntry>& local,
                                 size_t max_names = 4) {
     std::vector<std::string> missing, differs;
@@ -152,7 +180,7 @@ inline std::string content_diff(const std::vector<ContentEntry>& host, const std
         uint32_t mine = 0;
         for (const ContentEntry& l : local)
             if (l.kind == h.kind && acmi::to_lower_ascii(l.name) == acmi::to_lower_ascii(h.name)) mine = l.hash;
-        if (mine == h.hash) continue;
+        if (mine == h.hash || h.hash == 0) continue;  // the host lacks it too: its flight never uses it
         (mine == 0 ? missing : differs).push_back(h.name);
     }
     std::string out;

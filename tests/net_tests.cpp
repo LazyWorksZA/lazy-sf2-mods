@@ -10482,8 +10482,11 @@ void mission_content_tests() {
     const auto lo = ini("[Strike_66]\r\nLoadout[01].WeaponType=M117\r\nLoadout[01].RackType=MER_F105\r\n"
                         "Loadout[02].WeaponType=M117\r\nLoadout[03].Quantity=2\r\n[AirToAir]\r\nLoadout[06].WeaponType=AIM-9B\r\n");
     const auto w = hk::loadout_weapons(lo, "Strike_66");
-    expect(w.size() == 2 && w[0] == "M117" && w[1] == "MER_F105" && hk::loadout_weapons(lo, "Nope").empty(),
-           "content: the weapons and racks of the mission's loadout section, each once");
+    expect(w.size() == 2 && w[0] == "M117" && w[1] == "MER_F105", "content: the weapons and racks of the mission's loadout section, each once");
+    const auto all = hk::loadout_weapons(lo, "Nope");
+    const auto def = hk::loadout_weapons(ini("[Default]\r\nLoadout[01].WeaponType=Mk82\r\n[Other]\r\nLoadout[01].WeaponType=Mk84\r\n"), "");
+    expect(all.size() == 3 && all[2] == "AIM-9B" && def.size() == 1 && def[0] == "Mk82",
+           "content: no loadout section named: the [Default] one, else every section");
     const auto ty = ini("[TargetType001]\r\nName=barrack1\r\nUseGroundObject=FALSE\r\n[TargetType002]\r\nName=SA-2\r\n"
                         "UseGroundObject=TRUE\r\n[TargetType003]\r\nName=sa-2\r\nUseGroundObject=TRUE\r\n");
     const auto g = hk::theatre_ground_objects(ty);
@@ -10501,6 +10504,11 @@ void mission_content_tests() {
     mine[2].hash = 0x33;
     mine[3].hash = 0x44;
     expect(hk::content_diff(host, mine).empty(), "content: all the same: nothing to report");
+    mine[4].hash = 0x55;
+    expect(hk::content_diff(host, mine).empty(), "content: what the host lacks matches whatever this PC has");
+    expect(hk::content_name_ok("F-4E (USAF)") && !hk::content_name_ok(" lead") && !hk::content_name_ok("a\\b") &&
+               !hk::content_name_ok(std::string(65, 'x')),
+           "content: names with spaces inside are kept; path characters, edge spaces and long names are not");
     std::vector<hk::ContentEntry> many;
     for (int i = 0; i < 7; ++i) many.push_back({'W', "W" + std::to_string(i), 1});
     expect(hk::content_diff(many, {}, 4) == "missing: W0, W1, W2, W3; and 3 more", "content: at most four named");

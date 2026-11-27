@@ -215,7 +215,7 @@ void MissionFetch::run() {
                             status_sent = ms_now();
                         }
                         MissionRequestMsg rq{};
-                        rq.have_id = have;
+                        rq.have_id = refetch_.exchange(false) ? 0 : have;  // 0: send it all again
                         rq.tag = tag_;
                         uint8_t rb[sizeof(MissionRequestMsg)];
                         send(rb, encode(rq, rb, sizeof(rb)));

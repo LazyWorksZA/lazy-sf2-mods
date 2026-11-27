@@ -44,6 +44,12 @@ public:
     /// <summary>The mission id the host named in its latest offer (0: none yet). Any thread.</summary>
     /// <summary>Any thread: a whole mission is waiting for take().</summary>
     bool has_fresh() const;
+    /// <summary>Any thread: ask for the host's mission again in full at the next round (the last one could not be
+    /// used here).</summary>
+    void refetch() {
+        refetch_.store(true);
+        poke_.store(true);
+    }
     uint32_t latest_id() const { return latest_id_.load(std::memory_order_acquire); }
     /// <summary>The seat the host gave in its latest offer (kNoSeat: none).</summary>
     uint8_t latest_seat() const { return latest_seat_.load(std::memory_order_acquire); }
@@ -86,6 +92,7 @@ private:
     uint32_t content_hash_ = 0;
     std::atomic<bool> ready_{false}, poke_{false}, leaving_{false}, left_{false};
     std::atomic<uint32_t> ready_mission_{0};
+    std::atomic<bool> refetch_{false};
     std::atomic<int> want_{-1};
     std::atomic<uint32_t> wish_answer_{0};  // 0x10000 | seat << 8 | result, 0: none
     std::atomic<uint32_t> rtt_{0};

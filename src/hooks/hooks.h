@@ -428,9 +428,11 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn);
 /// <summary>mission_content.cpp: the host's list (sidecar content lines) checked against this PC: "missing: ...;
 /// differs: ..." or empty when all match. Menu thread.</summary>
 std::string mission_content_check(const std::string& sidecar_text);
-/// <summary>world_sync.cpp: the fetched mission's content check (client): true once the mission with this id was
-/// checked; *diff is empty when this PC has everything the mission uses.</summary>
-bool world_lobby_content(uint32_t mission_id, std::string* diff);
+/// <summary>world_sync.cpp: the content check of the host's mission (client).</summary>
+enum class ContentCheck { Pending, Passed, Lacks, Failed };
+/// <summary>world_sync.cpp: where the check of this mission stands (the fetched mission is taken and checked here
+/// when it has arrived). *text: what this PC lacks (Lacks) or why it could not check (Failed; it asks again).</summary>
+ContentCheck world_lobby_content(uint32_t mission_id, std::string* text);
 /// <summary>world_sync.cpp: the member of the player flight this PC's player flies (the host's lobby seat; -1: stock).</summary>
 void world_set_own_seat(int member);
 /// <summary>world_sync.cpp, a joined lobby session: the latest roster (and round trip), Ready, a seat wish.</summary>

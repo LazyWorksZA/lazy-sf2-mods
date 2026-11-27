@@ -695,6 +695,8 @@ void accept_save(const Ctx& c, void* page, const wchar_t* source) {
 
 uint32_t g_content_id = 0;      // join: the fetched mission whose content list was checked
 std::string g_content_diff;     // ... and what this PC lacks or has otherwise (empty: all there)
+uint32_t g_content_failed_id = 0;  // join: the mission that arrived but could not be unpacked or written here
+std::string g_content_fail;     // ... and why
 
 // Join, lobby session: the seat the host's book gives this pilot now (it may have changed since the mission arrived;
 // the host repeats it in every roster and offer). Menu thread.
@@ -732,11 +734,15 @@ void take_fetched_mission() {
     const char* why = "";
     if (!net::unpack_mission(packed, offer.mission_id, offer.raw_bytes, &sidecar, &msn, &why)) {
         LOG("world: join: the host's mission 0x%08lx is unusable (%s)", static_cast<unsigned long>(offer.mission_id), why);
+        g_content_failed_id = offer.mission_id;
+        g_content_fail = std::string("it did not unpack (") + why + ")";
         return;
     }
     const std::wstring dir = world_files_dir();
     if (dir.empty()) {
         LOG("world: join: no folder for the world files; the host's mission is not kept");
+        g_content_failed_id = offer.mission_id;
+        g_content_fail = "no folder for the session files";
         return;
     }
     const int n = next_number(dir);
@@ -744,6 +750,8 @@ void take_fetched_mission() {
     const std::wstring side_path = world_companion_path(msn_path, L".sidecar.txt");
     if (!write_bytes(msn_path, msn) || !write_text(side_path, sidecar, true)) {
         LOG("world: ERR join: could not write %ls or its sidecar", msn_path.c_str());
+        g_content_failed_id = offer.mission_id;
+        g_content_fail = "its files could not be written";
         return;
     }
     if (g_lobby_hash) {
@@ -2931,6 +2939,8 @@ void world_session_end() {
     g_fetched_id = g_flying_id = 0;
     g_content_id = 0;
     g_content_diff.clear();
+    g_content_failed_id = 0;
+    g_content_fail.clear();
     g_session_dir.clear();
     g_lobby_hash = 0;
     world_set_own_seat(-1);
@@ -2943,13 +2953,27 @@ bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password();
 
 uint32_t world_lobby_hash() { return g_lobby_hash; }
 
-bool world_lobby_content(uint32_t mission_id, std::string* diff) {
-    if (!g_join || !mission_id) return false;
+ContentCheck world_lobby_content(uint32_t mission_id, std::string* text) {
+    if (!g_join || !mission_id) return ContentCheck::Pending;
     // A newer mission has arrived: take it now (files written, its content checked), not at the briefing.
     if (g_fetch && g_content_id != mission_id && g_fetch->has_fresh()) take_fetched_mission();
-    if (g_content_id != mission_id) return false;
-    *diff = g_content_diff;
-    return true;
+    if (g_content_id == mission_id) {
+        *text = g_content_diff;
+        return g_content_diff.empty() ? ContentCheck::Passed : ContentCheck::Lacks;
+    }
+    if (g_content_failed_id == mission_id) {
+        *text = g_content_fail;
+        static ULONGLONG next = 0;  // ask again, at most every 5 s
+        const ULONGLONG now = GetTickCount64();
+        if (g_fetch && now >= next) {
+            next = now + 5000;
+            LOG("world: join: asking the host for mission 0x%08lx again (%s)", static_cast<unsigned long>(mission_id),
+                g_content_fail.c_str());
+            g_fetch->refetch();
+        }
+        return ContentCheck::Failed;
+    }
+    return ContentCheck::Pending;
 }
 
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms) {
