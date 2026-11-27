@@ -3,6 +3,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -145,7 +146,7 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     ini.button(names[2].c_str(), L"", L"LargerTextCenter", host ? L"TXT_LAZY_LOBBY_SETUP" : L"TXT_LAZY_LOBBY_BRIEFING",
                298, 575, host ? L"TXT_LAZY_LOBBY_SETUP_INFO" : L"TXT_LAZY_LOBBY_BRIEFING_INFO");
     ini.text(names[3].c_str(), L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
-    ini.text(names[4].c_str(), L"LargerTextCenter", L"", 513, 120);
+    ini.text(names[4].c_str(), L"LargerTextCenter", kLobbyBlankKey, 513, 120);
     ini.text(names[5].c_str(), L"LargerTextLeft", host ? L"TXT_LAZY_LOBBY_MISSION" : L"TXT_LAZY_LOBBY_HOST_MISSION",
              108, 172);
     ini.area(names[6].c_str(), 108, 192, 380, 330, true);
@@ -156,8 +157,8 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     ini.area(names[11].c_str(), 528, 214, 66, 340, false);
     ini.area(names[12].c_str(), 600, 214, 194, 340, false);
     ini.area(names[13].c_str(), 800, 214, 115, 340, false);
-    ini.text(names[14].c_str(), L"MediumTextLeft", L"", 108, 612);
-    if (!host) ini.text(names[15].c_str(), L"MediumTextLeft", L"", 108, 532);
+    ini.text(names[14].c_str(), L"MediumTextLeft", kLobbyBlankKey, 108, 612);
+    if (!host) ini.text(names[15].c_str(), L"MediumTextLeft", kLobbyBlankKey, 108, 532);
 }
 
 }  // namespace
@@ -169,9 +170,13 @@ bool splice_main_screen_button(std::wstring& text) {
     if (lower(t.substr(b, e - b)).find(L"destinationmenu=" + lower(kLobbyScreen)) == std::wstring::npos) return false;
     set_key(t, b, e, L"Active", L"TRUE");
     set_key(t, b, e, L"Enabled", L"TRUE");
-    // Stock: the 48-point style at (790,438) overlaps Campaign; Pilot Record's 40-point style fits the gap.
-    set_key(t, b, e, L"TextSetting", L"MainMenuText2");
-    set_key(t, b, e, L"TextPosition", L"790,459");
+    // In the large style of the three above it, one more of their steps (74) below Campaign (790,404); Pilot Record
+    // and Options move down so their spacing stays even above EXIT, which stays at (894,654).
+    set_key(t, b, e, L"TextSetting", L"MainMenuText");
+    set_key(t, b, e, L"TextPosition", L"790,478");
+    for (const auto& [name, pos] : {std::pair{L"PilotRecordHotspot", L"790,545"}, std::pair{L"OptionsHotspot", L"790,600"}}) {
+        if (section_range(t, name, b, e)) set_key(t, b, e, L"TextPosition", pos);
+    }
     text = std::move(t);
     return true;
 }
@@ -208,7 +213,7 @@ bool splice_lobby_screen(std::wstring& text, const std::wstring& menu_code_dll) 
     ini.text(L"LazyLobbyTitle", L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
     ini.text(L"LazyLobbyPanelTitle", L"LargerTextCenter", L"TXT_MENU_TYPE_MISSION", 257, 120);
     ini.text(L"LazyLobbyCallsignLabel", L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 46, 172);
-    ini.text(L"LazyLobbyCallsign", L"MediumTextLeft", L"", 180, 172);
+    ini.text(L"LazyLobbyCallsign", L"MediumTextLeft", kLobbyBlankKey, 180, 172);
     ini.text(L"LazyLobbyAddressLabel", L"MediumTextLeft", L"TXT_MENU_ADDRESS_TEXT", 46, 209);
     ini.edit(L"LazyLobbyAddress", 180, 206, kLobbyAddressChars, L"TXT_MENU_TCPIP_INFO");
     ini.text(L"LazyLobbyAddressHint", L"MediumTextLeft", L"TXT_MENU_TCPIP_INFO", 46, 240);

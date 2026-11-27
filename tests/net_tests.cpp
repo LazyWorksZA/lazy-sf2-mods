@@ -3116,20 +3116,24 @@ void lobby_splice_tests() {
         L"[MainScreen]\r\nMenuItem005=MultiplayerHotspot\r\n\r\n"
         L"[MultiplayerHotspot]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=NetworkConnectScreen\r\n"
         L"TextSetting=MainMenuText\r\nTextPosition=790,438\r\nActive=FALSE\r\nEnabled=FALSE\r\n\r\n"
-        L"[PilotRecordHotspot]\r\nTextPosition=790,513\r\nActive=FALSE\r\n";
+        L"[PilotRecordHotspot]\r\nTextPosition=790,513\r\nActive=FALSE\r\n\r\n"
+        L"[OptionsHotspot]\r\nTextPosition=790,568\r\n\r\n"
+        L"[QuitHotspot]\r\nTextPosition=894,654\r\n";
     std::wstring m = main;
     expect(splice_main_screen_button(m), "main screen button spliced");
     expect(m.find(L"[MultiplayerHotspot]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=NetworkConnectScreen\r\n"
-                  L"TextSetting=MainMenuText2\r\nTextPosition=790,459\r\nActive=TRUE\r\nEnabled=TRUE\r\n\r\n") !=
+                  L"TextSetting=MainMenuText\r\nTextPosition=790,478\r\nActive=TRUE\r\nEnabled=TRUE\r\n\r\n") !=
                std::wstring::npos,
-           "button active, enabled, smaller style, in the gap; keys changed in place");
-    expect(m.find(L"[PilotRecordHotspot]\r\nTextPosition=790,513\r\nActive=FALSE\r\n") != std::wstring::npos,
-           "the next section is untouched");
+           "button active, enabled, large style one step below Campaign; keys changed in place");
+    expect(m.find(L"[PilotRecordHotspot]\r\nTextPosition=790,545\r\nActive=FALSE\r\n") != std::wstring::npos &&
+               m.find(L"[OptionsHotspot]\r\nTextPosition=790,600\r\n") != std::wstring::npos &&
+               m.find(L"[QuitHotspot]\r\nTextPosition=894,654\r\n") != std::wstring::npos,
+           "Pilot Record and Options move down, EXIT stays");
 
     std::wstring last = L"[MultiplayerHotspot]\r\nDestinationMenu=NetworkConnectScreen";  // no newline, missing keys
     expect(splice_main_screen_button(last) &&
                last == L"[MultiplayerHotspot]\r\nDestinationMenu=NetworkConnectScreen\r\nActive=TRUE\r\nEnabled=TRUE\r\n"
-                       L"TextSetting=MainMenuText2\r\nTextPosition=790,459\r\n",
+                       L"TextSetting=MainMenuText\r\nTextPosition=790,478\r\n",
            "missing keys are added at the end of the last section");
     std::wstring other = L"[MultiplayerHotspot]\r\nDestinationMenu=SomeOtherScreen\r\nActive=FALSE\r\n";
     const std::wstring other_copy = other;

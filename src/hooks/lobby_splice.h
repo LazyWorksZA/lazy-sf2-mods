@@ -11,12 +11,17 @@ inline constexpr wchar_t kLobbyScreen[] = L"NetworkConnectScreen";
 inline constexpr wchar_t kLobbyHostScreen[] = L"LazyLobbyHostScreen";
 inline constexpr wchar_t kLobbyJoinScreen[] = L"LazyLobbyJoinScreen";
 
+/// <summary>The initial text of items the menu code fills: a TEXT item created empty gets no text node, and one set later
+/// is created hidden (StaticText SetText copies the old node's visibility), so these start as one space.</summary>
+inline constexpr wchar_t kLobbyBlankKey[] = L"TXT_LAZY_LOBBY_BLANK";
+
 /// <summary>Our English strings, answered by the text hook (menu_hooks.cpp). Keys stay under ~31 characters.</summary>
 struct LobbyText {
     const wchar_t* key;
     const wchar_t* text;
 };
 inline constexpr LobbyText kLobbyTexts[] = {
+    {kLobbyBlankKey, L" "},
     {L"TXT_LAZY_LOBBY_STATUS", L"Not connected."},
     {L"TXT_LAZY_LOBBY_JOIN_INFO", L"Join the game at the address above."},
     {L"TXT_LAZY_LOBBY_NET_HINT1", L"Internet play: the host opens UDP port 7777,"},
@@ -75,9 +80,9 @@ inline constexpr int kLobbyAddressChars = 63;
 inline constexpr int kLobbyPasswordChars = 31;
 
 /// <summary>
-/// Shows the stock Multiplayer button: makes [MultiplayerHotspot] active and enabled and moves it into the gap between
-/// Campaign and Pilot Record in Pilot Record's smaller style. Returns false and leaves `text` untouched if the section
-/// is missing or does not go to the lobby screen.
+/// Shows the stock Multiplayer button: makes [MultiplayerHotspot] active and enabled, in the large style one step below
+/// Campaign, and moves Pilot Record and Options down to keep the spacing even (EXIT stays). Returns false and leaves
+/// `text` untouched if the button's section is missing or does not go to the lobby screen.
 /// </summary>
 bool splice_main_screen_button(std::wstring& text);
 

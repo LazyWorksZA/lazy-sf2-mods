@@ -112,7 +112,10 @@ void* item_iface(int item, int type) {
     return iface;
 }
 
+/// <summary>Sets a TEXT item's text. Never empty: an empty text drops the item's text node, and the next one would be
+/// created hidden (see kLobbyBlankKey).</summary>
 void set_text(int item, const wchar_t* text) {
+    if (!text || !*text) text = L" ";
     if (void* t = item_iface(item, kIfaceText)) reinterpret_cast<SetText_t>(vtable_slot(t, kTextSet))(t, nullptr, text);
 }
 
