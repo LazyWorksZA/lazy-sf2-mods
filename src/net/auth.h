@@ -91,6 +91,9 @@ private:
 
 /// <summary>Host: unanswered connections one address may hold at a time.</summary>
 inline constexpr int kMaxPendingPerAddress = 2;
+/// <summary>Unanswered connections from one IPv4 /24 at most, so one network cannot fill every slot. Floods from many
+/// networks at once are an accepted risk (they can keep players waiting, not get in).</summary>
+inline constexpr int kMaxPendingPerNet = 2;
 
 /// <summary>Host: limits on connections that have not proven the password yet.</summary>
 struct AuthLimits {
@@ -102,6 +105,8 @@ struct AuthLimits {
     int evict_after_ms = 1500;  // an unanswered connection may make room for a newcomer only this long after its
                                 // challenge (key derivation plus round trip), or once refused
     int evict_gap_ms = 2000;    // one address makes room this often at most
+    int evict_table = 16;       // addresses remembered for evict_gap_ms (at most 64); when all are recent, nobody
+                                // makes room, so rotating addresses cannot get round the gap
 };
 
 /// <summary>

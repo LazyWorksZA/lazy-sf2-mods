@@ -373,7 +373,7 @@ void HostCore::run() {
     struct Evictor {
         uint32_t ip = 0;
         uint64_t at = 0;
-    } evictors[8] = {};  // the addresses that made room lately (oldest entry reused)
+    } evictors[64] = {};  // the addresses that made room lately (auth_limits_.evict_table of them are used)
     AuthLimiter limiter(auth_limits_);
     auto ip_text = [](const ENetPeer* p, char* out, size_t n) {
         const uint32_t a = p->address.host;  // network byte order
@@ -744,11 +744,13 @@ void HostCore::run() {
                 }
                 const uint32_t from_ip = ev.peer->address.host;
                 int slot = -1, oldest = -1;
-                int same_ip_pending = 0;
+                int same_ip_pending = 0, same_net_pending = 0;
                 for (int i = 0; i < kMaxClients; ++i) {
                     if (!peers[i]) {
                         if (slot < 0) slot = i;
                     } else if (!authed[i]) {
+                        // address.host is in network order: its low three bytes are the /24.
+                        if ((peers[i]->address.host & 0x00ffffffu) == (from_ip & 0x00ffffffu)) ++same_net_pending;
                         if (peers[i]->address.host == from_ip) {
                             ++same_ip_pending;
                             continue;  // never one of the newcomer's own address
@@ -762,22 +764,27 @@ void HostCore::run() {
                         if (oldest < 0 || age_key < best) oldest = i;
                     }
                 }
-                if (same_ip_pending >= kMaxPendingPerAddress) {
+                if (same_ip_pending >= kMaxPendingPerAddress || same_net_pending >= kMaxPendingPerNet) {
                     enet_peer_disconnect_now(ev.peer, 0);
                     break;
                 }
                 if (slot < 0) {
-                    Evictor* rec = &evictors[0];
-                    for (Evictor& x : evictors) {
-                        if (x.ip == from_ip) {
-                            rec = &x;
+                    // This address's entry, else a free one (never used, or older than the gap); none: refused.
+                    const uint64_t gap = static_cast<uint64_t>(auth_limits_.evict_gap_ms);
+                    const int table = auth_limits_.evict_table < 1 ? 1 : auth_limits_.evict_table > 64 ? 64 : auth_limits_.evict_table;
+                    Evictor* rec = nullptr;
+                    bool too_soon = false;
+                    for (int k = 0; k < table; ++k) {
+                        if (evictors[k].ip == from_ip && evictors[k].at) {
+                            rec = &evictors[k];
+                            too_soon = t < evictors[k].at + gap;
                             break;
                         }
-                        if (x.at < rec->at) rec = &x;
                     }
-                    const bool too_soon = rec->ip == from_ip && rec->at &&
-                                          t < rec->at + static_cast<uint64_t>(auth_limits_.evict_gap_ms);
-                    if (oldest < 0 || too_soon) {  // no connection that may make room, or this address just made some
+                    for (int k = 0; k < table && !rec; ++k)
+                        if (!evictors[k].at || t >= evictors[k].at + gap) rec = &evictors[k];
+                    // No connection that may make room, this address just made some, or every entry is recent.
+                    if (oldest < 0 || too_soon || !rec) {
                         enet_peer_disconnect_now(ev.peer, 0);
                         break;
                     }

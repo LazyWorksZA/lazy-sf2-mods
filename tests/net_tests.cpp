@@ -9937,6 +9937,76 @@ void bot_world_join_tests() {
 }
 
 
+// One network cannot fill the slots with unanswered connections, and rotating addresses cannot get round evict_gap_ms.
+void flood_limit_tests() {
+    std::printf("session password: per-/24 cap and the evictor table\n");
+    if (enet_initialize() != 0) {
+        expect(false, "enet_initialize");
+        return;
+    }
+    HostCore core;
+    AuthLimits lim;
+    lim.cooldown_ms = 0;
+    lim.block_after = 1000;
+    lim.deadline_ms = 5000;   // nothing is refused at its deadline during the checks
+    lim.evict_after_ms = 100;
+    lim.evict_gap_ms = 60000;
+    lim.evict_table = 1;
+    core.set_auth_limits(lim);
+    core.start("127.0.0.1", 0, [](const char*) {}, test_key());
+    for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ENetAddress addr{};
+    enet_address_set_host_ip(&addr, "127.0.0.1");
+    addr.port = core.port();
+    TestClient c1, c2, c3, f1, f2, e1, e2;
+    auto service_all = [&] {
+        for (TestClient* c : {&c1, &c2, &c3, &f1, &f2, &e1, &e2})
+            if (c->host) c->service(0);
+        HostEvent ev[16];
+        core.poll(ev, 16);
+        std::this_thread::yield();
+    };
+    auto wait_for = [&](auto pred, int ms) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (!pred() && std::chrono::steady_clock::now() < until) service_all();
+    };
+    auto open_from = [&](TestClient& c, const char* ip) {
+        c.auto_auth = false;
+        ENetAddress local{};
+        enet_address_set_host_ip(&local, ip);
+        c.host = enet_host_create(&local, 1, kChannelCount, 0, 0);
+        c.peer = c.host ? enet_host_connect(c.host, &addr, kChannelCount, 0) : nullptr;
+        wait_for([&] { return c.challenges > 0 || c.disconnected; }, 1000);
+    };
+    open_from(c1, "127.0.0.2");
+    open_from(c2, "127.0.0.3");
+    open_from(c3, "127.0.0.4");
+    expect(c1.challenges == 1 && c2.challenges == 1 && c3.challenges == 0 && c3.disconnected,
+           "a third unanswered connection from one /24 (other addresses) is cut before any challenge");
+    // Fill the other two slots with proven connections from other networks.
+    open_from(f1, "127.0.1.1");
+    f1.answer(f1.challenge);
+    wait_for([&] { return f1.proofs > 0; }, 1000);
+    open_from(f2, "127.0.2.1");
+    f2.answer(f2.challenge);
+    wait_for([&] { return f2.proofs > 0; }, 1000);
+    const auto t0 = std::chrono::steady_clock::now();
+    wait_for([&] { return std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(150); }, 300);
+    open_from(e1, "127.0.3.1");  // makes room: the table's one entry is now in use
+    wait_for([&] { return c1.disconnected; }, 300);
+    open_from(e2, "127.0.4.1");  // another address: the table is full
+    wait_for([&] { return e2.disconnected; }, 300);
+    expect(f1.proofs == 1 && f2.proofs == 1 && e1.challenges == 1 && c1.disconnected && e2.challenges == 0 &&
+               !c2.disconnected,
+           "the evictor table full: a newcomer from another address is refused instead of making room");
+    for (TestClient* c : {&c2, &f1, &f2, &e1})
+        if (c->peer) enet_peer_disconnect(c->peer, 0);
+    wait_for([] { return false; }, 100);
+    core.stop(false);
+    enet_deinitialize();
+}
+
 void fake_host_proof_tests() {
     std::printf("session password: a host that cannot prove it\n");
     AuthKey fake;
@@ -10308,6 +10378,7 @@ int main(int argc, char** argv) {
     session_lifecycle_tests();
     session_password_tests();
     fake_host_proof_tests();
+    flood_limit_tests();
     lobby_book_tests();
     lobby_loopback_tests();
     lobby_flow_splice_tests();
