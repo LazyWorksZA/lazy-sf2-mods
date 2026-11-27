@@ -37,10 +37,14 @@ struct HandoverVehicle {
     int16_t heading;
     uint8_t damage;
 };
-/// <summary>An aircraft or ground object the old owner has destroyed (it dies on the receiver too).</summary>
+/// <summary>An aircraft or ground object the old owner has destroyed: it dies on the receiver too, and the receiver
+/// logs the kill with the killer (by key; kind 0 none) and weapon (the old owner's +0x318/+0x31c).</summary>
 struct HandoverDead {
     uint8_t kind;
     uint16_t a, b;
+    uint8_t killer_kind;
+    uint16_t killer_a, killer_b;
+    uint32_t weapon;
 };
 /// <summary>A flight's current waypoint (its formation AI +0x18).</summary>
 struct HandoverFlight {
@@ -49,7 +53,7 @@ struct HandoverFlight {
 };
 #pragma pack(pop)
 static_assert(sizeof(HandoverHead) == 24);
-static_assert(sizeof(HandoverDead) == 5);
+static_assert(sizeof(HandoverDead) == 14);
 static_assert(sizeof(HandoverAircraft) == 60);  // 0:35 pose, 35:4 state, 39:1 damage, 40:1 throttle, 41:2 fuel,
                                                 // 43:1 stations, 44:8 station, 52:8 count
 static_assert(sizeof(HandoverVehicle) == 40);

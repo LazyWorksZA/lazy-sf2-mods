@@ -2249,6 +2249,40 @@ bool world_remote_deferred() { return g_remote_deferred != nullptr; }
 
 int world_destroy_object(void* obj) { return obj ? destroy_copy(static_cast<BYTE*>(obj)) : 1; }
 
+int world_log_kill(void* obj, uint32_t killer, uint32_t weapon) {
+    if (!obj) return 1;
+    struct K {
+        const wchar_t* name;
+        DWORD stamp, size, rva;
+    };
+    static const K kKill[4] = {{L"AircraftObject.dll", kAoStamp, kAoSize, 0x42ac0},
+                               {L"GroundObject.dll", kGoStamp, kGoSize, 0x15aa0},
+                               {L"GroundMobileObject.dll", kGmStamp, kGmSize, 0xd290},
+                               {L"NavalObject.dll", kNvStamp, kNvSize, 0x12620}};
+    constexpr size_t kSlotKill = 30;
+    uintptr_t fn = 0;
+    __try {
+        fn = reinterpret_cast<uintptr_t>((*static_cast<void***>(obj))[kSlotKill]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+    bool known = false;
+    for (const K& k : kKill) {
+        const uintptr_t base = module_if(k.name, k.stamp, k.size, "kill event");
+        known = known || (base && fn == base + k.rva);
+    }
+    if (!known) return 1;
+    __try {
+        BYTE* o = static_cast<BYTE*>(obj);
+        std::memcpy(o + 0x318, &killer, 4);
+        std::memcpy(o + 0x31c, &weapon, 4);
+        reinterpret_cast<void(__fastcall*)(void*)>(fn)(obj);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
 void world_remote_now() {
     void* msn = g_remote_deferred;
     g_remote_deferred = nullptr;

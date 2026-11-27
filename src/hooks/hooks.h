@@ -501,6 +501,10 @@ void handover_host_forget(int slot);
 /// <summary>world_sync.cpp: destroys an aircraft or ground object through its own slot 29 (checked; no kill entry).
 /// 0 done, 1 refused, 2 faulted.</summary>
 int world_destroy_object(void* obj);
+/// <summary>Logs a kill as the game does (the object's class kill event: aircraft slot 30 and its ground, vehicle and
+/// ship equivalents; slot-checked), with killer and weapon written first (+0x318/+0x31c). On the host the hooks keep
+/// it, so it lands on the host's single record. 0 done, 1 refused, 2 faulted.</summary>
+int world_log_kill(void* obj, uint32_t killer, uint32_t weapon);
 /// <summary>world_sync.cpp: a joined client's mark pass waits (it loaded first and runs the world); run it now; mark
 /// or hand back the whole world (fix-ups included; players' avatars stay remote; the count, -1 on failure); every
 /// live slot member but the player and the avatars; the flights (aircraft slots) and a flight's waypoint, read or set.</summary>

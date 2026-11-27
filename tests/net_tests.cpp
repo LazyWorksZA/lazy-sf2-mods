@@ -9054,14 +9054,17 @@ void handover_tests() {
         s.vehicles.push_back(v);
     }
     for (int i = 0; i < 30; ++i) s.flights.push_back(HandoverFlight{static_cast<uint16_t>(i), 3});
-    for (int i = 0; i < 20; ++i) s.dead.push_back(HandoverDead{1, static_cast<uint16_t>(30 + i), 0});
+    for (int i = 0; i < 20; ++i)
+        s.dead.push_back(HandoverDead{1, static_cast<uint16_t>(30 + i), 0, 1, 2, 1, 0xffffu + 4u});
     const std::vector<uint8_t> raw = serialize(s);
     HandoverSnapshot back;
-    expect(raw.size() == 24 + 80 * 60 + 200 * 40 + 30 * 3 + 20 * 5 && deserialize(raw.data(), raw.size(), &back) &&
-               back.dead.size() == 20 && back.dead[19].a == 49 &&
+    expect(raw.size() == 24 + 80 * 60 + 200 * 40 + 30 * 3 + 20 * 14 && deserialize(raw.data(), raw.size(), &back) &&
+               back.dead.size() == 20 && back.dead[19].a == 49 && back.dead[19].killer_kind == 1 &&
+               back.dead[19].killer_a == 2 && back.dead[19].killer_b == 1 && back.dead[19].weapon == 0xffffu + 4u &&
                back.aircraft.size() == 80 && back.aircraft[79].pose.pos[0] == 7900000 && back.vehicles[5].speed == 200 &&
                back.flights[29].waypoint == 3 && back.head.clock_ms == 812000 && !deserialize(raw.data(), raw.size() - 1, &back),
-           "handover: a busy mission's snapshot (80 aircraft, 200 vehicles, 30 flights) round trips; a short one is refused");
+           "handover: a busy mission's snapshot (80 aircraft, 200 vehicles, 30 flights, 20 kills with killer and weapon) "
+           "round trips; a short one is refused");
     std::vector<uint8_t> packed, out;
     uint32_t crc = 0;
     expect(pack_handover(raw, &packed, &crc) && unpack_handover(packed, crc, static_cast<uint32_t>(raw.size()), &out) &&

@@ -76,7 +76,15 @@ void collect(uint8_t kind, uint16_t a, uint16_t b, void* obj, void* ctx) {
     int32_t level = 0;
     if (!rd(o + jet::kDamage, &level)) return;
     if (level >= 5) {
-        s.dead.push_back(net::HandoverDead{kind, a, b});
+        net::HandoverDead d{};
+        d.kind = kind;
+        d.a = a;
+        d.b = b;
+        uint32_t killer = 0xffffffffu;
+        rd(o + 0x318, &killer);
+        rd(o + 0x31c, &d.weapon);
+        if (!world_key_of_object(killer, &d.killer_kind, &d.killer_a, &d.killer_b)) d.killer_kind = 0;
+        s.dead.push_back(d);
         return;
     }
     if (kind == 1) {
@@ -137,7 +145,7 @@ net::HandoverSnapshot build_snapshot(uint32_t epoch) {
 }
 
 struct Applied {
-    int aircraft = 0, vehicles = 0, flights = 0, missing = 0, destroyed = 0;
+    int aircraft = 0, vehicles = 0, flights = 0, missing = 0, destroyed = 0, kills = 0;
 };
 
 // Writes a snapshot into our world, `age` seconds after it was taken. The objects keep their REMOTEOBJECT state.
@@ -213,7 +221,12 @@ Applied apply_snapshot(const net::HandoverSnapshot& s, double age) {
         if (!o || id == player || host_drives_object(o) || client_drives_object(o) || !rd(o + jet::kDamage, &here) ||
             here >= 5)
             continue;
-        if (world_destroy_object(o) == 0) ++r.destroyed;
+        if (world_destroy_object(o) != 0) continue;
+        ++r.destroyed;
+        // The kill goes on the host's record, as its own kills do (the class's kill event, which the host keeps).
+        uint32_t killer = 0xffffffffu;
+        if (d.killer_kind) world_object_of_key(d.killer_kind, d.killer_a, d.killer_b, &killer);
+        if (world_log_kill(o, killer, d.weapon) == 0) ++r.kills;
     }
     for (const net::HandoverFlight& f : s.flights) {
         int wp = -1;
@@ -441,8 +454,8 @@ void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt
     const Applied a = apply_snapshot(s, rtt_s * 0.5);
     g_arbiter.on_complete(slot, true);
     LOG("handover: client %d's world taken over: %d aircraft, %d vehicles, %d flights written, %d destroyed as there "
-        "(%d not found or destroyed here), the mission clock set to %.1f s; we own the world and stream it",
-        slot + 1, a.aircraft, a.vehicles, a.flights, a.destroyed, a.missing, s.head.clock_ms / 1000.0);
+        "(%d kills logged), %d not found or destroyed here, the mission clock set to %.1f s; we own the world and stream it",
+        slot + 1, a.aircraft, a.vehicles, a.flights, a.destroyed, a.kills, a.missing, s.head.clock_ms / 1000.0);
     answer(slot, b.epoch, true);
 }
 
