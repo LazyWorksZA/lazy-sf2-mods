@@ -9937,9 +9937,16 @@ void bot_world_join_tests() {
 }
 
 
-// One network cannot fill the slots with unanswered connections, and rotating addresses cannot get round evict_gap_ms.
+// Eviction is rate-limited per /24 (an unseen network can always make room); the /24 pending cap spares LANs.
 void flood_limit_tests() {
-    std::printf("session password: per-/24 cap and the evictor table\n");
+    std::printf("session password: /24 limits\n");
+    auto be = [](unsigned a, unsigned b, unsigned c, unsigned d) { return a | (b << 8) | (c << 16) | (d << 24); };
+    expect(private_v4(be(127, 0, 0, 1)) && private_v4(be(10, 1, 2, 3)) && private_v4(be(172, 16, 0, 1)) &&
+               private_v4(be(172, 31, 9, 9)) && private_v4(be(192, 168, 1, 5)) && private_v4(be(169, 254, 0, 1)) &&
+               !private_v4(be(172, 32, 0, 1)) && !private_v4(be(8, 8, 8, 8)) && !private_v4(be(192, 169, 0, 1)),
+           "private and loopback ranges are told from public ones");
+    expect(net24(be(203, 0, 113, 5)) == net24(be(203, 0, 113, 200)) && net24(be(203, 0, 113, 5)) != net24(be(203, 0, 114, 5)),
+           "the /24 key");
     if (enet_initialize() != 0) {
         expect(false, "enet_initialize");
         return;
@@ -9951,7 +9958,6 @@ void flood_limit_tests() {
     lim.deadline_ms = 5000;   // nothing is refused at its deadline during the checks
     lim.evict_after_ms = 100;
     lim.evict_gap_ms = 60000;
-    lim.evict_table = 1;
     core.set_auth_limits(lim);
     core.start("127.0.0.1", 0, [](const char*) {}, test_key());
     for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
@@ -9959,9 +9965,9 @@ void flood_limit_tests() {
     ENetAddress addr{};
     enet_address_set_host_ip(&addr, "127.0.0.1");
     addr.port = core.port();
-    TestClient c1, c2, c3, f1, f2, e1, e2;
+    TestClient c1, c2, c3, f1, e1, e2, e3;
     auto service_all = [&] {
-        for (TestClient* c : {&c1, &c2, &c3, &f1, &f2, &e1, &e2})
+        for (TestClient* c : {&c1, &c2, &c3, &f1, &e1, &e2, &e3})
             if (c->host) c->service(0);
         HostEvent ev[16];
         core.poll(ev, 16);
@@ -9982,25 +9988,24 @@ void flood_limit_tests() {
     open_from(c1, "127.0.0.2");
     open_from(c2, "127.0.0.3");
     open_from(c3, "127.0.0.4");
-    expect(c1.challenges == 1 && c2.challenges == 1 && c3.challenges == 0 && c3.disconnected,
-           "a third unanswered connection from one /24 (other addresses) is cut before any challenge");
-    // Fill the other two slots with proven connections from other networks.
+    expect(c1.challenges == 1 && c2.challenges == 1 && c3.challenges == 1,
+           "three unanswered connections from one loopback /24 are all challenged (LANs are not capped)");
     open_from(f1, "127.0.1.1");
     f1.answer(f1.challenge);
     wait_for([&] { return f1.proofs > 0; }, 1000);
-    open_from(f2, "127.0.2.1");
-    f2.answer(f2.challenge);
-    wait_for([&] { return f2.proofs > 0; }, 1000);
     const auto t0 = std::chrono::steady_clock::now();
     wait_for([&] { return std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(150); }, 300);
-    open_from(e1, "127.0.3.1");  // makes room: the table's one entry is now in use
+    open_from(e1, "127.0.3.1");
     wait_for([&] { return c1.disconnected; }, 300);
-    open_from(e2, "127.0.4.1");  // another address: the table is full
+    open_from(e2, "127.0.3.2");  // the same /24 as e1, within evict_gap_ms
     wait_for([&] { return e2.disconnected; }, 300);
-    expect(f1.proofs == 1 && f2.proofs == 1 && e1.challenges == 1 && c1.disconnected && e2.challenges == 0 &&
-               !c2.disconnected,
-           "the evictor table full: a newcomer from another address is refused instead of making room");
-    for (TestClient* c : {&c2, &f1, &f2, &e1})
+    open_from(e3, "127.0.5.1");  // a network not seen: may make room
+    wait_for([&] { return c2.disconnected; }, 300);
+    expect(f1.proofs == 1 && e1.challenges == 1 && c1.disconnected, "all slots taken: a newcomer makes room");
+    expect(e2.challenges == 0 && e2.disconnected, "a second newcomer from that /24 within the gap is refused");
+    expect(e3.challenges == 1 && c2.disconnected && !c3.disconnected && !f1.disconnected,
+           "a newcomer from another /24 still makes room (one at a time)");
+    for (TestClient* c : {&c3, &f1, &e1, &e3})
         if (c->peer) enet_peer_disconnect(c->peer, 0);
     wait_for([] { return false; }, 100);
     core.stop(false);
@@ -10124,6 +10129,23 @@ void lobby_book_tests() {
     expect(e.host_seat_for(2) == 1 && e.seat_of(0x8) == 0 && e.members() == 2,
            "a 2-ship: the host's seat is gone, so the book gives it the free #2, never the client's #1");
     expect(e.host_seat_for(2) == 1, "asked again for the same flight: the same seat");
+    LobbyBook g;
+    g.set_members(4);
+    g.set_host("ALPHA", 3);
+    g.update(0x8, "BRAVO", false, 0, false, 0);
+    g.update(0x9, "CHARLIE", false, 1, false, 0);
+    expect(g.host_seat_for(2) == 1 && g.seat_of(0x8) == 0 && g.seat_of(0x9) == -1,
+           "a 2-ship full of clients: the host keeps a seat, the last client to join gives up its own");
+    LobbyBook k;
+    k.set_members(2);
+    k.update(0x8, "BRAVO", false, -1, false, 0);
+    k.update(0x9, "CHARLIE", false, -1, false, 0);
+    k.set_host("ALPHA", -1);
+    k.update(0x9, "CHARLIE", false, -1, true, 0);  // leaves: seat 1 free, the host has none
+    expect(k.host_seat() == -1 && k.update(0x8, "BRAVO", false, 1, false, 0) == kLobbySeatTaken && k.seat_of(0x8) == 0,
+           "a client cannot take the host's last seat");
+    k.update(0xA, "DELTA", false, -1, false, 0);
+    expect(k.seat_of(0xA) == -1, "a new client does not get the host's last seat either");
 }
 
 void lobby_loopback_tests() {

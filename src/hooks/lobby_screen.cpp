@@ -218,6 +218,11 @@ bool load_host_mission(uint32_t want_id = 0, bool* not_yet = nullptr) {
     int r = world_lobby_fetched(&theatre);
     if (r == 0 && want_id && world_lobby_fetched_id() != want_id) r = 1;
     if (not_yet) *not_yet = r == 1;
+    // A Launch retries each round while the mission is on its way: said once per mission.
+    static uint32_t told = 0;
+    const bool quiet = r != 0 && want_id && told == want_id;
+    told = r != 0 ? want_id : 0;
+    if (r != 0 && quiet) return false;
     if (r != 0) {
         LOG("lobby: Briefing: %s", r == 1 ? "no mission from the host yet" : r == 2 ? "theatre not installed" : "unusable mission");
         set_status(r == 1 ? L"The host has not shared a mission yet."

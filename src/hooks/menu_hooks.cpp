@@ -369,6 +369,15 @@ size_t encode_ini(const std::wstring& out, bool wide, char* buf, unsigned bytes)
 int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
     bool wide = false;
     std::wstring text = decode_ini(buf, n, wide);
+    if ((kind == MenuFile::Debrief || kind == MenuFile::SingleMission || kind == MenuFile::Hangar) &&
+        !g_lobby_spliced.load()) {
+        // The lobby screens these point back to are not in this menu session's MenuSystem.ini.
+        static bool logged = false;
+        if (!logged) LOG("menu: no lobby screens in this menu session; Single Mission, Hangar and Debrief stay stock");
+        logged = true;
+        if (kind == MenuFile::Hangar) g_hangar_return = 0;
+        return n;
+    }
     if (kind == MenuFile::Debrief) {
         const bool host = net_session_role() == NetRole::Host;
         const size_t need = splice_debrief_for_lobby(text, host) ? encode_ini(text, wide, buf, bytes) : 0;

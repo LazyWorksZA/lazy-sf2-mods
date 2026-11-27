@@ -373,7 +373,7 @@ void HostCore::run() {
     struct Evictor {
         uint32_t ip = 0;
         uint64_t at = 0;
-    } evictors[64] = {};  // the addresses that made room lately (auth_limits_.evict_table of them are used)
+    } evictors[16] = {};  // the /24s that made room lately (least recently used entry recycled)
     AuthLimiter limiter(auth_limits_);
     auto ip_text = [](const ENetPeer* p, char* out, size_t n) {
         const uint32_t a = p->address.host;  // network byte order
@@ -395,6 +395,7 @@ void HostCore::run() {
         auth_refused[slot] = false;
         auth_deadline[slot] = 0;
         refused_at[slot] = 0;
+        challenged_at[slot] = 0;
         mission_ask_ms[slot] = 0;
         // The connection's seat is released when no other open connection carries the same tag.
         if (const uint32_t tag = slot_tag[slot]) {
@@ -750,7 +751,7 @@ void HostCore::run() {
                         if (slot < 0) slot = i;
                     } else if (!authed[i]) {
                         // address.host is in network order: its low three bytes are the /24.
-                        if ((peers[i]->address.host & 0x00ffffffu) == (from_ip & 0x00ffffffu)) ++same_net_pending;
+                        if (net24(peers[i]->address.host) == net24(from_ip)) ++same_net_pending;
                         if (peers[i]->address.host == from_ip) {
                             ++same_ip_pending;
                             continue;  // never one of the newcomer's own address
@@ -764,31 +765,30 @@ void HostCore::run() {
                         if (oldest < 0 || age_key < best) oldest = i;
                     }
                 }
-                if (same_ip_pending >= kMaxPendingPerAddress || same_net_pending >= kMaxPendingPerNet) {
+                if (same_ip_pending >= kMaxPendingPerAddress ||
+                    (!private_v4(from_ip) && same_net_pending >= kMaxPendingPerNet)) {
                     enet_peer_disconnect_now(ev.peer, 0);
                     break;
                 }
                 if (slot < 0) {
-                    // This address's entry, else a free one (never used, or older than the gap); none: refused.
-                    const uint64_t gap = static_cast<uint64_t>(auth_limits_.evict_gap_ms);
-                    const int table = auth_limits_.evict_table < 1 ? 1 : auth_limits_.evict_table > 64 ? 64 : auth_limits_.evict_table;
-                    Evictor* rec = nullptr;
-                    bool too_soon = false;
-                    for (int k = 0; k < table; ++k) {
-                        if (evictors[k].ip == from_ip && evictors[k].at) {
-                            rec = &evictors[k];
-                            too_soon = t < evictors[k].at + gap;
+                    // The newcomer's /24 entry, else the least recently used one (so a network not seen lately can
+                    // always make room); a /24 makes room once per evict_gap_ms.
+                    const uint32_t net = net24(from_ip);
+                    Evictor* rec = &evictors[0];
+                    for (Evictor& x : evictors) {
+                        if (x.at && x.ip == net) {
+                            rec = &x;
                             break;
                         }
+                        if (x.at < rec->at) rec = &x;
                     }
-                    for (int k = 0; k < table && !rec; ++k)
-                        if (!evictors[k].at || t >= evictors[k].at + gap) rec = &evictors[k];
-                    // No connection that may make room, this address just made some, or every entry is recent.
-                    if (oldest < 0 || too_soon || !rec) {
+                    const bool too_soon =
+                        rec->at && rec->ip == net && t < rec->at + static_cast<uint64_t>(auth_limits_.evict_gap_ms);
+                    if (oldest < 0 || too_soon) {  // no connection that may make room, or this network just made some
                         enet_peer_disconnect_now(ev.peer, 0);
                         break;
                     }
-                    rec->ip = from_ip;
+                    rec->ip = net;
                     rec->at = t;
                     enet_peer_disconnect_now(peers[oldest], 0);
                     peers[oldest]->data = nullptr;

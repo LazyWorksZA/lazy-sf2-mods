@@ -91,9 +91,19 @@ private:
 
 /// <summary>Host: unanswered connections one address may hold at a time.</summary>
 inline constexpr int kMaxPendingPerAddress = 2;
-/// <summary>Unanswered connections from one IPv4 /24 at most, so one network cannot fill every slot. Floods from many
-/// networks at once are an accepted risk (they can keep players waiting, not get in).</summary>
-inline constexpr int kMaxPendingPerNet = 2;
+/// <summary>Unanswered connections from one public IPv4 /24 at most, so one network cannot fill every slot (private and
+/// loopback ranges are exempt: LAN play). Floods from many networks at once are an accepted risk (they can keep
+/// players waiting, not get in).</summary>
+inline constexpr int kMaxPendingPerNet = 4;
+
+/// <summary>The /24 of an IPv4 address in network byte order (ENetAddress::host): its low three bytes.</summary>
+inline uint32_t net24(uint32_t host_be) { return host_be & 0x00ffffffu; }
+
+/// <summary>Loopback, private (RFC 1918) or link-local, for an address in network byte order.</summary>
+inline bool private_v4(uint32_t host_be) {
+    const uint32_t a = host_be & 0xff, b = (host_be >> 8) & 0xff;
+    return a == 127 || a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) || (a == 169 && b == 254);
+}
 
 /// <summary>Host: limits on connections that have not proven the password yet.</summary>
 struct AuthLimits {
@@ -104,9 +114,7 @@ struct AuthLimits {
     int block_ms = 600000;   // how long a block lasts
     int evict_after_ms = 1500;  // an unanswered connection may make room for a newcomer only this long after its
                                 // challenge (key derivation plus round trip), or once refused
-    int evict_gap_ms = 2000;    // one address makes room this often at most
-    int evict_table = 16;       // addresses remembered for evict_gap_ms (at most 64); when all are recent, nobody
-                                // makes room, so rotating addresses cannot get round the gap
+    int evict_gap_ms = 2000;    // one /24 makes room this often at most
 };
 
 /// <summary>

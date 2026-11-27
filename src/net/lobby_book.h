@@ -29,8 +29,21 @@ public:
             if (p_[i].seat >= members_) p_[i].seat = -1;
         Pilot* h = find(kHostTag);
         if (h && h->seat < 0 && host_member >= 0 && host_member < members_ && !held(host_member)) h->seat = host_member;
+        if (h && h->seat < 0) h->seat = first_free();
+        if (h && h->seat < 0 && members_ > 0) {
+            // Every seat of the flight is a client's: the host flies, so the last client to join gives up its seat.
+            for (size_t i = n_; i > 0; --i) {
+                Pilot& p = p_[i - 1];
+                if (p.tag != kHostTag && p.seat >= 0) {
+                    h->seat = p.seat;
+                    p.seat = -1;
+                    p.ready = false;
+                    break;
+                }
+            }
+        }
         for (size_t i = 0; i < n_; ++i)
-            if (p_[i].seat < 0) p_[i].seat = first_free();
+            if (p_[i].seat < 0) p_[i].seat = client_free();
     }
     int members() const { return members_; }
 
@@ -74,7 +87,7 @@ public:
             *p = Pilot{};
             p->tag = tag;
             p->from = from;
-            p->seat = first_free();
+            p->seat = client_free();
             p->number = ++joined_;
         }
         clean_callsign(*p, callsign);
@@ -114,14 +127,12 @@ public:
         return n;
     }
 
-    /// <summary>The host's seat for a flight of `members` (the game thread, as the flight starts): if its seat is not in
-    /// that flight, the book first gives it the first free one there, so the host never flies a client's seat. -1: none
-    /// free.</summary>
+    /// <summary>The host's seat for a flight of `members` (the game thread, as the flight starts): a seat of that
+    /// flight the book keeps for the host (it never flies a client's). -1 only without a host row or a flight.</summary>
     int host_seat_for(int members) {
         Pilot* h = find(kHostTag);
         if (!h) return -1;
-        if (members != members_) set_members(members);
-        if (h->seat < 0 || h->seat >= members_) h->seat = first_free();
+        if (members != members_ || h->seat < 0 || h->seat >= members_) set_members(members);
         return h->seat;
     }
 
@@ -181,6 +192,7 @@ private:
     uint8_t wish(Pilot& p, int want) {
         if (want < 0 || want == p.seat) return kLobbyOk;
         if (want >= members_ || held(want)) return kLobbySeatTaken;
+        if (p.tag != kHostTag && host_needs(want)) return kLobbySeatTaken;  // the host's last seat
         p.seat = want;
         p.ready = false;
         return kLobbyOk;
@@ -193,6 +205,20 @@ private:
     int first_free() const {
         for (int m = 0; m < members_; ++m)
             if (!held(m)) return m;
+        return -1;
+    }
+    // Whether seat is the last free one while the host (in the book) has none: kept for the host.
+    bool host_needs(int seat) const {
+        const Pilot* h = find(kHostTag);
+        if (!h || h->seat >= 0) return false;
+        for (int m = 0; m < members_; ++m)
+            if (m != seat && !held(m)) return false;
+        return true;
+    }
+    // A client's seat: the first free one, but never the host's last.
+    int client_free() const {
+        for (int m = 0; m < members_; ++m)
+            if (!held(m) && !host_needs(m)) return m;
         return -1;
     }
     Pilot* find(uint32_t tag) {
