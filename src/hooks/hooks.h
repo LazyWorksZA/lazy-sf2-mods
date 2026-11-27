@@ -370,6 +370,10 @@ bool net_session_join(const char* host, uint16_t port, const char* callsign, con
 bool net_session_wrong_password();
 /// <summary>world_sync.cpp: the mission fetch was refused for the password.</summary>
 bool world_fetch_wrong_password();
+/// <summary>world_sync.cpp: the mission fetch could not find the host (its name did not resolve).</summary>
+bool world_fetch_host_unknown();
+/// <summary>A joined session cannot find its host. Menus.</summary>
+bool net_session_host_unknown();
 void net_session_close();
 NetRole net_session_role();
 /// <summary>A lobby session is open: the aircraft and weapon trackers are wanted. Any thread.</summary>

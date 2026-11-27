@@ -211,8 +211,7 @@ void install_and_publish(HMODULE m, bool probe, bool tacview) {
     g_for_probe = probe;
     if (install_for(m)) {
         g_base.store(mu, std::memory_order_release);
-        LOG("weapons: tracking on (reason: %s%s%s)", probe ? "probe" : "", probe && tacview ? " and " : "",
-            tacview ? "Tacview Recording setting" : "");
+        LOG("weapons: tracking on (reason: %s)", tracking_reasons(probe, tacview, net_session_wanted()).c_str());
     } else {
         g_for_probe = false;
         g_skip_base = mu;

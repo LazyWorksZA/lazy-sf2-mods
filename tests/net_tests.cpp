@@ -61,6 +61,7 @@
 #include "net/stream_format.h"
 #include "net/stream_record.h"
 #include "net/mission_fetch.h"
+#include "net/name_lookup.h"
 #include "net/world_proto.h"
 #include "net/world_stream_logic.h"
 #include "net/hit_logic.h"
@@ -3459,6 +3460,32 @@ void session_password_tests() {
     enet_peer_disconnect_now(early.peer, 0);
     early.idle(20);
     core.stop(false);
+}
+
+void fetch_lookup_tests() {
+    std::printf("mission fetch name lookup\n");
+    auto* f = new MissionFetch;
+    f->start("no-such-host.invalid", 7777, 0x77u, test_key(), nullptr, 200);
+    for (int i = 0; i < 1300 && !f->host_unknown() && f->state() == MissionFetch::State::Running; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    expect(f->host_unknown(), "a name that does not resolve: the fetch stops and says so");
+    delete f;
+    // stop() during a lookup returns at once: the lookup is abandoned, not joined.
+    std::atomic<bool> stop{false};
+    uint32_t ip = 0;
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        stop = true;
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const LookupResult r = lookup_name("slow.example", &ip, stop, 10000, [](const char*, uint32_t*) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        return false;
+    });
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    stopper.join();
+    expect(r == LookupResult::Stopped && ms < 500.0, "a lookup stopped while the resolver blocks returns at once");
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // the abandoned lookup frees its block
 }
 
 namespace {
@@ -9692,6 +9719,7 @@ int main() {
     lobby_logic_tests();
     session_lifecycle_tests();
     session_password_tests();
+    fetch_lookup_tests();
     pilot_twist_tests();
     probe_snapshot_tests();
     world_files_tests();

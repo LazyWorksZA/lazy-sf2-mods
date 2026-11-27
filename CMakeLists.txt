@@ -100,6 +100,7 @@ add_library(lazysf2 SHARED
     src/net/world_proto.cpp
     src/net/handover_format.cpp
     src/net/mission_fetch.cpp
+    src/net/name_lookup.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
     src/net/client_core.cpp
@@ -130,6 +131,7 @@ add_executable(lazysf2-net-tests
     src/net/world_proto.cpp
     src/net/handover_format.cpp
     src/net/mission_fetch.cpp
+    src/net/name_lookup.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
     src/net/client_core.cpp
@@ -172,6 +174,7 @@ add_executable(lazysf2-bot
     src/net/world_proto.cpp
     src/net/handover_format.cpp
     src/net/mission_fetch.cpp
+    src/net/name_lookup.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
     src/net/remote_jet.cpp

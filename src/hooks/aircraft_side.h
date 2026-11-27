@@ -1,6 +1,8 @@
 #pragma once
 // Pure logic for the aircraft tracker (aircraft_track.cpp), kept free of Windows headers so the tests can use it.
 #include <cstdint>
+#include <string>
+#include <utility>
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -25,6 +27,18 @@ inline AircraftSide classify_side(uint32_t flags, uint32_t friendly, uint32_t en
 
 /// <summary>The enable rule: the tracking hooks are installed only if a client needs them.</summary>
 inline bool tracking_wanted(bool probe_on, bool tacview_recording_on) { return probe_on || tacview_recording_on; }
+/// <summary>Why the trackers are on, for their log line: "probe", "Tacview Recording setting", "network session",
+/// joined by " and ".</summary>
+inline std::string tracking_reasons(bool probe, bool tacview, bool session) {
+    std::string s;
+    for (auto [on, name] : {std::pair{probe, "probe"}, std::pair{tacview, "Tacview Recording setting"},
+                            std::pair{session, "network session"}}) {
+        if (!on) continue;
+        if (!s.empty()) s += " and ";
+        s += name;
+    }
+    return s.empty() ? "none" : s;
+}
 
 /// <summary>What the tracker does when a (new) AircraftObject.dll image appears. No aircraft can exist yet then.</summary>
 struct LoadInput {

@@ -16,17 +16,25 @@ namespace {
 
 std::atomic<NetRole> g_role{NetRole::None};
 
-// %LOCALAPPDATA%\LazySF2Patch\Session, created; empty if that fails.
+// A real folder (not a file, not a junction or link): files are only written and deleted in those.
+bool plain_dir(const std::wstring& dir) {
+    const DWORD a = GetFileAttributesW(dir.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+// %LOCALAPPDATA%\LazySF2Patch\Session, created; empty if that fails or either folder is a reparse point.
 std::wstring session_dir() {
     PWSTR local = nullptr;
     std::wstring dir;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) && local) {
         dir = std::wstring(local) + L"\\LazySF2Patch";
         CreateDirectoryW(dir.c_str(), nullptr);
-        dir += L"\\Session";
-        CreateDirectoryW(dir.c_str(), nullptr);
-        const DWORD a = GetFileAttributesW(dir.c_str());
-        if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        if (plain_dir(dir)) {
+            dir += L"\\Session";
+            CreateDirectoryW(dir.c_str(), nullptr);
+        }
+        if (!plain_dir(dir) || dir.size() < 8 || dir.compare(dir.size() - 8, 8, L"\\Session") != 0) {
+            LOG("session: %ls is not a plain folder; no session files", dir.c_str());
             dir.clear();
         }
     }
@@ -75,6 +83,7 @@ void apply_trackers() {
 
 NetRole net_session_role() { return g_role.load(); }
 bool net_session_wrong_password() { return g_role.load() == NetRole::Client && world_fetch_wrong_password(); }
+bool net_session_host_unknown() { return g_role.load() == NetRole::Client && world_fetch_host_unknown(); }
 bool net_session_wanted() { return g_role.load() != NetRole::None; }
 
 // The variables configured host or client mode for this launch: the lobby stays out of it.

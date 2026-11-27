@@ -1,5 +1,7 @@
 #include "net/client_core.h"
 
+#include "net/name_lookup.h"
+
 #include "net/world_proto.h"
 #include "net/handover_format.h"
 
@@ -25,37 +27,6 @@ constexpr size_t kMaxPacket = sizeof(ClientEvent::data);
 constexpr size_t kMaxServiceLoop = 512;  // events handled per pass, so a flood cannot starve the queues
 
 constexpr double kHostByeGrace = 1.0;     // after the host's Bye, seconds before we disconnect if it has not
-
-/// <summary>
-/// A name lookup on its own short-lived thread, which getaddrinfo can block for many seconds: the network thread
-/// waits for it while still honouring stop(), and abandons it if it must. Shared by the two threads with a reference
-/// count; the lookup thread touches only this block, never the ClientCore.
-/// </summary>
-struct Lookup {
-    std::atomic<int> refs{2};
-    std::atomic<int> result{0};  // 0 pending, 1 resolved (ip set), 2 failed
-    uint32_t ip = 0;             // ENetAddress::host
-    char name[256] = {};
-    ClientLimits::ResolveFn fn = nullptr;
-};
-void release(Lookup* l) {
-    if (l->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete l;
-}
-bool enet_resolve(const char* name, uint32_t* ip) {
-    ENetAddress a{};
-    if (enet_address_set_host(&a, name) != 0) return false;
-    *ip = a.host;
-    return true;
-}
-void run_lookup(Lookup* l) {
-    const bool wsa = enet_initialize() == 0;  // its own Winsock reference: the network thread may deinitialize first
-    uint32_t ip = 0;
-    const bool ok = wsa && (l->fn ? l->fn : enet_resolve)(l->name, &ip);
-    if (wsa) enet_deinitialize();
-    l->ip = ip;
-    l->result.store(ok ? 1 : 2, std::memory_order_release);
-    release(l);
-}
 
 bool delivered(const ENetPeer* p) {
     return p->reliableDataInTransit == 0 && enet_list_empty(&p->sentReliableCommands) &&
@@ -317,34 +288,18 @@ void ClientCore::run() {
     // A numeric address needs no lookup. A name is looked up on a thread of its own, so that neither the game thread
     // nor stop() ever waits for the resolver.
     if (enet_address_set_host_ip(&addr, host_) != 0) {
-        Lookup* l = new (std::nothrow) Lookup;
-        if (!l) {
+        uint32_t ip = 0;
+        const LookupResult result = lookup_name(host_, &ip, stop_, static_cast<int>(limits_.connect_ms), limits_.resolve);
+        if (result != LookupResult::Resolved) {
             enet_deinitialize();
-            return fail_early("out of memory");
-        }
-        std::snprintf(l->name, sizeof(l->name), "%s", host_);
-        l->fn = limits_.resolve;
-        try {
-            std::thread([l] { run_lookup(l); }).detach();
-        } catch (...) {
-            l->result.store(2);
-            release(l);  // the thread's reference
-        }
-        const double until = wall_now() + limits_.connect_ms * 0.001;
-        while (l->result.load(std::memory_order_acquire) == 0 && !stop_.load() && wall_now() < until)
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        const int result = l->result.load(std::memory_order_acquire);
-        if (result == 1) addr.host = l->ip;
-        release(l);  // ours: an abandoned lookup frees the block when it returns
-        if (result != 1) {
-            enet_deinitialize();
-            if (stop_.load()) {
+            if (result == LookupResult::Stopped) {
                 say("net: client stopped (during the name lookup)");
                 finished_.store(true);
                 return;
             }
-            return fail_early(result == 2 ? "the host name does not resolve" : "the name lookup took too long");
+            return fail_early(result == LookupResult::Failed ? "the host name does not resolve" : "the name lookup took too long");
         }
+        addr.host = ip;
     }
     addr.port = port_;
     ENetHost* host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);

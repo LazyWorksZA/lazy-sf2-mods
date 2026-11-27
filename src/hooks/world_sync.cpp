@@ -988,7 +988,12 @@ void write_manifest(const Ctx& c, const Armed& a, int rnd_index, int rnd_seed) {
                   t.count, t.first_ground, h.flights, empty_formations, n_areas, populated);
     header.push_back(b);
     const std::string text = format_manifest(header, v);
-    const std::wstring path = numbered(world_files_dir(), a.number, L".manifest.txt");
+    const std::wstring dir = world_files_dir();
+    if (dir.empty()) {
+        LOG("world: no folder for the world files (the session has ended); no manifest");
+        return;
+    }
+    const std::wstring path = numbered(dir, a.number, L".manifest.txt");
     if (!write_text(path, text, true)) {
         LOG("world: ERR could not write %ls (exists, or path too long)", path.c_str());
         return;
@@ -1021,7 +1026,9 @@ void publish_mission(const Armed& a) {
 int __fastcall h_Start(void* msn) {
     Armed a;
     AcquireSRWLockExclusive(&g_lock);
-    if (g_armed.on && g_armed.msn == msn) {
+    if (g_mode == Mode::Off) {
+        g_armed = Armed{};  // armed by a session that has ended since: the stock mission runs
+    } else if (g_armed.on && g_armed.msn == msn) {
         a = g_armed;
         g_armed = Armed{};
     }
@@ -2810,8 +2817,14 @@ bool world_session_begin(bool host, const std::wstring& dir) {
 }
 
 void world_session_end() {
-    delete g_fetch;  // stops and joins its thread; a fetch cannot be restarted, so the next session makes a new one
+    // Stops and joins its thread, which never waits for the resolver (MissionFetch looks names up on a thread of its
+    // own and abandons it); a fetch cannot be restarted, so the next session makes a new one.
+    delete g_fetch;
     g_fetch = nullptr;
+    AcquireSRWLockExclusive(&g_lock);
+    g_armed = Armed{};  // an Accept in the session that was never flown: its seed and files do not reach a later mission
+    ReleaseSRWLockExclusive(&g_lock);
+    g_remote_deferred = nullptr;
     g_world_host = false;
     g_published_id = 0;
     g_mode = Mode::Off;
@@ -2829,6 +2842,7 @@ void world_session_end() {
 uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 
 bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password(); }
+bool world_fetch_host_unknown() { return g_fetch && g_fetch->host_unknown(); }
 
 bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) {
     if (!g_join) return true;

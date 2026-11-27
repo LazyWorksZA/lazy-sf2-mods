@@ -46,6 +46,8 @@ public:
     uint8_t latest_seat() const { return latest_seat_.load(std::memory_order_acquire); }
     /// <summary>The host refused the session password: the fetch has stopped asking. Any thread.</summary>
     bool wrong_password() const { return wrong_password_.load(std::memory_order_acquire); }
+    /// <summary>The host's name did not resolve (or not in time): the fetch has stopped. Any thread.</summary>
+    bool host_unknown() const { return host_unknown_.load(std::memory_order_acquire); }
 
 private:
     void run();
@@ -60,6 +62,8 @@ private:
     std::atomic<uint32_t> latest_id_{0};
     std::atomic<uint8_t> latest_seat_{kNoSeat};
     std::atomic<bool> wrong_password_{false};
+    std::atomic<bool> host_unknown_{false};
+    static constexpr int kLookupMs = 10000;
     AuthKey key_{};
     std::mutex mx_;
     bool fresh_ = false;           // under mx_: packed_ is not taken yet

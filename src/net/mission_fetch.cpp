@@ -1,5 +1,7 @@
 #include "net/mission_fetch.h"
 
+#include "net/name_lookup.h"
+
 #include <enet/enet.h>
 
 #include <chrono>
@@ -63,10 +65,20 @@ void MissionFetch::run() {
         return finish();
     }
     ENetAddress addr{};
-    if (enet_address_set_host(&addr, host_.c_str()) != 0) {
-        say("net: mission fetch failed: cannot resolve %s", host_.c_str());
-        enet_deinitialize();
-        return finish();
+    if (enet_address_set_host_ip(&addr, host_.c_str()) != 0) {
+        // A name: looked up on a thread of its own, so stop() (on the game thread) never waits for the resolver.
+        uint32_t ip = 0;
+        const LookupResult r = lookup_name(host_.c_str(), &ip, stop_, kLookupMs);
+        if (r != LookupResult::Resolved) {
+            if (r != LookupResult::Stopped) {
+                say("net: mission fetch failed: cannot resolve %s%s", host_.c_str(),
+                    r == LookupResult::TimedOut ? " (no answer in time)" : "");
+                host_unknown_.store(true, std::memory_order_release);
+            }
+            enet_deinitialize();
+            return finish();
+        }
+        addr.host = ip;
     }
     addr.port = port_;
     ENetHost* host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);

@@ -283,10 +283,16 @@ void session_click(int item) {
 // Join screen: the mission fetch reports a refused password once.
 bool g_join_refused_shown = false;
 void join_frame() {
-    if (g_join_refused_shown || !net_session_wrong_password()) return;
-    g_join_refused_shown = true;
-    LOG("lobby: the host refused the session password");
-    set_status(L"Wrong session password. Leave, and type the host's password.");
+    if (g_join_refused_shown) return;
+    if (net_session_wrong_password()) {
+        g_join_refused_shown = true;
+        LOG("lobby: the host refused the session password");
+        set_status(L"Wrong session password. Leave, and type the host's password.");
+    } else if (net_session_host_unknown()) {
+        g_join_refused_shown = true;
+        LOG("lobby: the host's name did not resolve");
+        set_status(L"Couldn't find the host. Leave, and check the address.");
+    }
 }
 
 bool g_host_bound = false;
