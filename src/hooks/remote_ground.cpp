@@ -24,13 +24,13 @@ constexpr size_t kObjRemoteFlags = 0x0c, kObjVel = 0x50, kObjGearHeight = 0x2fc,
                  kDataMinGear = 0x7c8;
 uint64_t g_kept = 0;
 
+// Read once per flight (the DLL can only be reloaded between flights), never per frame.
 uint32_t remote_mask() {
-    static HMODULE seen = nullptr;
-    static uint32_t mask = 0;
-    HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
-    if (m != seen) {
-        seen = m;
+    static uint32_t epoch = 0xffffffffu, mask = 0;
+    if (epoch != sim_player_epoch()) {
+        epoch = sim_player_epoch();
         mask = 0;
+        HMODULE m = GetModuleHandleW(L"AircraftObject.dll");
         if (m && is_expected_build(m, jet::kAoStamp, jet::kAoSize, "AircraftObject.dll (ground contact)"))
             std::memcpy(&mask, at_rva(m, kRvaAoRemoteMask), 4);
     }
@@ -65,6 +65,7 @@ int keep_on_ground(BYTE* o, uint32_t mask) {
 
 void __fastcall h_ground_contact(void* obj) {
     reinterpret_cast<void(__fastcall*)(void*)>(g_o_ground_contact)(obj);
+    if (!world_remote_on() && !net_session_active()) return;  // inert outside sessions
     if (keep_on_ground(static_cast<BYTE*>(obj), remote_mask()) == 1 && log_milestone(++g_kept))
         LOG("world: a remote copy on the ground kept its on-ground state (%llu frames so far)",
             static_cast<unsigned long long>(g_kept));

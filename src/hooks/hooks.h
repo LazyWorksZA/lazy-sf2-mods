@@ -461,6 +461,8 @@ extern void* g_o_incoming_missile;
 /// through the mission's setter when it is off. world_*: MSN +0x10/+0x14, read, and set through MSN slot 19 (checked;
 /// 0 done, 1 refused, 2 faulted).</summary>
 void mission_clock_tick();
+/// <summary>Client: ENet's smoothed round trip to the host in seconds (0 outside a session).</summary>
+double client_rtt_s();
 void mission_clock_apply(const uint8_t* data, size_t len, double host_now);
 bool world_mission_clock(float* t10, float* t14);
 int world_set_mission_clock(float t10, float t14);

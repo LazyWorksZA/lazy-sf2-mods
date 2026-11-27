@@ -894,6 +894,8 @@ bool client_world_active() { return g_core && g_session && world_client_tag() !=
 
 double client_host_now() { return g_now; }
 
+double client_rtt_s() { return g_core && g_session ? g_core->rtt_ms() / 1000.0 : 0.0; }
+
 void* client_avatar_object(int peer) {
     if (!g_rm || peer < 0 || peer >= kSources) return nullptr;
     return g_rm[peer].h.obj;

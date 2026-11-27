@@ -43,12 +43,12 @@ void mission_clock_tick() {
     if (n) host_world_send_all(buf, n, false);
 }
 
-void mission_clock_apply(const uint8_t* data, size_t len, double host_now) {
+void mission_clock_apply(const uint8_t* data, size_t len, double /*host_now*/) {
     net::MissionClockMsg m;
     if (net::decode(data, len, m) != net::Status::Ok) return;
     float t10 = 0, t14 = 0;
     if (!world_mission_clock(&t10, &t14)) return;
-    const net::ClockFix f = net::clock_fix(t10, m, host_now);
+    const net::ClockFix f = net::clock_fix(t10, m, client_rtt_s() * 0.5);
     if (!f.set) {
         if (!g_logged_first) {
             g_logged_first = true;
@@ -58,8 +58,8 @@ void mission_clock_apply(const uint8_t* data, size_t len, double host_now) {
     }
     const int r = world_set_mission_clock(static_cast<float>(f.target), static_cast<float>(f.target2));
     g_logged_first = true;
-    if (log_milestone(++g_fixes) || r != 0)
-        LOG("clock: mission clock %.2f s -> %.2f s, the owner's (correction %llu): %s", t10, f.target,
+    ++g_fixes;  // every correction is logged once; a message within the tolerance logs nothing
+    LOG("clock: mission clock %.2f s -> %.2f s, the owner's (correction %llu): %s", t10, f.target,
             static_cast<unsigned long long>(g_fixes),
             r == 0 ? "set" : r == 1 ? "NOT set (the setter is not the one we read)" : "FAULTED");
 }

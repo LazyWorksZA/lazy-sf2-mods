@@ -8912,11 +8912,29 @@ void clock_ground_tests() {
     expect(n == 20 && peek_world_type(b, n) == 34 && decode(b, n, r) == Status::Ok && r.clock_ms == 321500 &&
                clock_to_wire(-1.0f) == 0,
            "clock: 20 bytes, ms, round trip");
-    const ClockFix late = clock_fix(300.0, m, 100.4);
-    const ClockFix close = clock_fix(321.8, m, 100.4);
-    const ClockFix stale = clock_fix(300.0, m, 103.0);
-    expect(late.set && std::fabs(late.target - 321.9) < 1e-6 && !close.set && !stale.set,
-           "clock: the owner's clock advanced by the message's age; within 0.25 s left alone; older than 2 s not used");
+    const ClockFix late = clock_fix(300.0, m, 0.05);
+    const ClockFix close = clock_fix(321.6, m, 0.05);
+    const ClockFix slow = clock_fix(300.0, m, 5.0);
+    expect(late.set && std::fabs(late.target - 321.55) < 1e-6 && !close.set && slow.set && std::fabs(slow.target - 322.5) < 1e-6,
+           "clock: owner time plus half the round trip (at most 1 s); within 0.25 s left alone");
+    {  // a 10 s pause on the client: its clock stops while the owner's runs; one correction, then quiet
+        double local = 100.0;
+        MissionClockMsg o{};
+        o.clock_ms = 100000;
+        int sets = 0;
+        for (int i = 0; i < 12; ++i) {
+            o.clock_ms += 2000;  // the owner's clock, 2 s per message
+            if (i >= 5 && i <= 9) continue;  // paused: no game step, the messages are not applied
+            local += 2.0;
+            const ClockFix f = clock_fix(local, o, 0.02);
+            if (f.set) {
+                ++sets;
+                local = f.target;
+            }
+        }
+        expect(sets == 1 && std::fabs(local - (o.clock_ms / 1000.0 + 0.02)) < 1e-6,
+               "clock: a 10 s pause on the client gives one correction when it runs again, then none");
+    }
     std::printf("    estimate: 20 B every 2 s from the owner to each other PC (about 25 B/s with headers)\n");
     namespace hk = LazyWorks::SF2Patch::hooks;
     expect(hk::copy_on_ground(0.5f, 0.8f, 3.0f) && hk::copy_on_ground(1.7f, 0.8f, 60.0f) && !hk::copy_on_ground(5.0f, 0.8f, 3.0f) &&

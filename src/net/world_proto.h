@@ -766,20 +766,20 @@ inline uint32_t clock_to_wire(float s) { return s > 0.0f ? static_cast<uint32_t>
 /// <summary>Corrections smaller than this are left to drift (the clocks run at the same game rate).</summary>
 inline constexpr double kClockTolerance = 0.25;
 /// <summary>
-/// The mission clock a receiver should have now: the owner's at owner_ms, advanced by the age of the message on the
-/// shared host clock (0..2 s; older ones are not used). set is false when the local clock is within the tolerance.
+/// The mission clock a receiver should have now: the owner's, plus the one-way latency (half the round trip, clamped
+/// to 0..1 s), the owner's decision "client time = owner time + RTT/2". Only game-time values are compared: a pause on
+/// either side just shows as one correction when the clocks run again. set is false within the tolerance.
 /// </summary>
 struct ClockFix {
     bool set = false;
     double target = 0, target2 = 0;
 };
-inline ClockFix clock_fix(double local, const MissionClockMsg& m, double host_now) {
+inline ClockFix clock_fix(double local, const MissionClockMsg& m, double latency) {
     ClockFix f;
-    double age = host_now - m.owner_ms / 1000.0;
-    if (age < 0) age = 0;
-    if (age > 2.0) return f;
-    f.target = m.clock_ms / 1000.0 + age;
-    f.target2 = m.clock2_ms / 1000.0 + age;
+    if (!(latency > 0)) latency = 0;
+    if (latency > 1.0) latency = 1.0;
+    f.target = m.clock_ms / 1000.0 + latency;
+    f.target2 = m.clock2_ms / 1000.0 + latency;
     const double d = f.target - local;
     f.set = d > kClockTolerance || d < -kClockTolerance;
     return f;
