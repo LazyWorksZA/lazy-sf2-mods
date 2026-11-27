@@ -318,6 +318,17 @@ void ClientCore::run() {
     AuthChallengeMsg challenge{};
     AuthAnswerMsg answer{};
     AuthKey key{};
+    // The PBKDF2 key is derived off this loop (up to about 150 ms), so ENet keeps being serviced meanwhile.
+    struct Derive {
+        std::atomic<int> state{0};  // 0 idle or running, 1 done, 2 failed
+        AuthKey key{};
+        std::thread th;
+        ~Derive() {
+            if (th.joinable()) th.join();
+            auth_wipe(key);
+        }
+    } derive;
+    bool answer_sent = false;
     bool bye_started = false, bye_sent = false, disconnect_sent = false;
     bool peer_known[kSources] = {};  // PeerInfo seen and no PeerLeft since: duplicates are dropped
     double bye_seen_at = 0, welcomed_at = 0;
@@ -561,29 +572,33 @@ void ClientCore::run() {
                 if (!connected || answered || bye_seen || refused) return drop(n_state_);
                 answered = true;
                 challenge = m;
-                uint8_t out[sizeof(HelloMsg)];
-                if (!auth_.key_for(m, &key) || !auth_answer(key, m, &answer)) {
-                    say("net: client could not answer the password challenge (iterations %u); leaving",
-                        static_cast<unsigned>(m.iterations));
-                    return leave_with(kByeWrongPassword, rx);
+                try {
+                    derive.th = std::thread([&derive, client = auth_, m]() mutable {
+                        AuthKey k;
+                        const bool ok = client.key_for(m, &k);
+                        derive.key = k;
+                        auth_wipe(k);
+                        derive.state.store(ok ? 1 : 2, std::memory_order_release);
+                    });
+                } catch (...) {
+                    derive.state.store(2, std::memory_order_release);
                 }
-                // Reliable and in order: the host reads the answer before the Hello.
-                send_now(out, encode(answer, out, sizeof(out)), kChannelReliable);
-                send_now(out, encode(hello_, out, sizeof(out)), kChannelReliable);
-                say("net: client answered the password challenge; Hello sent");
-                return;
+                return;  // the answer goes out from the loop once the key is ready
             }
             case MsgType::AuthProof: {
                 AuthProofMsg m;
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok) return drop(n_format_);
-                if (!answered || host_proved || refused) return drop(n_state_);
+                if (!answer_sent || host_proved || refused) return drop(n_state_);
                 if (!auth_check_host(key, challenge, answer, m)) {
                     say("net: the host could not prove the session password; leaving");
                     return leave_with(kByeWrongPassword, rx);
                 }
                 host_proved = true;
                 auth_wipe(key);
-                say("net: the host proved the session password");
+                // Only now the Hello (callsign, aircraft, tag): nothing about us goes to a host that cannot prove it.
+                uint8_t out[sizeof(HelloMsg)];
+                send_now(out, encode(hello_, out, sizeof(out)), kChannelReliable);
+                say("net: the host proved the session password; Hello sent");
                 return;
             }
             case MsgType::Bye: {
@@ -680,6 +695,24 @@ void ClientCore::run() {
 
     while (!stop_.load(std::memory_order_relaxed) && !ended) {
         drain_out();
+        if (answered && !answer_sent && !refused) {
+            const int ds = derive.state.load(std::memory_order_acquire);
+            if (ds == 2) {
+                say("net: client could not answer the password challenge (iterations %u); leaving",
+                    static_cast<unsigned>(challenge.iterations));
+                leave_with(kByeWrongPassword, wall_now());
+            } else if (ds == 1) {
+                key = derive.key;
+                uint8_t out[sizeof(AuthAnswerMsg)];
+                if (auth_answer(key, challenge, &answer)) {
+                    send_now(out, encode(answer, out, sizeof(out)), kChannelReliable);
+                    answer_sent = true;
+                    say("net: client answered the password challenge");
+                } else {
+                    leave_with(kByeWrongPassword, wall_now());
+                }
+            }
+        }
         ENetEvent ev;
         int r = enet_host_service(host, &ev, 2);  // waits up to 2 ms for traffic (a queued State waits at most that long)
         for (size_t guard = 0; r > 0 && guard < kMaxServiceLoop && !ended; ++guard) {

@@ -146,6 +146,10 @@ void MissionFetch::run() {
         AuthChallengeMsg challenge{};
         AuthAnswerMsg answer{};
         AuthKey key{};
+        auto send = [&](const uint8_t* src, size_t len) {
+            if (ENetPacket* p = enet_packet_create(src, len, ENET_PACKET_FLAG_RELIABLE))
+                if (enet_peer_send(peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
+        };
         uint64_t t0 = ms_now(), last_rx = t0;
         while (!stop_.load() && !round_done && !refused) {
             ENetEvent ev;
@@ -174,18 +178,21 @@ void MissionFetch::run() {
                     }
                     answered = true;
                     challenge = chal;
-                    MissionRequestMsg rq{};
-                    rq.have_id = have;
-                    rq.tag = tag_;
-                    uint8_t ab[sizeof(AuthAnswerMsg)], rb[sizeof(MissionRequestMsg)];
-                    auto send = [&](const uint8_t* src, size_t len) {
-                        if (ENetPacket* p = enet_packet_create(src, len, ENET_PACKET_FLAG_RELIABLE))
-                            if (enet_peer_send(peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
-                    };
+                    uint8_t ab[sizeof(AuthAnswerMsg)];
+                    // This thread only fetches: a key derivation (cached per host session) may take its time here.
                     if (auth_.key_for(chal, &key) && auth_answer(key, chal, &answer)) {
-                        // Reliable and in order: the host reads the answer before the request.
-                        send(ab, encode(answer, ab, sizeof(ab)));
-                        send(rb, encode(rq, rb, sizeof(rb)));
+                        send(ab, encode(answer, ab, sizeof(ab)));  // the requests follow the host's proof
+                    } else {
+                        say("net: mission fetch: cannot answer the host's challenge (iterations %u); not asking again",
+                            static_cast<unsigned>(chal.iterations));
+                        refused = true;
+                    }
+                } else if (!wt && decode(d, n, proof) == Status::Ok) {
+                    if (answered && !proved && auth_check_host(key, challenge, answer, proof)) {
+                        proved = true;
+                        auth_wipe(key);
+                        // Nothing about this pilot (tag, callsign) goes out before the host proved the password. The
+                        // lobby status first: the host then knows this pilot's seat when it answers the request.
                         if (lobby_) {
                             LobbyStatusMsg ls{};
                             ls.tag = tag_;
@@ -197,15 +204,11 @@ void MissionFetch::run() {
                             uint8_t lb[sizeof(LobbyStatusMsg)];
                             send(lb, encode(ls, lb, sizeof(lb)));
                         }
-                    } else {
-                        say("net: mission fetch: cannot answer the host's challenge (iterations %u); not asking again",
-                            static_cast<unsigned>(chal.iterations));
-                        refused = true;
-                    }
-                } else if (!wt && decode(d, n, proof) == Status::Ok) {
-                    if (answered && !proved && auth_check_host(key, challenge, answer, proof)) {
-                        proved = true;
-                        auth_wipe(key);
+                        MissionRequestMsg rq{};
+                        rq.have_id = have;
+                        rq.tag = tag_;
+                        uint8_t rb[sizeof(MissionRequestMsg)];
+                        send(rb, encode(rq, rb, sizeof(rb)));
                     } else if (!proved) {
                         say("net: mission fetch: the host could not prove the session password; not asking again");
                         wrong_password_.store(true, std::memory_order_release);

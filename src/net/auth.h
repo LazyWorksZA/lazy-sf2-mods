@@ -14,8 +14,9 @@ namespace LazyWorks::SF2Patch::net {
 
 /// <summary>PBKDF2 iterations a host asks for (about 50-100 ms once per session and connection on a desktop PC).</summary>
 inline constexpr uint32_t kAuthIterations = 100000;
-/// <summary>The range a client accepts from a host (a rogue host could otherwise ask for minutes of work).</summary>
-inline constexpr uint32_t kAuthMinIterations = 10000, kAuthMaxIterations = 1000000;
+/// <summary>The range a client accepts from a host: no cheaper key than a host makes, and no more than about 150 ms of
+/// work (a rogue host could otherwise make each reconnect cost seconds).</summary>
+inline constexpr uint32_t kAuthMinIterations = kAuthIterations, kAuthMaxIterations = 300000;
 
 /// <summary>The key derived from the password for one salt; the only form the host keeps.</summary>
 struct AuthKey {

@@ -3579,6 +3579,38 @@ void session_password_tests() {
     p2c.idle(50);
     events(30);
 
+    // Every slot taken (three proven connections are open here): the oldest unanswered connection makes room; proven
+    // ones are never cut for a newcomer.
+    {
+        TestClient w1, w2, w3;
+        auto idle_all = [&](int ms) {
+            for (int i = 0; i < ms; ++i) {
+                for (TestClient* c : {&p1c, &p2c, &w1, &w2, &w3})
+                    if (c->host) c->service(0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        };
+        connect(w1);  // the fourth slot, unanswered
+        idle_all(20);
+        w2.auto_auth = false;
+        w2.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+        w2.peer = enet_host_connect(w2.host, &addr, kChannelCount, 0);
+        for (int i = 0; i < 500 && (w2.challenges == 0 || !w1.disconnected); ++i) idle_all(1);
+        expect(w1.challenges == 1 && w1.disconnected && w2.challenges == 1 && !p1c.disconnected && !p2c.disconnected,
+               "all slots taken: the oldest unanswered connection is cut and the newcomer challenged; proven ones stay");
+        w2.answer(w2.challenge);
+        idle_all(150);
+        w3.auto_auth = false;
+        w3.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+        w3.peer = enet_host_connect(w3.host, &addr, kChannelCount, 0);
+        for (int i = 0; i < 300 && !w3.disconnected; ++i) idle_all(1);
+        expect(w2.proofs == 1 && w3.challenges == 0 && w3.disconnected && !w2.disconnected,
+               "every slot proven: a newcomer is cut before any challenge");
+        enet_peer_disconnect(w2.peer, 0);
+        for (int i = 0; i < 300 && !w2.disconnected; ++i) idle_all(1);
+        events(30);
+    }
+
     // The mission fetch with the wrong password stops asking and gets no mission bytes; with the right one it does.
     MissionFetch bad_fetch;
     bad_fetch.start("127.0.0.1", core.port(), 0x99u, AuthClient("not-the-password"), nullptr, 200);
@@ -9882,8 +9914,8 @@ void fake_host_proof_tests() {
         if (honest) {
             expect(c.phase() == ClientCore::Phase::Welcomed && !bye9, "a host with the password: its proof checks out, Welcome counts");
         } else {
-            expect(welcomed_sent && c.phase() != ClientCore::Phase::Welcomed && bye9,
-                   "a host without the password: its proof fails, its Welcome is ignored, the client leaves (Bye 9)");
+            expect(!raw.got_hello && !welcomed_sent && c.phase() != ClientCore::Phase::Welcomed && bye9,
+                   "a host without the password: its proof fails, it never gets the Hello, the client leaves (Bye 9)");
         }
         c.stop(false);
     }
@@ -9925,6 +9957,18 @@ void lobby_book_tests() {
     b.update(0xD, "ECHO", false, 3, false, 9000);
     b.set_members(2);
     expect(b.host_seat() == 1 && b.seat_of(0xD) == 0, "a smaller flight: seats past it are dropped and given again");
+    LobbyBook c;
+    c.set_members(4);
+    const uint64_t a1 = (1ull << 16) | 5000, a2 = (2ull << 16) | 5000;
+    expect(c.update(0x1, "BRAVO", false, -1, false, 0, a1) == kLobbyOk && c.seat_of(0x1) == 0,
+           "a row is bound to the address that made it");
+    expect(c.update(0x1, "MALLORY", false, 2, false, 0, a2) == LobbyBook::kRefused &&
+               c.update(0x1, "MALLORY", false, -1, true, 0, a2) == LobbyBook::kRefused && c.seat_of(0x1) == 0 &&
+               c.clients() == 1,
+           "another address presenting the tag is refused: no seat change, no leave");
+    expect(c.update(0x2, "BRAVO2", false, -1, false, 0, a1) == LobbyBook::kRefused && c.clients() == 1,
+           "one address has one row");
+    expect(c.update(0x2, "CHARLIE", false, -1, false, 0, a2) == kLobbyOk && c.clients() == 2, "another address gets its own row");
 }
 
 void lobby_loopback_tests() {
@@ -9958,6 +10002,35 @@ void lobby_loopback_tests() {
     expect(rb.result == kLobbyContent && rb.your_seat == kNoSeat, "a client with other game content is kept out");
     const HostCore::LobbyView v = core.lobby_view();
     expect(v.clients == 2 && v.host_seat == 0, "the host sees both clients");
+    {
+        // Another connection (another address) presenting BRAVO's tag gets no roster and changes nothing.
+        TestClient spoof;
+        spoof.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+        ENetAddress ha{};
+        enet_address_set_host_ip(&ha, "127.0.0.1");
+        ha.port = core.port();
+        spoof.peer = enet_host_connect(spoof.host, &ha, kChannelCount, 0);
+        for (int i = 0; i < 2000 && spoof.proofs == 0 && !spoof.disconnected; ++i) spoof.idle(1);
+        LobbyStatusMsg ls{};
+        ls.tag = 0x11u;
+        set_str(ls.callsign, "MALLORY");
+        ls.want_seat = 3;
+        ls.leaving = 0;
+        ls.content_hash = 0x1234u;
+        uint8_t lb[sizeof(LobbyStatusMsg)];
+        spoof.send(lb, encode(ls, lb, sizeof(lb)), kChannelReliable);
+        spoof.idle(300);
+        bool rostered = false;
+        for (const auto& g : spoof.got)
+            rostered = rostered || peek_world_type(g.bytes.data(), g.bytes.size()) == static_cast<uint8_t>(WorldType::LobbyRoster);
+        const HostCore::LobbyView sv = core.lobby_view();
+        bool bravo = false;
+        for (size_t i = 0; i < sv.count; ++i) bravo = bravo || std::strcmp(sv.rows[i].callsign, "BRAVO") == 0;
+        expect(spoof.proofs == 1 && !rostered && sv.clients == 2 && bravo,
+               "a second connection presenting another pilot's tag is refused (no roster, the row unchanged)");
+        enet_peer_disconnect(spoof.peer, 0);
+        spoof.idle(50);
+    }
     f1.want_seat(3);
     const bool moved = wait([&] { return f1.roster(&r1, &rtt) && r1.your_seat == 3; });
     expect(moved, "a client's seat wish is granted through the fetch");
@@ -10015,6 +10088,7 @@ void lobby_flow_splice_tests() {
 }
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash still shows the last test reached
     if (argc > 1 && std::strcmp(argv[1], "lobby") == 0) {  // a quick loop over the lobby loopback
         lobby_loopback_tests();
         std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);

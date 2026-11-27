@@ -249,7 +249,7 @@ private:
     char summary_[3][40] = {};           // under mission_mx_
     uint32_t launch_seq_ = 0;            // under mission_mx_
     /// <summary>Network thread: a client's LobbyStatus, answered with its roster (under mission_mx_).</summary>
-    size_t lobby_answer(const LobbyStatusMsg& s, uint8_t* out, size_t cap);
+    size_t lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap);
     void release_seat(uint32_t tag);
     mutable std::mutex mission_mx_;
     std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer

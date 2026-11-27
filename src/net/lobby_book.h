@@ -16,6 +16,7 @@ public:
     static constexpr size_t kMax = 8;              // pilots, the host included
     static constexpr uint64_t kExpireMs = 15000;   // a client not heard of for this long has left (it asks every second)
     static constexpr uint32_t kHostTag = 0;        // the host's own row (client tags are never 0)
+    static constexpr uint8_t kRefused = 0xff;      // update: not this sender's row (no answer is sent)
 
     /// <summary>The player flight's size for a new mission: seats past it are dropped, and pilots without a seat get
     /// the first free one (the host first, then in join order).</summary>
@@ -46,10 +47,17 @@ public:
     }
 
     /// <summary>A client's status at now_ms. A new client gets the first free seat. A seat wish is granted only for a
-    /// free seat (and clears Ready); leaving drops the row. Returns a kLobby* result.</summary>
-    uint8_t update(uint32_t tag, const char* callsign, bool ready, int want_seat, bool leaving, uint64_t now_ms) {
+    /// free seat (and clears Ready); leaving drops the row. Returns a kLobby* result, or kRefused.</summary>
+    /// <param name="from">The sender's address (IP and port). A row belongs to the address that made it: another one
+    /// presenting its tag is refused, and one address has one row. 0 binds nothing.</param>
+    uint8_t update(uint32_t tag, const char* callsign, bool ready, int want_seat, bool leaving, uint64_t now_ms,
+                   uint64_t from = 0) {
         if (tag == kHostTag) return kLobbyFull;
         Pilot* p = find(tag);
+        if (p && p->from != from) return kRefused;
+        if (!p && from)
+            for (size_t i = 0; i < n_; ++i)
+                if (p_[i].from == from) return kRefused;
         if (leaving) {
             if (p) remove(static_cast<size_t>(p - p_));
             return kLobbyOk;
@@ -59,6 +67,7 @@ public:
             p = &p_[n_++];
             *p = Pilot{};
             p->tag = tag;
+            p->from = from;
             p->seat = first_free();
         }
         set_str(p->callsign, callsign);
@@ -126,6 +135,7 @@ private:
         int seat = -1;
         bool ready = false;
         uint64_t seen_ms = 0;
+        uint64_t from = 0;
     };
 
     // A seat wish (-1: none): granted if the seat exists and is free; a granted move clears Ready.

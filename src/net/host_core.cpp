@@ -23,6 +23,7 @@ uint64_t now_ms() {
 }
 
 constexpr uint32_t kMaxPingsPerSecond = 100;  // per peer; more are dropped
+constexpr uint32_t kMaxLobbyPerSecond = 4;    // LobbyStatus per connection (a client sends one a round, plus changes)
 constexpr size_t kMaxPacket = sizeof(HostEvent::data);
 constexpr size_t kMaxServiceLoop = 512;  // events handled per pass, so a flood cannot starve the queues
 
@@ -249,15 +250,16 @@ bool HostCore::lobby_ready(uint32_t tag) const {
     return book_.ready(tag);
 }
 
-size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint8_t* out, size_t cap) {
+size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap) {
     std::lock_guard<std::mutex> lock(mission_mx_);
     LobbyRosterMsg r{};
     if (s.content_hash != content_hash_) {
         r.result = kLobbyContent;
-        book_.update(s.tag, s.callsign, false, -1, true, now_ms());  // not in the lobby
+        book_.update(s.tag, s.callsign, false, -1, true, now_ms(), from);  // not in the lobby
     } else {
         r.result = book_.update(s.tag, s.callsign, s.ready != 0, s.want_seat == kLobbyNoWish ? -1 : s.want_seat,
-                                s.leaving != 0, now_ms());
+                                s.leaving != 0, now_ms(), from);
+        if (r.result == LobbyBook::kRefused) return 0;
     }
     r.mission_id = mission_ ? mission_->id : 0;
     r.launch_seq = launch_seq_;
@@ -300,6 +302,10 @@ void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t ra
     if (lobby_) book_.set_members(seats.members);  // the pilots keep their seats where the new flight has them
 }
 
+// ENet peers beyond the slots: an incoming connection can arrive while every slot is taken, so the oldest unanswered
+// one can make room for it (see the Connect event).
+constexpr size_t kSparePeers = 2;
+
 // The network thread. Everything below runs on it, and only it touches ENet.
 void HostCore::run() {
     char line[320];
@@ -318,7 +324,7 @@ void HostCore::run() {
     ENetHost* host = nullptr;
     if (enet_address_set_host_ip(&addr, addr_) == 0) {
         addr.port = req_port_;
-        host = enet_host_create(&addr, kMaxClients, kChannelCount, 0, 0);
+        host = enet_host_create(&addr, kMaxClients + kSparePeers, kChannelCount, 0, 0);
     }
     if (!host) {
         say("net: host failed: cannot bind udp %s:%u (bad address, or the port is in use)", addr_,
@@ -342,6 +348,7 @@ void HostCore::run() {
     bool version_refused[kMaxClients] = {};
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
+    uint32_t lobby_msgs[kMaxClients] = {};
     uint32_t gens[kMaxClients] = {};
     uint64_t mission_ask_ms[kMaxClients] = {};
     uint32_t slot_tag[kMaxClients] = {};  // the world tag each connection carried (request or Hello)
@@ -490,17 +497,22 @@ void HostCore::run() {
             LobbyStatusMsg ls;
             if (channel != kChannelReliable || decode(data, len, ls) != Status::Ok || ls.tag == 0) return drop(n_format_);
             if (!lobby_) return drop(n_state_);
-            if (ls.tag != slot_tag[slot]) {  // the tag holds a slot while this connection is open (as a request)
-                slot_tag[slot] = ls.tag;
-            }
+            if (++lobby_msgs[slot] > kMaxLobbyPerSecond) return drop(n_state_);
+            if (slot_tag[slot] && ls.tag != slot_tag[slot]) return drop(n_state_);  // one tag per connection
+            slot_tag[slot] = ls.tag;
+            // The fetch connects anew each round from one address, so a row is bound to that address (lobby_book.h).
+            const uint64_t from = (static_cast<uint64_t>(peers[slot]->address.host) << 16) | peers[slot]->address.port;
             uint8_t out[sizeof(LobbyRosterMsg)];
-            send_raw(slot, out, lobby_answer(ls, out, sizeof(out)));
+            const size_t n = lobby_answer(ls, from, out, sizeof(out));
+            if (!n) return drop(n_state_);  // another address's row: unanswered
+            send_raw(slot, out, n);
             return;
         }
         MissionRequestMsg rq;
         if (wt != static_cast<uint8_t>(WorldType::MissionRequest) || channel != kChannelReliable ||
             decode(data, len, rq) != Status::Ok)
             return drop(n_format_);
+        if (slot_tag[slot] && rq.tag != slot_tag[slot]) return drop(n_state_);  // one tag per connection
         const uint64_t ask_now = now_ms();
         if (mission_ask_ms[slot] && ask_now - mission_ask_ms[slot] < 1000) return drop(n_state_);  // 1 a second at most
         mission_ask_ms[slot] = ask_now;        std::shared_ptr<const MissionBlob> b;
@@ -700,9 +712,9 @@ void HostCore::run() {
         switch (ev.type) {
             case ENET_EVENT_TYPE_CONNECT: {
                 // Before any challenge: an address waiting after wrong answers is cut at once (logged once per wait),
-                // one address has at most kMaxPendingPerAddress unanswered connections (a player's session and its
-                // mission fetch), and unanswered connections never take the last free slot, so a burst of strangers
-                // cannot starve a player's session or mission fetch.
+                // and one address has at most kMaxPendingPerAddress unanswered connections (a player's session and its
+                // mission fetch). When every slot is taken, the oldest unanswered connection makes room (ENet keeps
+                // spare peers for this), so strangers holding slots without answering cannot starve a player.
                 const uint64_t t = now_ms();
                 bool first = false;
                 char ip[24];
@@ -713,19 +725,32 @@ void HostCore::run() {
                     enet_peer_disconnect_now(ev.peer, 0);
                     break;
                 }
-                int slot = -1, pending = 0;
+                int slot = -1, oldest = -1;
                 int same_ip_pending = 0;
                 for (int i = 0; i < kMaxClients; ++i) {
                     if (!peers[i]) {
                         if (slot < 0) slot = i;
                     } else if (!authed[i]) {
-                        ++pending;
                         if (peers[i]->address.host == ev.peer->address.host) ++same_ip_pending;
+                        // Refused ones first (they are on their way out), then the one challenged longest ago.
+                        const uint64_t age_key = auth_refused[i] ? 0 : auth_deadline[i];
+                        const uint64_t best = oldest < 0 ? ~0ull : (auth_refused[oldest] ? 0 : auth_deadline[oldest]);
+                        if (oldest < 0 || age_key < best) oldest = i;
                     }
                 }
-                if (slot < 0 || same_ip_pending >= kMaxPendingPerAddress || pending >= kMaxClients - 1) {
+                if (same_ip_pending >= kMaxPendingPerAddress) {
                     enet_peer_disconnect_now(ev.peer, 0);
                     break;
+                }
+                if (slot < 0) {
+                    if (oldest < 0) {  // every slot holds a proven connection: no room
+                        enet_peer_disconnect_now(ev.peer, 0);
+                        break;
+                    }
+                    enet_peer_disconnect_now(peers[oldest], 0);
+                    peers[oldest]->data = nullptr;
+                    free_slot(oldest);
+                    slot = oldest;
                 }
                 peers[slot] = ev.peer;
                 gens[slot] = next_gen++;
@@ -736,6 +761,7 @@ void HostCore::run() {
                 bye_seen[slot] = false;
                 last_rx[slot] = now_ms();
                 pings[slot] = 0;
+                lobby_msgs[slot] = 0;
                 authed[slot] = false;
                 auth_refused[slot] = false;
                 // The Connect event waits for the answer (handle_auth). A fresh nonce per connection: an answer
@@ -873,6 +899,7 @@ void HostCore::run() {
                 book_.expire(now);
             }
             for (uint32_t& p : pings) p = 0;
+            for (uint32_t& m : lobby_msgs) m = 0;
             const HostCounters c = counters();
             uint32_t quota_now = 0, quota_before = 0;
             for (int i = 0; i < kMaxClients; ++i) {
