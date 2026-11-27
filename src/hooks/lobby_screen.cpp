@@ -519,17 +519,18 @@ void session_frame() {
     g_next_roster = now + 500;
     const Roster r = read_roster(g_screen == Screen::Host);
     if (!r.have) return;
+    // Before the roster is drawn: a stale one keeps "not answering" in the header instead of its old answer time.
+    if (g_screen == Screen::Join && r.age_ms > kHostGoneMs) {  // the fetch asks every second: the host is gone
+        if (!g_host_gone) {
+            g_host_gone = true;
+            LOG("lobby: no roster from the host for %llu s; the host has gone", static_cast<unsigned long long>(r.age_ms / 1000));
+            set_text(session_item::kHeader, (L"Host at " + g_join_address + L" - not answering").c_str());
+            set_status(L"The host has gone. Leave, or wait for it to host again.");
+        }
+        return;
+    }
     show_roster(r);
     if (g_screen == Screen::Join) {
-        if (r.age_ms > kHostGoneMs) {  // the fetch asks every second: nothing for this long, the host is gone
-            if (!g_host_gone) {
-                g_host_gone = true;
-                LOG("lobby: no roster from the host for %llu s; the host has gone", static_cast<unsigned long long>(r.age_ms / 1000));
-                set_text(session_item::kHeader, (L"Host at " + g_join_address + L" - not answering").c_str());
-                set_status(L"The host has gone. Leave, or wait for it to host again.");
-            }
-            return;
-        }
         if (g_host_gone) {
             g_host_gone = false;
             set_status(L"The host is back.");
