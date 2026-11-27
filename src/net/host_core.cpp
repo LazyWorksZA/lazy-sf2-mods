@@ -257,9 +257,14 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
         r.result = kLobbyContent;
         book_.update(s.tag, s.callsign, false, -1, true, now_ms(), from);  // not in the lobby
     } else {
-        r.result = book_.update(s.tag, s.callsign, s.ready != 0, s.want_seat == kLobbyNoWish ? -1 : s.want_seat,
-                                s.leaving != 0, now_ms(), from);
+        // After Launch the seats are fixed: the flying pilots' Welcomes are checked against them.
+        const bool flying = (launch_seq_ & kLaunchFlying) != 0;
+        const int want = s.want_seat == kLobbyNoWish || flying ? -1 : s.want_seat;
+        const bool ready = s.ready != 0 && mission_ && s.ready_mission == mission_->id;  // Ready for this mission only
+        r.result = book_.update(s.tag, s.callsign, ready, want, s.leaving != 0, now_ms(), from);
         if (r.result == LobbyBook::kRefused) return 0;
+        if (flying && s.want_seat != kLobbyNoWish && r.result == kLobbyOk && book_.seat_of(s.tag) != s.want_seat)
+            r.result = kLobbySeatTaken;
     }
     r.mission_id = mission_ ? mission_->id : 0;
     r.launch_seq = launch_seq_;
@@ -299,7 +304,7 @@ void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t ra
     std::lock_guard<std::mutex> lock(mission_mx_);
     mission_ = std::move(b);
     seats_.reset(seats);  // a new mission: seats are given out again
-    if (lobby_) book_.set_members(seats.members);  // the pilots keep their seats where the new flight has them
+    if (lobby_) book_.set_members(seats.members, seats.host_member);  // the pilots keep their seats where the new flight has them
 }
 
 // ENet peers beyond the slots: an incoming connection can arrive while every slot is taken, so the oldest unanswered

@@ -4,6 +4,7 @@
 // guards it with its mission lock.
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "net/protocol.h"
@@ -14,16 +15,20 @@ namespace LazyWorks::SF2Patch::net {
 class LobbyBook {
 public:
     static constexpr size_t kMax = 8;              // pilots, the host included
-    static constexpr uint64_t kExpireMs = 15000;   // a client not heard of for this long has left (it asks every second)
+    static constexpr uint64_t kExpireMs = 20000;   // a client not heard of for this long has left (it asks every second)
     static constexpr uint32_t kHostTag = 0;        // the host's own row (client tags are never 0)
     static constexpr uint8_t kRefused = 0xff;      // update: not this sender's row (no answer is sent)
 
     /// <summary>The player flight's size for a new mission: seats past it are dropped, and pilots without a seat get
-    /// the first free one (the host first, then in join order).</summary>
-    void set_members(int members) {
+    /// the first free one (the host first, then in join order). Seats inside the flight are kept.</summary>
+    /// <param name="host_member">The host's member in that mission, given to the host only if it has no seat yet and
+    /// that seat is free (-1: none).</param>
+    void set_members(int members, int host_member = -1) {
         members_ = members < 0 ? 0 : members > 255 ? 255 : members;
         for (size_t i = 0; i < n_; ++i)
             if (p_[i].seat >= members_) p_[i].seat = -1;
+        Pilot* h = find(kHostTag);
+        if (h && h->seat < 0 && host_member >= 0 && host_member < members_ && !held(host_member)) h->seat = host_member;
         for (size_t i = 0; i < n_; ++i)
             if (p_[i].seat < 0) p_[i].seat = first_free();
     }
@@ -41,8 +46,9 @@ public:
             *h = Pilot{};
             h->tag = kHostTag;
             h->seat = first_free();
+            h->number = ++joined_;
         }
-        set_str(h->callsign, callsign);
+        clean_callsign(*h, callsign);
         return wish(*h, want_seat);
     }
 
@@ -69,8 +75,9 @@ public:
             p->tag = tag;
             p->from = from;
             p->seat = first_free();
+            p->number = ++joined_;
         }
-        set_str(p->callsign, callsign);
+        clean_callsign(*p, callsign);
         p->seen_ms = now_ms;
         const int before = p->seat;
         const uint8_t r = wish(*p, want_seat);
@@ -136,7 +143,21 @@ private:
         bool ready = false;
         uint64_t seen_ms = 0;
         uint64_t from = 0;
+        int number = 0;  // join order, for a callsign that cannot be shown
     };
+
+    // Printable ASCII only (the game's menu font, and a row with no callsign reads as a free seat); none left gives
+    // "PILOT n".
+    static void clean_callsign(Pilot& p, const char* in) {
+        size_t k = 0;
+        for (size_t i = 0; in && in[i] && k + 1 < sizeof(p.callsign); ++i) {
+            const unsigned char c = static_cast<unsigned char>(in[i]);
+            if (c >= 0x20 && c < 0x7f && (c != ' ' || k > 0)) p.callsign[k++] = static_cast<char>(c);
+        }
+        while (k > 0 && p.callsign[k - 1] == ' ') --k;
+        p.callsign[k] = 0;
+        if (!k) std::snprintf(p.callsign, sizeof(p.callsign), "PILOT %d", p.number);
+    }
 
     // A seat wish (-1: none): granted if the seat exists and is free; a granted move clears Ready.
     uint8_t wish(Pilot& p, int want) {
@@ -173,6 +194,7 @@ private:
 
     Pilot p_[kMax];
     size_t n_ = 0;
+    int joined_ = 0;
     int members_ = 0;
 };
 

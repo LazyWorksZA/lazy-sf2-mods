@@ -72,6 +72,8 @@ void* g_mnu = nullptr;
 std::wstring g_saved_address;  // what Options.ini holds (as last read or written)
 std::wstring g_join_address;   // the address Join was clicked with
 bool g_ready = false;          // join screen: this pilot's Ready (sent with every status)
+uint32_t g_ready_mission = 0;  // ... and the host's mission it was pressed for
+std::wstring g_pending_status; // a status line for the next session screen (set where no lobby screen is open)
 int g_wished = -1;             // join screen: the seat asked for, until the roster answers
 uint32_t g_launches = 0;       // host: Launches in this session
 uint32_t g_flown = 0;          // client: the Launch it flew (or was told about), so each is taken once
@@ -197,7 +199,7 @@ bool select_terrain(const std::string& theatre) {
     if (!ter) return false;
     bool ok = *static_cast<void**>(ter) == at_rva(te, kTerVtableRva);
     if (ok) {
-        const std::wstring w(theatre.begin(), theatre.end());
+        const std::wstring w = widen_ansi(theatre);
         using Select_t = bool(__fastcall*)(void*, void*, const wchar_t*);
         ok = reinterpret_cast<Select_t>(vtable_slot(ter, kTerSelect))(ter, nullptr, w.c_str());
     }
@@ -213,7 +215,7 @@ bool load_host_mission() {
     if (r != 0) {
         LOG("lobby: Briefing: %s", r == 1 ? "no mission from the host yet" : r == 2 ? "theatre not installed" : "unusable mission");
         set_status(r == 1 ? L"The host has not shared a mission yet."
-                   : r == 2 ? (L"This mission's theatre (" + std::wstring(theatre.begin(), theatre.end()) + L") is not installed.").c_str()
+                   : r == 2 ? (L"This mission's theatre (" + widen_ansi(theatre) + L") is not installed.").c_str()
                             : L"The host's mission cannot be used.");
         return false;
     }
@@ -292,7 +294,7 @@ void start_host() {
     if (ok) clear_password_field();
     if (!ok) {
         LOG("lobby: Host refused: %s", why.c_str());
-        set_status((L"Could not host: " + std::wstring(why.begin(), why.end()) + L".").c_str());
+        set_status((L"Could not host: " + widen_ansi(why) + L".").c_str());
         return;
     }
     LOG("lobby: hosting as \"%s\" on port %u", cs.c_str(), static_cast<unsigned>(kLobbyPort));
@@ -327,11 +329,12 @@ void start_join() {
     if (ok) clear_password_field();
     if (!ok) {
         LOG("lobby: Join refused: %s", why.c_str());
-        set_status((L"Could not join: " + std::wstring(why.begin(), why.end()) + L".").c_str());
+        set_status((L"Could not join: " + widen_ansi(why) + L".").c_str());
         return;
     }
-    g_join_address = std::wstring(host, host + std::strlen(host)) + L":" + std::to_wstring(port);
+    g_join_address = widen_ansi(host) + L":" + std::to_wstring(port);
     g_ready = false;
+    g_ready_mission = 0;
     g_wished = -1;
     g_flown = g_told = 0;
     LOG("lobby: joining %s:%u as \"%s\"", host, static_cast<unsigned>(port), cs.c_str());
@@ -358,11 +361,7 @@ void connect_click(int item) {
 
 // --- The host and join screens (L4): roster, seats, Ready. ---
 
-std::wstring widen(const char* s) {
-    std::wstring w;
-    for (; s && *s; ++s) w += static_cast<wchar_t>(static_cast<unsigned char>(*s));
-    return w;
-}
+std::wstring widen(const char* s) { return widen_ansi(s); }
 
 std::wstring seat_text(int seat) { return seat < 0 || seat == net::kNoSeat ? L"-" : L"#" + std::to_wstring(seat + 1); }
 
@@ -374,6 +373,7 @@ struct Roster {
     int you = -1;  // this pilot's seat
     uint8_t result = net::kLobbyOk;
     uint32_t launch_seq = 0;
+    uint32_t mission_id = 0;
     uint32_t rtt_ms = 0;
     std::wstring host_callsign;
     std::wstring summary[3];
@@ -381,9 +381,9 @@ struct Roster {
     net::LobbyRow rows[net::kLobbyRows] = {};
 };
 
-Roster read_roster() {
+Roster read_roster(bool host) {
     Roster r;
-    if (g_screen == Screen::Host) {
+    if (host) {
         net::HostCore::LobbyView v;
         if (!host_lobby_view(&v)) return r;
         r.have = true;
@@ -391,6 +391,7 @@ Roster read_roster() {
         r.clients = v.clients;
         r.you = v.host_seat;
         r.launch_seq = v.launch_seq;
+        r.mission_id = v.mission_id;
         r.count = v.count;
         std::memcpy(r.rows, v.rows, sizeof(r.rows));
         for (int i = 0; i < 3; ++i) r.summary[i] = widen(v.summary[i]);
@@ -402,6 +403,7 @@ Roster read_roster() {
         r.you = m.your_seat == net::kNoSeat ? -1 : m.your_seat;
         r.result = m.result;
         r.launch_seq = m.launch_seq;
+        r.mission_id = m.mission_id;
         r.count = m.count;
         std::memcpy(r.rows, m.rows, sizeof(r.rows));
         for (int i = 0; i < 3; ++i) r.summary[i] = widen(m.summary[i]);
@@ -486,20 +488,28 @@ void session_frame() {
     const ULONGLONG now = GetTickCount64();
     if (now < g_next_roster || net_session_role() == NetRole::None) return;
     g_next_roster = now + 500;
-    const Roster r = read_roster();
+    const Roster r = read_roster(g_screen == Screen::Host);
     if (!r.have) return;
     show_roster(r);
     if (g_screen == Screen::Join) {
+        if (g_ready && r.mission_id != g_ready_mission) {  // Ready was for a mission the host has replaced
+            g_ready = false;
+            g_ready_mission = 0;
+            world_lobby_ready(false, 0);
+            LOG("lobby: the host changed the mission; Ready off");
+            set_status(L"The host changed the mission: check the briefing, then press Ready again.");
+        }
         // The host's Launch: a ready pilot loads the latest mission and flies; one that is not ready is told, and flies
         // as soon as it is (late join) while the host's flight runs.
         const uint32_t launch = r.launch_seq & ~net::kLaunchFlying;
         if ((r.launch_seq & net::kLaunchFlying) && launch != g_flown) {
-            if (g_ready && r.you >= 0) {
+            if (g_ready && r.you >= 0 && g_ready_mission == r.mission_id) {
                 g_flown = launch;
                 LOG("lobby: the host launched (Launch %u); joining the flight", launch);
                 if (load_host_mission()) {
                     g_ready = false;
-                    world_lobby_ready(false);
+                    g_ready_mission = 0;
+                    world_lobby_ready(false, 0);
                     set_status(L"Launching...");
                     post(kCmdLeave, 1);
                     return;
@@ -526,6 +536,20 @@ void session_frame() {
     }
 }
 
+/// <summary>Client: Ready for the host's current mission, if this pilot has a seat in it. Returns nullptr, or why
+/// not (a status line).</summary>
+const wchar_t* try_ready() {
+    const Roster r = read_roster(false);
+    if (!r.have || r.result == net::kLobbyContent) return L"Not in the host's lobby.";
+    if (r.mission_id == 0) return L"The host has not set up a mission yet.";
+    if (r.you < 0) return L"Pick a seat first.";
+    g_ready = true;
+    g_ready_mission = r.mission_id;
+    world_lobby_ready(true, r.mission_id);
+    LOG("lobby: Ready on (mission 0x%08lx, seat %d)", static_cast<unsigned long>(r.mission_id), r.you);
+    return nullptr;
+}
+
 /// <summary>The next free seat after (dir 1) or before (dir -1) this pilot's, from the roster's free rows; -1 if none.</summary>
 int next_free_seat(const Roster& r, int dir) {
     if (r.members <= 0) return -1;
@@ -539,7 +563,7 @@ int next_free_seat(const Roster& r, int dir) {
 }
 
 void change_seat(int dir) {
-    const Roster r = read_roster();
+    const Roster r = read_roster(g_screen == Screen::Host);
     const int seat = next_free_seat(r, dir);
     if (seat < 0) {
         set_status(r.members == 0 ? L"No seats yet: the host has not set up the mission." : L"No other seat is free.");
@@ -553,7 +577,8 @@ void change_seat(int dir) {
     } else {
         g_wished = seat;
         g_ready = false;  // a new seat clears Ready (the host clears it too)
-        world_lobby_ready(false);
+        g_ready_mission = 0;
+        world_lobby_ready(false, 0);
         world_lobby_want_seat(seat);
         set_status((L"Asking the host for seat " + seat_text(seat) + L"...").c_str());
     }
@@ -580,15 +605,16 @@ void session_click(int item) {
                 set_status(L"Launching...");
                 post(kCmdLeave, 1);
             } else {
-                const Roster r = read_roster();
-                if (!g_ready && r.you < 0) {
-                    set_status(L"Pick a seat first.");
-                    break;
+                if (g_ready) {
+                    g_ready = false;
+                    g_ready_mission = 0;
+                    world_lobby_ready(false, 0);
+                    LOG("lobby: Ready off");
+                    set_status(L"Not ready.");
+                } else {
+                    const wchar_t* why = try_ready();
+                    set_status(why ? why : L"Ready: the host can launch the mission.");
                 }
-                g_ready = !g_ready;
-                world_lobby_ready(g_ready);
-                LOG("lobby: Ready %s", g_ready ? "on" : "off");
-                set_status(g_ready ? L"Ready: the host can launch the mission." : L"Not ready.");
                 g_next_roster = 0;
             }
             break;
@@ -681,6 +707,8 @@ void init_session_screen() {
         set_text(session_item::kHeader, (L"Host at " + g_join_address).c_str());
         set_status(g_ready ? L"Ready." : L"Pick a seat, then Ready.");
     }
+    if (!g_pending_status.empty() && role != NetRole::None) set_status(g_pending_status.c_str());
+    g_pending_status.clear();
     LOG("lobby: %s screen opened", host ? "host" : "join");
 }
 
@@ -720,14 +748,13 @@ bool game_option_int(const wchar_t* section, const wchar_t* key, int* out) {
     return read_option(section, key, buf, _countof(buf)) && parse_int(buf, out);
 }
 
-bool lobby_hangar_event(void* self, const int* ev) {
-    if (!self || !ev) return false;
-    void* mnu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);  // the menu-code base class keeps MNU there
-    HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
-    if (!mnu || !mnu_dll || *static_cast<void**>(mnu) != at_rva(mnu_dll, kMnuVtableRva)) return false;
-    if (ev[0] != 3 || (ev[3] & 0xf) != 0 || ev[2] != 0) return false;  // a left-button release
-    const int item = reinterpret_cast<ItemUnderPointer_t>(vtable_slot(mnu, kMnuItemUnderPointer))(mnu, nullptr);
-    if (item != kHangarFly) return false;
+namespace {
+
+int g_in_hangar = 0;  // menu thread: inside the Hangar's event handler with the lobby's way back in it
+PostCommand_t g_post = nullptr;  // MNU's own PostCommand, once guard_fly has replaced its vtable slot
+
+// The Hangar's Fly, from the lobby: back to the lobby screen instead (a client's Ready through the lobby's checks).
+bool hangar_back(void* mnu, const char* how) {
     const int back = lobby_hangar_return_item();
     void* sel = nullptr;
     if (back <= 0) return false;
@@ -736,14 +763,66 @@ bool lobby_hangar_event(void* self, const int* ev) {
         LOG("lobby: the Hangar's way back to the lobby is missing; Fly starts the flight");
         return false;
     }
-    const bool host = net_session_role() == NetRole::Host;
-    if (!host) {
-        g_ready = true;
-        world_lobby_ready(true);
+    const NetRole role = net_session_role();
+    if (role == NetRole::Client && !g_ready) {
+        const wchar_t* why = try_ready();
+        g_pending_status = why ? why : L"Ready: the host can launch the mission.";
     }
-    LOG("lobby: Hangar %s: back to the lobby", host ? "Done" : "Ready");
-    reinterpret_cast<PostCommand_t>(vtable_slot(mnu, kMnuPostCommand))(mnu, nullptr, kCmdGoTo, back, kCmdArg);
+    LOG("lobby: Hangar %s (%s): back to the lobby", role == NetRole::Host ? "Done" : role == NetRole::Client ? "Ready" : "Fly after the session ended", how);
+    const PostCommand_t post_cmd = g_post ? g_post : reinterpret_cast<PostCommand_t>(vtable_slot(mnu, kMnuPostCommand));
+    post_cmd(mnu, nullptr, kCmdGoTo, back, kCmdArg);
     return true;
+}
+
+// The menu system's command, while the Hangar's handler runs: its fly command goes back to the lobby.
+void __fastcall guarded_post(void* mnu, void* edx, int cmd, int a, int b) {
+    if (g_in_hangar > 0 && cmd == kCmdLeave && a == 1 && lobby_hangar_return_item() > 0 && hangar_back(mnu, "fly command"))
+        return;
+    g_post(mnu, edx, cmd, a, b);
+}
+
+/// <summary>Replaces MNU's PostCommand vtable slot with guarded_post, once (MenuSystem.dll stays loaded).</summary>
+void guard_fly(void* mnu) {
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+    HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
+    if (!is_expected_build(mnu_dll, kMnuTimestamp, kMnuImageSize, "MenuSystem.dll")) return;
+    void** slot = static_cast<void**>(at_rva(mnu_dll, kMnuVtableRva)) + kMnuPostCommand;
+    DWORD old = 0;
+    if (*static_cast<void**>(mnu) != at_rva(mnu_dll, kMnuVtableRva) ||
+        !VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+        LOG("lobby: the Hangar's fly command is not guarded (menu system not as expected)");
+        return;
+    }
+    g_post = reinterpret_cast<PostCommand_t>(*slot);
+    *slot = reinterpret_cast<void*>(&guarded_post);
+    VirtualProtect(slot, sizeof(void*), old, &old);
+    LOG("lobby: the Hangar's fly command is guarded (MenuSystem PostCommand slot)");
+}
+
+}  // namespace
+
+bool lobby_hangar_event(void* self, const int* ev) {
+    if (!self || !ev) return false;
+    void* mnu = *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4);  // the menu-code base class keeps MNU there
+    HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
+    if (!mnu || !mnu_dll || *static_cast<void**>(mnu) != at_rva(mnu_dll, kMnuVtableRva)) return false;
+    if (ev[0] != 3 || (ev[3] & 0xf) != 0 || ev[2] != 0) return false;  // a left-button release
+    const int item = reinterpret_cast<ItemUnderPointer_t>(vtable_slot(mnu, kMnuItemUnderPointer))(mnu, nullptr);
+    if (item != kHangarFly) return false;
+    return hangar_back(mnu, "Fly");
+}
+
+void lobby_hangar_enter(void* self) {
+    void* mnu = self ? *reinterpret_cast<void**>(static_cast<BYTE*>(self) + 4) : nullptr;
+    HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
+    if (mnu && mnu_dll && *static_cast<void**>(mnu) == at_rva(mnu_dll, kMnuVtableRva)) guard_fly(mnu);
+    ++g_in_hangar;
+}
+
+void lobby_hangar_leave() {
+    if (g_in_hangar > 0) --g_in_hangar;
 }
 
 std::wstring lobby_menu_code_path() {

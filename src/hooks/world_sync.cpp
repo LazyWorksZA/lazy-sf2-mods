@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cwchar>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -691,6 +692,19 @@ void accept_save(const Ctx& c, void* page, const wchar_t* source) {
     }
 }
 
+// Join, lobby session: the seat the host's book gives this pilot now (it may have changed since the mission arrived;
+// the host repeats it in every roster and offer). Menu thread.
+void apply_lobby_seat() {
+    if (!g_join || g_seat_from_env || !g_fetch || !g_lobby_hash) return;
+    net::LobbyRosterMsg r{};
+    uint32_t rtt = 0;
+    int seat = g_fetch->roster(&r, &rtt) ? r.your_seat : g_fetch->latest_seat();
+    if (seat == net::kNoSeat) seat = g_fetch->latest_seat();
+    if (seat == net::kNoSeat || seat == g_seat) return;
+    LOG("world: join: the lobby seat is member %d (was %d)", seat, g_seat);
+    g_seat = seat;
+}
+
 // Join: a mission fetched from the host becomes the file to load (written to the probe folder as world_NNN.msn and
 // its sidecar, so Load reads it by path as for LAZYSF2_WORLD_LOAD). Menu thread.
 void take_fetched_mission() {
@@ -739,6 +753,7 @@ void take_fetched_mission() {
     LOG("world: join: the host's mission 0x%08lx is %ls (%zu bytes); we fly member %d (%s), the host member %d",
         static_cast<unsigned long>(offer.mission_id), msn_path.c_str(), msn.size(), g_seat,
         g_seat_from_env ? "LAZYSF2_WORLD_SEAT" : "assigned by the host", g_host_seat);
+    apply_lobby_seat();
 }
 
 // The New page's settings theatre (+0x210, a wide string of MAX_PATH), read or written. SEH only.
@@ -754,7 +769,7 @@ bool page_theatre(void* page, char* out, size_t cap) {
 // Whether this PC has the theatre: its ini in the game's or the user's Terrains folder (loose, or in a cat).
 bool theatre_installed(const std::string& theatre) {
     if (theatre.empty()) return false;
-    std::wstring t(theatre.begin(), theatre.end());
+    const std::wstring t = widen_ansi(theatre);
     std::vector<uint8_t> bytes;
     wchar_t exe[MAX_PATH] = {};
     const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -2850,11 +2865,20 @@ bool world_session_begin(bool host, const std::wstring& dir, const char* callsig
 }
 
 void world_session_end() {
-    if (g_fetch) g_fetch->leave(600);  // the host drops this pilot's row at once
-    // Stops and joins its thread, which never waits for the resolver (MissionFetch looks names up on a thread of its
-    // own and abandons it); a fetch cannot be restarted, so the next session makes a new one.
-    delete g_fetch;
-    g_fetch = nullptr;
+    if (net::MissionFetch* f = g_fetch) {
+        g_fetch = nullptr;
+        // Off the menu thread: the fetch tells the host this pilot left (the host drops its row at once), then stops
+        // and joins its thread, which never waits for the resolver. A fetch cannot be restarted, so the next session
+        // makes a new one.
+        try {
+            std::thread([f] {
+                f->leave(600);
+                delete f;
+            }).detach();
+        } catch (...) {
+            delete f;
+        }
+    }
     AcquireSRWLockExclusive(&g_lock);
     g_armed = Armed{};  // an Accept in the session that was never flown: its seed and files do not reach a later mission
     ReleaseSRWLockExclusive(&g_lock);
@@ -2880,8 +2904,8 @@ uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password(); }
 
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms) { return g_fetch && g_fetch->roster(out, rtt_ms); }
-void world_lobby_ready(bool ready) {
-    if (g_fetch) g_fetch->set_ready(ready);
+void world_lobby_ready(bool ready, uint32_t mission_id) {
+    if (g_fetch) g_fetch->set_ready(ready, mission_id);
 }
 bool world_lobby_wish_answer(int* seat, uint8_t* result) { return g_fetch && g_fetch->wish_answer(seat, result); }
 void world_lobby_want_seat(int seat) {
@@ -2911,14 +2935,8 @@ int world_lobby_fetched(std::string* theatre) {
 bool world_lobby_load() {
     Ctx c{};
     if (!g_join || g_load_path.empty() || !resolve(&c, "lobby briefing")) return false;
-    // The seat this pilot picked in the lobby (it may have changed since the mission arrived).
-    net::LobbyRosterMsg r{};
-    uint32_t rtt = 0;
-    if (!g_seat_from_env && g_fetch && g_fetch->roster(&r, &rtt) && r.your_seat != net::kNoSeat && r.your_seat != g_seat) {
-        LOG("world: join: the lobby seat is member %u (was %d)", static_cast<unsigned>(r.your_seat), g_seat);
-        g_seat = r.your_seat;
-    }
     accept_load(c, nullptr, false);  // the theatre is selected already (no New page here)
+    apply_lobby_seat();               // the seat this pilot picked in the lobby, after any new offer's
     AcquireSRWLockExclusive(&g_lock);
     const bool armed = g_armed.on && g_armed.msn == c.msn && g_armed.msn_path == g_load_path;
     ReleaseSRWLockExclusive(&g_lock);
@@ -2949,8 +2967,14 @@ bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) 
             static_cast<unsigned long>(g_flying_id));
         return false;
     }
-    if (seat != net::kNoSeat && static_cast<int>(seat) != g_seat)
+    if (seat != net::kNoSeat && static_cast<int>(seat) != g_seat) {
+        if (g_lobby_hash) {  // the lobby's seats are fixed at Launch: another seat would put two pilots in one jet
+            LOG("world: join: the host's Welcome gives seat %u and we fly %d; leaving (Bye 8)", static_cast<unsigned>(seat),
+                g_seat);
+            return false;
+        }
         LOG("world: join: WARNING the host's Welcome gives seat %u, we fly %d", static_cast<unsigned>(seat), g_seat);
+    }
     if (host_seat != net::kNoSeat) g_host_seat = host_seat;
     LOG("world: join: welcomed into mission 0x%08lx; we fly member %d, the host member %d",
         static_cast<unsigned long>(mission_id), g_seat, g_host_seat);

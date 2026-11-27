@@ -52,7 +52,7 @@ public:
     void enable_lobby(const char* callsign, uint32_t content_hash);
     /// <summary>Any thread: Ready on or off, and a seat wish (-1: none); both go out on the next round, which they
     /// start at once.</summary>
-    void set_ready(bool ready);
+    void set_ready(bool ready, uint32_t mission_id);
     void want_seat(int seat);
     /// <summary>Any thread, once per answer: the seat last wished for and the host's kLobby* answer to it.</summary>
     bool wish_answer(int* seat, uint8_t* result);
@@ -82,6 +82,7 @@ private:
     char callsign_[16] = {};
     uint32_t content_hash_ = 0;
     std::atomic<bool> ready_{false}, poke_{false}, leaving_{false}, left_{false};
+    std::atomic<uint32_t> ready_mission_{0};
     std::atomic<int> want_{-1};
     std::atomic<uint32_t> wish_answer_{0};  // 0x10000 | seat << 8 | result, 0: none
     std::atomic<uint32_t> rtt_{0};

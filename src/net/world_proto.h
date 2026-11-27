@@ -112,6 +112,7 @@ struct LobbyStatusMsg {
     uint8_t want_seat;      // a member of the host's player flight, or kLobbyNoWish
     uint8_t leaving;        // 1: the pilot leaves the session (the host drops its row at once)
     uint32_t content_hash;  // hooks/content_hash: what the host compares with its own
+    uint32_t ready_mission; // the mission id Ready was pressed for: Ready counts only while it is the host's mission
 };
 struct LobbyRow {
     char callsign[16];  // empty: a free seat (the AI flies it)
@@ -136,7 +137,7 @@ struct MissionChunkHead {
     uint16_t len;  // payload bytes that follow (1..kMissionChunkData; only the last chunk may be shorter)
 };
 #pragma pack(pop)
-static_assert(sizeof(LobbyStatusMsg) == 31 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 280);
+static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 280);
 static_assert(sizeof(MissionRequestMsg) == 12);  // 4:4 have id, 8:4 tag
 static_assert(sizeof(MissionOfferMsg) == 23);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status,
                                                  // 21:1 seat, 22:1 host seat

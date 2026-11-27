@@ -6,12 +6,25 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "log.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
 inline void* vtable_slot(void* com_object, int slot) { return (*static_cast<void***>(com_object))[slot]; }
+
+/// <summary>Text in the game's ANSI code page (theatre names, our ASCII wire strings) as UTF-16.</summary>
+inline std::wstring widen_ansi(const char* s) {
+    if (!s || !*s) return {};
+    const int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (n <= 1) return {};
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s, -1, &w[0], n);
+    w.resize(static_cast<size_t>(n - 1));
+    return w;
+}
+inline std::wstring widen_ansi(const std::string& s) { return widen_ansi(s.c_str()); }
 
 /// <summary>Creates and enables a hook; logs the outcome.</summary>
 inline bool create_and_enable(void* target, void* detour, void** original, const char* what) {

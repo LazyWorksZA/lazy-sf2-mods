@@ -1,5 +1,6 @@
-// The lobby's way through the stock screens (L5, L6): in a lobby session the Hangar's Fly goes back to the lobby
-// (Done for the host, Ready for a client) instead of starting the flight. Hooks HangarScreen.dll's event handler each
+// The lobby's way through the stock screens (L5, L6): while the Hangar carries the lobby's way back (it was opened in a
+// session, even if the session has ended since), its Fly goes back to the lobby (Done for the host, Ready for a client)
+// instead of starting the flight. Hooks HangarScreen.dll's event handler each
 // time the screen's DLL is loaded (the menu system frees it when the screen closes). See lazy-sf2-recon: §28.5.
 #include <windows.h>
 
@@ -22,7 +23,14 @@ HMODULE g_base = nullptr;
 SRWLOCK g_lock = SRWLOCK_INIT;
 
 void __fastcall h_event(void* self, void* edx, const int* ev) {
-    if (net_session_role() != NetRole::None && lobby_hangar_event(self, ev)) return;
+    if (lobby_hangar_return_item() > 0) {
+        if (lobby_hangar_event(self, ev)) return;
+        // Any other way the handler flies (a key) is caught at the menu system's command (lobby_screen.cpp).
+        lobby_hangar_enter(self);
+        o_event(self, edx, ev);
+        lobby_hangar_leave();
+        return;
+    }
     o_event(self, edx, ev);
 }
 

@@ -9969,6 +9969,21 @@ void lobby_book_tests() {
     expect(c.update(0x2, "BRAVO2", false, -1, false, 0, a1) == LobbyBook::kRefused && c.clients() == 1,
            "one address has one row");
     expect(c.update(0x2, "CHARLIE", false, -1, false, 0, a2) == kLobbyOk && c.clients() == 2, "another address gets its own row");
+    LobbyBook d;
+    d.set_host("ALPHA", -1);
+    d.update(0x5, "", false, -1, false, 0);
+    d.update(0x6, "\xe9\x01\xe8", false, -1, false, 0);
+    d.update(0x7, "  BR AVO  ", false, -1, false, 0);
+    d.set_members(4, 2);
+    LobbyRow dr[kLobbyRows];
+    const size_t dn = d.rows(dr, LobbyBook::kHostTag);
+    expect(dn == 4 && std::strcmp(dr[1].callsign, "PILOT 2") == 0 && std::strcmp(dr[2].callsign, "PILOT 3") == 0 &&
+               std::strcmp(dr[3].callsign, "BR AVO") == 0,
+           "callsigns: printable ASCII, trimmed; none left reads PILOT n (never a free row)");
+    expect(d.host_seat() == 2 && d.seat_of(0x5) == 0 && d.seat_of(0x6) == 1 && d.seat_of(0x7) == 3,
+           "a host without a seat gets its mission's member; the others the free ones");
+    d.set_members(4, 0);
+    expect(d.host_seat() == 2, "a host with a seat keeps it when the mission says another member");
 }
 
 void lobby_loopback_tests() {
@@ -10042,15 +10057,45 @@ void lobby_loopback_tests() {
     const bool refused = answered && wseat == 3 && wres == kLobbySeatTaken;
     f2.roster(&r2, &rtt);
     expect(refused && r2.your_seat == s2, "the same seat for the second client is refused; it keeps its own");
-    f1.set_ready(true);
+    // The seat a client is offered follows the book: the one it was given, and a change with the same mission.
+    expect(wait([&] { return f2.latest_seat() == s2; }), "a client is offered the seat the book gave it");
+    expect(wait([&] { return f1.latest_seat() == 3; }), "a changed seat is offered again with the same mission");
+    f1.set_ready(true, 76);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    expect(!core.lobby_ready(0x11u), "Ready for another mission does not count");
+    f1.set_ready(true, 77);
     const bool ready = wait([&] { return core.lobby_ready(0x11u); });
     expect(ready, "Ready reaches the host");
+    // A late joiner, after the mission was set: its first round offers it a seat.
+    MissionFetch f3;
+    f3.enable_lobby("DELTA", 0x1234u);
+    f3.start("127.0.0.1", core.port(), 0x44u, test_auth(), nullptr, 400);
+    LobbyRosterMsg r3{};
+    const bool late = wait([&] { return f3.latest_id() == 77 && f3.roster(&r3, &rtt); });
+    expect(late && f3.latest_seat() != kNoSeat && f3.latest_seat() == r3.your_seat && r3.your_seat != 0 &&
+               r3.your_seat != 3 && r3.your_seat != s2,
+           "a late joiner is offered a free seat in its first round");
     f1.leave(1000);
-    expect(core.lobby_view().clients == 1, "Leave drops the row at once");
-    f1.stop();
+    expect(core.lobby_view().clients == 2, "Leave drops the row at once");
+    // The host's own seat stays across a new mission (its SeatPlan says member 0).
+    expect(core.lobby_host("ALPHA", 3) == kLobbyOk && core.lobby_view().host_seat == 3, "the host moves to the freed seat");
+    core.set_mission(std::vector<uint8_t>(10, 2), 78, 10, SeatPlan{4, 0});
+    expect(core.lobby_view().host_seat == 3 && core.lobby_view().mission_id == 78, "the host keeps its seat across a new mission");
+    expect(wait([&] { return f2.latest_id() == 78 && f2.latest_seat() == s2; }), "a client keeps its seat across a new mission");
+    // After Launch the seats are fixed.
+    core.set_lobby_launch(1u | kLaunchFlying);
+    f2.want_seat(0);
+    int lseat = -1;
+    uint8_t lres = 0;
+    bool lanswered = false;
+    wait([&] { return lanswered = lanswered || f2.wish_answer(&lseat, &lres); });
+    f2.roster(&r2, &rtt);
+    expect(lanswered && lseat == 0 && lres == kLobbySeatTaken && r2.your_seat == s2, "a seat request after Launch is refused");
     f2.stop();
+    f3.stop();
     bad.stop();
     core.stop(false);
+    f1.stop();
 }
 
 

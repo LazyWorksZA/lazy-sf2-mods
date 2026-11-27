@@ -46,7 +46,8 @@ void MissionFetch::enable_lobby(const char* callsign, uint32_t content_hash) {
     content_hash_ = content_hash;
 }
 
-void MissionFetch::set_ready(bool ready) {
+void MissionFetch::set_ready(bool ready, uint32_t mission_id) {
+    ready_mission_.store(ready ? mission_id : 0);
     ready_.store(ready);
     poke_.store(true);
 }
@@ -198,6 +199,7 @@ void MissionFetch::run() {
                             ls.tag = tag_;
                             set_str(ls.callsign, callsign_);
                             ls.ready = ready_.load() ? 1 : 0;
+                            ls.ready_mission = ready_mission_.load();
                             ls.want_seat = wish >= 0 && wish < 255 ? static_cast<uint8_t>(wish) : kLobbyNoWish;
                             ls.leaving = leaving ? 1 : 0;
                             ls.content_hash = content_hash_;

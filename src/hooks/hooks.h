@@ -115,6 +115,10 @@ bool game_option_int(const wchar_t* section, const wchar_t* key, int* out);
 /// <summary>lobby_screen.cpp: the Hangar's handler (self) got an event in a lobby session; true if the lobby took it
 /// (Fly: back to the lobby).</summary>
 bool lobby_hangar_event(void* self, const int* ev);
+/// <summary>Menu thread: around the Hangar's own event handler while the lobby's way back is in it, so its fly
+/// command (from any input) goes back to the lobby instead.</summary>
+void lobby_hangar_enter(void* self);
+void lobby_hangar_leave();
 
 /// <summary>Reads LAZYSF2_PROBE_DIR once. The probe (developer tool) is active only when it is set. Call from DllMain.</summary>
 void install_probe_hooks();
@@ -408,7 +412,7 @@ uint32_t content_hash();
 void world_set_own_seat(int member);
 /// <summary>world_sync.cpp, a joined lobby session: the latest roster (and round trip), Ready, a seat wish.</summary>
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms);
-void world_lobby_ready(bool ready);
+void world_lobby_ready(bool ready, uint32_t mission_id);
 void world_lobby_want_seat(int seat);
 bool world_lobby_wish_answer(int* seat, uint8_t* result);
 /// <summary>world_sync.cpp, a joined lobby session, menu thread: takes the fetched mission (0 ok, 1 none yet, 2 its

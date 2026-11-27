@@ -1,7 +1,8 @@
 // The content hash the lobby compares between host and clients (L4): a shared mission only plays the same on PCs with
-// the same game content. Hashes the exe's build, every .cat in the game folder (path and size), and the folder names
-// under the player's Objects\Aircraft, Objects\Weapons, Objects\GroundObject and Terrains (mods and DLC). Cheap: no
-// file contents are read.
+// the same game content. Hashes the exe's build, every .cat in the game folder (path and size), and for each folder
+// under the player's Objects\Aircraft, Objects\Weapons, Objects\GroundObject and Terrains (mods and DLC) its name and
+// the names and sizes of the .ini files directly in it (the files that define an object or theatre). Cheap: only
+// directory listings are read. Computed again for each session, so content changed between sessions counts.
 #include <windows.h>
 
 #include <algorithm>
@@ -41,6 +42,19 @@ void list_cats(const std::wstring& root, const std::wstring& rel, int depth, std
     FindClose(h);
 }
 
+// The .ini files directly in dir, as "prefix/name:size".
+void list_inis(const std::wstring& dir, const std::wstring& prefix, std::vector<std::wstring>* out) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*.ini").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const unsigned long long size = (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        out->push_back(prefix + L"/" + lower(fd.cFileName) + L":" + std::to_wstring(size));
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 void list_dirs(const std::wstring& dir, const wchar_t* tag, std::vector<std::wstring>* out) {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
@@ -48,7 +62,9 @@ void list_dirs(const std::wstring& dir, const wchar_t* tag, std::vector<std::wst
     do {
         const std::wstring name = fd.cFileName;
         if (name == L"." || name == L".." || !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        out->push_back(std::wstring(tag) + L"/" + lower(name));
+        const std::wstring prefix = std::wstring(tag) + L"/" + lower(name);
+        out->push_back(prefix);
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) list_inis(dir + L"\\" + name, prefix, out);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -56,8 +72,6 @@ void list_dirs(const std::wstring& dir, const wchar_t* tag, std::vector<std::wst
 }  // namespace
 
 uint32_t content_hash() {
-    static uint32_t cached = 0;
-    if (cached) return cached;
     std::vector<std::wstring> items;
     wchar_t exe[MAX_PATH] = {};
     const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -91,10 +105,10 @@ uint32_t content_hash() {
         }
         mix(0);
     }
-    cached = h ? h : 1u;
-    LOG("lobby: content hash 0x%08lx (%zu game files, %zu mod folders)", static_cast<unsigned long>(cached), cats,
+    const uint32_t hash = h ? h : 1u;
+    LOG("lobby: content hash 0x%08lx (%zu game files, %zu mod folders and files)", static_cast<unsigned long>(hash), cats,
         items.size() - cats);
-    return cached;
+    return hash;
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

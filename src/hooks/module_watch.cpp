@@ -23,7 +23,7 @@ void notify() {
     sound_on_modules_loaded();  // DirectSoundCreate8 pass-through; buffers are changed only with BackgroundMode 2
     pilot_twist_on_modules_loaded();  // hooks created disabled; enabled only while Pilot Twist is on
     menu_on_modules_loaded();
-    lobby_flow_on_modules_loaded();  // HangarScreen.dll: its Fly goes back to the lobby, in a lobby session only  // the Display Mode option is offered in every mode
+    lobby_flow_on_modules_loaded();  // HangarScreen.dll: its Fly goes back to the lobby while the lobby's Hangar is up
     aircraft_track_on_modules_loaded();  // hooks only if the probe or Tacview Recording needs it
     weapon_track_on_modules_loaded();  // MissileObject.dll: same rule as the aircraft tracker
     tacview_recorder_on_modules_loaded();  // registers a step callback once; nothing runs unless tracking is on
