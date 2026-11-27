@@ -61,6 +61,8 @@
 #include "net/world_proto.h"
 #include "net/world_stream_logic.h"
 #include "net/hit_logic.h"
+#include "net/handover_format.h"
+#include <deque>
 
 using namespace LazyWorks::SF2Patch::net;
 
@@ -9022,6 +9024,129 @@ void seat_takeover_tests() {
            "loopback: --seat-state sends the seat's state once, reliably, after the client's first State");
 }
 
+void handover_tests() {
+    std::printf("authority handover (handover task 4)\n");
+    HandoverSnapshot s;
+    s.head.epoch = 0x00010002;
+    s.head.t_ms = 500000;
+    s.head.clock_ms = 812000;
+    for (int i = 0; i < 80; ++i) {
+        HandoverAircraft a{};
+        a.pose.kind = 1;
+        a.pose.a = static_cast<uint16_t>(i / 4);
+        a.pose.b = static_cast<uint16_t>(i % 4);
+        a.pose.pos[0] = 100000 * i;
+        a.state = 0x00800800u;
+        a.fuel = 700;
+        a.stations = 2;
+        a.station[0] = 1;
+        a.count[0] = 2;
+        s.aircraft.push_back(a);
+    }
+    for (int i = 0; i < 200; ++i) {
+        HandoverVehicle v{};
+        v.pose.kind = 2;
+        v.pose.a = static_cast<uint16_t>(40 + i / 8);
+        v.pose.b = static_cast<uint16_t>(i % 8);
+        v.speed = 200;
+        s.vehicles.push_back(v);
+    }
+    for (int i = 0; i < 30; ++i) s.flights.push_back(HandoverFlight{static_cast<uint16_t>(i), 3});
+    const std::vector<uint8_t> raw = serialize(s);
+    HandoverSnapshot back;
+    expect(raw.size() == 22 + 80 * 60 + 200 * 40 + 30 * 3 && deserialize(raw.data(), raw.size(), &back) &&
+               back.aircraft.size() == 80 && back.aircraft[79].pose.pos[0] == 7900000 && back.vehicles[5].speed == 200 &&
+               back.flights[29].waypoint == 3 && back.head.clock_ms == 812000 && !deserialize(raw.data(), raw.size() - 1, &back),
+           "handover: a busy mission's snapshot (80 aircraft, 200 vehicles, 30 flights) round trips; a short one is refused");
+    std::vector<uint8_t> packed, out;
+    uint32_t crc = 0;
+    expect(pack_handover(raw, &packed, &crc) && unpack_handover(packed, crc, static_cast<uint32_t>(raw.size()), &out) &&
+               out == raw && !unpack_handover(packed, crc ^ 1, static_cast<uint32_t>(raw.size()), &out),
+           "handover: packed, CRC-checked, unpacked");
+    std::printf("    estimate: %zu bytes raw, %zu packed, %zu chunks of 80 B (91 B messages); once per handover\n", raw.size(),
+                packed.size(), (packed.size() + kHandoverChunkData - 1) / kHandoverChunkData);
+    HandoverBeginMsg b{};
+    b.epoch = s.head.epoch;
+    b.packed = static_cast<uint32_t>(packed.size());
+    b.raw = static_cast<uint32_t>(raw.size());
+    b.chunks = static_cast<uint16_t>((packed.size() + kHandoverChunkData - 1) / kHandoverChunkData);
+    b.crc = crc;
+    b.clock_ms = s.head.clock_ms;  // ahead of the bot's (no --clock: 0)
+    HandoverAssembly as;
+    bool done = false;
+    expect(as.begin(b), "handover: an offer starts an assembly");
+    for (int pass = 0; pass < 2; ++pass)  // every chunk twice, backwards: duplicates and order do not matter
+        for (int i = b.chunks - 1; i >= 0; --i) {
+            HandoverChunkMsg c{};
+            c.epoch = b.epoch;
+            c.index = static_cast<uint16_t>(i);
+            const size_t off = static_cast<size_t>(i) * kHandoverChunkData;
+            c.len = static_cast<uint8_t>(packed.size() - off < kHandoverChunkData ? packed.size() - off : kHandoverChunkData);
+            std::memcpy(c.data, packed.data() + off, c.len);
+            done = as.add(c);
+        }
+    expect(done && as.bytes() == packed, "handover: chunks in any order, twice, give the packed bytes");
+    HandoverBeginMsg bad = b;
+    bad.chunks = static_cast<uint16_t>(b.chunks + 1);
+    expect(!as.begin(bad), "handover: an offer whose chunk count does not fit its size is refused");
+    uint8_t mb[128];
+    HandoverChunkMsg cr{};
+    HandoverChunkMsg c0{};
+    c0.len = 0;
+    expect(encode(b, mb, sizeof(mb)) == 26 && sizeof(HandoverChunkMsg) == 91 &&
+               decode(mb, encode(c0, mb, sizeof(mb)), cr) == Status::BadType,
+           "handover: messages fit the 96-byte queues; an empty chunk is refused");
+    expect(take_handover(60000, 10000) && !take_handover(10000, 60000) && !take_handover(10500, 10000),
+           "handover: the side whose mission clock is ahead loaded first and keeps the world");
+
+    ServeRun sv;
+    sv.cfg.script = bot::Script::Straight;
+    sv.cfg.has_start = true;
+    sv.cfg.start[2] = 3000.0;
+    if (!sv.start()) return expect(false, "bot serve listening (handover)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log), "client start");
+    std::deque<std::vector<uint8_t>> q;
+    {
+        std::vector<uint8_t> m(sizeof(b));
+        encode(b, m.data(), m.size());
+        q.push_back(m);
+        for (uint16_t i = 0; i < b.chunks; ++i) {
+            HandoverChunkMsg ch{};
+            ch.epoch = b.epoch;
+            ch.index = i;
+            const size_t off = static_cast<size_t>(i) * kHandoverChunkData;
+            ch.len = static_cast<uint8_t>(packed.size() - off < kHandoverChunkData ? packed.size() - off : kHandoverChunkData);
+            std::memcpy(ch.data, packed.data() + off, ch.len);
+            std::vector<uint8_t> cm(sizeof(ch));
+            encode(ch, cm.data(), cm.size());
+            q.push_back(cm);
+        }
+    }
+    bool answered = false, taken = false;
+    WorldPacket wp[8];
+    serve_run_for(c, 6.0, [&] {
+        if (!c.welcomes.empty())
+            for (int i = 0; i < 16 && !q.empty(); ++i) {
+                if (!c.core.send_world(q.front().data(), q.front().size(), true)) break;
+                q.pop_front();
+            }
+        const size_t k = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k; ++i) {
+            HandoverDoneMsg d{};
+            if (decode(wp[i].data, wp[i].len, d) == Status::Ok) {
+                answered = true;
+                taken = d.taken != 0 && d.epoch == b.epoch;
+            }
+        }
+        return answered;
+    });
+    sv.finish();
+    c.core.stop(false);
+    expect(answered && taken && sv.res.handovers == 1 && sv.res.handover_aircraft == 80 && sv.res.handover_vehicles == 200,
+           "loopback: a client's world offer (paced, 16 chunks a step) reaches the host, unpacks, and is answered");
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -9107,6 +9232,7 @@ int main() {
     damage_tests();
     clock_ground_tests();
     seat_takeover_tests();
+    handover_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

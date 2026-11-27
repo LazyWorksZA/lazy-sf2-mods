@@ -1109,6 +1109,8 @@ void check_seat(void* msn) {
         "player");
 }
 
+void* g_remote_deferred = nullptr;  // the MSN whose mark pass waits for the host's session (game thread)
+
 int __fastcall h_Slot32(void* msn) {
     HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
     if ((g_seat < 0 && !g_remote) || !sm || msn != at_rva(sm, kRvaMsn)) return o_Slot32(msn);
@@ -1116,7 +1118,16 @@ int __fastcall h_Slot32(void* msn) {
     const bool seated = g_seat >= 0 && apply_seat(msn);
     const int r = o_Slot32(msn);
     if (seated) check_seat(msn);
-    if (g_remote) remote_after_start(msn);
+    if (g_remote) {
+        if (g_join && !client_welcomed()) {
+            // We loaded first: our world stays local (we own it) until the host's session; then it is offered to the
+            // host and marked remote (handover task 4).
+            g_remote_deferred = msn;
+            LOG("world: remote: we loaded the mission before the host's session: our AI runs the world until then");
+        } else {
+            remote_after_start(msn);
+        }
+    }
     return r;
 }
 
@@ -1201,6 +1212,7 @@ void mark_one(const Om& om, uint32_t id, uint32_t player, RemoteKind kind, Remot
 }
 
 void remote_before_start() {
+    g_remote_deferred = nullptr;
     const bool was = g_remote_on.exchange(false);
     const uint64_t n = g_blocked.exchange(0);
     if (was) LOG("world: remote: the last mission blocked %llu local damage calls to remote objects", n);
@@ -1805,6 +1817,10 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         mission_clock_apply(data, len, host_now);
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::HandoverDone)) {
+        handover_client_message(data, len);
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::SeatState)) {
         seat_state_apply(data, len, host_now);
         return;
@@ -2228,6 +2244,134 @@ void* checked_damage_fn(void** vt, int slot) {
 }  // namespace
 
 bool world_remote_on() { return g_remote_on.load(std::memory_order_acquire); }
+
+bool world_remote_deferred() { return g_remote_deferred != nullptr; }
+
+void world_remote_now() {
+    void* msn = g_remote_deferred;
+    g_remote_deferred = nullptr;
+    if (msn) remote_after_start(msn);
+}
+
+namespace {
+bool world_tables(SlotTable* t, Om* om, uint32_t* player);  // below, with the keys
+// Clears REMOTEOBJECT on one aircraft or ground object being handed back to its AI, with the fix-ups of
+// network-recon §12.1.3: an aircraft on the ground loses the airborne bit the remote state forced, its ripple timer
+// and rounds (+0x8f4, +0x8e6) and its trigger inputs are zeroed. SEH only. 1 cleared, 0 not remote, -1 faulted.
+int hand_back_one(BYTE* obj, uint32_t mask, bool aircraft) {
+    __try {
+        uint32_t f = 0;
+        std::memcpy(&f, obj + kObjFlags, 4);
+        if (!(f & mask)) return 0;
+        if (aircraft) {
+            uint32_t state = 0;
+            float height = 0, gear = 0, v[3] = {};
+            std::memcpy(&state, obj + 0x5f0, 4);
+            std::memcpy(&height, obj + 0x620, 4);
+            std::memcpy(&gear, obj + 0x2fc, 4);
+            std::memcpy(v, obj + kObjVel, sizeof(v));
+            const float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (copy_on_ground(height, gear, speed)) state &= ~0x800000u;
+            std::memcpy(obj + 0x5f0, &state, 4);
+            const float zero = 0;
+            const int16_t zs = 0;
+            std::memcpy(obj + 0x8f4, &zero, 4);
+            std::memcpy(obj + 0x8e6, &zs, 2);
+            float* in = *reinterpret_cast<float**>(obj + 0x5f8);
+            if (in) in[12] = in[13] = in[14] = 0.0f;
+        }
+        f &= ~mask;
+        std::memcpy(obj + kObjFlags, &f, 4);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+}  // namespace
+
+int world_set_remote_all(bool remote) {
+    HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    if (!sm) return -1;
+    void* msn = at_rva(sm, kRvaMsn);
+    if (remote) {
+        remote_after_start(msn);
+        return g_remote_on.load() ? 1 : -1;
+    }
+    uint32_t air = 0, ground = 0;
+    if (!read_mask(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll", kRvaAoRemoteMask, &air) ||
+        !read_mask(L"GroundObject.dll", kGoStamp, kGoSize, "GroundObject.dll", kRvaGoRemoteMask, &ground))
+        return -1;
+    SlotTable t{};
+    Om om;
+    uint32_t player = 0xffffffffu;
+    if (!world_tables(&t, &om, &player)) return -1;
+    g_remote_on = false;  // our world is local again: its damage applies here
+    int n = 0;
+    for (int i = 0; i < t.count; ++i) {
+        SlotRaw s{};
+        if (!read_slot(t, i, &s)) break;
+        for (int m = 0; m < s.members; ++m) {
+            BYTE* obj = nullptr;
+            int group = 0;
+            if (s.ids[m] == player || !resolve_obj(om, s.ids[m], &obj, &group) || group == 0) continue;
+            if (host_drives_object(obj) || client_drives_object(obj)) continue;  // players' avatars stay remote
+            n += hand_back_one(obj, group == 1 ? air : ground, group == 1) == 1;
+        }
+    }
+    const BYTE* areas = nullptr;
+    int n_areas = 0;
+    if (read_areas_head(msn, &areas, &n_areas)) {
+        for (int i = 0; i < n_areas; ++i) {
+            AreaRaw ar{};
+            if (!read_area(areas, i, &ar)) break;
+            for (int j = 0; j < ar.n_placed; ++j) {
+                PlacedRaw p{};
+                if (read_placed(ar, j, &p) && p.obj) n += hand_back_one(static_cast<BYTE*>(const_cast<void*>(p.obj)), ground, false) == 1;
+            }
+        }
+    }
+    return n;
+}
+
+void world_for_each_object(void (*cb)(uint8_t kind, uint16_t a, uint16_t b, void* obj, void* ctx), void* ctx) {
+    SlotTable t{};
+    Om om;
+    uint32_t player = 0xffffffffu;
+    if (!cb || !world_tables(&t, &om, &player)) return;
+    for (int i = 0; i < t.count; ++i) {
+        SlotRaw s{};
+        if (!read_slot(t, i, &s)) break;
+        for (int m = 0; m < s.members; ++m) {
+            BYTE* obj = nullptr;
+            int group = 0;
+            if (s.ids[m] == player || !resolve_obj(om, s.ids[m], &obj, &group) || group == 0) continue;
+            if (host_drives_object(obj) || client_drives_object(obj)) continue;
+            cb(static_cast<uint8_t>(i < t.first_ground ? 1 : 2), static_cast<uint16_t>(i), static_cast<uint16_t>(m), obj, ctx);
+        }
+    }
+}
+
+int world_flight_count() {
+    SlotTable t{};
+    Om om;
+    return world_tables(&t, &om, nullptr) ? t.first_ground : 0;
+}
+
+bool world_flight_waypoint(int slot, int* wp, bool set, int value) {
+    SlotTable t{};
+    Om om;
+    if (!world_tables(&t, &om, nullptr) || slot < 0 || slot >= t.first_ground) return false;
+    const uintptr_t af = module_if(L"AircraftFormation.dll", kAfStamp, kAfSize, "AircraftFormation.dll");
+    SlotRaw sr{};
+    BYTE* fo = nullptr;
+    int fg = 0, count = 0;
+    if (!af || !read_slot(t, slot, &sr) || sr.formation == 0xffffffffu || !resolve_obj(om, sr.formation, &fo, &fg))
+        return false;
+    BYTE* ai = formation_ai(fo, af);
+    if (!ai || !read_waypoint(ai, wp, &count)) return false;
+    if (set && value != *wp) return set_waypoint(ai, af, value) == 0;
+    return true;
+}
 
 namespace {
 constexpr DWORD kRvaMsnSetClock = 0xa160;  // MSN slot 19: thiscall(float), writes +0x10

@@ -398,6 +398,7 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
     }
     g_welcome = w;
     ++g_welcomes;
+    if (first) handover_client_welcomed();  // we ran the world until now: offer it, then follow
     for (int i = 0; i < kSources; ++i) g_rm[i].announced = false;
     if (first) {
         g_session = true;

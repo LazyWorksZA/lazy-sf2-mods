@@ -1,6 +1,7 @@
 #include "bot_serve.h"
 
 #include "net/world_proto.h"
+#include "net/handover_format.h"
 
 #include <chrono>
 #include <cmath>
@@ -222,6 +223,47 @@ struct Serve {
         if (n && core.send_world(c.slot, c.gen, buf, n, true)) ++res.hits_sent;
         say("bot serve: scripted gun hit %u on %c %u.%u (20 kJ kinetic)", static_cast<unsigned>(res.hits_sent),
             cfg.hit_kind == 1 ? 'A' : 'G', static_cast<unsigned>(cfg.hit_a), static_cast<unsigned>(cfg.hit_b));
+    }
+
+    // A client's world offer (handover task 4): taken unless the bot's --clock is ahead of the offer's.
+    HandoverAssembly ho;
+    void handover(const HostEvent& e) {
+        const uint8_t wt = peek_world_type(e.data, e.len);
+        auto answer = [&](uint32_t epoch, bool taken) {
+            HandoverDoneMsg d{};
+            d.epoch = epoch;
+            d.taken = taken ? 1 : 0;
+            uint8_t buf[sizeof(d)];
+            const size_t n = encode(d, buf, sizeof(buf));
+            if (n) core.send_world(c.slot, c.gen, buf, n, true);
+        };
+        if (wt == static_cast<uint8_t>(WorldType::HandoverBegin)) {
+            HandoverBeginMsg b{};
+            if (decode(e.data, e.len, b) != Status::Ok) return;
+            const uint32_t own = cfg.clock ? clock_to_wire(static_cast<float>(cfg.clock_start + (clock_t0 < 0 ? 0 : host_t - clock_t0))) : 0;
+            if (!take_handover(b.clock_ms, own) || !ho.begin(b)) {
+                ++res.handovers_refused;
+                say("bot serve: client %u offers its world (clock %.1f s, ours %.1f s): refused", static_cast<unsigned>(c.slot + 1),
+                    b.clock_ms / 1000.0, own / 1000.0);
+                answer(b.epoch, false);
+            }
+            return;
+        }
+        HandoverChunkMsg ch{};
+        if (decode(e.data, e.len, ch) != Status::Ok || !ho.active() || !ho.add(ch)) return;
+        const HandoverBeginMsg b = ho.offer();
+        std::vector<uint8_t> raw;
+        HandoverSnapshot s;
+        const bool ok = unpack_handover(ho.bytes(), b.crc, b.raw, &raw) && deserialize(raw.data(), raw.size(), &s);
+        ho.reset();
+        if (ok) {
+            ++res.handovers;
+            res.handover_aircraft = static_cast<uint32_t>(s.aircraft.size());
+            res.handover_vehicles = static_cast<uint32_t>(s.vehicles.size());
+        }
+        say("bot serve: client %u's world %s: %zu aircraft, %zu vehicles, %zu flights, clock %.1f s", static_cast<unsigned>(c.slot + 1),
+            ok ? "taken" : "did NOT unpack", s.aircraft.size(), s.vehicles.size(), s.flights.size(), s.head.clock_ms / 1000.0);
+        answer(b.epoch, ok);
     }
 
     // --clock: the mission clock.
@@ -503,6 +545,11 @@ struct Serve {
             res.last_rx_throttle = m.throttle;
             res.last_rx_engines = m.engines;
             res.last_rx_guns = m.guns;
+            return;
+        }
+        if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::HandoverBegin) ||
+            peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::HandoverChunk)) {
+            if (c.on && e.slot == c.slot && e.gen == c.gen) handover(e);
             return;
         }
         if (peek_world_type(e.data, e.len) == static_cast<uint8_t>(WorldType::DamageState)) {

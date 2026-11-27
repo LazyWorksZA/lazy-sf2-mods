@@ -1,6 +1,7 @@
 #include "net/client_core.h"
 
 #include "net/world_proto.h"
+#include "net/handover_format.h"
 
 #include <enet/enet.h>
 
@@ -411,6 +412,7 @@ void ClientCore::run() {
         DamageStateMsg dsm;
         MissionClockMsg mcm;
         SeatStateMsg ssm;
+        HandoverDoneMsg hdm;
         CountermeasureMsg cmm;
         ConsumablesMsg com;
         const bool ok =
@@ -436,7 +438,9 @@ void ClientCore::run() {
                         (wt == static_cast<uint8_t>(WorldType::MissionClock) && channel == kChannelUnreliable &&
                          decode(data, len, mcm) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::SeatState) && channel == kChannelReliable &&
-                         decode(data, len, ssm) == Status::Ok);
+                         decode(data, len, ssm) == Status::Ok) ||
+                        (wt == static_cast<uint8_t>(WorldType::HandoverDone) && channel == kChannelReliable &&
+                         decode(data, len, hdm) == Status::Ok);
         if (!ok) return drop(n_format_);
         if (!welcomed || len > sizeof(WorldPacket::data)) return drop(n_state_);
         // Reliable world messages (events, jet states) are never dropped: they share the events ring.

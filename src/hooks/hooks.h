@@ -296,7 +296,7 @@ bool replay_active();
 void player_jump_on_modules_loaded();
 void player_jump_request(bool full);
 /// <summary>
-/// Lock probe (developer tool, lock_probe.cpp): Ctrl+Shift+A places an AI 3 km ahead of the player, Ctrl+Shift+O
+/// Lock probe (developer tool, lock_probe.cpp): Ctrl+Shift+A places an AI 3 km ahead of the player, Ctrl+Shift+G
 /// locks it with the player's radar, Ctrl+Shift+I makes it lock the player. Requests: 1 place, 2 player lock, 3 AI lock.
 /// </summary>
 void lock_probe_on_modules_loaded();
@@ -485,6 +485,23 @@ int world_set_mission_clock(float t10, float t14);
 /// <summary>The ground-contact step's detour (remote_ground.cpp, handover task 2).</summary>
 void __fastcall h_ground_contact(void* obj);
 extern void* g_o_ground_contact;
+/// <summary>Authority handover (handover.cpp, task 4): the probe's solo hand-back (Ctrl+Shift+G); the step callback;
+/// the client's offer when the host's session starts (if it loaded first); the host's handling of an offer; the
+/// client's handling of the answer.</summary>
+void handover_probe_request();
+void handover_on_modules_loaded();
+void handover_client_welcomed();
+void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt_s);
+void handover_client_message(const uint8_t* data, size_t len);
+/// <summary>world_sync.cpp: a joined client's mark pass waits (it loaded first and runs the world); run it now; mark
+/// or hand back the whole world (fix-ups included; players' avatars stay remote; the count, -1 on failure); every
+/// live slot member but the player and the avatars; the flights (aircraft slots) and a flight's waypoint, read or set.</summary>
+bool world_remote_deferred();
+void world_remote_now();
+int world_set_remote_all(bool remote);
+void world_for_each_object(void (*cb)(uint8_t kind, uint16_t a, uint16_t b, void* obj, void* ctx), void* ctx);
+int world_flight_count();
+bool world_flight_waypoint(int slot, int* wp, bool set, int value);
 bool world_remote_on();
 uint32_t world_remote_mask();
 uint32_t world_remote_mask_ground();

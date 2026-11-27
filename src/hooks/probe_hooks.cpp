@@ -391,7 +391,7 @@ DWORD WINAPI hotkey_thread(LPVOID) {
     bool was_down = false, puppet_was_down = false, missile_was_down = false, rec_was_down = false,
          replay_was_down = false, rate_was_down = false, jump_was_down = false, nudge_was_down = false,
          twist_was_down = false, hold_was_down = false, destroy_was_down = false, place_was_down = false,
-         lock_was_down = false, ai_lock_was_down = false;
+         lock_was_down = false, ai_lock_was_down = false, handover_was_down = false;
     for (;;) {
         Sleep(50);
         const bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
@@ -423,6 +423,9 @@ DWORD WINAPI hotkey_thread(LPVOID) {
         const bool twist_down = mods && (GetAsyncKeyState('W') & 0x8000);
         if (twist_down && !twist_was_down) pilot_twist_dev_toggle();
         twist_was_down = twist_down;
+        const bool handover_down = mods && (GetAsyncKeyState('G') & 0x8000);
+        if (handover_down && !handover_was_down) handover_probe_request();
+        handover_was_down = handover_down;
         const bool hold_down = mods && (GetAsyncKeyState('H') & 0x8000);
         if (hold_down && !hold_was_down) pilot_twist_dev_cycle_hold();
         hold_was_down = hold_down;
@@ -514,6 +517,7 @@ void probe_on_modules_loaded() {
     player_jump_on_modules_loaded();
     lock_probe_on_modules_loaded();
     step_order_on_modules_loaded();
+    handover_on_modules_loaded();  // the handover probe (Ctrl+Shift+G) and the client's paced offer
     g_snapshot = scan_highest_snapshot();
     if (sim_register_step_callback(auto_step)) {
         LOG("probe: an automatic snapshot is taken %.0f s into each flight (the newest %zu flights are kept)",

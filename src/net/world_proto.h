@@ -29,8 +29,11 @@ enum class WorldType : uint8_t {
     Countermeasure = 33,  // a player's chaff and flare releases, reliable, as they happen: relayed
     MissionClock = 34,    // the world owner's mission clock, unreliable, every 2 s: owner to the others
     SeatState = 35,       // host to a client after its Welcome, reliable: its seat aircraft's current state
+    HandoverBegin = 36,   // the world owner's snapshot offer, reliable (net/handover_format.h)
+    HandoverChunk = 37,   // ... its chunks, reliable, 80 bytes each
+    HandoverDone = 38,    // the receiver's answer, reliable
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 35;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 38;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);

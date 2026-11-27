@@ -1,6 +1,7 @@
 #include "net/host_core.h"
 
 #include "net/world_proto.h"
+#include "net/handover_format.h"
 
 #include <enet/enet.h>
 
@@ -357,6 +358,24 @@ void HostCore::run() {
             e.len = static_cast<uint16_t>(len);
             e.is_state = lo ? 0 : 1;  // consumables count against the slot's quota, as States do
             if (!push_in(e, lo)) drop(n_queue_);
+            return;
+        }
+        if (wt == static_cast<uint8_t>(WorldType::HandoverBegin) || wt == static_cast<uint8_t>(WorldType::HandoverChunk)) {
+            HandoverBeginMsg hb;
+            HandoverChunkMsg hc;
+            const bool ok = channel == kChannelReliable &&
+                            (wt == static_cast<uint8_t>(WorldType::HandoverBegin) ? decode(data, len, hb) == Status::Ok
+                                                                                  : decode(data, len, hc) == Status::Ok);
+            if (!ok) return drop(n_format_);
+            if (!(slot_state_[slot].load(std::memory_order_acquire) & 1)) return drop(n_state_);
+            HostEvent e;
+            e.kind = HostEvent::Message;
+            e.slot = static_cast<uint8_t>(slot);
+            e.gen = gens[slot];
+            e.channel = channel;
+            std::memcpy(e.data, data, len);
+            e.len = static_cast<uint16_t>(len);
+            if (!push_in(e, true)) drop(n_queue_);
             return;
         }
         if (wt == static_cast<uint8_t>(WorldType::WeaponLaunch)) {  // a client's weapon release: to the game thread

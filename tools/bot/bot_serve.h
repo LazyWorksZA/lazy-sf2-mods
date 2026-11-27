@@ -118,6 +118,8 @@ struct ServeResult {
     uint8_t last_rx_level = 0;
     uint32_t clocks_sent = 0;
     uint32_t seat_states_sent = 0;
+    uint32_t handovers = 0, handover_aircraft = 0, handover_vehicles = 0;  // client offers taken, and their sizes
+    uint32_t handovers_refused = 0;
 };
 
 /// <summary>

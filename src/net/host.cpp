@@ -599,6 +599,12 @@ void handle_message(const HostEvent& e, void* player, double now) {
         }
         return;
     }
+    if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::HandoverBegin) ||
+        net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::HandoverChunk)) {
+        if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen)
+            handover_host_message(slot, e.data, e.len, g_core->rtt_ms(static_cast<uint8_t>(slot)) / 1000.0);
+        return;
+    }
     if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::HitClaim)) {
         if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) hits_host_claim(slot, e.data, e.len);
         return;

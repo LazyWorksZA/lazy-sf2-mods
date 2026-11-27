@@ -90,9 +90,11 @@ add_library(lazysf2 SHARED
     src/hooks/mission_clock.cpp
     src/hooks/remote_ground.cpp
     src/hooks/seat_takeover.cpp
+    src/hooks/handover.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp
+    src/net/handover_format.cpp
     src/net/mission_fetch.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
@@ -121,6 +123,7 @@ add_executable(lazysf2-net-tests
     tests/net_tests.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp
+    src/net/handover_format.cpp
     src/net/mission_fetch.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
@@ -160,6 +163,7 @@ add_executable(lazysf2-bot
     tools/bot/bot_serve.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp
+    src/net/handover_format.cpp
     src/net/mission_fetch.cpp
     src/net/host_core.cpp
     src/net/host_session.cpp
