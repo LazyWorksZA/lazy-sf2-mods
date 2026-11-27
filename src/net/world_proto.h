@@ -741,6 +741,14 @@ inline uint8_t cm_released(int before, int now, bool alive, bool dispenser_ok, i
 /// the world stream) must not make a kill entry or move mission success.
 /// </summary>
 inline bool kill_event_allowed(bool client_join, bool remote_copy) { return !(client_join && remote_copy); }
+/// <summary>What the kill-event hooks do with a call: the game calls the kill event every frame for a dead object
+/// until its +0x168 bit 0x80000000 is set, so a call with the bit set is a repeat (nothing to log, nothing to count);
+/// otherwise block it (and set the bit) on a joined client for a remote copy, else let the game log it.</summary>
+enum class KillHook : uint8_t { Repeat, Block, Log };
+inline KillHook kill_hook_action(bool already_logged, bool client_join, bool remote_copy) {
+    if (already_logged) return KillHook::Repeat;
+    return kill_event_allowed(client_join, remote_copy) ? KillHook::Log : KillHook::Block;
+}
 
 /// <summary>Releases since the last count: what fell, clamped to a byte; a rise (a rearm) is none.</summary>
 inline uint8_t released(int before, int now) {

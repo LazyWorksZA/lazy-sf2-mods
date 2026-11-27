@@ -204,4 +204,6 @@ void sim_remove(HMODULE aircraft_dll) {
     (void)s;  // MH_ERROR_NOT_CREATED is expected
 }
 
+void* sim_player_object() { return g_player; }
+
 }  // namespace LazyWorks::SF2Patch::hooks

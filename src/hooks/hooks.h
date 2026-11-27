@@ -239,6 +239,8 @@ inline void missile_spawn_on_present() {
 
 /// <summary>True while sim has a cached player aircraft.</summary>
 bool sim_player_known();
+/// <summary>The cached player aircraft, or null (game thread).</summary>
+void* sim_player_object();
 /// <summary>Incremented on every player loss and change of player. A run stores it at its start and ends when it differs.</summary>
 uint32_t sim_player_epoch();
 double sim_game_time();
@@ -489,6 +491,8 @@ extern void* g_o_ground_contact;
 /// the client's offer when the host's session starts (if it loaded first); the host's handling of an offer; the
 /// client's handling of the answer.</summary>
 void handover_probe_request();
+/// <summary>From Present (game thread): runs a pending probe press even when no player step runs.</summary>
+void handover_on_present();
 void handover_on_modules_loaded();
 void handover_client_welcomed();
 void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt_s);

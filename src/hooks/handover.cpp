@@ -355,7 +355,6 @@ void probe_step() {
 
 void step_cb(void*, float, bool is_player) {
     if (!is_player) return;
-    probe_step();
     if (g_arbiter_epoch != sim_player_epoch()) {
         g_arbiter_epoch = sim_player_epoch();
         g_arbiter.reset();
@@ -378,6 +377,17 @@ void step_cb(void*, float, bool is_player) {
 }  // namespace
 
 void handover_probe_request() { g_probe_request.store(true); }
+
+void handover_on_present() {
+    // The probe runs from Present, so a press is handled even if no player step runs (the player lost, the
+    // simulation paused); it only acts in a flight.
+    if (!g_probe_request.load(std::memory_order_relaxed) && g_probe_log_at < 0) return;
+    if (!sim_player_known()) {
+        if (g_probe_request.exchange(false)) LOG("handover probe: no player aircraft (not in a flight); ignored");
+        return;
+    }
+    probe_step();
+}
 
 void handover_on_modules_loaded() {
     static bool once = false;

@@ -8825,6 +8825,22 @@ void damage_tests() {
            "kills: a joined client logs no kill for a remote copy (no phantom kill entry, mission success unmoved); "
            "the host logs every kill, a client its own jet's");
     {
+        int blocked = 0, logged = 0;
+        bool bit = false;
+        for (int frame = 0; frame < 100; ++frame) {  // a dead copy: the game asks every frame
+            const KillHook kh = kill_hook_action(bit, true, true);
+            if (kh == KillHook::Block) {
+                ++blocked;
+                bit = true;
+            } else if (kh == KillHook::Log) {
+                ++logged;
+            }
+        }
+        expect(blocked == 1 && logged == 0 && kill_hook_action(false, false, true) == KillHook::Log &&
+                   kill_hook_action(true, false, false) == KillHook::Repeat,
+               "kills: a dead copy asked about every frame is blocked (and counted) once, not 100 times");
+    }
+    {
         int A = 0, B = 0;
         PeerDamage pd;
         DamageStateMsg hit{}, dead{}, next{};

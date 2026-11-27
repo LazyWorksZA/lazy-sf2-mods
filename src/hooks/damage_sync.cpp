@@ -284,8 +284,12 @@ void* g_o_ground_kill_event[3] = {};
 template <int K>
 void __fastcall h_ground_kill_event(void* obj) {
     uint32_t flags = 0;
-    const bool remote = rd(static_cast<BYTE*>(obj) + 0x0c, &flags) && (flags & world_remote_mask_ground());
-    if (!net::kill_event_allowed(world_remote_on(), remote)) {
+    const bool logged = rd(static_cast<BYTE*>(obj) + jet::kFlags, &flags) && (flags & kFlagKillLogged);
+    uint32_t rf = 0;
+    const bool remote = rd(static_cast<BYTE*>(obj) + 0x0c, &rf) && (rf & world_remote_mask_ground());
+    const net::KillHook k = net::kill_hook_action(logged, world_remote_on(), remote);
+    if (k == net::KillHook::Repeat) return;
+    if (k == net::KillHook::Block) {
         if (rd(static_cast<BYTE*>(obj) + jet::kFlags, &flags)) wr(static_cast<BYTE*>(obj) + jet::kFlags, flags | kFlagKillLogged);
         if (log_milestone(++g_rx.kills_blocked))
             LOG("damage: a remote ground copy's kill event was not logged here (%llu so far): the host keeps the kill record",
@@ -300,9 +304,13 @@ template void __fastcall h_ground_kill_event<2>(void*);
 
 // Aircraft primary slot 30 (+0x42ac0, __fastcall(obj)): logs the kill (mission event 1) once.
 void __fastcall h_aircraft_kill_event(void* obj) {
-    if (!net::kill_event_allowed(world_remote_on(), is_remote_copy(obj))) {
-        uint32_t flags = 0;
-        if (rd(static_cast<BYTE*>(obj) + jet::kFlags, &flags)) wr(static_cast<BYTE*>(obj) + jet::kFlags, flags | kFlagKillLogged);
+    uint32_t flags = 0;
+    // The game asks every frame for a dead aircraft (+0x40a40, +0x687f0); once logged (or blocked) it is a no-op.
+    const bool read = rd(static_cast<BYTE*>(obj) + jet::kFlags, &flags);
+    const net::KillHook k = net::kill_hook_action(read && (flags & kFlagKillLogged), world_remote_on(), is_remote_copy(obj));
+    if (k == net::KillHook::Repeat) return;
+    if (k == net::KillHook::Block) {
+        wr(static_cast<BYTE*>(obj) + jet::kFlags, flags | kFlagKillLogged);
         if (log_milestone(++g_rx.kills_blocked))
             LOG("damage: a remote copy's kill event was not logged here (%llu so far): the host keeps the kill record",
                 static_cast<unsigned long long>(g_rx.kills_blocked));

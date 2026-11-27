@@ -700,7 +700,29 @@ void take_fetched_mission() {
         g_seat_from_env ? "LAZYSF2_WORLD_SEAT" : "assigned by the host", g_host_seat);
 }
 
-void accept_load(const Ctx& c, void* page) {
+// The New page's settings theatre (+0x210, a wide string of MAX_PATH), read or written. SEH only.
+bool page_theatre(void* page, char* out, size_t cap) {
+    __try {
+        narrow(reinterpret_cast<const wchar_t*>(static_cast<const BYTE*>(page) + kPageSettings + kHdrMap), out, cap);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool set_page_theatre(void* page, const std::string& theatre) {
+    if (theatre.empty() || theatre.size() >= MAX_PATH) return false;
+    __try {
+        wchar_t* w = reinterpret_cast<wchar_t*>(static_cast<BYTE*>(page) + kPageSettings + kHdrMap);
+        size_t i = 0;
+        for (; i < theatre.size(); ++i) w[i] = static_cast<unsigned char>(theatre[i]);
+        w[i] = L'\0';
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void accept_load(const Ctx& c, void* page, bool new_page) {
     if (g_join) take_fetched_mission();
     if (g_load_path.empty()) return;
     const std::wstring side_path = world_companion_path(g_load_path, L".sidecar.txt");
@@ -719,6 +741,15 @@ void accept_load(const Ctx& c, void* page) {
         LOG("world: load refused (sidecar has no density: the saving launch never started that mission); flying "
             "the generated mission");
         return;
+    }
+    // The terrain is chosen from the generated mission's state, which Load does not replace: so on the New page,
+    // generate for the file's theatre first (a GERMANYCE mission must not fly on the page's DESERT).
+    char have[64] = {};
+    if (new_page && !s.theatre.empty() && page_theatre(page, have, sizeof(have)) && s.theatre != have) {
+        const bool set = set_page_theatre(page, s.theatre) &&
+                         call_generate(c.msn, static_cast<BYTE*>(page) + kPageSettings);
+        LOG("world: the New page was on theatre %s; the mission to load is in %s: %s", have, s.theatre.c_str(),
+            set ? "generated for that theatre first" : "COULD NOT switch the theatre (the flight may load the wrong terrain)");
     }
     if (!call_seed(c.rnd, s.seed)) {
         LOG("world: ERR RND Seed faulted; flying the generated mission");
@@ -750,7 +781,7 @@ int __fastcall h_NewEvent(void* page, void* edx, int ev) {
     Ctx c{};
     if (!resolve(&c, "New page Accept")) return r;
     if (g_mode == Mode::Save) accept_save(c, page, nullptr);
-    else if (g_mode == Mode::Load) accept_load(c, page);
+    else if (g_mode == Mode::Load) accept_load(c, page, true);
     return r;
 }
 
@@ -770,7 +801,7 @@ int __fastcall h_LoadEvent(void* page, void* edx, int ev) {
         }
         accept_save(c, page, src);
     } else if (g_mode == Mode::Load) {
-        accept_load(c, page);
+        accept_load(c, page, false);
     }
     return r;
 }
@@ -1192,11 +1223,23 @@ int set_flag(BYTE* obj, uint32_t mask) {
     }
 }
 
+// The player's aircraft by its flag (+0x168 bit 1), besides the mission's player id. SEH only.
+bool has_player_flag(const BYTE* obj) {
+    __try {
+        uint32_t f = 0;
+        std::memcpy(&f, obj + 0x168, 4);
+        return (f & 1u) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void mark_one(const Om& om, uint32_t id, uint32_t player, RemoteKind kind, RemoteCounts* c) {
     BYTE* obj = nullptr;
     int group = 0;
     const bool resolved = resolve_obj(om, id, &obj, &group);
-    if (resolved && id == player) {
+    // Never the player's jet: by the mission's player id, the aircraft tracker's player, or its player flag.
+    if (resolved && (id == player || (group == 1 && (obj == sim_player_object() || has_player_flag(obj))))) {
         ++c->player;
         return;
     }
