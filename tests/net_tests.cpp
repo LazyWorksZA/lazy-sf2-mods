@@ -27,6 +27,7 @@
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
 #include "acmi/terrain_texture.h"
+#include "hooks/lobby_splice.h"
 #include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
 #include "hooks/probe_snap_logic.h"
@@ -3066,6 +3067,67 @@ void gameplay_row_splice_tests() {
     const std::wstring empty_copy = empty_page;
     expect(LazyWorks::SF2Patch::hooks::splice_gameplay_row(empty_page) == 0 && empty_page == empty_copy,
            "page without MenuItem lines left unchanged");
+}
+
+void lobby_splice_tests() {
+    std::printf("lobby splice\n");
+    using namespace LazyWorks::SF2Patch::hooks;
+    // Synthetic fragments shaped like the stock files (no game text).
+    const std::wstring main =
+        L"[MainScreen]\r\nMenuItem005=MultiplayerHotspot\r\n\r\n"
+        L"[MultiplayerHotspot]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=NetworkConnectScreen\r\n"
+        L"TextSetting=MainMenuText\r\nTextPosition=790,438\r\nActive=FALSE\r\nEnabled=FALSE\r\n\r\n"
+        L"[PilotRecordHotspot]\r\nTextPosition=790,513\r\nActive=FALSE\r\n";
+    std::wstring m = main;
+    expect(splice_main_screen_button(m), "main screen button spliced");
+    expect(m.find(L"[MultiplayerHotspot]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=NetworkConnectScreen\r\n"
+                  L"TextSetting=MainMenuText2\r\nTextPosition=790,459\r\nActive=TRUE\r\nEnabled=TRUE\r\n\r\n") !=
+               std::wstring::npos,
+           "button active, enabled, smaller style, in the gap; keys changed in place");
+    expect(m.find(L"[PilotRecordHotspot]\r\nTextPosition=790,513\r\nActive=FALSE\r\n") != std::wstring::npos,
+           "the next section is untouched");
+
+    std::wstring last = L"[MultiplayerHotspot]\r\nDestinationMenu=NetworkConnectScreen";  // no newline, missing keys
+    expect(splice_main_screen_button(last) &&
+               last == L"[MultiplayerHotspot]\r\nDestinationMenu=NetworkConnectScreen\r\nActive=TRUE\r\nEnabled=TRUE\r\n"
+                       L"TextSetting=MainMenuText2\r\nTextPosition=790,459\r\n",
+           "missing keys are added at the end of the last section");
+    std::wstring other = L"[MultiplayerHotspot]\r\nDestinationMenu=SomeOtherScreen\r\nActive=FALSE\r\n";
+    const std::wstring other_copy = other;
+    expect(!splice_main_screen_button(other) && other == other_copy, "a button going elsewhere is left hidden");
+    std::wstring none = L"[MainScreen]\r\nMenuItem001=X\r\n";
+    expect(!splice_main_screen_button(none) && none == L"[MainScreen]\r\nMenuItem001=X\r\n", "no button section: unchanged");
+
+    const std::wstring sys = L"[MenuSystem]\r\nStartMenu=MainScreen\r\n\r\n#include \"MenuSetting.ini\"\r\n";
+    const std::wstring dll = L"C:\\Games\\Strike Fighters 2 (x86)\\winmm.dll";
+    std::wstring s = sys;
+    expect(splice_lobby_screen(s, dll), "lobby screen spliced");
+    expect(s.rfind(sys, 0) == 0, "stock text kept in front");
+    expect(s.find(L"\r\n[NetworkConnectScreen]\r\nMenuType=NORMAL_MENU\r\n") != std::wstring::npos &&
+               s.find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos,
+           "screen section with this DLL as menu code");
+    wchar_t key[64];
+    swprintf_s(key, L"MenuItem%03d=LazyLobbyBackButton\r\n", lobby_item::kBack);
+    expect(s.find(key) != std::wstring::npos, "Back has the item number the menu code uses");
+    int count = 0;
+    for (int i = 1; i <= 3; ++i) {
+        swprintf_s(key, L"MenuItem%03d=", i);
+        if (s.find(key) == std::wstring::npos) break;
+        count = i;
+    }
+    expect(count == 2, "2 contiguous items (Back, title)");
+    expect(s.find(L"[LazyLobbyBackButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MainScreen\r\n") !=
+               std::wstring::npos,
+           "Back goes to the main screen");
+    const std::wstring once = s;
+    expect(!splice_lobby_screen(s, dll) && s == once, "second splice refused");
+    std::wstring lower_case = L"[networkconnectscreen]\r\n";
+    expect(!splice_lobby_screen(lower_case, dll), "an existing screen (any case) is left alone");
+    std::wstring t = sys;
+    expect(!splice_lobby_screen(t, L"winmm.dll") && t == sys, "relative path refused");
+    expect(!splice_lobby_screen(t, L"C:\\a;b\\winmm.dll") && t == sys, "path with ';' refused");
+    expect(!splice_lobby_screen(t, L"C:\\" + std::wstring(220, L'a') + L"\\winmm.dll") && t == sys,
+           "overlong path refused");
 }
 
 namespace {
@@ -9284,6 +9346,7 @@ int main() {
     remote_avatar_tests();
     client_logic_tests();
     gameplay_row_splice_tests();
+    lobby_splice_tests();
     pilot_twist_tests();
     probe_snapshot_tests();
     world_files_tests();

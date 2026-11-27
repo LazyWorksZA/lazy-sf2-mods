@@ -7,6 +7,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 
 ### Player features
 
+- **Multiplayer button and lobby screen (first steps).** The main menu's own Multiplayer button, which the game ships hidden, now shows between Campaign and Pilot Record and opens a Multiplayer screen with a Back button (Esc also goes back). The screen does nothing else yet. The button shows only when the mod recognises the game's menu system; otherwise the main menu is unchanged. Nothing is added to the game folder: the screen is added to the menu text as the game reads it, and the mod DLL is its menu code.
 - **Fixed: the cursor stays on the game's screen in Fullscreen with Match Windows cursor.** The Windows cursor is kept inside the game window while the game is active, and released when you switch away.
 
 ### Developer tools (off unless enabled)

@@ -53,6 +53,8 @@ add_library(lazysf2 SHARED
     src/hooks/focus_hooks.cpp
     src/hooks/sound_hooks.cpp
     src/hooks/options_gameplay_splice.cpp
+    src/hooks/lobby_splice.cpp
+    src/hooks/lobby_screen.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp
     src/hooks/tacview_recorder.cpp
@@ -145,6 +147,7 @@ add_executable(lazysf2-net-tests
     src/acmi/airfields.cpp
     src/acmi/ini.cpp
     src/hooks/options_gameplay_splice.cpp
+    src/hooks/lobby_splice.cpp
     src/hooks/jet_census.cpp
     src/hooks/jet_mirror_core.cpp
 )

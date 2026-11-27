@@ -1,6 +1,7 @@
 // Options menu rows the mod adds: Display Mode and Screen (Graphics), Mouse Pointer and Pilot Twist (Controls), Tacview Recording
 // (Gameplay). Splices menu text as the file service reads it; hooks the OptionsScreen sub-menu classes at fixed RVAs.
-// See lazy-sf2-recon: option-trace.md.
+// Also splices the multiplayer lobby screen and button (lobby_splice.h, lobby_screen.cpp).
+// See lazy-sf2-recon: option-trace.md, recon-notes §28.
 #include <windows.h>
 
 #include <atomic>
@@ -14,6 +15,7 @@
 #include "monitors.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/lobby_splice.h"
 #include "hooks/options_gameplay_splice.h"
 #include "log.h"
 
@@ -67,31 +69,49 @@ constexpr wchar_t kHintText[] = L"Select fullscreen, or a borderless window for 
 std::atomic<int> g_list_id{0};       // control ID assigned to our list (0 = not injected)
 std::atomic<int> g_mouse_list_id{0}; // Controls page: Mouse Pointer list ID (0 = not injected)
 std::atomic<int> g_tac_list_id{0};   // Gameplay page: Tacview Recording list ID (0 = not injected)
+std::atomic<bool> g_lobby_spliced{false};  // the last MenuSystem.ini read got the lobby screen
 int g_selected = 0;                  // current selection on the Graphics page (UI thread)
-constexpr int kMaxTracked = 8;
-std::atomic<int> g_tracked[kMaxTracked] = {};  // open handles of OptionsScreen.ini (+1, 0 = free)
 
-bool ends_with_options_screen_ini(const wchar_t* name) {
-    if (!name) return false;
-    constexpr wchar_t kName[] = L"OptionsScreen.ini";
-    const size_t n = wcslen(name), k = wcslen(kName);
-    if (n < k || _wcsicmp(name + n - k, kName) != 0) return false;
+// Menu inis we edit as the file service reads them.
+enum class MenuFile : int { None, Options, MenuSystem, MainScreen };
+
+bool ends_with_file(const wchar_t* name, const wchar_t* file) {
+    const size_t n = wcslen(name), k = wcslen(file);
+    if (n < k || _wcsicmp(name + n - k, file) != 0) return false;
     return n == k || name[n - k - 1] == L'\\' || name[n - k - 1] == L'/';
 }
 
-void track(int handle) {
-    for (auto& t : g_tracked) {
+MenuFile menu_file(const wchar_t* name) {
+    if (!name) return MenuFile::None;
+    if (ends_with_file(name, L"OptionsScreen.ini")) return MenuFile::Options;
+    if (ends_with_file(name, L"MenuSystem.ini")) return MenuFile::MenuSystem;
+    if (ends_with_file(name, L"MainScreen.ini")) return MenuFile::MainScreen;
+    return MenuFile::None;
+}
+
+constexpr int kMaxTracked = 8;
+std::atomic<int> g_tracked[kMaxTracked] = {};       // open handles of those files (+1; 0 = free, -1 = being filled)
+std::atomic<int> g_tracked_kind[kMaxTracked] = {};  // their MenuFile
+
+void track(int handle, MenuFile kind) {
+    for (int i = 0; i < kMaxTracked; ++i) {
         int expected = 0;
-        if (t.compare_exchange_strong(expected, handle + 1)) return;
+        if (g_tracked[i].compare_exchange_strong(expected, -1)) {
+            g_tracked_kind[i] = static_cast<int>(kind);
+            g_tracked[i] = handle + 1;
+            return;
+        }
     }
 }
 
-bool untrack(int handle) {
-    for (auto& t : g_tracked) {
+MenuFile untrack(int handle) {
+    for (int i = 0; i < kMaxTracked; ++i) {
+        if (g_tracked[i].load() != handle + 1) continue;
+        const auto kind = static_cast<MenuFile>(g_tracked_kind[i].load());
         int expected = handle + 1;
-        if (t.compare_exchange_strong(expected, 0)) return true;
+        if (g_tracked[i].compare_exchange_strong(expected, 0)) return kind;
     }
-    return false;
+    return MenuFile::None;
 }
 
 // Our row goes where Detail is now (directly below Aspect Ratio); the top block uses 40-unit rows.
@@ -297,9 +317,10 @@ FileRead_t o_FileRead = nullptr;
 
 int __fastcall h_FileOpen(void* svc, void* edx, const wchar_t* name, int mode) {
     int h = o_FileOpen(svc, edx, name, mode);
-    if (h != -1 && ends_with_options_screen_ini(name)) {
+    if (h == -1) return h;
+    if (const MenuFile kind = menu_file(name); kind != MenuFile::None) {
         LOG("menu: opened %ls (mode %d) as handle %d", name, mode, h);
-        track(h);
+        track(h, kind);
     }
     return h;
 }
@@ -309,23 +330,82 @@ void __fastcall h_FileClose(void* svc, void* edx, int handle) {
     o_FileClose(svc, edx, handle);
 }
 
-int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned bytes) {
-    int n = o_FileRead(svc, edx, handle, buf, bytes);
-    if (!untrack(handle)) return n;  // not ours, or already spliced
-    if (n <= 0 || static_cast<unsigned>(n) >= bytes) {
-        LOG("menu: OptionsScreen.ini read of %d/%u bytes is not a whole-file read; not modified", n, bytes);
-        return n;
-    }
-
-    // UTF-16 LE with BOM (stock), or 8-bit text.
-    const bool wide = n >= 2 && static_cast<unsigned char>(buf[0]) == 0xFF && static_cast<unsigned char>(buf[1]) == 0xFE;
+// UTF-16 LE with BOM (stock), or 8-bit text.
+std::wstring decode_ini(const char* buf, int n, bool& wide) {
+    wide = n >= 2 && static_cast<unsigned char>(buf[0]) == 0xFF && static_cast<unsigned char>(buf[1]) == 0xFE;
     std::wstring text;
     if (wide) {
         text.assign(reinterpret_cast<const wchar_t*>(buf + 2), (n - 2) / 2);
     } else {
         for (int i = 0; i < n; ++i) text += static_cast<wchar_t>(static_cast<unsigned char>(buf[i]));
     }
+    return text;
+}
 
+// Writes `out` back in the read's encoding; returns the new byte count, or 0 if it does not fit.
+size_t encode_ini(const std::wstring& out, bool wide, char* buf, unsigned bytes) {
+    const size_t need = wide ? 2 + out.size() * 2 : out.size();
+    if (need + 2 > bytes) return 0;  // keep room for a 2-byte terminator
+    if (wide) {
+        memcpy(buf + 2, out.data(), out.size() * 2);
+    } else {
+        for (size_t i = 0; i < out.size(); ++i) buf[i] = static_cast<char>(out[i]);
+    }
+    return need;
+}
+
+// MenuSystem.ini: add the lobby screen. MAINSCREEN.INI (read after it): show the Multiplayer button, only while the
+// MenuSystem.ini the menus are running on carries the screen.
+int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
+    bool wide = false;
+    std::wstring text = decode_ini(buf, n, wide);
+    if (kind == MenuFile::MenuSystem) {
+        g_lobby_spliced = false;
+        const std::wstring dll = lobby_menu_code_path();
+        if (dll.empty()) return n;
+        if (!splice_lobby_screen(text, dll)) {
+            LOG("menu: MenuSystem.ini already defines the lobby screen, or the DLL path is unusable; lobby not added");
+            return n;
+        }
+        const size_t need = encode_ini(text, wide, buf, bytes);
+        if (!need) {
+            LOG("menu: no room to add the lobby screen to MenuSystem.ini (%u bytes)", bytes);
+            return n;
+        }
+        g_lobby_spliced = true;
+        LOG("menu: added the lobby screen to MenuSystem.ini (%d -> %zu bytes)", n, need);
+        return static_cast<int>(need);
+    }
+    if (!g_lobby_spliced.load()) {
+        LOG("menu: no lobby screen in this menu session; Multiplayer button left hidden");
+        return n;
+    }
+    if (!splice_main_screen_button(text)) {
+        LOG("menu: MAINSCREEN.INI has no usable [MultiplayerHotspot]; Multiplayer button left hidden");
+        return n;
+    }
+    const size_t need = encode_ini(text, wide, buf, bytes);
+    if (!need) {
+        LOG("menu: no room to show the Multiplayer button (%u bytes)", bytes);
+        return n;
+    }
+    LOG("menu: Multiplayer button shown on the main menu (%d -> %zu bytes)", n, need);
+    return static_cast<int>(need);
+}
+
+int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned bytes) {
+    int n = o_FileRead(svc, edx, handle, buf, bytes);
+    const MenuFile kind = untrack(handle);
+    if (kind == MenuFile::None) return n;  // not ours, or already spliced
+    if (n <= 0 || static_cast<unsigned>(n) >= bytes) {
+        LOG("menu: menu ini read of %d/%u bytes is not a whole-file read; not modified", n, bytes);
+        if (kind == MenuFile::MenuSystem) g_lobby_spliced = false;
+        return n;
+    }
+    if (kind != MenuFile::Options) return splice_lobby_file(kind, buf, n, bytes);
+
+    bool wide = false;
+    const std::wstring text = decode_ini(buf, n, wide);
     int list_id = 0;
     std::wstring out = splice(text, list_id);
     if (out.empty()) {
@@ -334,15 +414,10 @@ int __fastcall h_FileRead(void* svc, void* edx, int handle, char* buf, unsigned 
     }
     const int mouse_id = splice_controls(out);
     const int tac_id = splice_gameplay_row(out);
-    const size_t need = wide ? 2 + out.size() * 2 : out.size();
-    if (need + 2 > bytes) {  // keep room for a 2-byte terminator
-        LOG("menu: no room to add Display Mode (%zu of %u bytes)", need, bytes);
+    const size_t need = encode_ini(out, wide, buf, bytes);
+    if (!need) {
+        LOG("menu: no room to add Display Mode (%u bytes)", bytes);
         return n;
-    }
-    if (wide) {
-        memcpy(buf + 2, out.data(), out.size() * 2);
-    } else {
-        for (size_t i = 0; i < out.size(); ++i) buf[i] = static_cast<char>(out[i]);
     }
     g_list_id = list_id;
     g_mouse_list_id = mouse_id;

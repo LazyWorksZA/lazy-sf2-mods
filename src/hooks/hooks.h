@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "hooks/aircraft_side.h"
 #include "net/world_proto.h"
@@ -98,6 +99,11 @@ void pilot_twist_dev_cycle_hold();
 bool install_menu_hooks();
 /// <summary>Hooks OptionsScreen.dll once it is loaded.</summary>
 void menu_on_modules_loaded();
+/// <summary>
+/// This DLL's absolute path, for the lobby screen's MenuCodeDLL, or empty while the lobby can't run (MenuSystem.dll not
+/// loaded yet, an unexpected build, an unknown path). Decides once and logs it. Menu thread.
+/// </summary>
+std::wstring lobby_menu_code_path();
 
 /// <summary>Reads LAZYSF2_PROBE_DIR once. The probe (developer tool) is active only when it is set. Call from DllMain.</summary>
 void install_probe_hooks();
