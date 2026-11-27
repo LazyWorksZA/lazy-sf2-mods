@@ -385,6 +385,7 @@ int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
     }
     if (kind == MenuFile::MenuSystem) {
         g_lobby_spliced = false;
+        lobby_menus_entered();
         const std::wstring dll = lobby_menu_code_path();
         if (dll.empty()) return n;
         static bool refusal_logged = false;  // menu thread; MenuSystem.ini is read on every return to the menus

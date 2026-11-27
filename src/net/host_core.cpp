@@ -364,6 +364,11 @@ void HostCore::run() {
     uint8_t nonce[kMaxClients][kAuthNonce] = {};
     uint64_t auth_deadline[kMaxClients] = {};
     uint64_t refused_at[kMaxClients] = {};  // a refused connection is cut after a short grace for its Bye
+    uint64_t challenged_at[kMaxClients] = {};
+    struct Evictor {
+        uint32_t ip = 0;
+        uint64_t at = 0;
+    } evictors[8] = {};  // the addresses that made room lately (oldest entry reused)
     AuthLimiter limiter(auth_limits_);
     auto ip_text = [](const ENetPeer* p, char* out, size_t n) {
         const uint32_t a = p->address.host;  // network byte order
@@ -718,8 +723,10 @@ void HostCore::run() {
             case ENET_EVENT_TYPE_CONNECT: {
                 // Before any challenge: an address waiting after wrong answers is cut at once (logged once per wait),
                 // and one address has at most kMaxPendingPerAddress unanswered connections (a player's session and its
-                // mission fetch). When every slot is taken, the oldest unanswered connection makes room (ENet keeps
-                // spare peers for this), so strangers holding slots without answering cannot starve a player.
+                // mission fetch). When every slot is taken, the oldest unanswered connection of another address makes
+                // room (ENet keeps spare peers for this), but only once it had time to answer (or was refused), and
+                // one address makes room only every evict_gap_ms: strangers holding slots cannot starve a player, and
+                // a flood of newcomers cannot cut a player whose answer is on its way.
                 const uint64_t t = now_ms();
                 bool first = false;
                 char ip[24];
@@ -730,16 +737,23 @@ void HostCore::run() {
                     enet_peer_disconnect_now(ev.peer, 0);
                     break;
                 }
+                const uint32_t from_ip = ev.peer->address.host;
                 int slot = -1, oldest = -1;
                 int same_ip_pending = 0;
                 for (int i = 0; i < kMaxClients; ++i) {
                     if (!peers[i]) {
                         if (slot < 0) slot = i;
                     } else if (!authed[i]) {
-                        if (peers[i]->address.host == ev.peer->address.host) ++same_ip_pending;
+                        if (peers[i]->address.host == from_ip) {
+                            ++same_ip_pending;
+                            continue;  // never one of the newcomer's own address
+                        }
+                        const bool old_enough =
+                            auth_refused[i] || t >= challenged_at[i] + static_cast<uint64_t>(auth_limits_.evict_after_ms);
+                        if (!old_enough) continue;
                         // Refused ones first (they are on their way out), then the one challenged longest ago.
-                        const uint64_t age_key = auth_refused[i] ? 0 : auth_deadline[i];
-                        const uint64_t best = oldest < 0 ? ~0ull : (auth_refused[oldest] ? 0 : auth_deadline[oldest]);
+                        const uint64_t age_key = auth_refused[i] ? 0 : challenged_at[i];
+                        const uint64_t best = oldest < 0 ? ~0ull : (auth_refused[oldest] ? 0 : challenged_at[oldest]);
                         if (oldest < 0 || age_key < best) oldest = i;
                     }
                 }
@@ -748,10 +762,22 @@ void HostCore::run() {
                     break;
                 }
                 if (slot < 0) {
-                    if (oldest < 0) {  // every slot holds a proven connection: no room
+                    Evictor* rec = &evictors[0];
+                    for (Evictor& x : evictors) {
+                        if (x.ip == from_ip) {
+                            rec = &x;
+                            break;
+                        }
+                        if (x.at < rec->at) rec = &x;
+                    }
+                    const bool too_soon = rec->ip == from_ip && rec->at &&
+                                          t < rec->at + static_cast<uint64_t>(auth_limits_.evict_gap_ms);
+                    if (oldest < 0 || too_soon) {  // no connection that may make room, or this address just made some
                         enet_peer_disconnect_now(ev.peer, 0);
                         break;
                     }
+                    rec->ip = from_ip;
+                    rec->at = t;
                     enet_peer_disconnect_now(peers[oldest], 0);
                     peers[oldest]->data = nullptr;
                     free_slot(oldest);
@@ -781,6 +807,7 @@ void HostCore::run() {
                     break;
                 }
                 std::memcpy(nonce[slot], ch.nonce, kAuthNonce);
+                challenged_at[slot] = now_ms();
                 auth_deadline[slot] = now_ms() + static_cast<uint64_t>(auth_limits_.deadline_ms);
                 break;
             }

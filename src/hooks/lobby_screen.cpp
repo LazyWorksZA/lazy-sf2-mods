@@ -78,6 +78,8 @@ int g_wished = -1;             // join screen: the seat asked for, until the ros
 uint32_t g_launches = 0;       // host: Launches in this session
 uint32_t g_flown = 0;          // client: the Launch it flew (or was told about), so each is taken once
 uint32_t g_told = 0;           // client: the Launch it said "not ready" about
+uint32_t g_trying = 0;         // client: the Launch it is loading the mission for (logged once)
+uint32_t g_closed = 0;         // host: the Launch whose late joins were closed on the return to the menus
 enum class Screen { Connect, Host, Join };
 Screen g_screen = Screen::Connect;
 
@@ -209,9 +211,13 @@ bool select_terrain(const std::string& theatre) {
 
 /// <summary>Join screen, Briefing and Launch: the host's latest mission into the stock Single Mission (its theatre
 /// selected first, as the New page would). False with a status line when it cannot.</summary>
-bool load_host_mission() {
+/// <param name="want_id">The mission that must be the one loaded (0: any); another one counts as not arrived yet.</param>
+/// <param name="not_yet">Set when it failed only because that mission has not arrived yet (worth retrying).</param>
+bool load_host_mission(uint32_t want_id = 0, bool* not_yet = nullptr) {
     std::string theatre;
-    const int r = world_lobby_fetched(&theatre);
+    int r = world_lobby_fetched(&theatre);
+    if (r == 0 && want_id && world_lobby_fetched_id() != want_id) r = 1;
+    if (not_yet) *not_yet = r == 1;
     if (r != 0) {
         LOG("lobby: Briefing: %s", r == 1 ? "no mission from the host yet" : r == 2 ? "theatre not installed" : "unusable mission");
         set_status(r == 1 ? L"The host has not shared a mission yet."
@@ -336,7 +342,7 @@ void start_join() {
     g_ready = false;
     g_ready_mission = 0;
     g_wished = -1;
-    g_flown = g_told = 0;
+    g_flown = g_told = g_trying = 0;
     LOG("lobby: joining %s:%u as \"%s\"", host, static_cast<unsigned>(port), cs.c_str());
     post(kCmdGoTo, lobby_item::kJoin);
 }
@@ -504,9 +510,12 @@ void session_frame() {
         const uint32_t launch = r.launch_seq & ~net::kLaunchFlying;
         if ((r.launch_seq & net::kLaunchFlying) && launch != g_flown) {
             if (g_ready && r.you >= 0 && g_ready_mission == r.mission_id) {
-                g_flown = launch;
-                LOG("lobby: the host launched (Launch %u); joining the flight", launch);
-                if (load_host_mission()) {
+                if (g_trying != launch) LOG("lobby: the host launched (Launch %u); joining the flight", launch);
+                g_trying = launch;
+                bool not_yet = false;
+                const bool loaded = load_host_mission(r.mission_id, &not_yet);
+                if (loaded || !not_yet) g_flown = launch;  // a mission still on its way is tried again next round
+                if (loaded) {
                     g_ready = false;
                     g_ready_mission = 0;
                     world_lobby_ready(false, 0);
@@ -802,6 +811,14 @@ void guard_fly(void* mnu) {
 }
 
 }  // namespace
+
+void lobby_menus_entered() {
+    // The host's flight is over once the menus start again (the debrief comes first): no late joins into it.
+    if (!g_launches || g_closed == g_launches || net_session_role() != NetRole::Host) return;
+    g_closed = g_launches;
+    host_lobby_launch(g_launches);
+    LOG("lobby: the host is back in the menus after Launch %u; late joins closed", g_launches);
+}
 
 bool lobby_hangar_event(void* self, const int* ev) {
     if (!self || !ev) return false;

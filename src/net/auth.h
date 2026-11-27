@@ -99,6 +99,9 @@ struct AuthLimits {
     int cooldown_ms = 1000;  // after a failure the address may try again after this, doubled per failure in a row
     int block_after = 5;     // failures in a row before the address is blocked
     int block_ms = 600000;   // how long a block lasts
+    int evict_after_ms = 1500;  // an unanswered connection may make room for a newcomer only this long after its
+                                // challenge (key derivation plus round trip), or once refused
+    int evict_gap_ms = 2000;    // one address makes room this often at most
 };
 
 /// <summary>

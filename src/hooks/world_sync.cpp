@@ -2932,6 +2932,8 @@ int world_lobby_fetched(std::string* theatre) {
     return theatre_installed(s.theatre) ? 0 : 2;
 }
 
+uint32_t world_lobby_fetched_id() { return g_load_path.empty() ? 0 : g_fetched_id; }
+
 bool world_lobby_load() {
     Ctx c{};
     if (!g_join || g_load_path.empty() || !resolve(&c, "lobby briefing")) return false;

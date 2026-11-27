@@ -3452,6 +3452,7 @@ void session_password_tests() {
     fast.grace_ms = 100;
     fast.cooldown_ms = 0;     // most checks below reconnect at once from 127.0.0.1
     fast.block_after = 1000;  // and fail many times on purpose
+    fast.evict_after_ms = 200;
     HostCore core;
     core.set_auth_limits(fast);
     static std::atomic<int> refusals{0};
@@ -3579,35 +3580,96 @@ void session_password_tests() {
     p2c.idle(50);
     events(30);
 
-    // Every slot taken (three proven connections are open here): the oldest unanswered connection makes room; proven
-    // ones are never cut for a newcomer.
+    // Every slot taken (proven fillers from 127.0.0.3 make it so, whatever earlier checks left open). A newcomer may cut an unanswered connection of another
+    // address only once that one had time to answer (evict_after_ms, 200 here); never one of its own address; and
+    // proven ones never.
     {
-        TestClient w1, w2, w3;
-        auto idle_all = [&](int ms) {
-            for (int i = 0; i < ms; ++i) {
-                for (TestClient* c : {&p1c, &p2c, &w1, &w2, &w3})
-                    if (c->host) c->service(0);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
+        TestClient w1, w4, w5, w6, w7, w8;
+        TestClient burst[3];
+        TestClient fill[kMaxClients + 1];
+        // Wall-clock waits that service every client often: a sleep lasts a whole timer tick here, and the
+        // timings below are a few hundred ms.
+        auto service_all = [&] {
+            for (TestClient* c : {&p1c, &p2c, &w1, &w4, &w5, &w6, &w7, &w8, &burst[0], &burst[1], &burst[2]})
+                if (c->host) c->service(0);
+            for (TestClient& c : fill)
+                if (c.host) c.service(0);
+            std::this_thread::yield();
         };
-        connect(w1);  // the fourth slot, unanswered
-        idle_all(20);
-        w2.auto_auth = false;
-        w2.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
-        w2.peer = enet_host_connect(w2.host, &addr, kChannelCount, 0);
-        for (int i = 0; i < 500 && (w2.challenges == 0 || !w1.disconnected); ++i) idle_all(1);
-        expect(w1.challenges == 1 && w1.disconnected && w2.challenges == 1 && !p1c.disconnected && !p2c.disconnected,
-               "all slots taken: the oldest unanswered connection is cut and the newcomer challenged; proven ones stay");
-        w2.answer(w2.challenge);
-        idle_all(150);
-        w3.auto_auth = false;
-        w3.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
-        w3.peer = enet_host_connect(w3.host, &addr, kChannelCount, 0);
-        for (int i = 0; i < 300 && !w3.disconnected; ++i) idle_all(1);
-        expect(w2.proofs == 1 && w3.challenges == 0 && w3.disconnected && !w2.disconnected,
-               "every slot proven: a newcomer is cut before any challenge");
-        enet_peer_disconnect(w2.peer, 0);
-        for (int i = 0; i < 300 && !w2.disconnected; ++i) idle_all(1);
+        auto idle_all = [&](int ms) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+            while (std::chrono::steady_clock::now() < until) service_all();
+        };
+        auto open_from = [&](TestClient& c, const char* ip) {
+            c.auto_auth = false;
+            ENetAddress local{};
+            enet_address_set_host_ip(&local, ip);
+            local.port = 0;
+            c.host = enet_host_create(&local, 1, kChannelCount, 0, 0);
+            c.peer = c.host ? enet_host_connect(c.host, &addr, kChannelCount, 0) : nullptr;
+        };
+        auto wait_for = [&](auto pred, int ms) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+            while (!pred() && std::chrono::steady_clock::now() < until) service_all();
+        };
+        idle_all(700);  // unanswered connections left by earlier checks reach their deadline and are cut
+        int filled = 0;
+        for (TestClient& c : fill) {
+            open_from(c, "127.0.0.3");
+            wait_for([&] { return c.challenges > 0 || c.disconnected; }, 500);
+            if (!c.challenges) break;  // full
+            c.answer(c.challenge);
+            wait_for([&] { return c.proofs > 0 || c.disconnected; }, 500);
+            ++filled;
+        }
+        // Free exactly one slot.
+        if (filled > 0) {
+            enet_peer_disconnect(fill[filled - 1].peer, 0);
+            wait_for([&] { return fill[filled - 1].disconnected; }, 500);
+        }
+        // A player (127.0.0.2) is challenged in the last slot; a burst from 127.0.0.1 arrives while its answer is
+        // being made: the burst is refused and the player gets in.
+        open_from(w1, "127.0.0.2");
+        wait_for([&] { return w1.challenges > 0 || w1.disconnected; }, 500);
+        for (TestClient& b : burst) open_from(b, "127.0.0.1");
+        wait_for([&] {
+            bool all = true;
+            for (TestClient& b : burst) all = all && (b.disconnected || b.challenges > 0);
+            return all;
+        }, 300);
+        // (A refused newcomer may not see its disconnect yet: it is cut before ENet acknowledged it.)
+        const bool burst_cut = burst[0].challenges + burst[1].challenges + burst[2].challenges == 0;
+        w1.answer(w1.challenge);
+        wait_for([&] { return w1.proofs > 0 || w1.disconnected; }, 500);
+        expect(w1.host && burst_cut && w1.proofs == 1 && !w1.disconnected,
+               "a burst of newcomers does not cut a player whose answer is on its way");
+        // Every slot proven: a newcomer is cut before any challenge.
+        open_from(w8, "127.0.0.1");
+        wait_for([&] { return w8.disconnected; }, 300);
+        expect(w8.challenges == 0 && w8.disconnected && !w1.disconnected, "every slot proven: a newcomer is cut before any challenge");
+        enet_peer_disconnect(w1.peer, 0);
+        wait_for([&] { return w1.disconnected; }, 300);
+        // An unanswered connection past evict_after_ms makes room for another address's newcomer.
+        open_from(w4, "127.0.0.2");
+        wait_for([&] { return w4.challenges > 0; }, 500);
+        idle_all(250);
+        open_from(w5, "127.0.0.1");
+        wait_for([&] { return w5.challenges > 0 || w5.disconnected; }, 500);
+        expect(w4.disconnected && w5.challenges == 1 && !w5.disconnected && !p1c.disconnected && !p2c.disconnected,
+               "all slots taken: an unanswered connection that had its time is cut for the newcomer; proven ones stay");
+        enet_peer_disconnect(w5.peer, 0);
+        wait_for([&] { return w5.disconnected; }, 300);
+        // Never one of the newcomer's own address.
+        open_from(w6, "127.0.0.1");
+        wait_for([&] { return w6.challenges > 0; }, 500);
+        idle_all(250);
+        open_from(w7, "127.0.0.1");
+        wait_for([&] { return w7.disconnected; }, 300);
+        expect(w6.challenges == 1 && !w6.disconnected && w7.challenges == 0 && w7.disconnected,
+               "an address never cuts its own unanswered connection to make room");
+        wait_for([&] { return w6.disconnected; }, 1000);  // refused at the deadline
+        for (int i = 0; i + 1 < filled; ++i) enet_peer_disconnect(fill[i].peer, 0);
+        idle_all(200);
         events(30);
     }
 

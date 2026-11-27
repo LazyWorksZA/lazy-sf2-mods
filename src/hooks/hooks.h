@@ -119,6 +119,10 @@ bool lobby_hangar_event(void* self, const int* ev);
 /// command (from any input) goes back to the lobby instead.</summary>
 void lobby_hangar_enter(void* self);
 void lobby_hangar_leave();
+/// <summary>Menu thread: the menus start again (MenuSystem.ini read), as after a flight.</summary>
+void lobby_menus_entered();
+/// <summary>Join: the id of the host's mission the next load flies (0: none).</summary>
+uint32_t world_lobby_fetched_id();
 
 /// <summary>Reads LAZYSF2_PROBE_DIR once. The probe (developer tool) is active only when it is set. Call from DllMain.</summary>
 void install_probe_hooks();
