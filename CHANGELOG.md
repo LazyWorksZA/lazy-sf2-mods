@@ -17,6 +17,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
   - **Launch:** the host's flight starts at once. Each pilot who is Ready loads the mission and joins in their own seat as soon as it has loaded; a pilot's PC waits up to 60 s for a slow host. A pilot who presses Ready later joins the running flight, until the host is back in the menus.
   - **After the flight:** the debrief's Accept returns everyone to the lobby (Refly is hidden), and the host can set up the next mission in the same session. If the host goes away, a joined pilot sees "The host has gone"; when the same host starts a new session, the pilot's Launch and Ready start again.
   - **Leaving:** Esc does not end a session on these screens; use Close session or Leave.
+- **The log when the game folder is not writable.** A game installed under Program Files and started without administrator rights could not write `lazysf2.log`, so the mod ran without one. It now writes `%LOCALAPPDATA%\LazySF2Patch\lazysf2.log` instead, and its first line says why.
 - **Fixed: the cursor stays on the game's screen in Fullscreen with Match Windows cursor.** The Windows cursor is kept inside the game window while the game is active, and released when you switch away.
 
 ### Developer tools (off unless enabled)

@@ -6,6 +6,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <string>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -41,6 +42,25 @@ void open() {
     wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"lazysf2.log");
 
     g_file = _wfsopen(path, L"w", _SH_DENYNO);  // truncate on every start; readable while running
+    if (g_file) return;
+    // The game folder is not writable (an install under Program Files run without elevation, and no VirtualStore
+    // copy): %LOCALAPPDATA%\LazySF2Patch\lazysf2.log instead. Plain kernel32 calls only: this runs under the loader lock.
+    const DWORD err = GetLastError();
+    wchar_t local[MAX_PATH] = {};
+    const DWORD ln = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    if (ln == 0 || ln >= MAX_PATH - 40) return;
+    std::wstring dir = std::wstring(local) + L"\\LazySF2Patch";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const DWORD a = GetFileAttributesW(dir.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT)) return;
+    const std::wstring fallback = dir + L"\\lazysf2.log";
+    g_file = _wfsopen(fallback.c_str(), L"w", _SH_DENYNO);
+    if (!g_file) return;
+    char why[512];
+    std::snprintf(why, sizeof(why), "log: %ls is not writable (error %lu); logging to %ls instead", log_path(path).c_str(),
+                  static_cast<unsigned long>(err), log_path(fallback).c_str());
+    std::fprintf(g_file, "%s\n", why);
+    std::fflush(g_file);
 }
 
 void close() {

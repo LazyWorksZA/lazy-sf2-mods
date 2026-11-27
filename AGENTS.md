@@ -50,7 +50,7 @@ The test project is only for development: it is not published or shipped.
 - **vcpkg:** use the copy bundled with VS. It requires `builtin-baseline` in `vcpkg.json`.
 - **MSVC `C1083 Cannot open compiler generated file: ''`** is the long-path limit. Keep build directories short.
 - **Developer tools** (`lazysf2-bot`, `lazysf2-acmi`, `lazysf2-net-tests`) build into `build\Release\tools\`, not next to `winmm.dll`, so they never load the proxy as their own winmm. The installer copies only `build\Release\winmm.dll`.
-- **Runtime log:** `lazysf2.log` in the game folder. Use it to check that hooks were installed and what they did.
+- **Runtime log:** `lazysf2.log` in the game folder, or `%LOCALAPPDATA%\LazySF2Patch\lazysf2.log` when the game folder is not writable (its first line then says why). Use it to check that hooks were installed and what they did.
 - **`LAZYSF2_DISABLE=1`** runs the mod as a pure pass-through proxy.
 - **`LAZYSF2_PASSWORD=<text>`** is the session password for the developer network modes (`LAZYSF2_HOST`, `LAZYSF2_CONNECT`); they refuse to start without it. The lobby takes its password from its own field instead. It is never written to disk.
 - **`lazysf2-bot`** (developer tool) needs the session password in every mode (`--password TEXT`, or `LAZYSF2_PASSWORD`). `--world-join` joins a shared-world host as a client (mission request with a seat tag, then Hello). `--lobby ADDR:PORT --content HEX [--seat N]` joins a lobby as a pilot (roster, seat, Ready for each new mission) and follows the host's Launch as a `--world-join` client with its lobby tag; `--content` is the host's `lobby: content hash 0x...` log value. `lazysf2-net-tests botloop` (run from `build\Release`) runs the real bot against a loopback lobby host.
