@@ -407,6 +407,11 @@ void world_set_own_seat(int member);
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms);
 void world_lobby_ready(bool ready);
 void world_lobby_want_seat(int seat);
+/// <summary>world_sync.cpp, a joined lobby session, menu thread: takes the fetched mission (0 ok, 1 none yet, 2 its
+/// theatre is not installed, 3 not usable) and its theatre; then loads it into the running Single Mission with its
+/// seed and forced options, as an Accept would (true when armed for the flight).</summary>
+int world_lobby_fetched(std::string* theatre);
+bool world_lobby_load();
 void host_session_stop();
 /// <summary>host.cpp: the bound port once the network thread runs (false before); failed: it could not bind.</summary>
 bool host_session_port(uint16_t* port, bool* failed);

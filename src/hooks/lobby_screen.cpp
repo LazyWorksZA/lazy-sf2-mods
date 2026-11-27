@@ -43,6 +43,9 @@ constexpr DWORD kMmgStamp = 0x51d21faa, kMmgSize = 0x25000;  // Core\MissionMana
 constexpr DWORD kMmgVtableRva = 0x1b2c4;
 constexpr int kMmgSelectMission = 0x14 / 4;  // SelectMission(name): loads SingleMission, Campaign or InstantAction
 constexpr int kHangarFly = 9;               // the Hangar's Fly button (HANGARSCREEN.INI MenuItem009)
+constexpr DWORD kTerStamp = 0x51d21fa0, kTerSize = 0x46000;  // Core\TerrainEngine.dll
+constexpr DWORD kTerVtableRva = 0x3543c;
+constexpr int kTerSelect = 0x24 / 4;  // bool SelectTerrain(name): the theatre the next flight loads (the New page's choice)
 constexpr int kCmdArg = 10;         // third PostCommand argument, as the stock screens pass it
 
 constexpr wchar_t kAddressSection[] = L"OtherOptions";
@@ -179,6 +182,48 @@ bool select_single_mission() {
     }
     reinterpret_cast<Service_t>(vtable_slot(g_sys, kSysReleaseService))(g_sys, nullptr, L"MMG", &mmg);
     return ok;
+}
+
+/// <summary>Makes theatre the terrain of the next flight, as the Single Mission New page's theatre list does.</summary>
+bool select_terrain(const std::string& theatre) {
+    HMODULE te = GetModuleHandleW(L"TerrainEngine.dll");
+    if (!g_sys || !te || !is_expected_build(te, kTerStamp, kTerSize, "TerrainEngine.dll")) return false;
+    void* ter = nullptr;
+    reinterpret_cast<Service_t>(vtable_slot(g_sys, kSysGetService))(g_sys, nullptr, L"TER", &ter);
+    if (!ter) return false;
+    bool ok = *static_cast<void**>(ter) == at_rva(te, kTerVtableRva);
+    if (ok) {
+        const std::wstring w(theatre.begin(), theatre.end());
+        using Select_t = bool(__fastcall*)(void*, void*, const wchar_t*);
+        ok = reinterpret_cast<Select_t>(vtable_slot(ter, kTerSelect))(ter, nullptr, w.c_str());
+    }
+    reinterpret_cast<Service_t>(vtable_slot(g_sys, kSysReleaseService))(g_sys, nullptr, L"TER", &ter);
+    return ok;
+}
+
+/// <summary>Join screen, Briefing: the host's mission into the stock Single Mission (its theatre selected first, as
+/// the New page would), then the stock Hangar shows it. False with a status line when it cannot.</summary>
+bool open_briefing() {
+    std::string theatre;
+    const int r = world_lobby_fetched(&theatre);
+    if (r != 0) {
+        LOG("lobby: Briefing: %s", r == 1 ? "no mission from the host yet" : r == 2 ? "theatre not installed" : "unusable mission");
+        set_status(r == 1 ? L"The host has not shared a mission yet."
+                   : r == 2 ? (L"This mission's theatre (" + std::wstring(theatre.begin(), theatre.end()) + L") is not installed.").c_str()
+                            : L"The host's mission cannot be used.");
+        return false;
+    }
+    if (!select_single_mission() || !select_terrain(theatre)) {
+        LOG("lobby: Briefing: could not select Single Mission or theatre %s", theatre.c_str());
+        set_status(L"The mission's theatre could not be selected.");
+        return false;
+    }
+    if (!world_lobby_load()) {
+        set_status(L"The host's mission could not be loaded.");
+        return false;
+    }
+    LOG("lobby: Briefing: the host's mission is loaded (theatre %s); opening the Hangar", theatre.c_str());
+    return true;
 }
 
 void post(int cmd, int a) {
@@ -521,9 +566,8 @@ void session_click(int item) {
                 }
                 LOG("lobby: Set up mission: opening Single Mission");
                 post(kCmdGoTo, item);  // its DestinationMenu: SingleMissionScreen
-            } else {
-                LOG("lobby: Briefing clicked; not wired up yet");
-                set_status(L"The briefing is not available yet.");
+            } else if (open_briefing()) {
+                post(kCmdGoTo, item);  // its DestinationMenu: HangarScreen
             }
             break;
         case session_item::kSeatPrev:

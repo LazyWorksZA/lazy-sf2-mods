@@ -579,6 +579,10 @@ bool resolve(Ctx* c, const char* when) {
 
 // After a failed Load the mission is cleared: generate it again from the page's settings so the player can still fly.
 void regenerate(const Ctx& c, void* page) {
+    if (!page) {  // the lobby's briefing load has no New page to generate from
+        LOG("world: ERR the mission could not be loaded and there is no page to generate one; do not fly it");
+        return;
+    }
     void* settings = static_cast<BYTE*>(page) + kPageSettings;
     if (call_generate(c.msn, settings)) LOG("world: generated the mission again from the New page's settings");
     else LOG("world: ERR regenerating the mission faulted; do not fly this mission");
@@ -2881,6 +2885,36 @@ void world_lobby_ready(bool ready) {
 }
 void world_lobby_want_seat(int seat) {
     if (g_fetch) g_fetch->want_seat(seat);
+}
+
+int world_lobby_fetched(std::string* theatre) {
+    if (!g_join) return 3;
+    take_fetched_mission();
+    if (g_load_path.empty()) return 1;
+    std::string text, err;
+    WorldSidecar s;
+    if (!read_text(world_companion_path(g_load_path, L".sidecar.txt"), &text) || !parse_sidecar(text, &s, &err) ||
+        s.theatre.empty())
+        return 3;
+    *theatre = s.theatre;
+    return theatre_installed(s.theatre) ? 0 : 2;
+}
+
+bool world_lobby_load() {
+    Ctx c{};
+    if (!g_join || g_load_path.empty() || !resolve(&c, "lobby briefing")) return false;
+    // The seat this pilot picked in the lobby (it may have changed since the mission arrived).
+    net::LobbyRosterMsg r{};
+    uint32_t rtt = 0;
+    if (!g_seat_from_env && g_fetch && g_fetch->roster(&r, &rtt) && r.your_seat != net::kNoSeat && r.your_seat != g_seat) {
+        LOG("world: join: the lobby seat is member %u (was %d)", static_cast<unsigned>(r.your_seat), g_seat);
+        g_seat = r.your_seat;
+    }
+    accept_load(c, nullptr, false);  // the theatre is selected already (no New page here)
+    AcquireSRWLockExclusive(&g_lock);
+    const bool armed = g_armed.on && g_armed.msn == c.msn && g_armed.msn_path == g_load_path;
+    ReleaseSRWLockExclusive(&g_lock);
+    return armed;
 }
 
 void world_set_own_seat(int member) {
