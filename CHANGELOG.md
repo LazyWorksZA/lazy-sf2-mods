@@ -8,7 +8,7 @@ Newest first. Each release is tagged `vX.Y.Z`; its files are on the GitHub Relea
 ### Player features
 
 - **Multiplayer lobby.** The main menu's Multiplayer button (hidden in the stock game) now opens a lobby for flying one single mission together over the network, by direct address (on a LAN, or with UDP port 7777 forwarded to the host). The button shows only on the July 2013 build, where the hooks it needs are installed.
-  - **Connect:** the screen shows your pilot's callsign, the host's address (the last one used is kept in `Options.ini`, `[OtherOptions] LobbyAddress`) and a session password, with Host and Join.
+  - **Connect:** the screen shows the active pilot's callsign (as Pilot Record shows it), the host's address (the last one used is kept in `Options.ini`, `[OtherOptions] LobbyAddress`) and a session password, with Host and Join.
   - **Session password:** hosting needs one, and joining needs the host's. It never travels over the network: both PCs prove they know it (a challenge and answer each way, the key stretched with PBKDF2). Wrong guesses from one address are slowed down and then blocked for a while. The password is never written to disk; the field shows it as typed, because the game's edit field cannot hide it.
   - **Pilots and seats:** the hosting and joined screens list the pilots and the player flight's free seats (flown by the AI) in seat order. Each pilot, the host too, picks a free seat with "< Seat" and "Seat >"; the first to ask gets it, and the host always keeps one. Callsigns are shown in plain ASCII.
   - **Same game content:** a PC whose game archives, aircraft, weapons, ground objects or terrains differ from the host's is kept out with a message saying so.

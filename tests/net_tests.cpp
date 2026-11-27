@@ -3272,6 +3272,29 @@ void lobby_splice_tests() {
 
 void lobby_logic_tests() {
     std::printf("lobby logic\n");
+    {
+        // A pilot record: the picture name at +0x10 and the callsign at +0x90, 64-character wide fields.
+        std::vector<uint8_t> rec(0x300, 0);
+        auto put = [&](size_t off, const wchar_t* s) {
+            for (size_t i = 0; s[i]; ++i) {
+                rec[off + 2 * i] = static_cast<uint8_t>(s[i] & 0xff);
+                rec[off + 2 * i + 1] = static_cast<uint8_t>(s[i] >> 8);
+            }
+        };
+        put(0x10, L"PILOTPIC01");
+        put(0x90, L"Viper");
+        expect(LazyWorks::SF2Patch::hooks::plt_callsign(rec.data(), rec.size()) == L"Viper", "pilot record: the callsign field");
+        expect(LazyWorks::SF2Patch::hooks::plt_callsign(rec.data(), 0x100).empty() && LazyWorks::SF2Patch::hooks::plt_callsign(nullptr, 0).empty(), "pilot record: too short");
+        std::vector<uint8_t> unterminated = rec;
+        for (size_t i = 0; i < 64; ++i) unterminated[0x90 + 2 * i] = 'A', unterminated[0x91 + 2 * i] = 0;
+        expect(LazyWorks::SF2Patch::hooks::plt_callsign(unterminated.data(), unterminated.size()).empty(), "pilot record: a field without its end");
+        std::vector<uint8_t> nopic = rec;
+        std::fill(nopic.begin() + 0x10, nopic.begin() + 0x90, 0);
+        expect(LazyWorks::SF2Patch::hooks::plt_callsign(nopic.data(), nopic.size()).empty(), "pilot record: no picture name, not a record");
+        std::vector<uint8_t> ctrl = rec;
+        ctrl[0x92] = 1;
+        expect(LazyWorks::SF2Patch::hooks::plt_callsign(ctrl.data(), ctrl.size()).empty(), "pilot record: control characters");
+    }
     using namespace LazyWorks::SF2Patch::hooks;
     char host[64] = {};
     uint16_t port = 0;

@@ -41,4 +41,24 @@ inline std::string lobby_callsign(const std::wstring& text, const char* fallback
     return out;
 }
 
+/// <summary>The callsign in a pilot record (PilotData\PilotNNN.plt): a wide string of at most 64 characters at
+/// +0x90, after the picture name at +0x10 (see lazy-sf2-recon: recon-notes §28). Empty if the record is too short, the
+/// field has no terminator, or either field does not hold printable text.</summary>
+inline std::wstring plt_callsign(const uint8_t* d, size_t n) {
+    constexpr size_t kField = 64, kPicture = 0x10, kCallsign = 0x90;
+    if (!d || n < kCallsign + kField * 2) return {};
+    auto field = [&](size_t off, std::wstring* out) {
+        for (size_t i = 0; i < kField; ++i) {
+            const wchar_t c = static_cast<wchar_t>(d[off + 2 * i] | (d[off + 2 * i + 1] << 8));
+            if (c == 0) return true;
+            if (c < 0x20) return false;
+            *out += c;
+        }
+        return false;  // no terminator in the field
+    };
+    std::wstring picture, callsign;
+    if (!field(kPicture, &picture) || picture.empty() || !field(kCallsign, &callsign)) return {};
+    return callsign;
+}
+
 }  // namespace LazyWorks::SF2Patch::hooks

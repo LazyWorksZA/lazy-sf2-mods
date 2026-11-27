@@ -8,6 +8,7 @@
 #include <cwchar>
 #include <string>
 
+#include "acmi/ini.h"
 #include "config.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
@@ -265,11 +266,60 @@ int clicked_item(const int* ev) {
 }
 
 /// <summary>The active pilot's callsign for the wire (printable ASCII, 15 characters).</summary>
-std::string wire_callsign() {
-    wchar_t callsign[64] = {};
-    read_option(L"Pilot", L"Callsign", callsign, _countof(callsign));
-    return lobby_callsign(callsign, "PLAYER");
+/// <summary>A small file's bytes (at most 1 MB); false if it cannot be read.</summary>
+bool read_small_file(const std::wstring& path, std::vector<uint8_t>* out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    bool ok = GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart <= (1 << 20);
+    if (ok) {
+        out->resize(static_cast<size_t>(size.QuadPart));
+        DWORD got = 0;
+        ok = ReadFile(h, out->data(), static_cast<DWORD>(out->size()), &got, nullptr) && got == out->size();
+    }
+    CloseHandle(h);
+    return ok;
 }
+
+/// <summary>The active pilot's callsign, as the Pilot Record screen shows it: PilotData\PilotList.ini names the
+/// current pilot and its record file, which holds the callsign. Falls back to Options.ini [Pilot] Callsign (the
+/// game's default for a new pilot). Read again each time, so a change of pilot follows.</summary>
+std::wstring active_callsign() {
+    std::wstring callsign;
+    const char* from = "the active pilot's record";
+    const std::wstring data = config::game_data_dir();
+    std::vector<uint8_t> bytes;
+    if (!data.empty() && read_small_file(data + L"\\PilotData\\PilotList.ini", &bytes)) {
+        const acmi::Ini list = acmi::parse_ini(bytes.data(), bytes.size());
+        const std::string* id = list.get("CurrentPilot", "PilotID");
+        const int n = id ? std::atoi(id->c_str()) : 0;
+        char section[16];
+        std::snprintf(section, sizeof(section), "Pilot%03d", n);
+        const std::string* file = n > 0 && n < 1000 ? list.get(section, "Filename") : nullptr;
+        // A plain file name in PilotData only.
+        if (file && !file->empty() && file->size() < 64 && file->find_first_of("\\/:") == std::string::npos &&
+            file->find("..") == std::string::npos &&
+            read_small_file(data + L"\\PilotData\\" + widen_ansi(*file), &bytes))
+            callsign = plt_callsign(bytes.data(), bytes.size());
+    }
+    if (callsign.empty()) {
+        from = "Options.ini [Pilot] (no pilot record found)";
+        wchar_t buf[64] = {};
+        read_option(L"Pilot", L"Callsign", buf, _countof(buf));
+        callsign = buf;
+    }
+    static std::wstring logged;
+    if (callsign != logged) {
+        logged = callsign;
+        LOG("lobby: callsign \"%ls\" from %s", callsign.c_str(), from);
+    }
+    return callsign;
+}
+
+/// <summary>The active pilot's callsign for the wire (printable ASCII, 15 characters); empty if none is left, and
+/// the host's roster then shows "PILOT n".</summary>
+std::string wire_callsign() { return lobby_callsign(active_callsign(), ""); }
 
 /// <summary>The Session password field as UTF-8 (empty if none). Never logged, never stored: the session keeps what it
 /// needs (the host a derived key, a client the password until it leaves), and every copy here is wiped after use.</summary>
@@ -745,9 +795,8 @@ void init_connect_screen() {
         LOG("lobby: a session was still open on the connect screen; closing it");
         net_session_close();
     }
-    wchar_t callsign[64] = {};
-    read_option(L"Pilot", L"Callsign", callsign, _countof(callsign));
-    set_text(lobby_item::kCallsign, callsign);
+    const std::wstring callsign = active_callsign();
+    set_text(lobby_item::kCallsign, callsign.empty() ? L"(no callsign)" : callsign.c_str());
     wchar_t address[kLobbyAddressChars + 1] = {};
     const bool have_options = read_option(kAddressSection, kAddressKey, address, _countof(address));
     g_saved_address = address;
@@ -755,7 +804,7 @@ void init_connect_screen() {
         reinterpret_cast<SetText_t>(vtable_slot(e, kEditSet))(e, nullptr, address);
     }
     set_text(lobby_item::kStatus, L"Not connected.");
-    LOG("lobby: connect screen opened (callsign \"%ls\", saved address \"%ls\"%s)", callsign, address,
+    LOG("lobby: connect screen opened (callsign \"%ls\", saved address \"%ls\"%s)", callsign.c_str(), address,
         have_options ? "" : ", Options.ini not available");
 }
 
