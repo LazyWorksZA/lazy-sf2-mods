@@ -42,8 +42,10 @@ enum ByeReason : uint8_t { kByeNone = 0, kByeBusy = 1, kByeNoAvatar = 2, kByeSes
 
 using avatar_logic::dist3;
 
-// Set once by host_install(), then read-only.
-bool g_enabled = false;
+// Set by host_install() (LAZYSF2_HOST, for the process) or by a lobby session (host_session_start/stop, menus only:
+// no step runs then, and the network thread copies the address at its start).
+std::atomic<bool> g_enabled{false};
+bool g_from_env = false;
 char g_addr[48] = {};
 uint16_t g_port = 0;
 char g_callsign[17] = "HOST";  // LAZYSF2_CALLSIGN, printable ASCII; the wire field keeps 15 characters
@@ -861,27 +863,44 @@ void host_install() {
     const DWORD nc = GetEnvironmentVariableW(L"LAZYSF2_CALLSIGN", cs, 32);
     if (nc > 0 && nc < 32) avatar_logic::to_ascii(g_callsign, sizeof(g_callsign), cs);
     if (!g_callsign[0]) std::snprintf(g_callsign, sizeof(g_callsign), "HOST");
+    g_from_env = true;
     g_enabled = true;
 }
 
-void host_on_modules_loaded() {
-    static std::atomic<bool> once{false};
-    if (!g_enabled || once.exchange(true)) return;
+namespace {
+
+// Creates the per-session objects (a fresh core each session: its queues and mission start empty) and registers
+// the step callback (once; it does nothing while g_running is false).
+bool make_objects() {
     if (!sim_register_step_callback(on_step)) {
         LOG("net: host off (no free step callback slot)");
-        return;
+        return false;
     }
+    if (!g_stream) g_stream = new (std::nothrow) net::StreamWriter;
+    if (!g_av) g_av = new (std::nothrow) Avatar[net::kMaxClients];
+    delete g_peers;
+    delete g_core;
     g_core = new (std::nothrow) net::HostCore;
     g_peers = g_core ? new (std::nothrow) net::HostPeers(*g_core) : nullptr;
-    g_stream = new (std::nothrow) net::StreamWriter;
-    g_av = new (std::nothrow) Avatar[net::kMaxClients];
     if (!g_core || !g_peers || !g_stream || !g_av) {
         LOG("net: host off (out of memory)");
-        return;  // the step callback stays registered but does nothing: g_running is false
+        return false;
     }
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     g_qpc_ms = 1000.0 / static_cast<double>(f.QuadPart);
+    return true;
+}
+
+bool start_running() {
+    if (!make_objects()) return false;
+    for (int s = 0; s < net::kMaxClients; ++s) g_av[s] = Avatar{};
+    set_clients(0);
+    g_avatar_states.clear();
+    std::memset(g_world_behind, 0, sizeof(g_world_behind));
+    std::memset(g_newest_gen, 0, sizeof(g_newest_gen));
+    g_order.reset();
+    g_order_shift = false;
     g_checked_gen = g_aircraft_generation.load(std::memory_order_acquire);
     g_epoch = sim_player_epoch();
     g_running.store(true);
@@ -889,11 +908,76 @@ void host_on_modules_loaded() {
     if (!g_core->start(g_addr, g_port, core_log)) {
         g_running.store(false);
         LOG("net: host off (could not start the network thread)");
-        return;
+        return false;
     }
     std::lock_guard<std::mutex> lock(g_mission_mx);
     g_core_started.store(true);
     if (!g_mission.empty()) g_core->set_mission(g_mission, g_mission_id, g_mission_raw, g_seat_plan);
+    return true;
+}
+
+}  // namespace
+
+void host_on_modules_loaded() {
+    static std::atomic<bool> once{false};
+    if (!g_from_env || once.exchange(true)) return;
+    start_running();
+}
+
+bool host_configured() { return g_enabled.load(); }
+
+bool host_session_start(const char* addr, uint16_t port, const char* callsign, const char** why) {
+    if (g_from_env) {
+        *why = "LAZYSF2_HOST is set for this launch";
+        return false;
+    }
+    if (g_enabled.load() || g_running.load()) {
+        *why = "a host session is already running";
+        return false;
+    }
+    std::snprintf(g_addr, sizeof(g_addr), "%s", addr);
+    g_port = port;
+    std::snprintf(g_callsign, sizeof(g_callsign), "%s", callsign && *callsign ? callsign : "HOST");
+    g_enabled = true;
+    if (!start_running()) {
+        g_enabled = false;
+        *why = "the network thread could not start";
+        return false;
+    }
+    LOG("net: host session started on %s:%u as \"%s\"", g_addr, static_cast<unsigned>(g_port), g_callsign);
+    return true;
+}
+
+bool host_session_port(uint16_t* port, bool* failed) {
+    *port = 0;
+    *failed = false;
+    if (!g_running.load() || !g_core) return false;
+    *failed = g_core->state() == net::HostCore::State::Failed;
+    *port = g_core->port();
+    return *port != 0;
+}
+
+void host_session_stop() {
+    if (g_from_env || !g_running.exchange(false)) return;
+    g_core->stop(false);  // joins the network thread: it disconnects every peer and stops ENet
+    // Menus: no step runs, and the aircraft of the last flight are gone (check_live finds none), so the avatars are
+    // only forgotten.
+    bool live[net::kMaxClients] = {};
+    if (g_nclients > 0) check_live(live);
+    for (int s = 0; s < net::kMaxClients; ++s)
+        if (g_av[s].active) release(s, "the host closed the session", live[s], kByeNone, net::LeaveReason::HostEnded, false);
+    set_clients(0);
+    sim_set_run_active(false);
+    g_stream->close(false);  // the writer drains on its own; the next open waits for it
+    {
+        std::lock_guard<std::mutex> lock(g_mission_mx);
+        g_core_started.store(false);
+        g_mission.clear();
+        g_mission_id = g_mission_raw = 0;
+        g_seat_plan = net::SeatPlan{};
+    }
+    g_enabled = false;
+    LOG("net: host session closed");
 }
 
 bool host_drives_object(const void* obj) {

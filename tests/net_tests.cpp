@@ -1,5 +1,6 @@
 // Console tests for the network protocol and an ENet loopback. Not shipped, no game needed.
 #include <enet/enet.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +28,7 @@
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
 #include "acmi/terrain_texture.h"
+#include "hooks/lobby_logic.h"
 #include "hooks/lobby_splice.h"
 #include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
@@ -3188,6 +3190,90 @@ void lobby_splice_tests() {
     expect(!splice_lobby_screen(t, L"C:\\a;b\\winmm.dll") && t == sys, "path with ';' refused");
     expect(!splice_lobby_screen(t, L"C:\\" + std::wstring(220, L'a') + L"\\winmm.dll") && t == sys,
            "overlong path refused");
+}
+
+void lobby_logic_tests() {
+    std::printf("lobby logic\n");
+    using namespace LazyWorks::SF2Patch::hooks;
+    char host[64] = {};
+    uint16_t port = 0;
+    expect(parse_lobby_address(L"10.0.0.5", host, sizeof(host), &port) && std::strcmp(host, "10.0.0.5") == 0 &&
+               port == kLobbyPort,
+           "an address without a port joins the lobby port 7777");
+    expect(parse_lobby_address(L"my-pc.example:1234", host, sizeof(host), &port) &&
+               std::strcmp(host, "my-pc.example") == 0 && port == 1234,
+           "a name with a port");
+    expect(!parse_lobby_address(L"", host, sizeof(host), &port), "empty refused");
+    expect(!parse_lobby_address(L"my pc", host, sizeof(host), &port), "a space refused");
+    expect(!parse_lobby_address(L"host:0", host, sizeof(host), &port) &&
+               !parse_lobby_address(L"host:70000", host, sizeof(host), &port) &&
+               !parse_lobby_address(L"host:", host, sizeof(host), &port),
+           "bad ports refused");
+    expect(!parse_lobby_address(L"höst", host, sizeof(host), &port), "non-ASCII refused");
+    expect(lobby_callsign(L"  Phantom ", "PLAYER") == "Phantom", "callsign trimmed");
+    expect(lobby_callsign(L"Ünïcode", "PLAYER") == "ncode", "non-ASCII letters dropped");
+    expect(lobby_callsign(L"ABCDEFGHIJKLMNOPQRST", "PLAYER") == "ABCDEFGHIJKLMNO", "at most 15 characters");
+    expect(lobby_callsign(L"   ", "PLAYER") == "PLAYER" && lobby_callsign(L"", "PLAYER") == "PLAYER",
+           "empty uses the fallback");
+}
+
+// Threads of this process (Toolhelp), to see that a session's threads are all gone after it closes.
+int process_threads() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    int n = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+        if (te.th32OwnerProcessID == GetCurrentProcessId()) ++n;
+    CloseHandle(snap);
+    return n;
+}
+
+DWORD process_handles() {
+    DWORD n = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &n);
+    return n;
+}
+
+// The lobby's session cycle: a new core per session (host: HostCore; client: ClientCore and a MissionFetch against it),
+// started, used, stopped and deleted on one thread, three times. No thread or handle may be left over.
+void session_lifecycle_tests() {
+    std::printf("session lifecycle\n");
+    auto quiet = [](const char*) {};
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const int threads0 = process_threads();
+    const DWORD handles0 = process_handles();
+    bool all_ran = true, all_fetched = true;
+    for (int round = 0; round < 3; ++round) {
+        auto* host = new HostCore;
+        all_ran &= host->start("127.0.0.1", 0, quiet);
+        for (int i = 0; i < 2000 && host->state() == HostCore::State::Starting; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        all_ran &= host->state() == HostCore::State::Running;
+        const uint16_t port = host->port();
+        auto* fetch = new MissionFetch;
+        all_fetched &= fetch->start("127.0.0.1", port, 0x1234u + round, quiet, 200);
+        auto* client = new ClientCore;
+        HelloMsg hello{};
+        set_str(hello.callsign, "LIFECYCLE");
+        all_ran &= client->start("127.0.0.1", port, hello, quiet);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        client->stop(false);
+        delete client;
+        delete fetch;  // stops and joins
+        host->stop(false);
+        all_ran &= host->state() == HostCore::State::Idle;
+        delete host;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const int threads1 = process_threads();
+    const DWORD handles1 = process_handles();
+    std::printf("    threads %d -> %d, handles %lu -> %lu\n", threads0, threads1, handles0, handles1);
+    expect(all_ran, "three host/client sessions start, run and stop");
+    expect(all_fetched, "a mission fetch starts in each session and is deleted with it");
+    expect(threads1 <= threads0, "no thread left after three sessions");
+    expect(handles1 <= handles0 + 8, "no handles leaked (within the CRT's own slack)");
 }
 
 namespace {
@@ -9407,6 +9493,8 @@ int main() {
     client_logic_tests();
     gameplay_row_splice_tests();
     lobby_splice_tests();
+    lobby_logic_tests();
+    session_lifecycle_tests();
     pilot_twist_tests();
     probe_snapshot_tests();
     world_files_tests();

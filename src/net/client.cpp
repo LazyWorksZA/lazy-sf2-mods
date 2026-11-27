@@ -44,8 +44,10 @@ constexpr double kParkAfter = 10.0;   // wall seconds without a State before a r
 constexpr double kShownEvery = 0.1;   // RemoteShown records per remote, host seconds (and every Snap)
 constexpr double kTakeEvery = 1.0;    // host seconds between tries to take an aircraft for a remote
 
-// Set once by client_install(), then read-only.
-bool g_enabled = false;
+// Set by client_install() (LAZYSF2_CONNECT, for the process) or by a lobby session (client_session_start/stop, menus
+// only: no step runs then).
+std::atomic<bool> g_enabled{false};
+bool g_from_env = false;
 char g_host[64] = {};
 uint16_t g_port = 0;
 char g_callsign[16] = "PLAYER";  // LAZYSF2_CALLSIGN, printable ASCII, at most 15 characters (the wire field)
@@ -900,9 +902,83 @@ void client_install() {
             LOG("net: client: LAZYSF2_NET_JOIN must be move or none; using move");
         }
     }
+    g_from_env = true;
     g_enabled = true;
     LOG("net: client on: joins %s:%u as \"%s\" when a flight starts; join %s", g_host, static_cast<unsigned>(g_port),
         g_callsign, g_join_move ? "move (onto the host's wing)" : "none (fly to the host)");
+}
+
+namespace {
+
+// The step callback (once) and the objects; a fresh core each lobby session (a stopped core does not start again
+// once its connection has ended).
+bool make_objects() {
+    if (!g_stream) g_stream = new (std::nothrow) net::StreamWriter;
+    if (!g_rm) g_rm = new (std::nothrow) Remote[kSources];
+    if (!g_core) g_core = new (std::nothrow) ClientCore;
+    if (!g_core || !g_stream || !g_rm) {
+        LOG("net: client off (out of memory)");
+        return false;
+    }
+    if (!sim_register_step_callback(on_step)) {
+        LOG("net: client off (no free step callback slot)");
+        return false;
+    }
+    return true;
+}
+
+void reset_link() {
+    g_link = Link::Idle;
+    g_leaving = g_disconnected = false;
+    g_next_try = 0;
+    g_blocked = false;
+    g_wait_logged = nullptr;
+    g_attempts = 0;
+    g_retry_quiet = false;
+    g_refused.clear();
+    g_moved = false;
+    g_epoch = sim_player_epoch();
+    g_checked_gen = g_aircraft_generation.load(std::memory_order_acquire);
+}
+
+}  // namespace
+
+bool client_session_start(const char* host, uint16_t port, const char* callsign, const char** why) {
+    if (g_from_env) {
+        *why = "LAZYSF2_CONNECT is set for this launch";
+        return false;
+    }
+    if (g_enabled.load() || g_running.load()) {
+        *why = "a client session is already running";
+        return false;
+    }
+    std::snprintf(g_host, sizeof(g_host), "%s", host);
+    g_port = port;
+    std::snprintf(g_callsign, sizeof(g_callsign), "%s", callsign && *callsign ? callsign : "PLAYER");
+    if (!make_objects()) {
+        *why = "out of memory";
+        return false;
+    }
+    reset_link();
+    g_enabled = true;
+    g_running.store(true);
+    LOG("net: client session: joins %s:%u as \"%s\" when a flight starts", g_host, static_cast<unsigned>(g_port), g_callsign);
+    return true;
+}
+
+void client_session_stop() {
+    if (g_from_env || !g_running.exchange(false)) return;
+    if (g_link == Link::Running) {
+        if (!g_leaving && !g_disconnected) g_core->bye(kByeSessionEnded);
+        g_core->stop(false);  // a Bye gets its short chance to go out, then the thread is joined
+    }
+    end_session("left the session");
+    g_stream->close(false);
+    delete g_core;  // joined above: no thread left
+    g_core = nullptr;
+    reset_link();
+    g_enabled = false;
+    LOG("net: client session closed");
 }
 
 bool client_world_send(const uint8_t* data, size_t len, bool reliable) {
@@ -936,7 +1012,7 @@ bool client_connect_target(char* host, size_t cap, uint16_t* port) {
 
 void client_on_modules_loaded() {
     static std::atomic<bool> once{false};
-    if (!g_enabled || once.exchange(true)) return;
+    if (!g_from_env || once.exchange(true)) return;
     g_core = new (std::nothrow) ClientCore;
     g_stream = new (std::nothrow) net::StreamWriter;
     g_rm = new (std::nothrow) Remote[kSources];

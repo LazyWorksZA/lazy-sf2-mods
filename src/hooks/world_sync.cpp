@@ -89,7 +89,9 @@ constexpr size_t kObjFlags = 0x0c, kObjPos = 0x38, kObjAngles = 0x100;
 constexpr size_t kAircraftData = 0x380, kGroundTypeRec = 0x360, kTypeName = 0x04;
 
 enum class Mode { Off, Save, Load };
-Mode g_mode = Mode::Off;          // set once in world_install()
+// Set in world_install() from the variables, or by a lobby session (world_session_begin/end, menus only).
+Mode g_mode = Mode::Off;
+std::wstring g_session_dir;       // lobby session: where the world files go when the probe is off
 std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
 bool g_join = false;              // LAZYSF2_WORLD_JOIN=1 (with LAZYSF2_CONNECT): fetch the host's mission in menus
 bool g_seat_from_env = false;     // LAZYSF2_WORLD_SEAT was given: it wins over the host's seat
@@ -97,13 +99,19 @@ uint32_t g_tag = 0;               // join: this launch's world tag (the host key
 uint32_t g_fetched_id = 0;        // join: the mission id behind g_load_path
 uint32_t g_flying_id = 0;         // join: the mission id of the flight under way (0: not the host's)
 int g_host_seat = 0;              // join: the member the host flies
-net::MissionFetch* g_fetch = nullptr;  // never freed (no join at DLL unload)
+net::MissionFetch* g_fetch = nullptr;  // freed at a lobby session's end only (no join at DLL unload)
 std::atomic<bool> g_world_host{false};  // a mission was published: this host streams its world to clients
 uint32_t g_published_id = 0;  // the mission this host serves (game thread)
 bool g_remote = false;            // LAZYSF2_WORLD_REMOTE=1
 int g_seat = -1;                  // LAZYSF2_WORLD_SEAT: the player's member index, or -1 (stock)
 bool g_seed_from_env = false;
 uint32_t g_env_seed = 0;
+
+// The probe folder (the variables), else the lobby session's folder; empty outside both.
+std::wstring world_files_dir() {
+    if (const wchar_t* p = probe_output_dir()) return p;
+    return g_session_dir;
+}
 
 // What an Accept armed for the next start call. Menu and flight start run on the game's main thread, but the start
 // hook and the getter read it without assuming that.
@@ -601,7 +609,11 @@ bool load_page_path(const void* page, wchar_t* out, size_t cap) {
 // source: null for the generated mission (written by MSN Save); else the Load page's file, copied byte for byte (loose
 // or from a cat, through the exe's file manager) so hand-made keys survive.
 void accept_save(const Ctx& c, void* page, const wchar_t* source) {
-    const std::wstring dir = probe_output_dir();
+    const std::wstring dir = world_files_dir();
+    if (dir.empty()) {
+        LOG("world: save refused (no folder for the world files)");
+        return;
+    }
     const int n = next_number(dir);
     const std::wstring msn_path = numbered(dir, n, L".msn");
     const std::wstring side_path = world_companion_path(msn_path, L".sidecar.txt");
@@ -682,7 +694,11 @@ void take_fetched_mission() {
         LOG("world: join: the host's mission 0x%08lx is unusable (%s)", static_cast<unsigned long>(offer.mission_id), why);
         return;
     }
-    const std::wstring dir = probe_output_dir();
+    const std::wstring dir = world_files_dir();
+    if (dir.empty()) {
+        LOG("world: join: no folder for the world files; the host's mission is not kept");
+        return;
+    }
     const int n = next_number(dir);
     const std::wstring msn_path = numbered(dir, n, L".msn");
     const std::wstring side_path = world_companion_path(msn_path, L".sidecar.txt");
@@ -788,7 +804,7 @@ void accept_load(const Ctx& c, void* page, bool new_page) {
     HeaderRaw h{};
     if (read_header(c.msn, &h) && s.theatre != h.map)
         LOG("world: WARNING the loaded mission's theatre is %s, the sidecar says %s", h.map, s.theatre.c_str());
-    const std::wstring dir = probe_output_dir();
+    const std::wstring dir = world_files_dir();
     const int n = next_number(dir);
     LOG("world: loaded %ls instead of the generated mission (theatre %s, %s, %04d-%02d-%02d %02d:%02d, weather %d), "
         "seed %lu; at the start: density %d, mission start %d",
@@ -801,7 +817,7 @@ void accept_load(const Ctx& c, void* page, bool new_page) {
 
 int __fastcall h_NewEvent(void* page, void* edx, int ev) {
     const int r = o_NewEvent(page, edx, ev);
-    if (ev != kEventAccept && ev != kEventFly) return r;
+    if (g_mode == Mode::Off || (ev != kEventAccept && ev != kEventFly)) return r;  // Off: a lobby session has ended
     Ctx c{};
     if (!resolve(&c, "New page Accept")) return r;
     if (g_mode == Mode::Save) accept_save(c, page, nullptr);
@@ -814,7 +830,7 @@ int __fastcall h_NewEvent(void* page, void* edx, int ev) {
 NewEvent_t o_LoadEvent = nullptr;
 int __fastcall h_LoadEvent(void* page, void* edx, int ev) {
     const int r = o_LoadEvent(page, edx, ev);
-    if (ev != kEventAccept && ev != kEventFly) return r;
+    if (g_mode == Mode::Off || (ev != kEventAccept && ev != kEventFly)) return r;
     Ctx c{};
     if (!resolve(&c, "Load page Accept")) return r;
     if (g_mode == Mode::Save) {
@@ -972,7 +988,7 @@ void write_manifest(const Ctx& c, const Armed& a, int rnd_index, int rnd_seed) {
                   t.count, t.first_ground, h.flights, empty_formations, n_areas, populated);
     header.push_back(b);
     const std::string text = format_manifest(header, v);
-    const std::wstring path = numbered(probe_output_dir(), a.number, L".manifest.txt");
+    const std::wstring path = numbered(world_files_dir(), a.number, L".manifest.txt");
     if (!write_text(path, text, true)) {
         LOG("world: ERR could not write %ls (exists, or path too long)", path.c_str());
         return;
@@ -2752,11 +2768,61 @@ void fetch_log(const char* line) { LOG("%s", line); }
 void start_fetch() {
     char host[64] = {};
     uint16_t port = 0;
-    g_fetch = new (std::nothrow) net::MissionFetch;
+    if (!g_fetch) g_fetch = new (std::nothrow) net::MissionFetch;
     if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !g_fetch->start(host, port, g_tag, fetch_log))
         LOG("world: join: could not start the mission fetch");
 }
+
+uint32_t new_tag() {
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    return (static_cast<uint32_t>(qpc.QuadPart) ^ static_cast<uint32_t>(qpc.QuadPart >> 32) ^
+            (GetCurrentProcessId() << 12)) | 1u;  // never 0
+}
 }  // namespace
+
+bool world_session_begin(bool host, const std::wstring& dir) {
+    if (g_mode != Mode::Off || g_join || g_remote || g_seat >= 0) {
+        LOG("world: a session is already configured (LAZYSF2_WORLD_* or an earlier session); not changed");
+        return false;
+    }
+    g_session_dir = dir;
+    g_seed_from_env = false;
+    g_load_path.clear();
+    g_fetched_id = g_flying_id = 0;
+    g_host_seat = 0;
+    if (host) {
+        g_mode = Mode::Save;
+        LOG("world: session: each New- or Load-page Accept saves the mission to %ls and serves it", dir.c_str());
+    } else {
+        g_join = true;
+        g_tag = new_tag();
+        g_mode = Mode::Load;
+        g_seat = 1;  // until the host suggests one
+        g_remote = true;
+        start_fetch();
+        LOG("world: session: the host's mission is fetched in menus and flown at the next Accept");
+    }
+    world_on_modules_loaded();  // hooks the images already loaded for what this mode needs
+    return true;
+}
+
+void world_session_end() {
+    delete g_fetch;  // stops and joins its thread; a fetch cannot be restarted, so the next session makes a new one
+    g_fetch = nullptr;
+    g_world_host = false;
+    g_published_id = 0;
+    g_mode = Mode::Off;
+    g_join = false;
+    g_remote = false;
+    g_remote_on = false;  // our world is local again (as after a handover takeover)
+    g_seat = -1;
+    g_tag = 0;
+    g_load_path.clear();
+    g_fetched_id = g_flying_id = 0;
+    g_session_dir.clear();
+    LOG("world: session ended; Single Mission is stock again");
+}
 
 uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 
@@ -2815,7 +2881,7 @@ void world_on_modules_loaded() {
     if (sm_n) hook_image(L"SingleMission.dll", "SingleMission.dll", kSmStamp, kSmSize, sm_defs, sm_n, g_sm, g_sm_bad);
     // The damage hooks: on a joined client (the remote block and the hit claims), and on a host that serves its
     // mission (gun hits on the clients' avatars go to their owners).
-    if (!g_remote && !(g_mode == Mode::Save && env_set(L"LAZYSF2_HOST"))) return;
+    if (!g_remote && !(g_mode == Mode::Save && host_configured())) return;
 #define LZ_DMG(K, ARGS, RVA, ...)                                                                         \
     {RVA, reinterpret_cast<void*>(&h_dmg##ARGS<K>), &g_dmg_orig[K], "world: damage block " #K, {__VA_ARGS__}, 9}
     static const HookDef kAo[] = {

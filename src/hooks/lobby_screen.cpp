@@ -4,12 +4,14 @@
 // object. See lazy-sf2-recon: recon-notes §28.
 #include <windows.h>
 
+#include <cstring>
 #include <cwchar>
 #include <string>
 
 #include "config.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/lobby_logic.h"
 #include "hooks/lobby_splice.h"
 #include "log.h"
 
@@ -163,6 +165,52 @@ int clicked_item(const int* ev) {
     return item > 0 && item_iface(item, kIfaceSelection) ? item : 0;
 }
 
+/// <summary>The active pilot's callsign for the wire (printable ASCII, 15 characters).</summary>
+std::string wire_callsign() {
+    wchar_t callsign[64] = {};
+    read_option(L"Pilot", L"Callsign", callsign, _countof(callsign));
+    return lobby_callsign(callsign, "PLAYER");
+}
+
+void start_host() {
+    take_address();
+    const std::string cs = wire_callsign();
+    std::string why;
+    if (!net_session_host(kLobbyPort, cs.c_str(), &why)) {
+        LOG("lobby: Host refused: %s", why.c_str());
+        set_status((L"Could not host: " + std::wstring(why.begin(), why.end()) + L".").c_str());
+        return;
+    }
+    LOG("lobby: hosting as \"%s\" on port %u", cs.c_str(), static_cast<unsigned>(kLobbyPort));
+    post(kCmdGoTo, lobby_item::kHost);
+}
+
+void start_join() {
+    const std::wstring a = take_address();
+    char host[64] = {};
+    uint16_t port = 0;
+    if (a.empty()) {
+        LOG("lobby: Join clicked with no address");
+        set_status(L"Type the host's address first.");
+        return;
+    }
+    if (!parse_lobby_address(a, host, sizeof(host), &port)) {
+        LOG("lobby: Join refused: \"%ls\" is not an address", a.c_str());
+        set_status(L"That is not an address: use a name or IP, with :port if not 7777.");
+        return;
+    }
+    const std::string cs = wire_callsign();
+    std::string why;
+    if (!net_session_join(host, port, cs.c_str(), &why)) {
+        LOG("lobby: Join refused: %s", why.c_str());
+        set_status((L"Could not join: " + std::wstring(why.begin(), why.end()) + L".").c_str());
+        return;
+    }
+    g_join_address = std::wstring(host, host + std::strlen(host)) + L":" + std::to_wstring(port);
+    LOG("lobby: joining %s:%u as \"%s\"", host, static_cast<unsigned>(port), cs.c_str());
+    post(kCmdGoTo, lobby_item::kJoin);
+}
+
 void connect_click(int item) {
     switch (item) {
         case lobby_item::kBack:
@@ -170,25 +218,12 @@ void connect_click(int item) {
             LOG("lobby: Back");
             post(kCmdGoTo, item);
             break;
-        case lobby_item::kHost: {
-            const std::wstring a = take_address();
-            // L3 starts the host here and goes on only if it runs.
-            LOG("lobby: Host clicked (address \"%ls\"); session control is not wired up yet", a.c_str());
-            post(kCmdGoTo, item);
+        case lobby_item::kHost:
+            start_host();
             break;
-        }
-        case lobby_item::kJoin: {
-            const std::wstring a = take_address();
-            if (a.empty()) {
-                LOG("lobby: Join clicked with no address");
-                set_status(L"Type the host's address first.");
-                break;
-            }
-            g_join_address = a;
-            LOG("lobby: Join clicked (address \"%ls\"); session control is not wired up yet", a.c_str());
-            post(kCmdGoTo, item);
+        case lobby_item::kJoin:
+            start_join();
             break;
-        }
         default:
             break;
     }
@@ -199,6 +234,7 @@ void session_click(int item) {
     switch (item) {
         case session_item::kLeave:
             LOG("lobby: %s", host ? "Close session" : "Leave");
+            net_session_close();
             post(kCmdGoTo, item);
             break;
         case session_item::kAction:
@@ -214,10 +250,32 @@ void session_click(int item) {
     }
 }
 
+// Host screen: the header follows the network thread (binding takes a moment; a port in use fails).
+bool g_host_bound = false;
+void host_frame() {
+    if (g_host_bound) return;
+    uint16_t port = 0;
+    bool failed = false;
+    if (host_session_port(&port, &failed)) {
+        g_host_bound = true;
+        const std::wstring h = L"Hosting on port " + std::to_wstring(port) + L" · 0 players joined";
+        set_text(session_item::kHeader, h.c_str());
+        set_status(L"Waiting for players. Set up the mission when you are ready.");
+    } else if (failed) {
+        g_host_bound = true;
+        LOG("lobby: the host could not open its port; closing the session");
+        net_session_close();
+        set_text(session_item::kHeader, L"Not hosting");
+        set_status(L"Could not open UDP port 7777: is another game or program using it?");
+    }
+}
+
 /// <summary>The handler object the menu system calls (thiscall slots: 0 frame, 2 refresh, 3 input event).</summary>
 class LobbyHandler {
 public:
-    virtual void frame() {}
+    virtual void frame() {
+        if (g_mnu && g_screen == Screen::Host) host_frame();
+    }
     virtual void unused() {}
     virtual void refresh() {}
     virtual void handle_event(const int* ev) {
@@ -242,6 +300,11 @@ Screen identify_screen() {
 }
 
 void init_connect_screen() {
+    // The connect screen is outside any session: one still open (a way out we did not see) closes here.
+    if (net_session_role() != NetRole::None) {
+        LOG("lobby: a session was still open on the connect screen; closing it");
+        net_session_close();
+    }
     wchar_t callsign[64] = {};
     read_option(L"Pilot", L"Callsign", callsign, _countof(callsign));
     set_text(lobby_item::kCallsign, callsign);
@@ -256,13 +319,23 @@ void init_connect_screen() {
         have_options ? "" : ", Options.ini not available");
 }
 
-// L3/L4 fill these from the session: "Hosting on port N · K players joined", "Host X · address · ping", the mission
-// summary, the pilot list and the "you fly" line.
+// L4 fills the player count, the host's callsign and ping, the mission summary, the pilot list and the "you fly" line.
 void init_session_screen() {
     const bool host = g_screen == Screen::Host;
-    std::wstring header = host ? L"Not hosting yet" : L"Not joined yet · " + g_join_address;
+    const NetRole role = net_session_role();
+    std::wstring header;
+    if (role != (host ? NetRole::Host : NetRole::Client)) {
+        header = L"Not in a session";
+        set_status(L"The session has ended. Go back to start a new one.");
+    } else if (host) {
+        g_host_bound = false;
+        header = L"Starting the host...";
+        set_status(L"Opening UDP port 7777...");
+    } else {
+        header = L"Host at " + g_join_address;
+        set_status(L"Waiting for the host's mission.");
+    }
     set_text(session_item::kHeader, header.c_str());
-    set_text(session_item::kStatus, L"Session control is not built yet.");
     LOG("lobby: %s screen opened (header \"%ls\")", host ? "host" : "join", header.c_str());
 }
 

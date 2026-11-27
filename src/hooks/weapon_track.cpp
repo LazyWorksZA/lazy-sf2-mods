@@ -240,7 +240,7 @@ void weapon_track_on_modules_loaded() {
         in.hooked_patched = mu == old && hooks_carry_patch(m);
         in.build_ok = in.hooked_patched ||
                       is_expected_build(m, kMissileTimestamp, kMissileImageSize, "MissileObject.dll");
-        in.wanted = tracking_wanted(probe, tacview);
+        in.wanted = tracking_wanted(probe || net_session_wanted(), tacview);
         in.had_old = old != 0;
         const LoadDecision d = decide_on_image(in);
         if (d.kind == LoadKind::Keep) break;
@@ -264,7 +264,7 @@ void weapon_track_on_modules_loaded() {
         }
         if (d.kind == LoadKind::Skip) {
             g_skip_base = mu;
-            LOG("weapons: not needed (probe off, Tacview Recording off); MissileObject.dll left unhooked");
+            LOG("weapons: not needed (probe off, Tacview Recording off, no network session); MissileObject.dll left unhooked");
             break;
         }
         install_and_publish(m, probe, tacview);
@@ -280,7 +280,7 @@ void weapon_track_reevaluate() {
     AcquireSRWLockExclusive(&g_install_lock);
     do {
         const bool hooked = m && mu == g_base.load() && hooks_carry_patch(m);
-        const bool wanted = tracking_wanted(probe, tacview);
+        const bool wanted = tracking_wanted(probe || net_session_wanted(), tacview);
         switch (decide_on_options_exit(m != nullptr && mu != g_bad_base.load(), hooked, wanted)) {
             case OptionsExitAction::Nothing:
                 break;
@@ -297,7 +297,7 @@ void weapon_track_reevaluate() {
                 g_skip_base = mu;
                 if (old_image_still_loaded(m)) remove_weapon_hooks(m);
                 clear_table();
-                LOG("weapons: no longer needed (Tacview Recording off, probe off); weapon hooks removed");
+                LOG("weapons: no longer needed (Tacview Recording off, probe off, no network session); weapon hooks removed");
                 break;
         }
     } while (false);

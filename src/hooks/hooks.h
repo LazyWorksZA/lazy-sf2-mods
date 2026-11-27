@@ -314,8 +314,9 @@ void step_order_on_modules_loaded();
 
 /// <summary>
 /// Host mode (developer tool; src/net/host.cpp): LAZYSF2_HOST=port or address:port (default 127.0.0.1) makes the
-/// mod listen for clients over UDP (ENet) and drive one AI aircraft per client as its avatar. Inert unless the
-/// probe is on. host_install() reads the variable once (DllMain, after install_probe_hooks());
+/// mod listen for clients over UDP (ENet) and drive one AI aircraft per client as its avatar. The variable needs the
+/// probe; a lobby session (host_session_start) does not. host_install() reads the variable once (DllMain, after
+/// install_probe_hooks());
 /// host_on_modules_loaded() starts the network thread and registers the step callback; host_shutdown() stops the
 /// thread and returns every avatar to the AI (DLL unload only).
 /// </summary>
@@ -329,7 +330,8 @@ bool host_has_clients();
 /// Client mode (developer tool; src/net/client.cpp): LAZYSF2_CONNECT=host:port makes the mod join a host once the
 /// player is airborne, move the own jet onto the host's wing (LAZYSF2_NET_JOIN=move, the default, or none), send its
 /// State at 20 Hz of host time and show the host and the other clients on AI aircraft. LAZYSF2_CALLSIGN names the
-/// player (default PLAYER). Inert unless the probe is on; with LAZYSF2_HOST also set, both stay off.
+/// player (default PLAYER). The variables need the probe (with LAZYSF2_HOST also set, both stay off); a lobby session
+/// (client_session_start) does not.
 /// client_install() reads the variables (DllMain, after host_install()); client_on_modules_loaded() registers the
 /// step callback; client_shutdown() ends the connection and gives the avatars back (DLL unload only).
 /// </summary>
@@ -339,7 +341,8 @@ void client_shutdown();
 /// <summary>True from the client's Welcome until its session ends. Any thread.</summary>
 bool client_welcomed();
 /// <summary>
-/// Shared mission world tooling (developer tool; world_sync.cpp), inert unless the probe is on. LAZYSF2_WORLD_SAVE=1
+/// Shared mission world (world_sync.cpp): the variables need the probe; a lobby session (world_session_begin) does not.
+/// LAZYSF2_WORLD_SAVE=1
 /// saves each Single Mission accepted on the New page to &lt;probe dir&gt;\world_NNN.msn (plus world_NNN.sidecar.txt:
 /// seed and start options) and runs from it; LAZYSF2_WORLD_LOAD=&lt;file&gt; runs that file instead, with the
 /// sidecar's seed and options forced. Both write world_NNN.manifest.txt after the mission's objects are created.
@@ -352,6 +355,34 @@ bool client_welcomed();
 /// </summary>
 void world_install();
 void world_on_modules_loaded();
+
+/// <summary>
+/// Lobby sessions (net_session.cpp; menus only, the menu thread): start a host or a client and the shared world at run
+/// time, without the probe, and close them again. The variables (LAZYSF2_HOST, LAZYSF2_CONNECT, LAZYSF2_WORLD_*) win:
+/// with them set, a start is refused with the reason in why.
+/// </summary>
+enum class NetRole { None, Host, Client };
+bool net_session_host(uint16_t port, const char* callsign, std::string* why);
+bool net_session_join(const char* host, uint16_t port, const char* callsign, std::string* why);
+void net_session_close();
+NetRole net_session_role();
+/// <summary>A lobby session is open: the aircraft and weapon trackers are wanted. Any thread.</summary>
+bool net_session_wanted();
+/// <summary>host.cpp: host mode is on (the variable or a lobby session). Any thread.</summary>
+bool host_configured();
+/// <summary>host.cpp, menus only: starts or stops host mode for a lobby session; why: a reason literal.</summary>
+bool host_session_start(const char* addr, uint16_t port, const char* callsign, const char** why);
+void host_session_stop();
+/// <summary>host.cpp: the bound port once the network thread runs (false before); failed: it could not bind.</summary>
+bool host_session_port(uint16_t* port, bool* failed);
+/// <summary>client.cpp, menus only: starts or stops client mode for a lobby session (it connects when a flight starts).</summary>
+bool client_session_start(const char* host, uint16_t port, const char* callsign, const char** why);
+void client_session_stop();
+/// <summary>world_sync.cpp, menus only: the shared world for a lobby session (host: save and serve each Accept;
+/// client: fetch the host's mission and fly it). dir holds the world files unless the probe is on.</summary>
+bool world_session_begin(bool host, const std::wstring& dir);
+void world_session_end();
+
 /// <summary>
 /// Host mode: the mission package (net/world_proto.h) to serve to clients that ask for it (T5). Any thread; kept
 /// until replaced, and handed to the network core once it runs. No-op without LAZYSF2_HOST.

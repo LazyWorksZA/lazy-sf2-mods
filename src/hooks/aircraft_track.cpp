@@ -293,7 +293,7 @@ void aircraft_track_on_modules_loaded() {
         in.hooked_patched = mu == old && hooks_carry_patch(m);
         in.build_ok = in.hooked_patched ||
                       is_expected_build(m, kAircraftTimestamp, kAircraftImageSize, "AircraftObject.dll");
-        in.wanted = tracking_wanted(probe, tacview);
+        in.wanted = tracking_wanted(probe || net_session_wanted(), tacview);
         in.had_old = old != 0;
         const LoadDecision d = decide_on_image(in);
         if (d.kind == LoadKind::Keep) break;  // another thread got here first
@@ -319,7 +319,7 @@ void aircraft_track_on_modules_loaded() {
         }
         if (d.kind == LoadKind::Skip) {
             g_skip_base = mu;
-            LOG("track: not needed (probe off, Tacview Recording off); AircraftObject.dll left unhooked");
+            LOG("track: not needed (probe off, Tacview Recording off, no network session); AircraftObject.dll left unhooked");
             break;
         }
         install_and_publish(m, probe, tacview);
@@ -338,7 +338,7 @@ void aircraft_track_reevaluate() {
     AcquireSRWLockExclusive(&g_install_lock);
     do {
         const bool hooked = m && mu == g_base.load() && hooks_carry_patch(m);
-        const bool wanted = tracking_wanted(probe, tacview);
+        const bool wanted = tracking_wanted(probe || net_session_wanted(), tacview);
         switch (decide_on_options_exit(m != nullptr && mu != g_bad_base.load(), hooked, wanted)) {
             case OptionsExitAction::Nothing:
                 break;
@@ -356,7 +356,7 @@ void aircraft_track_reevaluate() {
                 g_skip_base = mu;
                 if (old_image_still_loaded(m)) remove_track_hooks(m);
                 clear_table();
-                LOG("track: no longer needed (Tacview Recording off, probe off); aircraft hooks removed");
+                LOG("track: no longer needed (Tacview Recording off, probe off, no network session); aircraft hooks removed");
                 break;
         }
     } while (false);
