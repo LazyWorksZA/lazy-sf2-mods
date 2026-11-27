@@ -3257,6 +3257,12 @@ void lobby_splice_tests() {
     expect(!splice_lobby_screen(t, L"C:\\a;b\\winmm.dll") && t == sys, "path with ';' refused");
     expect(!splice_lobby_screen(t, L"C:\\" + std::wstring(220, L'a') + L"\\winmm.dll") && t == sys,
            "overlong path refused");
+    // The game draws menu text in its ANSI font: our text and the spliced ini stay ASCII (the source is not UTF-8).
+    bool ascii = true;
+    for (const LobbyText& lt : kLobbyTexts)
+        for (const wchar_t* q = lt.text; *q; ++q) ascii &= *q >= 0x20 && *q < 0x7f;
+    for (wchar_t ch : once) ascii &= ch < 0x7f;
+    expect(ascii, "our menu strings and the spliced lobby screens are plain ASCII");
 }
 
 void lobby_logic_tests() {

@@ -317,7 +317,7 @@ void host_frame() {
     bool failed = false;
     if (host_session_port(&port, &failed)) {
         g_host_bound = true;
-        const std::wstring h = L"Hosting on port " + std::to_wstring(port) + L" · 0 players joined";
+        const std::wstring h = L"Hosting on port " + std::to_wstring(port) + L" - 0 players joined";
         set_text(session_item::kHeader, h.c_str());
         set_status(L"Waiting for players. Set up the mission when you are ready.");
     } else if (failed) {
