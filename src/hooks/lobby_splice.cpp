@@ -214,12 +214,18 @@ bool splice_single_mission_for_lobby(std::wstring& text) {
     return true;
 }
 
-bool splice_debrief_for_lobby(std::wstring& text, bool host) {
+namespace {
+int add_return_item(std::wstring& t, const wchar_t* screen, bool host);  // below
+}  // namespace
+
+int splice_debrief_for_lobby(std::wstring& text, bool host) {
     std::wstring t = text;
     size_t b = 0, e = 0;
-    if (!section_range(t, L"ExitButton", b, e)) return false;
+    if (!section_range(t, L"ExitButton", b, e) || !section_range(t, L"ReflyButton", b, e)) return 0;  // Refly must hide
+    const int id = add_return_item(t, L"DebriefScreen", host);
+    if (!id || !section_range(t, L"ExitButton", b, e)) return 0;
     set_key(t, b, e, L"DestinationMenu", host ? kLobbyHostScreen : kLobbyJoinScreen);
-    if (!section_range(t, L"ReflyButton", b, e)) return false;  // a Refly we cannot hide would fly alone
+    section_range(t, L"ReflyButton", b, e);
     set_key(t, b, e, L"Active", L"FALSE");
     set_key(t, b, e, L"Enabled", L"FALSE");
     set_key(t, b, e, L"TextPosition", L"4000,4000");
@@ -230,13 +236,32 @@ bool splice_debrief_for_lobby(std::wstring& text, bool host) {
         set_key(t, b, e, L"DestinationMenu", L"DebriefScreen");
     }
     text = std::move(t);
-    return true;
+    return id;
 }
 
-int splice_hangar_for_lobby(std::wstring& text, bool host) {
-    std::wstring t = text;
+int screen_item_number(const std::wstring& text, const wchar_t* screen, const wchar_t* item) {
     size_t b = 0, e = 0;
-    if (!section_range(t, L"HangarScreen", b, e) || lower(t).find(L"[lazylobbyreturn]") != std::wstring::npos) return 0;
+    if (!section_range(text, screen, b, e)) return 0;
+    const std::wstring want = lower(item);
+    for (size_t p = text.find(L"MenuItem", b); p != std::wstring::npos && p < e; p = text.find(L"MenuItem", p + 8)) {
+        if (p > 0 && text[p - 1] != L'\n') continue;
+        int id = 0;
+        if (swscanf_s(text.c_str() + p, L"MenuItem%d=", &id) != 1) continue;
+        const size_t v = text.find(L'=', p) + 1;
+        size_t eol = text.find_first_of(L"\r\n", v);
+        if (eol == std::wstring::npos) eol = text.size();
+        if (lower(text.substr(v, eol - v)) == want) return id;
+    }
+    return 0;
+}
+
+namespace {
+
+// Adds the hidden [LazyLobbyReturn] TEXTBUTTON (to the host or join screen) as the screen's next MenuItem; returns
+// its number, or 0 (t untouched) if the screen section is not as expected.
+int add_return_item(std::wstring& t, const wchar_t* screen, bool host) {
+    size_t b = 0, e = 0;
+    if (!section_range(t, screen, b, e) || lower(t).find(L"[lazylobbyreturn]") != std::wstring::npos) return 0;
     // The next free MenuItem number of the screen, and the line after its last MenuItem line.
     int max_id = 0;
     size_t ins = b;
@@ -253,14 +278,6 @@ int splice_hangar_for_lobby(std::wstring& text, bool host) {
     wchar_t line[64];
     swprintf_s(line, L"MenuItem%03d=LazyLobbyReturn\r\n", id);
     t.insert(ins, line);
-    if (section_range(t, L"FlyButton", b, e)) {
-        set_key(t, b, e, L"TextStringID", host ? L"TXT_LAZY_LOBBY_DONE" : L"TXT_LAZY_LOBBY_READY");
-        set_key(t, b, e, L"InfoTextStringID", host ? L"TXT_LAZY_LOBBY_DONE_INFO" : L"TXT_LAZY_LOBBY_HANGAR_READY");
-    }
-    if (!host && section_range(t, L"LoadoutButton", b, e)) {  // clients fly the host's loadout (v1)
-        set_key(t, b, e, L"Active", L"FALSE");
-        set_key(t, b, e, L"Enabled", L"FALSE");
-    }
     if (!t.empty() && t.back() != L'\n') t += L"\r\n";
     t += L"\r\n[LazyLobbyReturn]\r\n"
          L"MenuItemType=TEXTBUTTON\r\n"
@@ -273,6 +290,24 @@ int splice_hangar_for_lobby(std::wstring& text, bool host) {
          L"TextPosition=-200,-200\r\n"
          L"Active=FALSE\r\n"
          L"Enabled=FALSE\r\n";
+    return id;
+}
+
+}  // namespace
+
+int splice_hangar_for_lobby(std::wstring& text, bool host) {
+    std::wstring t = text;
+    size_t b = 0, e = 0;
+    const int id = add_return_item(t, L"HangarScreen", host);
+    if (!id) return 0;
+    if (section_range(t, L"FlyButton", b, e)) {
+        set_key(t, b, e, L"TextStringID", host ? L"TXT_LAZY_LOBBY_DONE" : L"TXT_LAZY_LOBBY_READY");
+        set_key(t, b, e, L"InfoTextStringID", host ? L"TXT_LAZY_LOBBY_DONE_INFO" : L"TXT_LAZY_LOBBY_HANGAR_READY");
+    }
+    if (!host && section_range(t, L"LoadoutButton", b, e)) {  // clients fly the host's loadout (v1)
+        set_key(t, b, e, L"Active", L"FALSE");
+        set_key(t, b, e, L"Enabled", L"FALSE");
+    }
     text = std::move(t);
     return id;
 }

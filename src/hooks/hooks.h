@@ -121,6 +121,11 @@ void lobby_hangar_enter(void* self);
 void lobby_hangar_leave();
 /// <summary>Menu thread: the menus start again (MenuSystem.ini read), as after a flight.</summary>
 void lobby_menus_entered();
+/// <summary>Menu thread: the session Debrief's hidden way back to the lobby while it is the open screen, and its Exit
+/// (Accept) item; 0 when none.</summary>
+int lobby_debrief_return_item(int* exit_item);
+/// <summary>Menu thread: one of our screens opened (the Debrief is closed).</summary>
+void lobby_debrief_closed();
 /// <summary>Join: the id of the host's mission the next load flies (0: none).</summary>
 uint32_t world_lobby_fetched_id();
 

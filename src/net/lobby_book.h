@@ -116,6 +116,14 @@ public:
         return p ? p->seat : -1;
     }
     int host_seat() const { return seat_of(kHostTag); }
+    /// <summary>The row of tag: its seat and when it was last heard of; false if there is none.</summary>
+    bool info(uint32_t tag, int* seat, uint64_t* seen_ms) const {
+        const Pilot* p = find(tag);
+        if (!p) return false;
+        *seat = p->seat;
+        *seen_ms = p->seen_ms;
+        return true;
+    }
     bool ready(uint32_t tag) const {
         const Pilot* p = find(tag);
         return p && p->ready;
@@ -129,11 +137,29 @@ public:
 
     /// <summary>The host's seat for a flight of `members` (the game thread, as the flight starts): a seat of that
     /// flight the book keeps for the host (it never flies a client's). -1 only without a host row or a flight.</summary>
+    /// The book's flight (members()) and the clients' seats are left as they are unless the host needs one of them.
     int host_seat_for(int members) {
         Pilot* h = find(kHostTag);
-        if (!h) return -1;
-        if (members != members_ || h->seat < 0 || h->seat >= members_) set_members(members);
-        return h->seat;
+        if (!h || members <= 0) return -1;
+        if (h->seat >= 0 && h->seat < members) return h->seat;
+        for (int m = 0; m < members; ++m) {
+            if (!held(m)) {
+                h->seat = m;
+                return m;
+            }
+        }
+        // Every seat of that flight is a client's: the last client to join gives up its seat.
+        for (size_t i = n_; i > 0; --i) {
+            Pilot& p = p_[i - 1];
+            if (p.tag != kHostTag && p.seat >= 0 && p.seat < members) {
+                h->seat = p.seat;
+                p.seat = -1;
+                p.ready = false;
+                p.seat = client_free();
+                return h->seat;
+            }
+        }
+        return -1;
     }
 
     /// <summary>The roster for one reader: the pilots and the free seats (flown by the AI) in seat order, pilots without

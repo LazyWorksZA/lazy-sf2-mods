@@ -115,9 +115,12 @@ bool splice_single_mission_for_lobby(std::wstring& text);
 /// number (the Hangar hook posts it instead of Fly), or 0 and leaves the text untouched if the file is not as expected.
 /// </summary>
 int splice_hangar_for_lobby(std::wstring& text, bool host);
-/// <summary>DEBRIEFSCREEN.INI in a lobby session (L8): Exit (its OK) goes back to the host or join screen; Refly and
-/// the Mission Editor are moved off the screen (the screen's code keeps them active). False (text untouched) if the
-/// file is not as expected.</summary>
-bool splice_debrief_for_lobby(std::wstring& text, bool host);
+/// <summary>DEBRIEFSCREEN.INI in a lobby session (L8): Exit (the Accept button) goes back to the host or join screen,
+/// also through a hidden [LazyLobbyReturn] item (the screen's code sets Exit's destination itself); Refly and the
+/// Mission Editor are moved off the screen. Returns the hidden item's number, or 0 (text untouched) if the file is not
+/// as expected.</summary>
+int splice_debrief_for_lobby(std::wstring& text, bool host);
+/// <summary>The MenuItem number under which [screen] lists item, or 0.</summary>
+int screen_item_number(const std::wstring& text, const wchar_t* screen, const wchar_t* item);
 
 }  // namespace LazyWorks::SF2Patch::hooks

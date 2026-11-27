@@ -74,6 +74,8 @@ int g_selected = 0;                  // current selection on the Graphics page (
 
 // Menu inis we edit as the file service reads them.
 enum class MenuFile : int { None, Options, MenuSystem, MainScreen, SingleMission, Hangar, Debrief };
+std::atomic<int> g_debrief_return{0};  // the session Debrief's hidden way back while it is the open screen (0: none)
+std::atomic<int> g_debrief_exit{0};    // ... and its Exit (Accept) item number
 std::atomic<int> g_hangar_return{0};  // the Hangar's hidden back-to-lobby item in this menu session (0: none)
 
 bool ends_with_file(const wchar_t* name, const wchar_t* file) {
@@ -84,6 +86,12 @@ bool ends_with_file(const wchar_t* name, const wchar_t* file) {
 
 MenuFile menu_file(const wchar_t* name) {
     if (!name) return MenuFile::None;
+    {
+        // Another screen opens: the Debrief's way back no longer applies (its item numbers mean other buttons there).
+        const size_t n = wcslen(name);
+        if (n >= 10 && _wcsicmp(name + n - 10, L"Screen.ini") == 0 && !ends_with_file(name, L"DebriefScreen.ini"))
+            g_debrief_return = 0;
+    }
     if (ends_with_file(name, L"OptionsScreen.ini")) return MenuFile::Options;
     if (ends_with_file(name, L"MenuSystem.ini")) return MenuFile::MenuSystem;
     if (ends_with_file(name, L"MainScreen.ini")) return MenuFile::MainScreen;
@@ -95,6 +103,8 @@ MenuFile menu_file(const wchar_t* name) {
         if (ends_with_file(name, L"DebriefScreen.ini")) return MenuFile::Debrief;
     } else if (ends_with_file(name, L"HangarScreen.ini")) {
         g_hangar_return = 0;  // a stock Hangar: its Fly is the game's own
+    } else if (ends_with_file(name, L"DebriefScreen.ini")) {
+        g_debrief_return = 0;
     }
     return MenuFile::None;
 }
@@ -380,11 +390,16 @@ int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
     }
     if (kind == MenuFile::Debrief) {
         const bool host = net_session_role() == NetRole::Host;
-        const size_t need = splice_debrief_for_lobby(text, host) ? encode_ini(text, wide, buf, bytes) : 0;
+        g_debrief_return = 0;
+        const int exit_item = screen_item_number(text, L"DebriefScreen", L"ExitButton");
+        const int item = exit_item ? splice_debrief_for_lobby(text, host) : 0;
+        const size_t need = item ? encode_ini(text, wide, buf, bytes) : 0;
         if (!need) {
             LOG("menu: DEBRIEFSCREEN.INI left stock in the lobby session (not as expected, or no room)");
             return n;
         }
+        g_debrief_exit = exit_item;
+        g_debrief_return = item;
         LOG("menu: Debrief set for the lobby session (Exit returns to the %s screen, no Refly)", host ? "host" : "join");
         return static_cast<int>(need);
     }
@@ -901,6 +916,11 @@ bool old_opts_still_loaded(HMODULE base) {
 }  // namespace
 
 int lobby_hangar_return_item() { return g_hangar_return.load(); }
+int lobby_debrief_return_item(int* exit_item) {
+    if (exit_item) *exit_item = g_debrief_exit.load();
+    return g_debrief_return.load();
+}
+void lobby_debrief_closed() { g_debrief_return = 0; }
 
 bool install_menu_hooks() {
     HMODULE exe = GetModuleHandleW(nullptr);

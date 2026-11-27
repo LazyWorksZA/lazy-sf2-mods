@@ -1341,8 +1341,8 @@ void bot_loopback_tests() {
                "connected but no Welcome: exit code 3 after about 15 s");
         expect(silent.welcomed && silent.code == 4 && silent.secs > 3.5 && silent.secs < 9.0,
                "host silent after the Welcome: exit code 4 after about 4 s");
-        expect(kicked.code == 4 && kicked.secs > 3.5 && kicked.secs < 9.0,
-               "the core drops a client that is never welcomed: the bot exits 4");
+        expect(kicked.code == 3 && kicked.secs > 14.0 && kicked.secs < 22.0,
+               "the core keeps a client waiting for its Welcome (the host may be loading): the bot gives up after 15 s");
     }
     {
         const BotSession r = run_clean_session(bot::Script::Climb, 20.0, 1.0, 0.0, 0.0, 0.0);
@@ -10126,7 +10126,7 @@ void lobby_book_tests() {
     e.set_host("ALPHA", 3);
     e.update(0x8, "BRAVO", false, 0, false, 0);
     expect(e.host_seat() == 3 && e.seat_of(0x8) == 0, "host at #4, a client at #1");
-    expect(e.host_seat_for(2) == 1 && e.seat_of(0x8) == 0 && e.members() == 2,
+    expect(e.host_seat_for(2) == 1 && e.seat_of(0x8) == 0 && e.members() == 4,
            "a 2-ship: the host's seat is gone, so the book gives it the free #2, never the client's #1");
     expect(e.host_seat_for(2) == 1, "asked again for the same flight: the same seat");
     LobbyBook g;
@@ -10134,8 +10134,9 @@ void lobby_book_tests() {
     g.set_host("ALPHA", 3);
     g.update(0x8, "BRAVO", false, 0, false, 0);
     g.update(0x9, "CHARLIE", false, 1, false, 0);
-    expect(g.host_seat_for(2) == 1 && g.seat_of(0x8) == 0 && g.seat_of(0x9) == -1,
+    expect(g.host_seat_for(2) == 1 && g.seat_of(0x8) == 0 && g.seat_of(0x9) == 2,
            "a 2-ship full of clients: the host keeps a seat, the last client to join gives up its own");
+    expect(g.host_seat_for(2) == 1 && g.seat_of(0x8) == 0, "asked again: the host keeps that seat");
     LobbyBook k;
     k.set_members(2);
     k.update(0x8, "BRAVO", false, -1, false, 0);
@@ -10253,6 +10254,44 @@ void lobby_loopback_tests() {
     wait([&] { return lanswered = lanswered || f2.wish_answer(&lseat, &lres); });
     f2.roster(&r2, &rtt);
     expect(lanswered && lseat == 0 && lres == kLobbySeatTaken && r2.your_seat == s2, "a seat request after Launch is refused");
+    {
+        // The pilot follows the Launch: its flight connection (another port) asks with the lobby tag and says Hello.
+        TestClient fl;
+        fl.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+        ENetAddress ha{};
+        enet_address_set_host_ip(&ha, "127.0.0.1");
+        ha.port = core.port();
+        fl.peer = enet_host_connect(fl.host, &ha, kChannelCount, 0);
+        for (int i = 0; i < 2000 && fl.proofs == 0 && !fl.disconnected; ++i) fl.idle(1);
+        uint8_t b[256];
+        MissionRequestMsg rq{};
+        rq.tag = 0x22u;
+        fl.send(b, encode(rq, b, sizeof(b)), kChannelReliable);
+        HelloMsg hm{};
+        set_str(hm.callsign, "CHARLIE");
+        set_str(hm.aircraft, "F-4E");
+        hm.world_tag = 0x22u;
+        fl.send(b, encode(hm, b, sizeof(b)), kChannelReliable);
+        fl.idle(300);
+        uint8_t offered = kNoSeat;
+        for (const auto& g : fl.got) {
+            MissionOfferMsg mo;
+            if (decode(g.bytes.data(), g.bytes.size(), mo) == Status::Ok) offered = mo.seat;
+        }
+        bool hello = false;
+        HostEvent ev[16];
+        for (size_t n = core.poll(ev, 16); n; n = core.poll(ev, 16))
+            for (size_t i = 0; i < n; ++i)
+                hello = hello || (ev[i].kind == HostEvent::Message && ev[i].len > 3 && ev[i].data[3] == static_cast<uint8_t>(MsgType::Hello));
+        std::printf("    flight connection: offered %u, hello %d, seat_for %d (s2 %d)\n", offered, (int)hello, core.seat_for(0x22u), s2);
+        expect(fl.proofs == 1 && offered == s2 && hello && core.seat_for(0x22u) == s2,
+               "after Launch the pilot's flight connection gets the lobby seat for its tag");
+        core.set_mission(std::vector<uint8_t>(10, 2), 78, 10, SeatPlan{4, 0});  // the host republishes at the start
+        const int hs = core.lobby_host_seat_for(4);
+        expect(hs >= 0 && hs != s2 && core.seat_for(0x22u) == s2, "the flight's start keeps the pilot's seat");
+        enet_peer_disconnect(fl.peer, 0);
+        fl.idle(50);
+    }
     f2.stop();
     f3.stop();
     bad.stop();
@@ -10260,6 +10299,107 @@ void lobby_loopback_tests() {
     f1.stop();
 }
 
+
+// The live loop: a 2-ship, the host at #1 and a lobby pilot at #2; Launch; the host loads for seconds (nothing polls the
+// core) while the pilot's fetch keeps asking; the pilot's flight connection says Hello with the lobby tag.
+void lobby_launch_tests() {
+    std::printf("lobby launch (a pilot follows the host's Launch)\n");
+    HostCore core;
+    core.enable_lobby(0x1234u);
+    core.start("127.0.0.1", 0, [](const char*) {}, test_key());
+    for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    core.lobby_host("PHANTOM", -1);
+    core.set_mission(std::vector<uint8_t>(10, 1), 91, 10, SeatPlan{2, 0});
+    MissionFetch f;
+    f.enable_lobby("BOT1", 0x1234u);
+    f.start("127.0.0.1", core.port(), 0x55u, test_auth(), nullptr, 1000);
+    auto wait = [&](auto pred, int ms) {
+        for (int i = 0; i < ms / 10 && !pred(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return pred();
+    };
+    LobbyRosterMsg r{};
+    uint32_t rtt = 0;
+    wait([&] { return f.roster(&r, &rtt) && r.your_seat == 1; }, 10000);
+    f.set_ready(true, 91);
+    wait([&] { return core.lobby_ready(0x55u); }, 10000);
+    core.set_lobby_launch(1u | kLaunchFlying);
+    TestClient fl;
+    fl.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+    ENetAddress ha{};
+    enet_address_set_host_ip(&ha, "127.0.0.1");
+    ha.port = core.port();
+    fl.peer = enet_host_connect(fl.host, &ha, kChannelCount, 0);
+    for (int i = 0; i < 3000 && fl.proofs == 0 && !fl.disconnected; ++i) fl.idle(1);
+    uint8_t b[256];
+    MissionRequestMsg rq{};
+    rq.tag = 0x55u;
+    fl.send(b, encode(rq, b, sizeof(b)), kChannelReliable);
+    HelloMsg hm{};
+    set_str(hm.callsign, "BOT1");
+    set_str(hm.aircraft, "F-4E");
+    hm.world_tag = 0x55u;
+    fl.send(b, encode(hm, b, sizeof(b)), kChannelReliable);
+    fl.idle(9500);  // the host's game thread is loading the flight
+    core.set_mission(std::vector<uint8_t>(10, 1), 91, 10, SeatPlan{2, 0});  // republished at the start
+    const int hs = core.lobby_host_seat_for(2);                              // slot 32
+    int seat = -2;
+    HostEvent ev[16];
+    for (size_t n = core.poll(ev, 16); n; n = core.poll(ev, 16))
+        for (size_t i = 0; i < n; ++i)
+            if (ev[i].kind == HostEvent::Message && ev[i].len > 3 && ev[i].data[3] == static_cast<uint8_t>(MsgType::Hello))
+                seat = core.seat_for(0x55u);
+    std::printf("    host seat %d, pilot seat at its Hello %d\n", hs, seat);
+    expect(!fl.disconnected, "a flight connection waiting for its Welcome is not cut while the host loads (9.5 s)");
+    expect(hs == 0 && seat == 1, "after the host's load the pilot's Hello with the lobby tag gets its lobby seat (#2)");
+    enet_peer_disconnect(fl.peer, 0);
+    fl.idle(50);
+    f.stop();
+    core.stop(false);
+}
+
+// The real lazysf2-bot --lobby against a loopback lobby host, as the live loop runs it: Launch, then 9.5 s in which
+// nothing polls the core (the host loads), then the bot's flight Hello. Run from build\Release with the "botloop"
+// argument (it starts tools\lazysf2-bot.exe); not in the full run.
+void bot_lobby_loop_test() {
+    std::printf("bot --lobby against a loopback lobby host\n");
+    HostCore core;
+    core.enable_lobby(0x1234u);
+    core.start("127.0.0.1", 0, [](const char* l) { std::printf("    [core] %s\n", l); }, test_key());
+    for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    core.lobby_host("PHANTOM", -1);
+    core.set_mission(std::vector<uint8_t>(10, 1), 91, 10, SeatPlan{2, 0});
+    char cmd[512];
+    std::snprintf(cmd, sizeof(cmd), "start \"\" /b tools\\lazysf2-bot.exe --lobby 127.0.0.1:%u --content 1234 --password %s --seat 2 --duration 5",
+                  static_cast<unsigned>(core.port()), kTestPassword);
+    std::system(cmd);
+    for (int i = 0; i < 1500 && !core.lobby_ready(0)/*never*/ ; ++i) {
+        HostCore::LobbyView v = core.lobby_view();
+        if (v.clients && v.count >= 2 && (v.rows[1].flags & kLobbyRowReady)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    core.set_lobby_launch(1u | kLaunchFlying);
+    std::this_thread::sleep_for(std::chrono::milliseconds(9500));  // the host loads; nobody polls the core
+    core.set_mission(std::vector<uint8_t>(10, 1), 91, 10, SeatPlan{2, 0});
+    std::printf("    host seat for 2: %d\n", core.lobby_host_seat_for(2));
+    HostEvent ev[16];
+    int seat = -2;
+    for (size_t n = core.poll(ev, 16); n; n = core.poll(ev, 16))
+        for (size_t i = 0; i < n; ++i)
+            if (ev[i].kind == HostEvent::Message && ev[i].data[3] == static_cast<uint8_t>(MsgType::Hello)) {
+                HelloMsg h;
+                if (decode(ev[i].data, ev[i].len, h) == Status::Ok) {
+                    seat = core.seat_for(h.world_tag);
+                    char row[120];
+                    core.lobby_describe(h.world_tag, row, sizeof(row));
+                    std::printf("    Hello tag 0x%08x -> seat %d (%s)\n", h.world_tag, seat, row);
+                }
+            }
+    expect(seat == 1, "the real bot's flight Hello gets its lobby seat");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    core.stop(false);
+}
 
 void lobby_flow_splice_tests() {
     std::printf("lobby flow splices (L5: Single Mission and Hangar in a session; L8: Debrief)\n");
@@ -10272,7 +10412,14 @@ void lobby_flow_splice_tests() {
             L"[MissionEditorButton]\r\nMenuItemType=HOTSPOT\r\nPosition=729,588\r\nDestinationMenu=MissionEditor\r\n"
             L"Active=FALSE\r\nEnabled=FALSE\r\n";
         std::wstring h = stock, c = stock;
-        expect(splice_debrief_for_lobby(h, true) && splice_debrief_for_lobby(c, false) &&
+        expect(screen_item_number(stock, L"DebriefScreen", L"ExitButton") == 5 &&
+                   screen_item_number(stock, L"DebriefScreen", L"NoSuchButton") == 0,
+               "Debrief: Exit's item number from the screen's list");
+        expect(splice_debrief_for_lobby(h, true) == 12 && h.find(L"MenuItem012=LazyLobbyReturn\r\n") != std::wstring::npos &&
+                   h.find(L"[LazyLobbyReturn]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyHostScreen\r\n") !=
+                       std::wstring::npos,
+               "Debrief: a hidden way back to the lobby as the next item");
+        expect(splice_debrief_for_lobby(c, false) &&
                    h.find(L"[ExitButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyHostScreen\r\n") != std::wstring::npos &&
                    c.find(L"[ExitButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyJoinScreen\r\n") != std::wstring::npos,
                "Debrief: Exit returns to the host or join screen");
@@ -10325,8 +10472,13 @@ void lobby_flow_splice_tests() {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash still shows the last test reached
+    if (argc > 1 && std::strcmp(argv[1], "botloop") == 0) {
+        bot_lobby_loop_test();
+        return g_fail ? 1 : 0;
+    }
     if (argc > 1 && std::strcmp(argv[1], "lobby") == 0) {  // a quick loop over the lobby loopback
         lobby_loopback_tests();
+        lobby_launch_tests();
         std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
         return g_fail ? 1 : 0;
     }
@@ -10403,6 +10555,7 @@ int main(int argc, char** argv) {
     flood_limit_tests();
     lobby_book_tests();
     lobby_loopback_tests();
+    lobby_launch_tests();
     lobby_flow_splice_tests();
     fetch_lookup_tests();
     pilot_twist_tests();

@@ -276,6 +276,19 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
     return encode(r, out, cap);
 }
 
+void HostCore::lobby_describe(uint32_t tag, char* out, size_t cap) const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    int seat = -1;
+    uint64_t seen = 0;
+    if (!lobby_)
+        std::snprintf(out, cap, "not a lobby");
+    else if (!book_.info(tag, &seat, &seen))
+        std::snprintf(out, cap, "no lobby row for tag 0x%08x (%d seats)", static_cast<unsigned>(tag), book_.members());
+    else
+        std::snprintf(out, cap, "lobby row of tag 0x%08x: seat %d of %d, heard of %llu ms ago", static_cast<unsigned>(tag),
+                      seat, book_.members(), static_cast<unsigned long long>(now_ms() - seen));
+}
+
 int HostCore::lobby_host_seat_for(int members) {
     std::lock_guard<std::mutex> lock(mission_mx_);
     return lobby_ ? book_.host_seat_for(members) : -1;
@@ -924,7 +937,8 @@ void HostCore::run() {
                 free_slot(i);
                 continue;
             }
-            if (now - last_rx[i] >= kTimeoutMs) {
+            const bool awaiting = hello_seen[i] && !(slot_state_[i].load(std::memory_order_acquire) & 1);
+            if (now - last_rx[i] >= (awaiting ? kAwaitWelcomeMs : kTimeoutMs)) {
                 enet_peer_disconnect_now(peers[i], 0);
                 HostEvent e;
                 e.kind = HostEvent::Disconnect;
@@ -940,7 +954,9 @@ void HostCore::run() {
             next_report = now + 1000;
             if (lobby_) {
                 std::lock_guard<std::mutex> lock(mission_mx_);
-                book_.expire(now);
+                if (const int gone = book_.expire(now))
+                    say("lobby: %d pilot(s) not heard of for %llu s; their rows and seats dropped", gone,
+                        static_cast<unsigned long long>(LobbyBook::kExpireMs / 1000));
             }
             for (uint32_t& p : pings) p = 0;
             for (uint32_t& m : lobby_msgs) m = 0;

@@ -313,8 +313,13 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
     // Shared world: the client's seat, by the tag its mission fetch carried (never by slot number).
     const int seat = world_host_streaming() ? g_core->seat_for(h.world_tag) : -1;
     if (world_host_streaming() && seat < 0) {
-        reject(slot, gen, kByeNoAvatar, h.world_tag ? "no free seat in the host's flight" : "it did not fetch the mission",
-               callsign);
+        char why[160] = "it did not fetch the mission";
+        if (h.world_tag) {
+            char row[100];
+            g_core->lobby_describe(h.world_tag, row, sizeof(row));
+            std::snprintf(why, sizeof(why), "no free seat in the host's flight (%s)", row);
+        }
+        reject(slot, gen, kByeNoAvatar, why, callsign);
         return;
     }
     // Shared world: the seat aircraft's current state, before the take, for the client's takeover in place (task 3);
@@ -656,6 +661,20 @@ void handle_message(const HostEvent& e, void* player, double now) {
     }
 }
 
+// Connections without a Hello (mission fetch rounds, about one a second per waiting pilot) and their ends: logged
+// once a minute with a count, not each.
+void quiet_peer_log(int slot, bool connected) {
+    static ULONGLONG last = 0;
+    static unsigned conns = 0, gone = 0;
+    (connected ? conns : gone) += 1;
+    const ULONGLONG now = GetTickCount64();
+    if (last && now - last < 60000) return;
+    LOG("net: peer %d %s (%u connections and %u ends without a Hello since the last line; logged once a minute)",
+        slot + 1, connected ? "connected" : "gone", conns, gone);
+    last = now;
+    conns = gone = 0;
+}
+
 void pump(void* player, double now) {
     g_core->set_host_time(now);
     HostEvent ev[32];
@@ -676,7 +695,7 @@ void pump(void* player, double now) {
                 g_newest_gen[slot] = ev[i].gen;
             switch (ev[i].kind) {
                 case HostEvent::Connect:
-                    LOG("net: peer %d connected", slot + 1);
+                    quiet_peer_log(slot, true);
                     break;
                 case HostEvent::Disconnect:
                     if (g_av[slot].active && g_av[slot].gen == ev[i].gen) {
@@ -685,7 +704,7 @@ void pump(void* player, double now) {
                         release(slot, ev[i].reason == 1 ? "timeout, no packets for 5 s" : "disconnected", live[slot],
                                 kByeNone, ev[i].reason == 1 ? net::LeaveReason::Timeout : net::LeaveReason::Left);
                     } else {
-                        LOG("net: peer %d gone", slot + 1);
+                        quiet_peer_log(slot, false);
                     }
                     break;
                 case HostEvent::Message:

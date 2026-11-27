@@ -1242,8 +1242,8 @@ void host_lobby_seat(void* msn) {
     const int s = host_lobby_seat_for(f.members);
     if (s == -2) return;
     const int seat = s > 0 ? s : -1;  // member 0 is the mission's own seat: stock
-    if (seat == g_seat) return;
-    LOG("world: the lobby gives the host member %d of this %d-member flight (was %d)", s < 0 ? 0 : s, f.members, g_seat);
+    LOG("world: the lobby gives the host member %d of this %d-member flight%s", s < 0 ? 0 : s, f.members,
+        seat == g_seat ? "" : " (changed)");
     g_seat = seat;
 }
 

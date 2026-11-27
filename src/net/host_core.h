@@ -30,6 +30,9 @@ namespace LazyWorks::SF2Patch::net {
 
 inline constexpr int kMaxClients = 4;
 inline constexpr uint32_t kTimeoutMs = 5000;  // no packet from a peer for this long (wall clock) ends it
+// ... except after its Hello, while it waits for its Welcome: a client sends nothing then, and the host's game thread
+// may be loading the flight (a client waits ClientLimits::welcome_ms, 15 s, for it).
+inline constexpr uint32_t kAwaitWelcomeMs = 20000;
 
 /// <summary>What the game thread reads from the core.</summary>
 struct HostEvent {
@@ -162,6 +165,8 @@ public:
     /// <summary>Game thread, at the flight's start: the host's seat in a flight of members, from the book (-1: none).
     /// </summary>
     int lobby_host_seat_for(int members);
+    /// <summary>For a log line: the lobby book's view of tag (row, seat, last heard of), into out.</summary>
+    void lobby_describe(uint32_t tag, char* out, size_t cap) const;
     uint32_t mission_id() const;
     /// <summary>True while the tag holds a seat (one of its connections is open).</summary>
     bool seat_active(uint32_t tag) const;
