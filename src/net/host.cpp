@@ -46,7 +46,7 @@ using avatar_logic::dist3;
 // no step runs then, and the network thread copies the address at its start).
 std::atomic<bool> g_enabled{false};
 bool g_from_env = false;
-net::AuthKey g_key;  // the session password's key (LAZYSF2_PASSWORD or the lobby); the password itself is not kept
+net::AuthKey g_key;  // the session's key (PBKDF2 of LAZYSF2_PASSWORD or the lobby's password over a fresh salt)
 char g_addr[48] = {};
 uint16_t g_port = 0;
 char g_callsign[17] = "HOST";  // LAZYSF2_CALLSIGN, printable ASCII; the wire field keeps 15 characters
@@ -842,7 +842,10 @@ static std::string env_password() {
     if (n == 0 || n >= 128) return {};
     char u[512] = {};
     const int m = WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(n), u, sizeof(u) - 1, nullptr, nullptr);
-    return m > 0 ? std::string(u, static_cast<size_t>(m)) : std::string();
+    std::string s = m > 0 ? std::string(u, static_cast<size_t>(m)) : std::string();
+    net::auth_wipe(w, sizeof(w));
+    net::auth_wipe(u, sizeof(u));
+    return s;
 }
 
 void host_install() {
@@ -874,7 +877,10 @@ void host_install() {
     const DWORD nc = GetEnvironmentVariableW(L"LAZYSF2_CALLSIGN", cs, 32);
     if (nc > 0 && nc < 32) avatar_logic::to_ascii(g_callsign, sizeof(g_callsign), cs);
     if (!g_callsign[0]) std::snprintf(g_callsign, sizeof(g_callsign), "HOST");
-    if (!net::make_auth_key(env_password(), &g_key)) {
+    std::string password = env_password();
+    const bool keyed = net::make_host_key(password, &g_key);
+    net::auth_wipe(password);
+    if (!keyed) {
         LOG("net: host off (a session password is required: set LAZYSF2_PASSWORD)");
         return;
     }
@@ -951,7 +957,7 @@ bool host_session_start(const char* addr, uint16_t port, const char* callsign, c
         *why = "a host session is already running";
         return false;
     }
-    if (!net::make_auth_key(password, &g_key)) {
+    if (!net::make_host_key(password, &g_key)) {
         *why = "a session password is required";
         return false;
     }
@@ -997,7 +1003,7 @@ void host_session_stop() {
         g_seat_plan = net::SeatPlan{};
     }
     g_enabled = false;
-    g_key = net::AuthKey{};
+    net::auth_wipe(g_key);
     LOG("net: host session closed");
 }
 

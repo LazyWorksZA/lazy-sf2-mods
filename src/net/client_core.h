@@ -101,7 +101,7 @@ public:
     /// given. False if already started (also after the connection ended: call stop() first) or the arguments are bad;
     /// every later failure arrives as Disconnected. The lookup of a name is bounded by limits.connect_ms.
     /// </summary>
-    bool start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const AuthKey& key,
+    bool start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const AuthClient& auth,
                const ClientLimits& limits = {});
     /// <summary>
     /// Ends the thread (a Bye queued by bye() just before still gets a short chance to go out). With in_loader_lock
@@ -176,7 +176,7 @@ private:
     char host_[256] = {};
     uint16_t port_ = 0;
     HelloMsg hello_{};
-    AuthKey key_{};  // the session password's key: answers the host's challenge
+    AuthClient auth_;  // the session password: answers the host's challenge and checks its proof
     ClientLimits limits_{};
     LogFn log_ = nullptr;
     std::atomic<Phase> phase_{Phase::Idle};

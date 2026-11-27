@@ -48,7 +48,7 @@ constexpr double kTakeEvery = 1.0;    // host seconds between tries to take an a
 // only: no step runs then).
 std::atomic<bool> g_enabled{false};
 bool g_from_env = false;
-net::AuthKey g_key;  // the session password's key (LAZYSF2_PASSWORD or the lobby); the password itself is not kept
+net::AuthClient g_auth;  // the session password (LAZYSF2_PASSWORD or the lobby), wiped when the session ends
 char g_host[64] = {};
 uint16_t g_port = 0;
 char g_callsign[16] = "PLAYER";  // LAZYSF2_CALLSIGN, printable ASCII, at most 15 characters (the wire field)
@@ -764,7 +764,7 @@ void maybe_connect(void* /*player*/, double wall) {
     h.theatre_hash = g_theatre_hash;
     h.world_tag = world_client_tag();
     g_core_quiet.store(g_retry_quiet, std::memory_order_relaxed);
-    if (!g_core->start(g_host, g_port, h, client_core_log, g_key)) {
+    if (!g_core->start(g_host, g_port, h, client_core_log, g_auth)) {
         LOG("net: client: could not start the network thread; trying again in 5 s");
         return;
     }
@@ -883,7 +883,10 @@ std::string env_password() {
     if (n == 0 || n >= 128) return {};
     char u[512] = {};
     const int m = WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(n), u, sizeof(u) - 1, nullptr, nullptr);
-    return m > 0 ? std::string(u, static_cast<size_t>(m)) : std::string();
+    std::string s = m > 0 ? std::string(u, static_cast<size_t>(m)) : std::string();
+    net::auth_wipe(w, sizeof(w));
+    net::auth_wipe(u, sizeof(u));
+    return s;
 }
 
 }  // namespace
@@ -914,7 +917,8 @@ void client_install() {
             LOG("net: client: LAZYSF2_NET_JOIN must be move or none; using move");
         }
     }
-    if (!net::make_auth_key(env_password(), &g_key)) {
+    g_auth = net::AuthClient(env_password());
+    if (!g_auth.has_password()) {
         LOG("net: client off (a session password is required: set LAZYSF2_PASSWORD)");
         return;
     }
@@ -969,7 +973,8 @@ bool client_session_start(const char* host, uint16_t port, const char* callsign,
         *why = "a client session is already running";
         return false;
     }
-    if (!net::make_auth_key(password, &g_key)) {
+    g_auth = net::AuthClient(password);
+    if (!g_auth.has_password()) {
         *why = "the host's session password is required";
         return false;
     }
@@ -999,7 +1004,7 @@ void client_session_stop() {
     g_core = nullptr;
     reset_link();
     g_enabled = false;
-    g_key = net::AuthKey{};
+    g_auth.clear();
     LOG("net: client session closed");
 }
 
@@ -1025,9 +1030,9 @@ bool client_drives_object(const void* obj) {
     return false;
 }
 
-bool client_auth_key(net::AuthKey* out) {
-    if (!g_enabled || !g_key.set) return false;
-    *out = g_key;
+bool client_auth(net::AuthClient* out) {
+    if (!g_enabled || !g_auth.has_password()) return false;
+    *out = g_auth;
     return true;
 }
 

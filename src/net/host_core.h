@@ -83,6 +83,8 @@ public:
     /// still be running its last instructions, or ENet code, when the DLL is unmapped. Developer tool only.
     /// </summary>
     void stop(bool in_loader_lock);
+    /// <summary>Limits on connections before their password answer (call before start(); tests shorten them).</summary>
+    void set_auth_limits(const AuthLimits& limits) { auth_limits_ = limits; }
 
     State state() const { return state_.load(std::memory_order_acquire); }
     uint16_t port() const { return port_.load(std::memory_order_acquire); }  // the bound port, once Running
@@ -181,6 +183,7 @@ private:
     uint16_t req_port_ = 0;
     LogFn log_ = nullptr;
     AuthKey key_{};
+    AuthLimits auth_limits_{};
     std::atomic<State> state_{State::Idle};
     std::atomic<uint16_t> port_{0};
     std::atomic<bool> stop_{false};

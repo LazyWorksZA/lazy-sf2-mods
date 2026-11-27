@@ -290,6 +290,13 @@ void HostCore::run() {
     bool auth_refused[kMaxClients] = {};
     uint8_t nonce[kMaxClients][kAuthNonce] = {};
     uint64_t auth_deadline[kMaxClients] = {};
+    uint64_t refused_at[kMaxClients] = {};  // a refused connection is cut after a short grace for its Bye
+    AuthLimiter limiter(auth_limits_);
+    auto ip_text = [](const ENetPeer* p, char* out, size_t n) {
+        const uint32_t a = p->address.host;  // network byte order
+        std::snprintf(out, n, "%u.%u.%u.%u", a & 0xff, (a >> 8) & 0xff, (a >> 16) & 0xff, a >> 24);
+        return out;
+    };
     uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
@@ -304,6 +311,7 @@ void HostCore::run() {
         authed[slot] = false;
         auth_refused[slot] = false;
         auth_deadline[slot] = 0;
+        refused_at[slot] = 0;
         mission_ask_ms[slot] = 0;
         // The connection's seat is released when no other open connection carries the same tag.
         if (const uint32_t tag = slot_tag[slot]) {
@@ -480,7 +488,12 @@ void HostCore::run() {
     auto refuse_auth = [&](int slot, const char* why) {
         auth_refused[slot] = true;
         auth_deadline[slot] = 0;
-        say("net: peer %u refused: %s", static_cast<unsigned>(slot + 1), why);
+        refused_at[slot] = now_ms();
+        char ip[24] = "?";
+        if (peers[slot]) ip_text(peers[slot], ip, sizeof(ip));
+        const bool blocked = peers[slot] && limiter.failed(peers[slot]->address.host, refused_at[slot]);
+        say("net: peer %u (%s) refused: %s%s", static_cast<unsigned>(slot + 1), ip, why,
+            blocked ? "; that address is blocked for a while" : "");
         if (peers[slot]) send_bye(slot, kByeWrongPassword);
     };
     // Before the answer only the answer counts (and a version refusal, so an older build hears why).
@@ -500,6 +513,12 @@ void HostCore::run() {
             decode(data, len, a) != Status::Ok)
             return drop(n_state_);  // anything else before the answer is dropped unread
         if (!auth_verify(key_, nonce[slot], a)) return refuse_auth(slot, "wrong session password");
+        // The host proves the password too, before anything else reaches the client.
+        AuthProofMsg proof;
+        uint8_t pb[sizeof(AuthProofMsg)];
+        if (!auth_host_proof(key_, nonce[slot], a, &proof) || !send_raw(slot, pb, encode(proof, pb, sizeof(pb))))
+            return refuse_auth(slot, "could not send the host's proof");
+        limiter.succeeded(peers[slot]->address.host);
         authed[slot] = true;
         auth_deadline[slot] = 0;
         // No log line: the client's mission fetch connects every few seconds.
@@ -608,10 +627,31 @@ void HostCore::run() {
     auto handle_event = [&](ENetEvent& ev) {
         switch (ev.type) {
             case ENET_EVENT_TYPE_CONNECT: {
-                int slot = -1;
-                for (int i = 0; i < kMaxClients && slot < 0; ++i)
-                    if (!peers[i]) slot = i;
-                if (slot < 0) {
+                // Before any challenge: an address waiting after wrong answers is cut at once (logged once per wait),
+                // one address has at most kMaxPendingPerAddress unanswered connections (a player's session and its
+                // mission fetch), and unanswered connections never take the last free slot, so a burst of strangers
+                // cannot starve a player's session or mission fetch.
+                const uint64_t t = now_ms();
+                bool first = false;
+                char ip[24];
+                if (!limiter.allow(ev.peer->address.host, t, &first)) {
+                    if (first)
+                        say("net: refusing %s for %llu s after wrong session passwords", ip_text(ev.peer, ip, sizeof(ip)),
+                            static_cast<unsigned long long>((limiter.until(ev.peer->address.host) - t + 999) / 1000));
+                    enet_peer_disconnect_now(ev.peer, 0);
+                    break;
+                }
+                int slot = -1, pending = 0;
+                int same_ip_pending = 0;
+                for (int i = 0; i < kMaxClients; ++i) {
+                    if (!peers[i]) {
+                        if (slot < 0) slot = i;
+                    } else if (!authed[i]) {
+                        ++pending;
+                        if (peers[i]->address.host == ev.peer->address.host) ++same_ip_pending;
+                    }
+                }
+                if (slot < 0 || same_ip_pending >= kMaxPendingPerAddress || pending >= kMaxClients - 1) {
                     enet_peer_disconnect_now(ev.peer, 0);
                     break;
                 }
@@ -630,7 +670,7 @@ void HostCore::run() {
                 // recorded from another one does not fit.
                 AuthChallengeMsg ch{};
                 uint8_t out[sizeof(AuthChallengeMsg)];
-                if (!auth_random(ch.nonce, kAuthNonce) || !send_raw(slot, out, encode(ch, out, sizeof(out)))) {
+                if (!auth_challenge(key_, &ch) || !send_raw(slot, out, encode(ch, out, sizeof(out)))) {
                     say("net: peer %u: could not send the password challenge; connection ended", static_cast<unsigned>(slot + 1));
                     enet_peer_disconnect_now(ev.peer, 0);
                     ev.peer->data = nullptr;
@@ -638,7 +678,7 @@ void HostCore::run() {
                     break;
                 }
                 std::memcpy(nonce[slot], ch.nonce, kAuthNonce);
-                auth_deadline[slot] = now_ms() + kAuthTimeoutMs;
+                auth_deadline[slot] = now_ms() + static_cast<uint64_t>(auth_limits_.deadline_ms);
                 break;
             }
             case ENET_EVENT_TYPE_DISCONNECT: {  // the peer left, or ENet's own timeout fired
@@ -735,6 +775,13 @@ void HostCore::run() {
             if (!peers[i]) continue;
             rtt_[i].store(peers[i]->roundTripTime, std::memory_order_relaxed);
             if (auth_deadline[i] && now >= auth_deadline[i]) refuse_auth(i, "no password answer in time");
+            if (auth_refused[i] && now - refused_at[i] >= static_cast<uint64_t>(auth_limits_.grace_ms)) {
+                // Cut now rather than wait for ENet's own timeout: the slot is free for the next player at once.
+                enet_peer_disconnect_now(peers[i], 0);
+                peers[i]->data = nullptr;
+                free_slot(i);
+                continue;
+            }
             if (now - last_rx[i] >= kTimeoutMs) {
                 enet_peer_disconnect_now(peers[i], 0);
                 HostEvent e;

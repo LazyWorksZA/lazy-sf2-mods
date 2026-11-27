@@ -180,10 +180,9 @@ int run_fetch(const std::string& spec, const std::string& dir, double duration, 
     const int port = colon == std::string::npos ? 0 : std::atoi(spec.c_str() + colon + 1);
     if (colon == std::string::npos || port <= 0 || port > 65535 || dir.empty()) return 1;
     net::MissionFetch fetch;
-    net::AuthKey key;
-    if (!net::make_auth_key(password, &key)) return 1;
+    const net::AuthClient auth(password);
     const uint32_t tag = (GetTickCount() ^ (GetCurrentProcessId() << 12)) | 1u;
-    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, key, fetch_log)) return 2;
+    if (!fetch.start(spec.substr(0, colon).c_str(), static_cast<uint16_t>(port), tag, auth, fetch_log)) return 2;
     const double limit = duration > 0 ? duration : 60.0;
     std::vector<uint8_t> packed, msn;
     net::MissionOfferMsg offer{};

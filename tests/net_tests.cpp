@@ -1,6 +1,7 @@
 // Console tests for the network protocol and an ENet loopback. Not shipped, no game needed.
 #include <enet/enet.h>
 #include <tlhelp32.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <atomic>
@@ -71,14 +72,18 @@
 using namespace LazyWorks::SF2Patch::net;
 
 constexpr char kTestPassword[] = "test-password";
+constexpr uint32_t kTestIterations = kAuthMinIterations;  // cheap, still accepted by clients
+// The test hosts' key: the test password over a fixed salt.
 const AuthKey& test_key() {
     static const AuthKey k = [] {
+        static const uint8_t salt[kAuthSalt] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
         AuthKey a;
-        make_auth_key(kTestPassword, &a);
+        derive_auth_key(kTestPassword, salt, kTestIterations, &a);
         return a;
     }();
     return k;
 }
+AuthClient test_auth() { return AuthClient(kTestPassword); }
 
 namespace {
 
@@ -254,10 +259,14 @@ struct TestClient {
             if (ev.type == ENET_EVENT_TYPE_DISCONNECT) disconnected = true;
             if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
                 AuthChallengeMsg ch;
+                AuthProofMsg pr;
                 if (decode(ev.packet->data, ev.packet->dataLength, ch) == Status::Ok) {
                     challenge = ch;
                     ++challenges;
                     if (auto_auth) answer(ch);
+                } else if (decode(ev.packet->data, ev.packet->dataLength, pr) == Status::Ok) {
+                    proof = pr;
+                    ++proofs;
                 } else {
                     got.push_back(
                         {ev.channelID, std::vector<uint8_t>(ev.packet->data, ev.packet->data + ev.packet->dataLength)});
@@ -266,14 +275,18 @@ struct TestClient {
             }
         }
     }
-    bool auto_auth = true;  // answer the host's password challenge with test_key()
+    bool auto_auth = true;  // answer the host's password challenge with the test password
     AuthChallengeMsg challenge{};
-    int challenges = 0;
-    void answer(const AuthChallengeMsg& ch, const AuthKey& key = test_key()) {
-        AuthAnswerMsg a;
-        auth_answer(key, ch, &a);
-        uint8_t b[sizeof(a)];
-        send(b, encode(a, b, sizeof(b)), kChannelReliable);
+    AuthProofMsg proof{};
+    AuthAnswerMsg last_answer{};
+    AuthKey last_key{};
+    int challenges = 0, proofs = 0;
+    void answer(const AuthChallengeMsg& ch, const char* password = kTestPassword) {
+        AuthClient ac(password);
+        ac.key_for(ch, &last_key);
+        auth_answer(last_key, ch, &last_answer);
+        uint8_t b[sizeof(last_answer)];
+        send(b, encode(last_answer, b, sizeof(b)), kChannelReliable);
     }
     bool throttle_off = false;
     void send(const uint8_t* d, size_t n, uint8_t channel) {
@@ -1258,6 +1271,7 @@ void bot_loopback_tests() {
             if (srv) {
                 std::atomic<bool> done{false};
                 Run res;
+                AuthChallengeMsg ch{};
                 const std::string host = "127.0.0.1:" + std::to_string(srv->address.port);
                 std::thread th([&] {
                     res = timed(host);
@@ -1266,14 +1280,23 @@ void bot_loopback_tests() {
                 while (!done) {
                     ENetEvent ev;
                     while (enet_host_service(srv, &ev, 1) > 0) {
-                        if (ev.type == ENET_EVENT_TYPE_CONNECT) {  // a v5 host challenges first (any answer will do here)
-                            AuthChallengeMsg ch{};
+                        if (ev.type == ENET_EVENT_TYPE_CONNECT) {  // a v5 host challenges first and proves it on any answer
+                            auth_challenge(test_key(), &ch);
                             uint8_t cb[sizeof(ch)];
                             ENetPacket* p = enet_packet_create(cb, encode(ch, cb, sizeof(cb)), ENET_PACKET_FLAG_RELIABLE);
                             if (p && enet_peer_send(ev.peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
                             enet_host_flush(srv);
                         }
                         if (ev.type != ENET_EVENT_TYPE_RECEIVE) continue;
+                        AuthAnswerMsg ans;
+                        if (decode(ev.packet->data, ev.packet->dataLength, ans) == Status::Ok) {
+                            AuthProofMsg pr;
+                            auth_host_proof(test_key(), ch.nonce, ans, &pr);
+                            uint8_t pb[sizeof(pr)];
+                            ENetPacket* p = enet_packet_create(pb, encode(pr, pb, sizeof(pb)), ENET_PACKET_FLAG_RELIABLE);
+                            if (p && enet_peer_send(ev.peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
+                            enet_host_flush(srv);
+                        }
                         MsgType t{};
                         if (send_welcome && !res.welcomed && peek_type(ev.packet->data, ev.packet->dataLength, t) == Status::Ok &&
                             t == MsgType::Hello) {
@@ -3297,11 +3320,11 @@ void session_lifecycle_tests() {
         all_ran &= host->state() == HostCore::State::Running;
         const uint16_t port = host->port();
         auto* fetch = new MissionFetch;
-        all_fetched &= fetch->start("127.0.0.1", port, 0x1234u + round, test_key(), quiet, 200);
+        all_fetched &= fetch->start("127.0.0.1", port, 0x1234u + round, test_auth(), quiet, 200);
         auto* client = new ClientCore;
         HelloMsg hello{};
         set_str(hello.callsign, "LIFECYCLE");
-        all_ran &= client->start("127.0.0.1", port, hello, quiet, test_key());
+        all_ran &= client->start("127.0.0.1", port, hello, quiet, test_auth());
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
         client->stop(false);
         delete client;
@@ -3321,28 +3344,65 @@ void session_lifecycle_tests() {
 }
 
 void session_password_tests() {
-    std::printf("session password (v5 challenge and answer)\n");
-    AuthKey none, right, wrong;
-    expect(!make_auth_key("", &none) && !none.set, "an empty password gives no key");
-    AuthKey abc;
-    static const uint8_t kSha256Abc[32] = {0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40,
-                                           0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17,
-                                           0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad};
-    expect(make_auth_key("abc", &abc) && std::memcmp(abc.k, kSha256Abc, 32) == 0, "SHA-256(\"abc\") matches FIPS 180-2");
-    expect(make_auth_key(kTestPassword, &right) && make_auth_key("not-the-password", &wrong) &&
-               std::memcmp(right.k, test_key().k, sizeof(right.k)) == 0 && std::memcmp(right.k, wrong.k, sizeof(right.k)) != 0,
-           "the key is SHA-256 of the password: the same password gives the same key");
+    std::printf("session password (v5: PBKDF2 key, mutual challenge and answer, limits)\n");
+    const uint8_t salt[kAuthSalt] = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6};
+    AuthKey none, right, right2, wrong, other_salt;
+    expect(!derive_auth_key("", salt, kTestIterations, &none) && !none.set, "an empty password gives no key");
+    {
+        // RFC 7914 section 11: PBKDF2-HMAC-SHA256("passwd", "salt", 1, 64), first 32 bytes.
+        static const uint8_t kRfc[32] = {0x55, 0xac, 0x04, 0x6e, 0x56, 0xe3, 0x08, 0x9f, 0xec, 0x16, 0x91,
+                                         0xc2, 0x25, 0x44, 0xb6, 0x05, 0xf9, 0x41, 0x85, 0x21, 0x6d, 0xde,
+                                         0x04, 0x65, 0xe6, 0x8b, 0x9d, 0x57, 0xc2, 0x0d, 0xac, 0xbc};
+        uint8_t s16[kAuthSalt] = {'s', 'a', 'l', 't'};
+        // derive_auth_key takes a 16-byte salt; check the CNG call itself against the RFC with a 4-byte salt.
+        BCRYPT_ALG_HANDLE alg = nullptr;
+        uint8_t k[32] = {};
+        const bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) >= 0 &&
+                        BCryptDeriveKeyPBKDF2(alg, reinterpret_cast<PUCHAR>(const_cast<char*>("passwd")), 6, s16, 4, 1, k,
+                                              32, 0) >= 0;
+        if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+        expect(ok && std::memcmp(k, kRfc, 32) == 0, "PBKDF2-HMAC-SHA256 matches RFC 7914 (the CNG call the key uses)");
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    AuthKey full;
+    expect(make_host_key(kTestPassword, &full), "a host key over a fresh salt");
+    const double derive_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    PBKDF2 with %u iterations: %.0f ms\n", static_cast<unsigned>(kAuthIterations), derive_ms);
+    expect(full.iterations == kAuthIterations && derive_ms > 5.0 && derive_ms < 2000.0,
+           "the host key costs real work once per session");
+    expect(derive_auth_key(kTestPassword, salt, kTestIterations, &right) &&
+               derive_auth_key(kTestPassword, salt, kTestIterations, &right2) &&
+               derive_auth_key("not-the-password", salt, kTestIterations, &wrong) &&
+               derive_auth_key(kTestPassword, full.salt, kTestIterations, &other_salt) &&
+               std::memcmp(right.k, right2.k, 32) == 0 && std::memcmp(right.k, wrong.k, 32) != 0 &&
+               std::memcmp(right.k, other_salt.k, 32) != 0,
+           "the key depends on the password and the salt");
+
     AuthChallengeMsg c1{}, c2{};
-    expect(auth_random(c1.nonce, kAuthNonce) && auth_random(c2.nonce, kAuthNonce) &&
-               std::memcmp(c1.nonce, c2.nonce, kAuthNonce) != 0,
-           "nonces are random");
+    expect(auth_challenge(right, &c1) && auth_challenge(right, &c2) && std::memcmp(c1.nonce, c2.nonce, kAuthNonce) != 0 &&
+               std::memcmp(c1.salt, salt, kAuthSalt) == 0 && c1.iterations == kTestIterations,
+           "a challenge carries a fresh nonce, the session's salt and iterations");
+    AuthClient client(kTestPassword);
+    AuthKey ck;
     AuthAnswerMsg a1{}, bad{};
-    expect(auth_answer(right, c1, &a1) && auth_verify(right, c1.nonce, a1), "the right password's answer verifies");
+    expect(client.key_for(c1, &ck) && auth_answer(ck, c1, &a1) && auth_verify(right, c1.nonce, a1),
+           "the right password's answer verifies");
     expect(auth_answer(wrong, c1, &bad) && !auth_verify(right, c1.nonce, bad), "a wrong password's answer is refused");
     AuthAnswerMsg tampered = a1;
     tampered.mac[31] ^= 1;
     expect(!auth_verify(right, c1.nonce, tampered), "a changed answer is refused");
     expect(!auth_verify(right, c2.nonce, a1), "an old answer does not verify for another connection's nonce (replay)");
+    AuthProofMsg p1{}, reflected{};
+    expect(auth_host_proof(right, c1.nonce, a1, &p1) && auth_check_host(ck, c1, a1, p1), "the host's proof checks out");
+    std::memcpy(reflected.mac, a1.mac, kAuthMac);
+    expect(!auth_check_host(ck, c1, a1, reflected), "the client's own answer reflected back is not a host proof");
+    AuthProofMsg wrong_proof{};
+    auth_host_proof(wrong, c1.nonce, a1, &wrong_proof);
+    expect(!auth_check_host(ck, c1, a1, wrong_proof), "a host without the password cannot prove it");
+    AuthChallengeMsg greedy = c1;
+    greedy.iterations = kAuthMaxIterations + 1;
+    AuthKey gk;
+    expect(!client.key_for(greedy, &gk), "a challenge asking for too much work is refused");
     uint8_t wire[sizeof(AuthAnswerMsg)];
     expect(encode(a1, wire, sizeof(wire)) == 52 &&
                std::search(wire, wire + sizeof(wire), kTestPassword, kTestPassword + sizeof(kTestPassword) - 1) ==
@@ -3352,11 +3412,39 @@ void session_password_tests() {
     HelloMsg hh{};
     ClientCore cc;
     MissionFetch mf;
-    expect(!idle.start("127.0.0.1", 0, [](const char*) {}, none) && !cc.start("127.0.0.1", 7777, hh, nullptr, none) &&
-               !mf.start("127.0.0.1", 7777, 1, none, nullptr),
+    expect(!idle.start("127.0.0.1", 0, [](const char*) {}, none) && !cc.start("127.0.0.1", 7777, hh, nullptr, AuthClient()) &&
+               !mf.start("127.0.0.1", 7777, 1, AuthClient(), nullptr),
            "host, client and mission fetch refuse to start without a password");
 
+    // The limiter: exponential backoff per address, a block after block_after failures, reset by a success.
+    {
+        AuthLimits lim;
+        lim.cooldown_ms = 100;
+        lim.block_after = 3;
+        lim.block_ms = 10000;
+        AuthLimiter L(lim);
+        bool first = false;
+        const uint32_t ip = 0x0100007f, ip2 = 0x0200007f;
+        expect(L.allow(ip, 0, &first), "a new address may try");
+        L.failed(ip, 1000);
+        const bool held = !L.allow(ip, 1050, &first) && first && !L.allow(ip, 1060, &first) && !first;
+        expect(held && L.allow(ip, 1100, &first) && L.allow(ip2, 1050, &first),
+               "after a failure the address waits its cooldown (logged once); others are free");
+        L.failed(ip, 1200);
+        expect(!L.allow(ip, 1350, &first) && L.allow(ip, 1400, &first), "the second failure doubles the wait");
+        const bool blocked = L.failed(ip, 1500);
+        expect(blocked && !L.allow(ip, 5000, &first) && L.allow(ip, 11500, &first), "the third failure blocks the address");
+        L.succeeded(ip);
+        expect(L.until(ip) == 0, "a correct answer clears the address");
+    }
+
+    AuthLimits fast;
+    fast.deadline_ms = 400;
+    fast.grace_ms = 100;
+    fast.cooldown_ms = 0;     // most checks below reconnect at once from 127.0.0.1
+    fast.block_after = 1000;  // and fail many times on purpose
     HostCore core;
+    core.set_auth_limits(fast);
     static std::atomic<int> refusals{0};
     refusals = 0;
     core.start("127.0.0.1", 0, [](const char* l) {
@@ -3376,7 +3464,7 @@ void session_password_tests() {
         c.auto_auth = false;
         c.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
         c.peer = enet_host_connect(c.host, &addr, kChannelCount, 0);
-        for (int i = 0; i < 2000 && c.challenges == 0 && !c.disconnected; ++i) c.idle(1);
+        for (int i = 0; i < 1000 && c.challenges == 0 && !c.disconnected; ++i) c.idle(1);
     };
     auto events = [&](int ms) {
         std::vector<HostEvent> all;
@@ -3406,14 +3494,16 @@ void session_password_tests() {
     MissionRequestMsg rq{};
     rq.tag = 0x55u;
     early.send(buf, encode(rq, buf, sizeof(buf)), kChannelReliable);
-    early.idle(150);
-    std::vector<HostEvent> ev = events(50);
+    early.idle(100);
+    std::vector<HostEvent> ev = events(30);
     expect(early.challenges == 1 && ev.empty() && early.got.empty(),
            "before the answer: no Connect, no Hello for the game, and no mission offer");
-    early.answer(early.challenge, right);
+    early.answer(early.challenge);
     early.idle(150);
-    ev = events(50);
-    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect, "the right answer: the game hears of the connection");
+    ev = events(30);
+    expect(ev.size() == 1 && ev[0].kind == HostEvent::Connect && early.proofs == 1 &&
+               auth_check_host(early.last_key, early.challenge, early.last_answer, early.proof),
+           "the right answer: the host proves the password too, and the game hears of the connection");
     early.send(buf, encode(rq, buf, sizeof(buf)), kChannelReliable);
     early.idle(200);
     MissionOfferMsg offer{};
@@ -3421,39 +3511,75 @@ void session_password_tests() {
     for (const auto& g : early.got) offered = offered || decode(g.bytes.data(), g.bytes.size(), offer) == Status::Ok;
     expect(offered && offer.mission_id == 77, "after the answer the mission request is answered");
     const AuthChallengeMsg old_challenge = early.challenge;
-    AuthAnswerMsg recorded{};
-    auth_answer(right, old_challenge, &recorded);
+    const AuthAnswerMsg recorded = early.last_answer;
 
-    // A wrong password: Bye 9, the connection ends, the game never hears of it.
+    // A wrong password: Bye 9, cut after the grace, and the game never hears of it.
     TestClient w;
     connect(w);
-    w.answer(w.challenge, wrong);
+    w.answer(w.challenge, "not-the-password");
     for (int i = 0; i < 1000 && !w.disconnected; ++i) w.idle(1);
-    ev = events(50);
-    expect(bye_reason(w) == kByeWrongPassword && w.disconnected && ev.empty(),
-           "a wrong password: Bye 9 (wrong session password), disconnected, no Connect or Disconnect for the game");
+    ev = events(30);
+    expect(bye_reason(w) == kByeWrongPassword && w.disconnected && w.proofs == 0 && ev.empty(),
+           "a wrong password: Bye 9, no host proof, disconnected, no Connect or Disconnect for the game");
 
     // A replayed answer (valid for another connection's nonce) is refused the same way.
     TestClient r;
     connect(r);
     r.send(buf, encode(recorded, buf, sizeof(buf)), kChannelReliable);
     for (int i = 0; i < 1000 && !r.disconnected; ++i) r.idle(1);
-    ev = events(50);
+    ev = events(30);
     expect(std::memcmp(r.challenge.nonce, old_challenge.nonce, kAuthNonce) != 0 && bye_reason(r) == kByeWrongPassword &&
                r.disconnected && ev.empty(),
            "a replayed answer from another connection is refused (a fresh nonce per connection)");
-    expect(refusals.load() == 2, "the host logs each refusal");
 
-    // The mission fetch with the wrong password stops asking and gets no mission bytes.
+    // No answer: refused at the (short) deadline and cut, so the slot is free again.
+    TestClient silent;
+    connect(silent);
+    for (int i = 0; i < 2000 && !silent.disconnected; ++i) silent.idle(1);
+    expect(silent.challenges == 1 && silent.disconnected && bye_reason(silent) == kByeWrongPassword,
+           "no answer in time: Bye 9 and disconnected (the 3 s deadline, shortened here)");
+
+    // Slots are recycled: more refused strangers than slots, one after another, are each challenged.
+    int challenged = 0;
+    for (int k = 0; k < 6; ++k) {
+        TestClient s;
+        connect(s);
+        challenged += s.challenges;
+        s.answer(s.challenge, "guess");
+        for (int i = 0; i < 1000 && !s.disconnected; ++i) s.idle(1);
+    }
+    expect(challenged == 6, "refused connections free their slot at once: six strangers in a row are each challenged");
+
+    // One address has at most kMaxPendingPerAddress (2) unanswered connections.
+    TestClient p1c, p2c, p3c;
+    connect(p1c);
+    connect(p2c);
+    p3c.auto_auth = false;
+    p3c.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
+    p3c.peer = enet_host_connect(p3c.host, &addr, kChannelCount, 0);
+    for (int i = 0; i < 500 && !p3c.disconnected; ++i) {
+        p1c.idle(1);
+        p2c.idle(1);
+        p3c.idle(1);
+    }
+    expect(p1c.challenges == 1 && p2c.challenges == 1 && p3c.challenges == 0 && p3c.disconnected,
+           "a third unanswered connection from the same address is cut before any challenge");
+    p1c.answer(p1c.challenge);
+    p2c.answer(p2c.challenge);
+    p1c.idle(100);
+    p2c.idle(50);
+    events(30);
+
+    // The mission fetch with the wrong password stops asking and gets no mission bytes; with the right one it does.
     MissionFetch bad_fetch;
-    bad_fetch.start("127.0.0.1", core.port(), 0x99u, wrong, nullptr, 200);
+    bad_fetch.start("127.0.0.1", core.port(), 0x99u, AuthClient("not-the-password"), nullptr, 200);
     for (int i = 0; i < 300 && !bad_fetch.wrong_password(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     std::vector<uint8_t> packed;
     MissionOfferMsg o{};
     expect(bad_fetch.wrong_password() && !bad_fetch.take(&packed, &o), "a fetch with the wrong password is refused, no mission");
     bad_fetch.stop();
     MissionFetch good_fetch;
-    good_fetch.start("127.0.0.1", core.port(), 0x9au, right, nullptr, 200);
+    good_fetch.start("127.0.0.1", core.port(), 0x9au, test_auth(), nullptr, 200);
     bool got = false;
     for (int i = 0; i < 300 && !got; ++i) {
         got = good_fetch.take(&packed, &o);
@@ -3462,14 +3588,60 @@ void session_password_tests() {
     expect(got && o.mission_id == 77 && !good_fetch.wrong_password(), "a fetch with the right password gets the mission");
     good_fetch.stop();
     enet_peer_disconnect_now(early.peer, 0);
+    enet_peer_disconnect_now(p1c.peer, 0);
+    enet_peer_disconnect_now(p2c.peer, 0);
     early.idle(20);
     core.stop(false);
+    expect(refusals.load() >= 9, "the host logs each refusal");
+
+    // Backoff end to end: after a wrong answer the address is cut before any challenge until its cooldown is over.
+    {
+        AuthLimits slow = fast;
+        slow.cooldown_ms = 600;
+        HostCore bk;
+        bk.set_auth_limits(slow);
+        bk.start("127.0.0.1", 0, [](const char*) {}, right);
+        for (int i = 0; i < 2000 && bk.state() == HostCore::State::Starting; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        addr.port = bk.port();
+        TestClient a;
+        connect(a);
+        a.answer(a.challenge, "guess");
+        for (int i = 0; i < 1000 && !a.disconnected; ++i) a.idle(1);
+        TestClient b;
+        connect(b);
+        TestClient c;
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        connect(c);
+        expect(b.challenges == 0 && b.disconnected && c.challenges == 1,
+               "after a wrong answer the address waits its cooldown (cut before a challenge), then may try again");
+        enet_peer_disconnect_now(c.peer, 0);
+        c.idle(10);
+        bk.stop(false);
+    }
+
+    // A fake host without the password: the client and the fetch take nothing from it.
+    {
+        AuthKey fake;
+        derive_auth_key("the-wrong-one", salt, kTestIterations, &fake);
+        HostCore fh;
+        fh.start("127.0.0.1", 0, [](const char*) {}, fake);
+        for (int i = 0; i < 2000 && fh.state() == HostCore::State::Starting; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        fh.set_mission(std::vector<uint8_t>(10, 3), 99, 10, SeatPlan{4, 1});
+        MissionFetch ff;
+        ff.start("127.0.0.1", fh.port(), 0x5au, test_auth(), nullptr, 200);
+        for (int i = 0; i < 300 && !ff.wrong_password(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        expect(ff.wrong_password() && !ff.take(&packed, &o), "a fetch from a host without the password takes no mission");
+        ff.stop();
+        fh.stop(false);
+    }
 }
 
 void fetch_lookup_tests() {
     std::printf("mission fetch name lookup\n");
     auto* f = new MissionFetch;
-    f->start("no-such-host.invalid", 7777, 0x77u, test_key(), nullptr, 200);
+    f->start("no-such-host.invalid", 7777, 0x77u, test_auth(), nullptr, 200);
     for (int i = 0; i < 1300 && !f->host_unknown() && f->state() == MissionFetch::State::Running; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     expect(f->host_unknown(), "a name that does not resolve: the fetch stops and says so");
@@ -5319,6 +5491,8 @@ struct RawHost {
     ENetHost* host = nullptr;
     ENetPeer* peer = nullptr;
     bool got_hello = false;
+    AuthChallengeMsg sent_challenge{};
+    const AuthKey* proof_key = &test_key();  // a fake host proves with another key
     ~RawHost() {
         if (host) enet_host_destroy(host);
     }
@@ -5335,10 +5509,16 @@ struct RawHost {
         while (enet_host_service(host, &ev, 0) > 0) {
             if (ev.type == ENET_EVENT_TYPE_CONNECT) {
                 peer = ev.peer;
-                AuthChallengeMsg ch{};
-                send(ch, kChannelReliable);
+                auth_challenge(test_key(), &sent_challenge);
+                send(sent_challenge, kChannelReliable);
             }
             if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
+                AuthAnswerMsg ans;
+                if (decode(ev.packet->data, ev.packet->dataLength, ans) == Status::Ok) {
+                    AuthProofMsg pr;
+                    auth_host_proof(*proof_key, sent_challenge.nonce, ans, &pr);
+                    send(pr, kChannelReliable);
+                }
                 MsgType t{};
                 if (peek_type(ev.packet->data, ev.packet->dataLength, t) == Status::Ok && t == MsgType::Hello) got_hello = true;
                 enet_packet_destroy(ev.packet);
@@ -5513,7 +5693,7 @@ void client_core_relay_tests() {
     auto nothing = [] {};
     // One after the other, so the slots are known: ONE is client 1, TWO client 2.
     for (int i = 0; i < 2; ++i) {
-        c[i]->start("127.0.0.1", h.core.port(), hello[i], cc_client_log, test_key());
+        c[i]->start("127.0.0.1", h.core.port(), hello[i], cc_client_log, test_auth());
         run(5.0, [&] { return rx[i].has(ClientEvent::Welcome); }, nothing);
     }
     expect(c[0]->client_id() == 1 && c[1]->client_id() == 2, "two clients welcomed as 1 and 2");
@@ -5665,7 +5845,7 @@ void client_core_hitch_tests() {
         char cs[8];
         std::snprintf(cs, sizeof(cs), "C%d", i + 1);
         set_str(hello.callsign, cs);
-        c[i]->start("127.0.0.1", h.core.port(), hello, cc_client_log, test_key());
+        c[i]->start("127.0.0.1", h.core.port(), hello, cc_client_log, test_auth());
         run(5.0, true, [&] { return rx[i].has(ClientEvent::Welcome); }, nothing);
     }
     if (c[0]->client_id() != 1 || c[1]->client_id() != 2 || c[2]->client_id() != 3) {
@@ -5693,7 +5873,7 @@ void client_core_hitch_tests() {
             c[3] = std::make_unique<ClientCore>();
             HelloMsg hello = cc_hello(0);
             set_str(hello.callsign, "C4");
-            c[3]->start("127.0.0.1", h.core.port(), hello, cc_client_log, test_key());
+            c[3]->start("127.0.0.1", h.core.port(), hello, cc_client_log, test_auth());
         }
         if (!bye3 && el > 0.3) {
             bye3 = true;
@@ -5749,8 +5929,8 @@ void client_core_session_tests() {
     h.theatre = fnv1a("Korea");
     if (!h.start()) return expect(false, "host core running");
     auto c = std::make_unique<ClientCore>();
-    expect(c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("Korea")), cc_client_log, test_key()), "client start");
-    expect(!c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key()), "a second start is refused");
+    expect(c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("Korea")), cc_client_log, test_auth()), "client start");
+    expect(!c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth()), "a second start is refused");
     CcRx rx;
     const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
     expect(welcomed && c->phase() == ClientCore::Phase::Welcomed && c->client_id() == 1, "connect, Hello, Welcome: client 1");
@@ -5877,7 +6057,7 @@ void client_core_host_bye_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("localhost", h.core.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("localhost", h.core.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         expect(ok, "a host name is resolved on the network thread: localhost, Welcome");
@@ -5894,7 +6074,7 @@ void client_core_host_bye_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         h.core.stop(false);
@@ -5908,7 +6088,7 @@ void client_core_host_bye_tests() {
         RawHost raw;
         if (!raw.open()) return expect(false, "raw host");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
         raw.welcome(50.0);
@@ -5933,7 +6113,7 @@ void client_core_refusal_tests() {
         h.theatre = fnv1a("Korea");
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("GermanyCE")), cc_client_log, test_key());
+        c->start("127.0.0.1", h.core.port(), cc_hello(fnv1a("GermanyCE")), cc_client_log, test_auth());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
         const int b = rx.find(ClientEvent::Bye), d = rx.find(ClientEvent::Disconnected);
@@ -5947,7 +6127,7 @@ void client_core_refusal_tests() {
         RawHost raw;
         if (!raw.open()) return expect(false, "raw host");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
         ByeMsg v1{};
@@ -5965,7 +6145,7 @@ void client_core_refusal_tests() {
         RawHost raw;
         if (!raw.open()) return expect(false, "raw host");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         cc_run(nullptr, &raw, *c, rx, 5.0, [&] { return raw.got_hello; });
         raw.send(cc_jet(0, 1, 50.0), kChannelUnreliable);  // before the Welcome: wrong phase
@@ -6009,8 +6189,8 @@ void client_core_connect_tests() {
     {
         ClientCore c;
         HelloMsg h = cc_hello(0);
-        expect(!c.start(nullptr, 7777, h, cc_client_log, test_key()) && !c.start("", 7777, h, cc_client_log, test_key()) &&
-                   !c.start("127.0.0.1", 0, h, cc_client_log, test_key()) && c.phase() == ClientCore::Phase::Idle,
+        expect(!c.start(nullptr, 7777, h, cc_client_log, test_auth()) && !c.start("", 7777, h, cc_client_log, test_auth()) &&
+                   !c.start("127.0.0.1", 0, h, cc_client_log, test_auth()) && c.phase() == ClientCore::Phase::Idle,
                "start refuses a missing host or port 0");
     }
     {  // no answer to the connect request
@@ -6018,7 +6198,7 @@ void client_core_connect_tests() {
         ClientLimits lim;
         lim.connect_ms = 600;
         const double t0 = ClientCore::wall_now();
-        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_key(), lim);
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_auth(), lim);
         CcRx rx;
         const bool ok = cc_run(nullptr, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
         const double dt = ClientCore::wall_now() - t0;
@@ -6030,7 +6210,7 @@ void client_core_connect_tests() {
     }
     {  // a name that does not resolve
         auto c = std::make_unique<ClientCore>();
-        c->start("no-such-host.invalid", 7777, cc_hello(0), cc_client_log, test_key());
+        c->start("no-such-host.invalid", 7777, cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         const bool ok = cc_run(nullptr, nullptr, *c, rx, 20.0, [&] { return rx.has(ClientEvent::Disconnected); });
         expect(ok && rx.ev.back().reason == static_cast<uint8_t>(ClientEnd::CannotConnect) && c->phase() == ClientCore::Phase::Failed,
@@ -6043,7 +6223,7 @@ void client_core_connect_tests() {
         auto c = std::make_unique<ClientCore>();
         ClientLimits lim;
         lim.welcome_ms = 800;
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key(), lim);
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth(), lim);
         CcRx rx;
         bool awaiting = false;
         const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] {
@@ -6058,7 +6238,7 @@ void client_core_connect_tests() {
     }
     for (int loader = 0; loader < 2; ++loader) {  // stop while the connect is still pending
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_auth());
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const ClientCore::Phase before = c->phase();
         const double t0 = ClientCore::wall_now();
@@ -6097,7 +6277,7 @@ void cc_idle_raw(RawHost& raw, double seconds) {
 // A raw host that has welcomed the client, with the Welcome already polled.
 bool cc_welcomed_raw(RawHost& raw, ClientCore& c, CcRx& rx) {
     if (!raw.open()) return false;
-    c.start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key());
+    c.start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_auth());
     cc_run(nullptr, &raw, c, rx, 5.0, [&] { return raw.got_hello; });
     raw.welcome(50.0);
     return cc_run(nullptr, &raw, c, rx, 3.0, [&] { return rx.has(ClientEvent::Welcome); });
@@ -6109,7 +6289,7 @@ void client_core_lookup_tests() {
     slow.resolve = cc_slow_resolve;
     for (int loader = 0; loader < 2; ++loader) {
         auto c = std::make_unique<ClientCore>();
-        c->start("slow.example", 7777, cc_hello(0), cc_client_log, test_key(), slow);
+        c->start("slow.example", 7777, cc_hello(0), cc_client_log, test_auth(), slow);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const double t0 = ClientCore::wall_now();
         c->stop(loader != 0);
@@ -6124,7 +6304,7 @@ void client_core_lookup_tests() {
         ClientLimits lim = slow;
         lim.connect_ms = 500;
         const double t0 = ClientCore::wall_now();
-        c->start("slow.example", 7777, cc_hello(0), cc_client_log, test_key(), lim);
+        c->start("slow.example", 7777, cc_hello(0), cc_client_log, test_auth(), lim);
         CcRx rx;
         const bool ok = cc_run(nullptr, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Disconnected); });
         const double dt = ClientCore::wall_now() - t0;
@@ -6181,7 +6361,7 @@ void client_core_flood_tests() {
         expect(bi >= 0 && cc_bye_reason(rx.ev[bi]) == 2 && di == static_cast<int>(rx.ev.size()) - 1 && rx.count(ClientEvent::Disconnected) == 1 &&
                    rx.ev[di].reason == static_cast<uint8_t>(ClientEnd::HostClosed) && c->phase() == ClientCore::Phase::Closed,
                "the Bye survives the flood; the client leaves after the host's Bye by itself; Disconnected last, once");
-        expect(!c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_key()), "start after an end without stop() is refused");
+        expect(!c->start("127.0.0.1", raw.port(), cc_hello(0), cc_client_log, test_auth()), "start after an end without stop() is refused");
     }
     {  // Control events beyond the whole ring: the session ends (QueueFull), and everything queued is still delivered.
         RawHost raw;
@@ -6286,7 +6466,7 @@ void client_core_bye_stop_tests() {
             if (tmp.open()) dead_port = tmp.port();
         }
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", dead_port, cc_hello(0), cc_client_log, test_auth());
         c->bye(0);
         CcRx rx;
         const double t0 = ClientCore::wall_now();
@@ -6300,7 +6480,7 @@ void client_core_bye_stop_tests() {
         h.answer_hello = false;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return c->phase() == ClientCore::Phase::AwaitWelcome && h.got_hello; });
         c->bye(0);
@@ -6314,7 +6494,7 @@ void client_core_bye_stop_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "host core running");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         c->bye(4);
@@ -6323,7 +6503,7 @@ void client_core_bye_stop_tests() {
         expect(h.byes.size() == 1 && h.byes[0].reason == 4, "a Bye pending at stop() reaches the host");
         rx.ev.clear();
         h.got_disconnect = false;
-        expect(c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key()), "restart after stop()");
+        expect(c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth()), "restart after stop()");
         const bool ok = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         expect(ok && rx.ev[0].kind == ClientEvent::Welcome && c->phase() == ClientCore::Phase::Welcomed && c->client_id() == 1,
                "the second session is welcomed, with nothing left over from the first");
@@ -6337,7 +6517,7 @@ void client_core_concurrency_tests() {
     FakeHost h;
     if (!h.start()) return expect(false, "host core running");
     auto c = std::make_unique<ClientCore>();
-    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
+    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth());
     CcRx rx;
     if (!cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); })) return expect(false, "welcomed");
     h.send_jet = true;
@@ -6769,7 +6949,7 @@ void bot_serve_tests() {
         s.cfg.record_dir = dir;
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
-        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
         serve_run_for(c, 6.0, [] { return false; });
         s.finish();
         serve_run_for(c, 2.0, [&] { return c.ended; });
@@ -6869,7 +7049,7 @@ void bot_serve_tests() {
         s.cfg.script = bot::Script::Straight;
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
-        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
         const double p0[3] = {c.pos[0], c.pos[1], c.pos[2]}, h = c.heading;
         serve_run_for(c, 5.0, [&] { return c.welcomes.size() >= 2 && c.host.size() >= 20; });
         serve_run_for(c, 2.5, [] { return false; });  // the client is on the wing now: no more Welcomes
@@ -6912,7 +7092,7 @@ void bot_serve_tests() {
         if (!s.start()) return expect(false, "bot serve listening");
         ServeClient c;
         c.follow_join = false;
-        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+        expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
         serve_run_for(c, 8.0, [&] { return c.welcomes.size() >= 4; });
         s.finish();
         c.core.stop(false);
@@ -8048,7 +8228,7 @@ void world_stream_tests() {
     FakeHost h;
     if (!h.start()) return expect(false, "stream loopback: host core");
     auto c = std::make_unique<ClientCore>();
-    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
+    c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth());
     CcRx rx;
     const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
     const bool sent = h.core.send_world(h.slot, h.gen, b, en, true) &&
@@ -8141,7 +8321,7 @@ void world_snapshot_tests() {
     FakeHost fh;
     if (!fh.start()) return expect(false, "snapshot loopback: host core");
     auto c = std::make_unique<ClientCore>();
-    c->start("127.0.0.1", fh.core.port(), cc_hello(0), cc_client_log, test_key());
+    c->start("127.0.0.1", fh.core.port(), cc_hello(0), cc_client_log, test_auth());
     CcRx rx;
     const bool welcomed = cc_run(&fh, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
     uint8_t e[600];
@@ -8264,7 +8444,7 @@ void world_seat_rule_tests() {
         FakeHost h;
         if (!h.start()) return expect(false, "queues loopback: host core");
         auto c = std::make_unique<ClientCore>();
-        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_key());
+        c->start("127.0.0.1", h.core.port(), cc_hello(0), cc_client_log, test_auth());
         CcRx rx;
         const bool welcomed = cc_run(&h, nullptr, *c, rx, 5.0, [&] { return rx.has(ClientEvent::Welcome); });
         WorldEventRec ev{kEventAwake, 1, 1, 0, 0};
@@ -8387,7 +8567,7 @@ void world_mission_tests() {
             return false;
         };
         auto fetch = std::make_unique<MissionFetch>();
-        const bool started = fetch->start("127.0.0.1", core.port(), 0x1234u, test_key(), nullptr, 200);
+        const bool started = fetch->start("127.0.0.1", core.port(), 0x1234u, test_auth(), nullptr, 200);
         for (int i = 0; i < 300 && none_seen.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         expect(started && none_seen.load() >= 1 && fetch->state() == MissionFetch::State::Running,
                "mission loopback: the host says none yet, the fetch keeps asking");
@@ -8417,7 +8597,7 @@ void world_mission_tests() {
         for (int i = 0; i < 200 && core.seat_active(0x1234u); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         expect(!core.seat_active(0x1234u), "seats: a closed fetch connection releases its seat");
         auto again = std::make_unique<MissionFetch>();
-        again->start("127.0.0.1", core.port(), 0x1234u, test_key(), nullptr, 200);
+        again->start("127.0.0.1", core.port(), 0x1234u, test_auth(), nullptr, 200);
         const bool back = wait_take(*again, &got, &go, 10000);
         expect(back && go.seat == seat_a, "seats: a restarted client with the same tag gets its old seat back");
         again->stop();
@@ -8687,7 +8867,7 @@ void jet_controls_tests() {
     s.cfg.jet = bot::JetScript::Ab;
     if (!s.start()) return expect(false, "bot serve listening (--jet ab)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<AvatarStateMsg> got;
     bool sent_own = false;
     WorldPacket wp[8];
@@ -8886,7 +9066,7 @@ void hit_claim_tests() {
     s.cfg.hit_every = 1.0;
     if (!s.start()) return expect(false, "bot serve listening (--jet guns --hit)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<HitMsg> hits;
     bool saw_guns = false;
     int claims = 0;
@@ -9025,7 +9205,7 @@ void weapon_launch_tests() {
     s.cfg.launch_every = 1.0;
     if (!s.start()) return expect(false, "bot serve listening (--launch)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<WeaponLaunchMsg> got;
     bool sent = false;
     WorldPacket wp[8];
@@ -9167,7 +9347,7 @@ void stores_tests() {
     s.cfg.stores = true;
     if (!s.start()) return expect(false, "bot serve listening (--stores)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<LoadoutMsg> los;
     std::vector<ConsumablesMsg> cos;
     int sent = 0;
@@ -9320,7 +9500,7 @@ void damage_tests() {
     sv.cfg.damage = true;
     if (!sv.start()) return expect(false, "bot serve listening (--damage)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<DamageStateMsg> got;
     int cms = 0;
     bool sent = false;
@@ -9400,7 +9580,7 @@ void clock_ground_tests() {
     s.cfg.clock_start = 600.0;
     if (!s.start()) return expect(false, "bot serve listening (--clock)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<MissionClockMsg> got;
     WorldPacket wp[8];
     serve_run_for(c, 4.5, [&] {
@@ -9457,7 +9637,7 @@ void seat_takeover_tests() {
     s.cfg.seat_state = true;
     if (!s.start()) return expect(false, "bot serve listening (--seat-state)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::vector<SeatStateMsg> got;
     WorldPacket wp[8];
     serve_run_for(c, 2.5, [&] {
@@ -9586,7 +9766,7 @@ void handover_tests() {
     sv.cfg.start[2] = 3000.0;
     if (!sv.start()) return expect(false, "bot serve listening (handover)");
     ServeClient c;
-    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log, test_key()), "client start");
+    expect(c.core.start("127.0.0.1", sv.port, cc_hello(0), cc_client_log, test_auth()), "client start");
     std::deque<std::vector<uint8_t>> q;
     {
         std::vector<uint8_t> m(sizeof(b));
@@ -9653,6 +9833,54 @@ void bot_world_join_tests() {
            "loopback: the bot asks for the mission with a seat tag, Hellos with it, and receives the world stream");
 }
 
+
+void fake_host_proof_tests() {
+    std::printf("session password: a host that cannot prove it\n");
+    AuthKey fake;
+    const uint8_t salt[kAuthSalt] = {};
+    derive_auth_key("not-the-password", salt, kTestIterations, &fake);
+    if (enet_initialize() != 0) {
+        expect(false, "enet_initialize");
+        return;
+    }
+    for (int honest = 0; honest < 2; ++honest) {
+        RawHost raw;
+        if (!raw.open()) {
+            expect(false, "raw host opens");
+            return;
+        }
+        if (!honest) raw.proof_key = &fake;  // accepts any answer and sends a proof made without the password
+        ClientCore c;
+        HelloMsg hh{};
+        set_str(hh.callsign, "PROOF");
+        c.start("127.0.0.1", raw.port(), hh, nullptr, test_auth());
+        bool welcomed_sent = false, bye9 = false;
+        for (int i = 0; i < 1500 && c.phase() != ClientCore::Phase::Welcomed && !bye9; ++i) {
+            raw.service();
+            if (raw.got_hello && !welcomed_sent) {
+                raw.welcome(1000.0);  // a fake host's Welcome must not count
+                welcomed_sent = true;
+            }
+            ClientEvent e[8];
+            const size_t n = c.poll(e, 8);
+            for (size_t k = 0; k < n; ++k) {
+                ByeMsg b;
+                if (e[k].kind == ClientEvent::Bye && decode(e[k].data, e[k].len, b) == Status::Ok && b.reason == kByeWrongPassword)
+                    bye9 = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (honest) {
+            expect(c.phase() == ClientCore::Phase::Welcomed && !bye9, "a host with the password: its proof checks out, Welcome counts");
+        } else {
+            expect(welcomed_sent && c.phase() != ClientCore::Phase::Welcomed && bye9,
+                   "a host without the password: its proof fails, its Welcome is ignored, the client leaves (Bye 9)");
+        }
+        c.stop(false);
+    }
+    enet_deinitialize();
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -9682,8 +9910,8 @@ int main() {
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
         expect(kVersion == 5 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7 &&
-                   sizeof(AuthChallengeMsg) == 20 && sizeof(AuthAnswerMsg) == 52,
-               "v5 sizes (v4's, plus the password challenge and answer)");
+                   sizeof(AuthChallengeMsg) == 40 && sizeof(AuthAnswerMsg) == 52 && sizeof(AuthProofMsg) == 36,
+               "v5 sizes (v4's, plus the password challenge, answer and host proof)");
     }
 
     loopback();
@@ -9723,6 +9951,7 @@ int main() {
     lobby_logic_tests();
     session_lifecycle_tests();
     session_password_tests();
+    fake_host_proof_tests();
     fetch_lookup_tests();
     pilot_twist_tests();
     probe_snapshot_tests();

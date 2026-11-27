@@ -20,9 +20,10 @@ constexpr uint64_t kConnectMs = 5000, kRetryMs = 5000, kSilenceMs = 10000;
 
 }  // namespace
 
-bool MissionFetch::start(const char* host, uint16_t port, uint32_t tag, const AuthKey& key, LogFn log, uint32_t poll_ms) {
-    if (state_.load() != State::Idle || !host || !*host || port == 0 || tag == 0 || !key.set) return false;
-    key_ = key;
+bool MissionFetch::start(const char* host, uint16_t port, uint32_t tag, const AuthClient& auth, LogFn log,
+                         uint32_t poll_ms) {
+    if (state_.load() != State::Idle || !host || !*host || port == 0 || tag == 0 || !auth.has_password()) return false;
+    auth_ = auth;
     host_ = host;
     port_ = port;
     tag_ = tag;
@@ -98,6 +99,10 @@ void MissionFetch::run() {
         if (!peer) break;
         MissionAssembly as;
         bool connected = false, round_done = false;
+        bool answered = false, proved = false;  // per connection: nothing from the host counts before its proof
+        AuthChallengeMsg challenge{};
+        AuthAnswerMsg answer{};
+        AuthKey key{};
         uint64_t t0 = ms_now(), last_rx = t0;
         while (!stop_.load() && !round_done && !refused) {
             ENetEvent ev;
@@ -117,9 +122,15 @@ void MissionFetch::run() {
                 MissionChunkHead ch;
                 const uint8_t* payload = nullptr;
                 AuthChallengeMsg chal;
+                AuthProofMsg proof;
                 ByeMsg bye;
                 if (!wt && decode(d, n, chal) == Status::Ok) {
-                    AuthAnswerMsg a;
+                    if (answered) {
+                        enet_packet_destroy(ev.packet);
+                        continue;
+                    }
+                    answered = true;
+                    challenge = chal;
                     MissionRequestMsg rq{};
                     rq.have_id = have;
                     rq.tag = tag_;
@@ -128,10 +139,23 @@ void MissionFetch::run() {
                         if (ENetPacket* p = enet_packet_create(src, len, ENET_PACKET_FLAG_RELIABLE))
                             if (enet_peer_send(peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
                     };
-                    if (auth_answer(key_, chal, &a)) {
+                    if (auth_.key_for(chal, &key) && auth_answer(key, chal, &answer)) {
                         // Reliable and in order: the host reads the answer before the request.
-                        send(ab, encode(a, ab, sizeof(ab)));
+                        send(ab, encode(answer, ab, sizeof(ab)));
                         send(rb, encode(rq, rb, sizeof(rb)));
+                    } else {
+                        say("net: mission fetch: cannot answer the host's challenge (iterations %u); not asking again",
+                            static_cast<unsigned>(chal.iterations));
+                        refused = true;
+                    }
+                } else if (!wt && decode(d, n, proof) == Status::Ok) {
+                    if (answered && !proved && auth_check_host(key, challenge, answer, proof)) {
+                        proved = true;
+                        auth_wipe(key);
+                    } else if (!proved) {
+                        say("net: mission fetch: the host could not prove the session password; not asking again");
+                        wrong_password_.store(true, std::memory_order_release);
+                        refused = true;
                     }
                 } else if (!wt && decode(d, n, bye) == Status::Ok && bye.reason == kByeWrongPassword) {
                     say("net: mission fetch: the host refused the session password; not asking again");
@@ -141,6 +165,8 @@ void MissionFetch::run() {
                     say("net: mission fetch: the host speaks protocol v%u (this client is v%u); not asking again",
                         static_cast<unsigned>(d[2]), static_cast<unsigned>(kVersion));
                     refused = true;
+                } else if (!proved) {
+                    // An offer, a chunk or anything else from a host that has not proven the password: unread.
                 } else if (wt == static_cast<uint8_t>(WorldType::MissionOffer) && decode(d, n, o) == Status::Ok) {
                     latest_seat_.store(o.seat, std::memory_order_release);
                     if (o.status == kOfferOk || o.status == kOfferSame) {

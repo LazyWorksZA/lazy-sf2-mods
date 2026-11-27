@@ -28,6 +28,7 @@ enum class MsgType : uint8_t {
     PeerLeft = 8,  // host to client only
     AuthChallenge = 9,  // host to client, first on every connection
     AuthAnswer = 10,    // client to host, before anything else
+    AuthProof = 11,     // host to client, after a correct answer: the host knows the password too
 };
 
 enum class Status {
@@ -101,15 +102,21 @@ struct PeerLeftMsg {
     uint16_t id;
     uint8_t reason;
 };
-inline constexpr size_t kAuthNonce = 16, kAuthMac = 32;
+inline constexpr size_t kAuthNonce = 16, kAuthMac = 32, kAuthSalt = 16;
 struct AuthChallengeMsg {
     Header h;
     uint8_t nonce[kAuthNonce];  // fresh random bytes for this connection
+    uint8_t salt[kAuthSalt];    // the host session's PBKDF2 salt
+    uint32_t iterations;        // ... and iteration count
 };
 struct AuthAnswerMsg {
     Header h;
     uint8_t client_nonce[kAuthNonce];
-    uint8_t mac[kAuthMac];  // net/auth.h auth_mac: proves the password without sending it
+    uint8_t mac[kAuthMac];  // net/auth.h auth_answer: proves the password without sending it
+};
+struct AuthProofMsg {
+    Header h;
+    uint8_t mac[kAuthMac];  // net/auth.h auth_host_proof: the host proves it too
 };
 #pragma pack(pop)
 
@@ -124,7 +131,8 @@ static_assert(sizeof(StateMsg) == 78);    // 4:2 id, 6:4 seq, 10:8 time, 18:24 p
 static_assert(sizeof(ByeMsg) == 7);       // 4:2 id, 6:1 reason
 static_assert(sizeof(PeerInfoMsg) == 55); // 4:2 id, 6:16 callsign, 22:32 aircraft, 54:1 seat
 static_assert(sizeof(PeerLeftMsg) == 7);  // 4:2 id, 6:1 reason
-static_assert(sizeof(AuthChallengeMsg) == 20);  // 4:16 nonce
+static_assert(sizeof(AuthChallengeMsg) == 40);  // 4:16 nonce, 20:16 salt, 36:4 iterations
+static_assert(sizeof(AuthProofMsg) == 36);      // 4:32 mac
 static_assert(sizeof(AuthAnswerMsg) == 52);     // 4:16 client nonce, 20:32 mac
 
 /// <summary>
@@ -160,7 +168,8 @@ inline constexpr uint8_t kByeWrongVersion = 6;
 /// <summary>Bye reasons added in v3 (shared world).</summary>
 inline constexpr uint8_t kByeWorldBehind = 7;   // host: this client's world events could not be queued
 inline constexpr uint8_t kByeWrongMission = 8;  // client: it flies another mission than the host's
-/// <summary>Bye reason added in v5: the AuthAnswer did not prove the session password (or did not come in time).</summary>
+/// <summary>Bye reason added in v5: the AuthAnswer did not prove the session password (or did not come in time), or
+/// the address must wait after earlier failures.</summary>
 inline constexpr uint8_t kByeWrongPassword = 9;
 
 /// <summary>A Bye reason in words, for log lines (the host's reasons; any number is safe).</summary>
@@ -197,6 +206,7 @@ size_t encode(const PeerInfoMsg& m, uint8_t* out, size_t cap);
 size_t encode(const PeerLeftMsg& m, uint8_t* out, size_t cap);
 size_t encode(const AuthChallengeMsg& m, uint8_t* out, size_t cap);
 size_t encode(const AuthAnswerMsg& m, uint8_t* out, size_t cap);
+size_t encode(const AuthProofMsg& m, uint8_t* out, size_t cap);
 
 /// <summary>Reads the type of a packet after checking length, magic and version.</summary>
 Status peek_type(const uint8_t* data, size_t len, MsgType& type);
@@ -215,6 +225,7 @@ Status decode(const uint8_t* data, size_t len, PeerInfoMsg& out);
 Status decode(const uint8_t* data, size_t len, PeerLeftMsg& out);
 Status decode(const uint8_t* data, size_t len, AuthChallengeMsg& out);
 Status decode(const uint8_t* data, size_t len, AuthAnswerMsg& out);
+Status decode(const uint8_t* data, size_t len, AuthProofMsg& out);
 
 /// <summary>Copies at most N-1 bytes of src into a fixed field and always NUL-terminates it (zero-fills the rest).</summary>
 template <size_t N>

@@ -116,7 +116,11 @@ struct Runner {
     bool connected = false, disconnected = false, welcomed = false;
     bool host_bye = false;
     bool have_challenge = false;  // the host's password challenge arrived (once per connection)
+    bool host_proved = false;     // the host proved the password: nothing else from it counts before
+    bool proof_failed = false;
     AuthChallengeMsg challenge{};
+    AuthAnswerMsg answer{};
+    AuthKey key{};
     double host_bye_at = 0, welcomed_at = 0;
     WelcomeMsg welcome{};
     double offset[3] = {};  // formation: --offset, or the Welcome's slot (150 m right per client id, 50 m back)
@@ -240,11 +244,24 @@ struct Runner {
     void process(uint8_t channel, const uint8_t* data, size_t len, double rx) {
         MsgType type{};
         if (peek_type(data, len, type) != Status::Ok) return refuse();
+        if (!host_proved && type != MsgType::AuthChallenge && type != MsgType::AuthProof && type != MsgType::Bye)
+            return refuse();
         switch (type) {
             case MsgType::AuthChallenge: {
                 if (channel != kChannelReliable || decode(data, len, challenge) != Status::Ok || have_challenge)
                     return refuse();
                 have_challenge = true;
+                return;
+            }
+            case MsgType::AuthProof: {
+                AuthProofMsg p;
+                if (channel != kChannelReliable || decode(data, len, p) != Status::Ok || host_proved) return refuse();
+                if (auth_check_host(key, challenge, answer, p)) {
+                    host_proved = true;
+                } else {
+                    proof_failed = true;
+                    say("bot: the host could not prove the session password");
+                }
                 return;
             }
             case MsgType::Welcome: {
@@ -373,7 +390,7 @@ struct Runner {
             last_rx = rx;
             const size_t len = ev.packet->dataLength;
             if (const uint8_t wt = peek_world_type(ev.packet->data, len)) {
-                world_packet(wt, ev.packet->data, len);  // any size; never --lag'd
+                if (host_proved) world_packet(wt, ev.packet->data, len);  // any size; never --lag'd
                 enet_packet_destroy(ev.packet);
                 return;
             }
@@ -614,20 +631,21 @@ BotResult run_bot(const BotConfig& cfg) {
     r.last_rx = wall_now();
     if (cfg.lag_ms > 0) r.say("bot: --lag: every packet is held %.0f ms each way", cfg.lag_ms);
     // The session password: the host's challenge comes first; the answer goes before anything else.
-    AuthKey key;
-    if (!make_auth_key(cfg.password, &key)) {
+    AuthClient auth(cfg.password);
+    if (!auth.has_password()) {
         r.say("bot: a session password is required");
         res.code = 1;
         return res;
     }
     for (double t0 = wall_now(); !r.have_challenge && !r.disconnected && wall_now() - t0 < kWelcomeWait && !r.cancelled();)
         r.service(1);
-    AuthAnswerMsg answer;
-    if (!r.have_challenge || !auth_answer(key, r.challenge, &answer)) {
-        r.say("bot: no password challenge from the host (%s)", r.disconnected ? "it closed the connection" : "timed out");
+    if (!r.have_challenge || !auth.key_for(r.challenge, &r.key) || !auth_answer(r.key, r.challenge, &r.answer)) {
+        r.say("bot: no usable password challenge from the host (%s)",
+              r.disconnected ? "it closed the connection" : r.have_challenge ? "bad iterations" : "timed out");
         res.code = r.disconnected ? 4 : 3;
         return res;
     }
+    const AuthAnswerMsg& answer = r.answer;
     HelloMsg hello{};
     set_str(hello.callsign, cfg.callsign.c_str());
     set_str(hello.aircraft, cfg.aircraft.c_str());

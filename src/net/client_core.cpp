@@ -52,14 +52,14 @@ double ClientCore::wall_now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool ClientCore::start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const AuthKey& key,
+bool ClientCore::start(const char* host, uint16_t port, const HelloMsg& hello, LogFn log, const AuthClient& auth,
                        const ClientLimits& limits) {
-    if (thread_.joinable() || !host || !*host || std::strlen(host) >= sizeof(host_) || port == 0 || !key.set) return false;
+    if (thread_.joinable() || !host || !*host || std::strlen(host) >= sizeof(host_) || port == 0 || !auth.has_password()) return false;
     if (started_ && !finished_.load()) return false;  // a thread detached by stop(true) is still cleaning up
     std::snprintf(host_, sizeof(host_), "%s", host);
     port_ = port;
     hello_ = hello;
-    key_ = key;
+    auth_ = auth;
     limits_ = limits;
     log_ = log;
     // No other thread runs now: reset everything a previous session left.
@@ -314,6 +314,10 @@ void ClientCore::run() {
 
     bool connected = false, welcomed = false, bye_seen = false, refused = false;
     bool answered = false;  // the password challenge was answered (once per connection)
+    bool host_proved = false;  // the host proved the password: until then nothing from it is used
+    AuthChallengeMsg challenge{};
+    AuthAnswerMsg answer{};
+    AuthKey key{};
     bool bye_started = false, bye_sent = false, disconnect_sent = false;
     bool peer_known[kSources] = {};  // PeerInfo seen and no PeerLeft since: duplicates are dropped
     double bye_seen_at = 0, welcomed_at = 0;
@@ -428,9 +432,28 @@ void ClientCore::run() {
         end(ClientEnd::QueueFull, Phase::Closed);
     };
 
+    // Ends the connection as if the host had said Bye with reason: the game hears why.
+    auto leave_with = [&](uint8_t reason, double rx) {
+        refused = true;
+        ByeMsg b{};
+        b.client_id = 0;
+        b.reason = reason;
+        ClientEvent e;
+        e.kind = ClientEvent::Bye;
+        e.wall_rx = rx;
+        e.len = static_cast<uint16_t>(encode(b, e.data, sizeof(e.data)));
+        push_control(e, "Bye");
+        enet_peer_disconnect(peer, 0);
+        disconnect_sent = true;
+        disconnect_at = rx;
+    };
+
     auto handle_packet = [&](uint8_t channel, const uint8_t* data, size_t len, double rx) {
         n_received_.fetch_add(1, std::memory_order_relaxed);
-        if (const uint8_t wt = peek_world_type(data, len)) return handle_world(channel, wt, data, len, rx);
+        if (const uint8_t wt = peek_world_type(data, len)) {
+            if (!host_proved) return drop(n_state_);  // nothing from a host that has not proven the password
+            return handle_world(channel, wt, data, len, rx);
+        }
         if (len > kMaxPacket) return drop(n_format_);
         MsgType type{};
         const Status ps = peek_type(data, len, type);
@@ -451,6 +474,8 @@ void ClientCore::run() {
             disconnect_at = rx;
         }
         if (ps != Status::Ok) return drop(n_format_);
+        if (!host_proved && type != MsgType::AuthChallenge && type != MsgType::AuthProof && type != MsgType::Bye)
+            return drop(n_state_);
         ClientEvent e;
         e.wall_rx = rx;
         int source = -1;
@@ -535,19 +560,30 @@ void ClientCore::run() {
                 if (channel != kChannelReliable || decode(data, len, m) != Status::Ok) return drop(n_format_);
                 if (!connected || answered || bye_seen || refused) return drop(n_state_);
                 answered = true;
-                AuthAnswerMsg a;
+                challenge = m;
                 uint8_t out[sizeof(HelloMsg)];
-                if (!auth_answer(key_, m, &a)) {
-                    say("net: client could not answer the password challenge; leaving");
-                    enet_peer_disconnect(peer, 0);
-                    disconnect_sent = true;
-                    disconnect_at = rx;
-                    return;
+                if (!auth_.key_for(m, &key) || !auth_answer(key, m, &answer)) {
+                    say("net: client could not answer the password challenge (iterations %u); leaving",
+                        static_cast<unsigned>(m.iterations));
+                    return leave_with(kByeWrongPassword, rx);
                 }
                 // Reliable and in order: the host reads the answer before the Hello.
-                send_now(out, encode(a, out, sizeof(out)), kChannelReliable);
+                send_now(out, encode(answer, out, sizeof(out)), kChannelReliable);
                 send_now(out, encode(hello_, out, sizeof(out)), kChannelReliable);
                 say("net: client answered the password challenge; Hello sent");
+                return;
+            }
+            case MsgType::AuthProof: {
+                AuthProofMsg m;
+                if (channel != kChannelReliable || decode(data, len, m) != Status::Ok) return drop(n_format_);
+                if (!answered || host_proved || refused) return drop(n_state_);
+                if (!auth_check_host(key, challenge, answer, m)) {
+                    say("net: the host could not prove the session password; leaving");
+                    return leave_with(kByeWrongPassword, rx);
+                }
+                host_proved = true;
+                auth_wipe(key);
+                say("net: the host proved the session password");
                 return;
             }
             case MsgType::Bye: {

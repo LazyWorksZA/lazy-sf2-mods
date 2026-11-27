@@ -828,7 +828,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
                cfg.mission.size());
     }
     AuthKey key;
-    if (!make_auth_key(cfg.password, &key)) {
+    if (!make_host_key(cfg.password, &key)) {
         sv.say("bot serve: a session password is required");
         res.code = 1;
         return res;

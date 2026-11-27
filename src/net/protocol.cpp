@@ -52,6 +52,7 @@ size_t size_of(MsgType t) {
         case MsgType::PeerLeft: return sizeof(PeerLeftMsg);
         case MsgType::AuthChallenge: return sizeof(AuthChallengeMsg);
         case MsgType::AuthAnswer: return sizeof(AuthAnswerMsg);
+        case MsgType::AuthProof: return sizeof(AuthProofMsg);
     }
     return 0;
 }
@@ -68,6 +69,7 @@ size_t encode(const PeerInfoMsg& m, uint8_t* o, size_t c) { return encode_impl(m
 size_t encode(const PeerLeftMsg& m, uint8_t* o, size_t c) { return encode_impl(m, MsgType::PeerLeft, o, c); }
 size_t encode(const AuthChallengeMsg& m, uint8_t* o, size_t c) { return encode_impl(m, MsgType::AuthChallenge, o, c); }
 size_t encode(const AuthAnswerMsg& m, uint8_t* o, size_t c) { return encode_impl(m, MsgType::AuthAnswer, o, c); }
+size_t encode(const AuthProofMsg& m, uint8_t* o, size_t c) { return encode_impl(m, MsgType::AuthProof, o, c); }
 
 Status peek_type(const uint8_t* data, size_t len, MsgType& type) {
     if (!data || len < sizeof(Header)) return Status::Truncated;
@@ -75,7 +77,7 @@ Status peek_type(const uint8_t* data, size_t len, MsgType& type) {
     std::memcpy(&h, data, sizeof(h));
     if (h.magic != kMagic) return Status::BadMagic;
     if (h.version != kVersion) return Status::BadVersion;
-    if (h.type < static_cast<uint8_t>(MsgType::Hello) || h.type > static_cast<uint8_t>(MsgType::AuthAnswer))
+    if (h.type < static_cast<uint8_t>(MsgType::Hello) || h.type > static_cast<uint8_t>(MsgType::AuthProof))
         return Status::BadType;
     const MsgType t = static_cast<MsgType>(h.type);
     if (len < size_of(t)) return Status::Truncated;
@@ -110,6 +112,7 @@ Status decode(const uint8_t* d, size_t n, PeerInfoMsg& out) {
 Status decode(const uint8_t* d, size_t n, PeerLeftMsg& o) { return decode_impl(d, n, MsgType::PeerLeft, o); }
 Status decode(const uint8_t* d, size_t n, AuthChallengeMsg& o) { return decode_impl(d, n, MsgType::AuthChallenge, o); }
 Status decode(const uint8_t* d, size_t n, AuthAnswerMsg& o) { return decode_impl(d, n, MsgType::AuthAnswer, o); }
+Status decode(const uint8_t* d, size_t n, AuthProofMsg& o) { return decode_impl(d, n, MsgType::AuthProof, o); }
 
 const char* status_name(Status s) {
     switch (s) {
@@ -269,8 +272,8 @@ bool protocol_selftest(const char** why) {
         std::memcpy(bad, buf, n);
         bad[3] = 0;
         LZ_CHECK(peek_type(bad, n, t) == Status::BadType, "peek type 0");
-        bad[3] = 11;
-        LZ_CHECK(peek_type(bad, n, t) == Status::BadType, "peek type 11");
+        bad[3] = 12;
+        LZ_CHECK(peek_type(bad, n, t) == Status::BadType, "peek type 12");
     }
     {
         ByeMsg a{};
@@ -314,8 +317,8 @@ bool protocol_selftest(const char** why) {
         LZ_CHECK(buf[3] == 8 && peek_is(buf, n, MsgType::PeerLeft), "peek peerleft");
         if (!negatives<PeerLeftMsg>(buf, n, why)) return false;
         MsgType t{};
-        buf[3] = 11;
-        LZ_CHECK(peek_type(buf, n, t) == Status::BadType, "peek type 11");
+        buf[3] = 12;
+        LZ_CHECK(peek_type(buf, n, t) == Status::BadType, "peek type 12");
     }
     {
         // A v1 Hello (version byte 1, the old 52-byte size) is refused as a bad version.

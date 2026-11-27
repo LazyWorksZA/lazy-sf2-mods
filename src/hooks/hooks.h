@@ -389,8 +389,8 @@ bool host_session_port(uint16_t* port, bool* failed);
 /// <summary>client.cpp, menus only: starts or stops client mode for a lobby session (it connects when a flight starts).</summary>
 bool client_session_start(const char* host, uint16_t port, const char* callsign, const std::string& password,
                           const char** why);
-/// <summary>client.cpp: the session password's key of the configured client (for the mission fetch).</summary>
-bool client_auth_key(net::AuthKey* out);
+/// <summary>client.cpp: the configured client's session password (for the mission fetch).</summary>
+bool client_auth(net::AuthClient* out);
 void client_session_stop();
 /// <summary>world_sync.cpp, menus only: the shared world for a lobby session (host: save and serve each Accept;
 /// client: fetch the host's mission and fly it). dir holds the world files unless the probe is on.</summary>
