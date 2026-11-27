@@ -62,6 +62,7 @@
 #include "net/stream_format.h"
 #include "net/stream_record.h"
 #include "net/mission_fetch.h"
+#include "net/lobby_book.h"
 #include "net/name_lookup.h"
 #include "net/world_proto.h"
 #include "net/world_stream_logic.h"
@@ -3200,9 +3201,8 @@ void lobby_splice_tests() {
                section(h).find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos &&
                section(j).find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos,
            "three screens, each with this DLL as menu code");
-    expect(items(c) == lobby_item::kCount && items(h) == session_item::kHostCount &&
-               items(j) == session_item::kJoinCount,
-           "contiguous item counts: connect 16, host 15, join 16");
+    expect(items(c) == lobby_item::kCount && items(h) == session_item::kCount && items(j) == session_item::kCount,
+           "contiguous item counts: connect 16, host and join 41");
     expect(has(c, lobby_item::kBack, L"DestinationMenu=MainScreen") &&
                has(c, lobby_item::kHost, L"DestinationMenu=" + h) && has(c, lobby_item::kJoin, L"DestinationMenu=" + j),
            "connect: Back to the main menu, Host and Join to their screens");
@@ -3220,18 +3220,21 @@ void lobby_splice_tests() {
                    has(screen, session_item::kAction, L"MenuItemType=TEXTBUTTON") &&
                    has(screen, session_item::kMissionButton, L"MenuItemType=TEXTBUTTON") &&
                    has(screen, session_item::kHeader, L"MenuItemType=TEXT") &&
-                   has(screen, session_item::kSummary, L"MenuItemType=TEXTAREA") &&
-                   has(screen, session_item::kSeats, L"MenuItemType=TEXTAREA") &&
-                   has(screen, session_item::kCallsigns, L"MenuItemType=TEXTAREA") &&
-                   has(screen, session_item::kStates, L"MenuItemType=TEXTAREA") &&
-                   has(screen, session_item::kStatus, L"MenuItemType=TEXT");
+                   has(screen, session_item::kSummary + 2, L"MenuItemType=TEXT") &&
+                   has(screen, session_item::kSeatPrev, L"MenuItemType=TEXTBUTTON") &&
+                   has(screen, session_item::kSeatNext, L"MenuItemType=TEXTBUTTON") &&
+                   has(screen, session_item::kStatus, L"MenuItemType=TEXT") &&
+                   has(screen, session_item::kYouFly, L"MenuItemType=TEXT");
+        for (int r = 0; r < kLobbyRows; ++r)
+            session &= has(screen, session_item::row_seat(r), L"MenuItemType=TEXT") &&
+                       has(screen, session_item::row_callsign(r), L"MenuItemType=TEXT") &&
+                       has(screen, session_item::row_status(r), L"MenuItemType=TEXT") &&
+                       has(screen, session_item::row_status(r), L"TextStringID=" + std::wstring(kLobbyBlankKey));
     }
-    expect(session, "host and join: Leave to the connect screen, buttons, header, summary, pilot columns, status");
+    expect(session, "host and join: Leave, buttons, header, summary lines, seat buttons, status, 8 pilot rows of TEXT");
     expect(has(c, lobby_item::kPassword, L"MenuItemType=EDIT") && has(c, lobby_item::kPassword, L"TextBufferSize=32") &&
                has(c, lobby_item::kPassword, L"EditFieldSetting=EditFieldSetting"),
            "connect: the Session password field (31 characters) at the menu code's number");
-    expect(has(j, session_item::kYouFly, L"MenuItemType=TEXT") && item_name(h, session_item::kYouFly).empty(),
-           "only the join screen has the 'you fly' line");
     expect(has(h, session_item::kAction, L"TextStringID=TXT_LAZY_LOBBY_LAUNCH") &&
                has(j, session_item::kAction, L"TextStringID=TXT_LAZY_LOBBY_READY") &&
                has(h, session_item::kLeave, L"TextStringID=TXT_LAZY_LOBBY_CLOSE") &&
@@ -9887,6 +9890,90 @@ void fake_host_proof_tests() {
     enet_deinitialize();
 }
 
+
+void lobby_book_tests() {
+    std::printf("lobby book (L4: pilots choose their seats)\n");
+    LobbyBook b;
+    expect(b.set_host("ALPHA", -1) == kLobbyOk && b.host_seat() == -1, "no mission: the host has no seat yet");
+    expect(b.update(0xA, "BRAVO", false, -1, false, 1000) == kLobbyOk && b.seat_of(0xA) == -1 && b.clients() == 1,
+           "a client joins before the mission: listed, no seat");
+    b.set_members(4);
+    expect(b.host_seat() == 0 && b.seat_of(0xA) == 1, "the mission arrives: the host, then the client, get the first free seats");
+    b.update(0xB, "CHARLIE", false, -1, false, 1000);
+    expect(b.seat_of(0xB) == 2, "a later client gets the next free seat");
+    const uint8_t ra = b.update(0xA, "BRAVO", false, 3, false, 1100);
+    const uint8_t rb = b.update(0xB, "CHARLIE", false, 3, false, 1100);
+    expect(ra == kLobbyOk && b.seat_of(0xA) == 3 && rb == kLobbySeatTaken && b.seat_of(0xB) == 2,
+           "two pilots ask for the same seat: the first wins, the second keeps its own");
+    expect(b.set_host("ALPHA", 1) == kLobbyOk && b.host_seat() == 1 && b.set_host("ALPHA", 2) == kLobbySeatTaken &&
+               b.host_seat() == 1,
+           "the host changes its seat to a free one; a taken one is refused");
+    b.update(0xA, "BRAVO", true, -1, false, 1200);
+    expect(b.ready(0xA), "Ready is taken from the status");
+    b.update(0xA, "BRAVO", true, 0, false, 1300);
+    expect(b.seat_of(0xA) == 0 && !b.ready(0xA), "a seat change after Ready clears Ready");
+    LobbyRow rows[kLobbyRows];
+    const size_t n = b.rows(rows, 0xA);
+    expect(n == 4 && std::strcmp(rows[0].callsign, "ALPHA") == 0 && (rows[0].flags & kLobbyRowHost) &&
+               (rows[1].flags & kLobbyRowYou) && rows[3].callsign[0] == 0 && rows[3].seat == 3,
+           "roster: the host first, the reader marked, free seats as AI rows");
+    expect(b.update(0xB, "CHARLIE", false, -1, true, 1400) == kLobbyOk && b.seat_of(0xB) == -1 && b.clients() == 1,
+           "a pilot that leaves drops its row and frees its seat");
+    b.update(0xC, "DELTA", false, -1, false, 1500);
+    expect(b.seat_of(0xC) == 2 && b.expire(1500 + LobbyBook::kExpireMs + 1) == 2 && b.clients() == 0 && b.host_seat() == 1,
+           "clients not heard of expire; the host stays");
+    b.update(0xD, "ECHO", false, 3, false, 9000);
+    b.set_members(2);
+    expect(b.host_seat() == 1 && b.seat_of(0xD) == 0, "a smaller flight: seats past it are dropped and given again");
+}
+
+void lobby_loopback_tests() {
+    std::printf("lobby loopback (roster, seats, content hash)\n");
+    HostCore core;
+    core.enable_lobby(0x1234u);
+    core.start("127.0.0.1", 0, [](const char*) {}, test_key());
+    for (int i = 0; i < 2000 && core.state() == HostCore::State::Starting; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    core.lobby_host("ALPHA", -1);
+    core.set_mission(std::vector<uint8_t>(10, 1), 77, 10, SeatPlan{4, 0});
+    MissionFetch f1, f2, bad;
+    f1.enable_lobby("BRAVO", 0x1234u);
+    f2.enable_lobby("CHARLIE", 0x1234u);
+    bad.enable_lobby("ZULU", 0x9999u);
+    f1.start("127.0.0.1", core.port(), 0x11u, test_auth(), nullptr, 200);
+    f2.start("127.0.0.1", core.port(), 0x22u, test_auth(), nullptr, 200);
+    bad.start("127.0.0.1", core.port(), 0x33u, test_auth(), nullptr, 200);
+    LobbyRosterMsg r1{}, r2{}, rb{};
+    uint32_t rtt = 0;
+    auto wait = [&](auto pred) {
+        for (int i = 0; i < 1000 && !pred(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return pred();
+    };
+    const bool both = wait([&] {
+        return f1.roster(&r1, &rtt) && f2.roster(&r2, &rtt) && bad.roster(&rb, &rtt) && r2.count >= 3;
+    });
+    expect(both && r1.your_seat == 1 && r2.your_seat == 2 && r1.members == 4 && r1.mission_id == 77,
+           "two clients get the roster with their default seats");
+    expect(rb.result == kLobbyContent && rb.your_seat == kNoSeat, "a client with other game content is kept out");
+    const HostCore::LobbyView v = core.lobby_view();
+    expect(v.clients == 2 && v.host_seat == 0, "the host sees both clients");
+    f1.want_seat(3);
+    const bool moved = wait([&] { return f1.roster(&r1, &rtt) && r1.your_seat == 3; });
+    expect(moved, "a client's seat wish is granted through the fetch");
+    f2.want_seat(3);
+    const bool refused = wait([&] { return f2.roster(&r2, &rtt) && r2.result == kLobbySeatTaken; });
+    expect(refused && r2.your_seat == 2, "the same seat for the second client is refused; it keeps its own");
+    f1.set_ready(true);
+    const bool ready = wait([&] { return core.lobby_ready(0x11u); });
+    expect(ready, "Ready reaches the host");
+    f1.leave(1000);
+    expect(core.lobby_view().clients == 1, "Leave drops the row at once");
+    f1.stop();
+    f2.stop();
+    bad.stop();
+    core.stop(false);
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -9958,6 +10045,8 @@ int main() {
     session_lifecycle_tests();
     session_password_tests();
     fake_host_proof_tests();
+    lobby_book_tests();
+    lobby_loopback_tests();
     fetch_lookup_tests();
     pilot_twist_tests();
     probe_snapshot_tests();

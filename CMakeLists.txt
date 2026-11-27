@@ -56,6 +56,7 @@ add_library(lazysf2 SHARED
     src/hooks/lobby_splice.cpp
     src/hooks/lobby_screen.cpp
     src/hooks/net_session.cpp
+    src/hooks/content_hash.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp
     src/hooks/tacview_recorder.cpp

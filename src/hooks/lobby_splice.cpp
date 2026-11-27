@@ -127,38 +127,54 @@ struct Ini {
 };
 
 // The host and join screens: the Roster background's wide panel (x 88-938, header rule at y 146), mission on the
-// left, pilots on the right, the session's own buttons in the bottom bar like Exit and Fly on the stock screens.
+// left, pilots on the right (one TEXT per cell: run-time text needs TEXT items, see kLobbyBlankKey), the session's own
+// buttons in the bottom bar like Exit and Fly on the stock screens.
 void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     const std::wstring p = host ? L"LazyHost" : L"LazyJoin";
-    auto n = [&](const wchar_t* s) { return p + s; };
-    std::vector<std::wstring> names = {n(L"LeaveButton"),  n(L"ActionButton"), n(L"MissionButton"), n(L"Title"),
-                                       n(L"Header"),       n(L"MissionLabel"), n(L"Summary"),       n(L"PilotsLabel"),
-                                       n(L"SeatHead"),     n(L"CallsignHead"), n(L"StatusHead"),    n(L"Seats"),
-                                       n(L"Callsigns"),    n(L"States"),       n(L"Status"),        n(L"YouFly")};
-    names.resize(host ? session_item::kHostCount : session_item::kJoinCount);
+    auto n = [&](const std::wstring& s) { return p + s; };
+    std::vector<std::wstring> names = {n(L"LeaveButton"), n(L"ActionButton"), n(L"MissionButton"), n(L"Title"),
+                                       n(L"Header"),      n(L"MissionLabel"), n(L"Summary1"),      n(L"Summary2"),
+                                       n(L"Summary3"),    n(L"PilotsLabel"),  n(L"SeatHead"),      n(L"CallsignHead"),
+                                       n(L"StatusHead"),  n(L"SeatPrev"),     n(L"SeatNext"),      n(L"Status"),
+                                       n(L"YouFly")};
+    for (int r = 0; r < net::kLobbyRows; ++r) {
+        const std::wstring k = std::to_wstring(r + 1);
+        names.push_back(n(L"RowSeat" + k));
+        names.push_back(n(L"RowCallsign" + k));
+        names.push_back(n(L"RowStatus" + k));
+    }
     ini.screen(host ? kLobbyHostScreen : kLobbyJoinScreen, L"RosterScreen.JPG", names, dll);
+    auto at = [&](int item) { return names[item - 1].c_str(); };
 
-    ini.button(names[0].c_str(), kLobbyScreen, L"LargerTextLeft",
+    ini.button(at(session_item::kLeave), kLobbyScreen, L"LargerTextLeft",
                host ? L"TXT_LAZY_LOBBY_CLOSE" : L"TXT_LAZY_LOBBY_LEAVE", 48, 694,
                host ? L"TXT_LAZY_LOBBY_CLOSE_INFO" : L"TXT_LAZY_LOBBY_LEAVE_INFO");
-    ini.button(names[1].c_str(), L"", L"LargerTextRight", host ? L"TXT_LAZY_LOBBY_LAUNCH" : L"TXT_LAZY_LOBBY_READY",
-               976, 694, host ? L"TXT_LAZY_LOBBY_LAUNCH_INFO" : L"TXT_LAZY_LOBBY_READY_INFO");
-    ini.button(names[2].c_str(), L"", L"LargerTextCenter", host ? L"TXT_LAZY_LOBBY_SETUP" : L"TXT_LAZY_LOBBY_BRIEFING",
-               298, 575, host ? L"TXT_LAZY_LOBBY_SETUP_INFO" : L"TXT_LAZY_LOBBY_BRIEFING_INFO");
-    ini.text(names[3].c_str(), L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
-    ini.text(names[4].c_str(), L"LargerTextCenter", kLobbyBlankKey, 513, 120);
-    ini.text(names[5].c_str(), L"LargerTextLeft", host ? L"TXT_LAZY_LOBBY_MISSION" : L"TXT_LAZY_LOBBY_HOST_MISSION",
-             108, 172);
-    ini.area(names[6].c_str(), 108, 192, 380, 330, true);
-    ini.text(names[7].c_str(), L"LargerTextLeft", L"TXT_LAZY_LOBBY_PILOTS", 528, 172);
-    ini.text(names[8].c_str(), L"MediumTextLeft", L"TXT_LAZY_LOBBY_SEAT", 528, 192);
-    ini.text(names[9].c_str(), L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 600, 192);
-    ini.text(names[10].c_str(), L"MediumTextLeft", L"TXT_LAZY_LOBBY_COL_STATUS", 800, 192);
-    ini.area(names[11].c_str(), 528, 214, 66, 340, false);
-    ini.area(names[12].c_str(), 600, 214, 194, 340, false);
-    ini.area(names[13].c_str(), 800, 214, 115, 340, false);
-    ini.text(names[14].c_str(), L"MediumTextLeft", kLobbyBlankKey, 108, 612);
-    if (!host) ini.text(names[15].c_str(), L"MediumTextLeft", kLobbyBlankKey, 108, 532);
+    ini.button(at(session_item::kAction), L"", L"LargerTextRight",
+               host ? L"TXT_LAZY_LOBBY_LAUNCH" : L"TXT_LAZY_LOBBY_READY", 976, 694,
+               host ? L"TXT_LAZY_LOBBY_LAUNCH_INFO" : L"TXT_LAZY_LOBBY_READY_INFO");
+    ini.button(at(session_item::kMissionButton), L"", L"LargerTextCenter",
+               host ? L"TXT_LAZY_LOBBY_SETUP" : L"TXT_LAZY_LOBBY_BRIEFING", 298, 575,
+               host ? L"TXT_LAZY_LOBBY_SETUP_INFO" : L"TXT_LAZY_LOBBY_BRIEFING_INFO");
+    ini.text(at(4), L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
+    ini.text(at(session_item::kHeader), L"LargerTextCenter", kLobbyBlankKey, 513, 120);
+    ini.text(at(6), L"LargerTextLeft", host ? L"TXT_LAZY_LOBBY_MISSION" : L"TXT_LAZY_LOBBY_HOST_MISSION", 108, 172);
+    for (int i = 0; i < 3; ++i) ini.text(at(session_item::kSummary + i), L"MediumTextLeft", kLobbyBlankKey, 108, 200 + 22 * i);
+    ini.text(at(10), L"LargerTextLeft", L"TXT_LAZY_LOBBY_PILOTS", 528, 172);
+    ini.text(at(11), L"MediumTextLeft", L"TXT_LAZY_LOBBY_SEAT", 528, 192);
+    ini.text(at(12), L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 600, 192);
+    ini.text(at(13), L"MediumTextLeft", L"TXT_LAZY_LOBBY_COL_STATUS", 800, 192);
+    ini.button(at(session_item::kSeatPrev), L"", L"LargerTextLeft", L"TXT_LAZY_LOBBY_SEAT_PREV", 528, 410,
+               L"TXT_LAZY_LOBBY_SEAT_INFO");
+    ini.button(at(session_item::kSeatNext), L"", L"LargerTextRight", L"TXT_LAZY_LOBBY_SEAT_NEXT", 915, 410,
+               L"TXT_LAZY_LOBBY_SEAT_INFO");
+    ini.text(at(session_item::kStatus), L"MediumTextLeft", kLobbyBlankKey, 108, 612);
+    ini.text(at(session_item::kYouFly), L"MediumTextLeft", kLobbyBlankKey, 108, 532);
+    for (int r = 0; r < net::kLobbyRows; ++r) {
+        const int y = 214 + 22 * r;
+        ini.text(at(session_item::row_seat(r)), L"MediumTextLeft", kLobbyBlankKey, 528, y);
+        ini.text(at(session_item::row_callsign(r)), L"MediumTextLeft", kLobbyBlankKey, 600, y);
+        ini.text(at(session_item::row_status(r)), L"MediumTextLeft", kLobbyBlankKey, 800, y);
+    }
 }
 
 }  // namespace

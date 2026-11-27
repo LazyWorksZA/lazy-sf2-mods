@@ -9,6 +9,7 @@
 
 #include "hooks/aircraft_side.h"
 #include "net/auth.h"
+#include "net/host_core.h"
 #include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -382,7 +383,21 @@ bool net_session_wanted();
 bool host_configured();
 /// <summary>host.cpp, menus only: starts or stops host mode for a lobby session; why: a reason literal.</summary>
 bool host_session_start(const char* addr, uint16_t port, const char* callsign, const std::string& password,
-                        const char** why);
+                        uint32_t content_hash, const char** why);
+/// <summary>host.cpp, lobby sessions: the roster as the host sees it; the host's own seat wish (-1: keep; also applied
+/// to its flight through world_set_own_seat); the mission summary lines and Launch count sent to the clients.</summary>
+bool host_lobby_view(net::HostCore::LobbyView* out);
+uint8_t host_lobby_seat(int want_seat);
+void host_lobby_info(const char* const lines[3], uint32_t launch_seq);
+/// <summary>content_hash.cpp: this install's content (game cats, the player's aircraft, weapons, ground objects and
+/// terrains folders), cached. Menu thread.</summary>
+uint32_t content_hash();
+/// <summary>world_sync.cpp: the member of the player flight this PC's player flies (the host's lobby seat; -1: stock).</summary>
+void world_set_own_seat(int member);
+/// <summary>world_sync.cpp, a joined lobby session: the latest roster (and round trip), Ready, a seat wish.</summary>
+bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms);
+void world_lobby_ready(bool ready);
+void world_lobby_want_seat(int seat);
 void host_session_stop();
 /// <summary>host.cpp: the bound port once the network thread runs (false before); failed: it could not bind.</summary>
 bool host_session_port(uint16_t* port, bool* failed);
@@ -394,7 +409,7 @@ bool client_auth(net::AuthClient* out);
 void client_session_stop();
 /// <summary>world_sync.cpp, menus only: the shared world for a lobby session (host: save and serve each Accept;
 /// client: fetch the host's mission and fly it). dir holds the world files unless the probe is on.</summary>
-bool world_session_begin(bool host, const std::wstring& dir);
+bool world_session_begin(bool host, const std::wstring& dir, const char* callsign = nullptr, uint32_t content_hash = 0);
 void world_session_end();
 
 /// <summary>

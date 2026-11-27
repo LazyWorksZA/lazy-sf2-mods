@@ -55,6 +55,22 @@ uint8_t peek_world_type(const uint8_t* data, size_t len) {
     return h.type >= kWorldTypeFirst && h.type <= kWorldTypeLast ? h.type : 0;
 }
 
+size_t encode(const LobbyStatusMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::LobbyStatus, o, c); }
+size_t encode(const LobbyRosterMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::LobbyRoster, o, c); }
+Status decode(const uint8_t* d, size_t n, LobbyStatusMsg& out) {
+    const Status s = decode_fixed(d, n, WorldType::LobbyStatus, out);
+    if (s == Status::Ok) out.callsign[sizeof(out.callsign) - 1] = 0;
+    return s;
+}
+Status decode(const uint8_t* d, size_t n, LobbyRosterMsg& out) {
+    const Status s = decode_fixed(d, n, WorldType::LobbyRoster, out);
+    if (s != Status::Ok) return s;
+    if (out.count > kLobbyRows) return Status::BadType;
+    for (auto& line : out.summary) line[sizeof(line) - 1] = 0;
+    for (LobbyRow& r : out.rows) r.callsign[sizeof(r.callsign) - 1] = 0;
+    return Status::Ok;
+}
+
 size_t encode(const MissionRequestMsg& m, uint8_t* o, size_t c) {
     return encode_fixed(m, WorldType::MissionRequest, o, c);
 }

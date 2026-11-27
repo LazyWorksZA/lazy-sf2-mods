@@ -40,6 +40,38 @@ bool MissionFetch::start(const char* host, uint16_t port, uint32_t tag, const Au
     return true;
 }
 
+void MissionFetch::enable_lobby(const char* callsign, uint32_t content_hash) {
+    lobby_ = true;
+    set_str(callsign_, callsign);
+    content_hash_ = content_hash;
+}
+
+void MissionFetch::set_ready(bool ready) {
+    ready_.store(ready);
+    poke_.store(true);
+}
+
+void MissionFetch::want_seat(int seat) {
+    want_.store(seat);
+    poke_.store(true);
+}
+
+bool MissionFetch::roster(LobbyRosterMsg* out, uint32_t* rtt_ms) const {
+    std::lock_guard<std::mutex> lock(roster_mx_);
+    if (!have_roster_) return false;
+    *out = roster_;
+    *rtt_ms = rtt_.load();
+    return true;
+}
+
+void MissionFetch::leave(int wait_ms) {
+    if (!lobby_ || state_.load() != State::Running) return;
+    leaving_.store(true);
+    poke_.store(true);
+    for (int i = 0; i < wait_ms / 10 && !left_.load() && state_.load() == State::Running; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
 void MissionFetch::stop() {
     stop_.store(true);
     if (thread_.joinable()) thread_.join();
@@ -100,6 +132,9 @@ void MissionFetch::run() {
         MissionAssembly as;
         bool connected = false, round_done = false;
         bool answered = false, proved = false;  // per connection: nothing from the host counts before its proof
+        bool offer_done = false, roster_done = !lobby_;
+        const bool leaving = leaving_.load();
+        const int wish = want_.load();
         AuthChallengeMsg challenge{};
         AuthAnswerMsg answer{};
         AuthKey key{};
@@ -143,6 +178,17 @@ void MissionFetch::run() {
                         // Reliable and in order: the host reads the answer before the request.
                         send(ab, encode(answer, ab, sizeof(ab)));
                         send(rb, encode(rq, rb, sizeof(rb)));
+                        if (lobby_) {
+                            LobbyStatusMsg ls{};
+                            ls.tag = tag_;
+                            set_str(ls.callsign, callsign_);
+                            ls.ready = ready_.load() ? 1 : 0;
+                            ls.want_seat = wish >= 0 && wish < 255 ? static_cast<uint8_t>(wish) : kLobbyNoWish;
+                            ls.leaving = leaving ? 1 : 0;
+                            ls.content_hash = content_hash_;
+                            uint8_t lb[sizeof(LobbyStatusMsg)];
+                            send(lb, encode(ls, lb, sizeof(lb)));
+                        }
                     } else {
                         say("net: mission fetch: cannot answer the host's challenge (iterations %u); not asking again",
                             static_cast<unsigned>(chal.iterations));
@@ -167,6 +213,22 @@ void MissionFetch::run() {
                     refused = true;
                 } else if (!proved) {
                     // An offer, a chunk or anything else from a host that has not proven the password: unread.
+                } else if (wt == static_cast<uint8_t>(WorldType::LobbyRoster)) {
+                    LobbyRosterMsg rr;
+                    if (decode(d, n, rr) == Status::Ok) {
+                        {
+                            std::lock_guard<std::mutex> lock(roster_mx_);
+                            roster_ = rr;
+                            have_roster_ = true;
+                        }
+                        rtt_.store(peer->roundTripTime);
+                        if (wish >= 0) {
+                            int expected = wish;
+                            want_.compare_exchange_strong(expected, -1);  // answered (granted or refused)
+                        }
+                        if (leaving) left_.store(true);
+                        roster_done = true;
+                    }
                 } else if (wt == static_cast<uint8_t>(WorldType::MissionOffer) && decode(d, n, o) == Status::Ok) {
                     latest_seat_.store(o.seat, std::memory_order_release);
                     if (o.status == kOfferOk || o.status == kOfferSame) {
@@ -183,7 +245,7 @@ void MissionFetch::run() {
                             say("net: the host has %s; asking again",
                                 o.status == kOfferNone ? "no mission yet" : "a mission it cannot send");
                         if (o.status != kOfferSame) logged_none = true;
-                        round_done = true;
+                        offer_done = true;
                     }
                 } else if (wt == static_cast<uint8_t>(WorldType::MissionChunk) &&
                            decode_mission_chunk(d, n, ch, &payload) == Status::Ok) {
@@ -197,11 +259,12 @@ void MissionFetch::run() {
                         have = as.offer().mission_id;
                         say("net: mission 0x%08x received (%u bytes)", static_cast<unsigned>(have),
                             static_cast<unsigned>(as.offer().packed_bytes));
-                        round_done = true;
+                        offer_done = true;
                     }
                 }
                 enet_packet_destroy(ev.packet);
             }
+            round_done = offer_done && roster_done;
             if ((!connected && now - t0 > kConnectMs) || (connected && now - last_rx > kSilenceMs)) break;
         }
         // Leave between asks: a waiting client holds no host slot (the host keeps its seat by tag while free).
@@ -222,8 +285,10 @@ void MissionFetch::run() {
         } else if (round_done) {
             logged_lost = false;
         }
-        const uint64_t until = ms_now() + (round_done ? poll_ms_ : kRetryMs);
-        while (!stop_.load() && !refused && ms_now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (left_.load()) break;  // the host knows this pilot left: nothing more to ask
+        const uint64_t until = ms_now() + (round_done ? poll_ms_ : lobby_ ? 1000 : kRetryMs);  // the lobby retries soon
+        while (!stop_.load() && !refused && ms_now() < until && !poke_.exchange(false))
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     enet_host_destroy(host);
     enet_deinitialize();

@@ -63,6 +63,8 @@ void* g_sys = nullptr;
 void* g_mnu = nullptr;
 std::wstring g_saved_address;  // what Options.ini holds (as last read or written)
 std::wstring g_join_address;   // the address Join was clicked with
+bool g_ready = false;          // join screen: this pilot's Ready (sent with every status)
+int g_wished = -1;             // join screen: the seat asked for, until the roster answers
 enum class Screen { Connect, Host, Join };
 Screen g_screen = Screen::Connect;
 
@@ -251,6 +253,8 @@ void start_join() {
         return;
     }
     g_join_address = std::wstring(host, host + std::strlen(host)) + L":" + std::to_wstring(port);
+    g_ready = false;
+    g_wished = -1;
     LOG("lobby: joining %s:%u as \"%s\"", host, static_cast<unsigned>(port), cs.c_str());
     post(kCmdGoTo, lobby_item::kJoin);
 }
@@ -273,6 +277,188 @@ void connect_click(int item) {
     }
 }
 
+// --- The host and join screens (L4): roster, seats, Ready. ---
+
+std::wstring widen(const char* s) {
+    std::wstring w;
+    for (; s && *s; ++s) w += static_cast<wchar_t>(static_cast<unsigned char>(*s));
+    return w;
+}
+
+std::wstring seat_text(int seat) { return seat < 0 || seat == net::kNoSeat ? L"-" : L"#" + std::to_wstring(seat + 1); }
+
+// What the screens show, from the host's own view or the client's latest roster.
+struct Roster {
+    bool have = false;
+    int members = 0;
+    int clients = 0;
+    int you = -1;  // this pilot's seat
+    uint8_t result = net::kLobbyOk;
+    uint32_t launch_seq = 0;
+    uint32_t rtt_ms = 0;
+    std::wstring host_callsign;
+    std::wstring summary[3];
+    size_t count = 0;
+    net::LobbyRow rows[net::kLobbyRows] = {};
+};
+
+Roster read_roster() {
+    Roster r;
+    if (g_screen == Screen::Host) {
+        net::HostCore::LobbyView v;
+        if (!host_lobby_view(&v)) return r;
+        r.have = true;
+        r.members = v.members;
+        r.clients = v.clients;
+        r.you = v.host_seat;
+        r.launch_seq = v.launch_seq;
+        r.count = v.count;
+        std::memcpy(r.rows, v.rows, sizeof(r.rows));
+        for (int i = 0; i < 3; ++i) r.summary[i] = widen(v.summary[i]);
+    } else {
+        net::LobbyRosterMsg m;
+        if (!world_lobby_roster(&m, &r.rtt_ms)) return r;
+        r.have = true;
+        r.members = m.members;
+        r.you = m.your_seat == net::kNoSeat ? -1 : m.your_seat;
+        r.result = m.result;
+        r.launch_seq = m.launch_seq;
+        r.count = m.count;
+        std::memcpy(r.rows, m.rows, sizeof(r.rows));
+        for (int i = 0; i < 3; ++i) r.summary[i] = widen(m.summary[i]);
+        for (size_t i = 0; i < r.count; ++i) {
+            if (r.rows[i].flags & net::kLobbyRowHost) r.host_callsign = widen(r.rows[i].callsign);
+            if (r.rows[i].callsign[0] && !(r.rows[i].flags & net::kLobbyRowHost)) ++r.clients;
+        }
+    }
+    return r;
+}
+
+bool g_refusal_shown = false;
+ULONGLONG g_next_roster = 0;  // the roster is redrawn twice a second
+
+void show_roster(const Roster& r) {
+    const bool host = g_screen == Screen::Host;
+    for (int i = 0; i < net::kLobbyRows; ++i) {
+        std::wstring seat, cs, st;
+        if (static_cast<size_t>(i) < r.count) {
+            const net::LobbyRow& row = r.rows[i];
+            seat = seat_text(row.seat);
+            if (row.callsign[0]) {
+                cs = widen(row.callsign);
+                if (row.flags & net::kLobbyRowYou) cs += L" (you)";
+                st = (row.flags & net::kLobbyRowHost) ? L"Host" : (row.flags & net::kLobbyRowReady) ? L"Ready" : L"Not ready";
+            } else {
+                cs = L"AI";
+            }
+        }
+        set_text(session_item::row_seat(i), seat.c_str());
+        set_text(session_item::row_callsign(i), cs.c_str());
+        set_text(session_item::row_status(i), st.c_str());
+    }
+    const std::wstring players = std::to_wstring(r.clients) + (r.clients == 1 ? L" player joined" : L" players joined");
+    if (host) {
+        uint16_t port = 0;
+        bool failed = false;
+        host_session_port(&port, &failed);
+        set_text(session_item::kHeader, (L"Hosting on port " + std::to_wstring(port) + L" - " + players).c_str());
+        for (int i = 0; i < 3; ++i) set_text(session_item::kSummary + i, r.summary[i].c_str());
+        if (r.summary[0].empty()) set_text(session_item::kSummary, L"No mission yet: Set up mission...");
+    } else {
+        std::wstring h = L"Host " + (r.host_callsign.empty() ? std::wstring(L"?") : r.host_callsign) + L" - " +
+                         g_join_address + L" - ping " + std::to_wstring(r.rtt_ms) + L" ms";
+        set_text(session_item::kHeader, h.c_str());
+        for (int i = 0; i < 3; ++i) set_text(session_item::kSummary + i, r.summary[i].c_str());
+        if (r.summary[0].empty()) set_text(session_item::kSummary, L"The host has not set up a mission yet.");
+    }
+    if (r.members == 0) {
+        set_text(session_item::kYouFly, L"Seats appear once the host has set up the mission.");
+    } else if (r.you < 0) {
+        set_text(session_item::kYouFly, L"No seat yet: pick a free one with < Seat or Seat >.");
+    } else {
+        std::wstring y = L"You fly seat " + seat_text(r.you) + L" of the player flight";
+        if (!host) y += L" with the host's loadout";
+        set_text(session_item::kYouFly, (y + L".").c_str());
+    }
+}
+
+void session_frame() {
+    if (g_screen == Screen::Host) {
+        uint16_t port = 0;
+        bool failed = false;
+        if (!host_session_port(&port, &failed) && failed) {
+            LOG("lobby: the host could not open its port; closing the session");
+            net_session_close();
+            set_text(session_item::kHeader, L"Not hosting");
+            set_status(L"Could not open UDP port 7777: is another game or program using it?");
+            return;
+        }
+    } else if (!g_refusal_shown) {
+        if (net_session_wrong_password()) {
+            g_refusal_shown = true;
+            LOG("lobby: the host refused the session password");
+            set_status(L"Wrong session password. Leave, and type the host's password.");
+        } else if (net_session_host_unknown()) {
+            g_refusal_shown = true;
+            LOG("lobby: the host's name did not resolve");
+            set_status(L"Couldn't find the host. Leave, and check the address.");
+        }
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_next_roster || net_session_role() == NetRole::None) return;
+    g_next_roster = now + 500;
+    const Roster r = read_roster();
+    if (!r.have) return;
+    show_roster(r);
+    if (g_screen == Screen::Join) {
+        if (r.result == net::kLobbyContent && !g_refusal_shown) {
+            g_refusal_shown = true;
+            LOG("lobby: the host's game content differs from ours; not in its lobby");
+            set_status(L"Your game content differs from the host's (aircraft, weapons, terrains or patches).");
+        } else if (g_wished >= 0 && r.you == g_wished) {
+            g_wished = -1;
+            set_status((L"You took seat " + seat_text(r.you) + L".").c_str());
+        } else if (g_wished >= 0 && r.result == net::kLobbySeatTaken) {
+            set_status((L"Seat " + seat_text(g_wished) + L" was taken; you keep " + seat_text(r.you) + L".").c_str());
+            g_wished = -1;
+        }
+    }
+}
+
+/// <summary>The next free seat after (dir 1) or before (dir -1) this pilot's, from the roster's free rows; -1 if none.</summary>
+int next_free_seat(const Roster& r, int dir) {
+    if (r.members <= 0) return -1;
+    const int from = r.you < 0 ? (dir > 0 ? -1 : r.members) : r.you;
+    for (int step = 1; step <= r.members; ++step) {
+        const int s = ((from + dir * step) % r.members + r.members) % r.members;
+        for (size_t i = 0; i < r.count; ++i)
+            if (!r.rows[i].callsign[0] && r.rows[i].seat == s) return s;
+    }
+    return -1;
+}
+
+void change_seat(int dir) {
+    const Roster r = read_roster();
+    const int seat = next_free_seat(r, dir);
+    if (seat < 0) {
+        set_status(r.members == 0 ? L"No seats yet: the host has not set up the mission." : L"No other seat is free.");
+        return;
+    }
+    LOG("lobby: seat %d asked for", seat);
+    if (g_screen == Screen::Host) {
+        const uint8_t res = host_lobby_seat(seat);
+        set_status(res == net::kLobbyOk ? (L"You took seat " + seat_text(seat) + L".").c_str()
+                                        : (L"Seat " + seat_text(seat) + L" is not free.").c_str());
+    } else {
+        g_wished = seat;
+        g_ready = false;  // a new seat clears Ready (the host clears it too)
+        world_lobby_ready(false);
+        world_lobby_want_seat(seat);
+        set_status((L"Asking the host for seat " + seat_text(seat) + L"...").c_str());
+    }
+    g_next_roster = 0;
+}
+
 void session_click(int item) {
     const bool host = g_screen == Screen::Host;
     switch (item) {
@@ -282,50 +468,32 @@ void session_click(int item) {
             post(kCmdGoTo, item);
             break;
         case session_item::kAction:
-            LOG("lobby: %s clicked; not wired up yet", host ? "Launch" : "Ready");
-            set_status(host ? L"Launch is not available yet." : L"Ready is not available yet.");
+            if (host) {
+                LOG("lobby: Launch clicked; not wired up yet");
+                set_status(L"Launch is not available yet.");
+            } else {
+                const Roster r = read_roster();
+                if (!g_ready && r.you < 0) {
+                    set_status(L"Pick a seat first.");
+                    break;
+                }
+                g_ready = !g_ready;
+                world_lobby_ready(g_ready);
+                LOG("lobby: Ready %s", g_ready ? "on" : "off");
+                set_status(g_ready ? L"Ready: the host can launch the mission." : L"Not ready.");
+                g_next_roster = 0;
+            }
             break;
         case session_item::kMissionButton:
             LOG("lobby: %s clicked; not wired up yet", host ? "Set up mission" : "Briefing");
             set_status(host ? L"Mission set-up is not available yet." : L"The briefing is not available yet.");
             break;
+        case session_item::kSeatPrev:
+        case session_item::kSeatNext:
+            change_seat(item == session_item::kSeatNext ? 1 : -1);
+            break;
         default:
             break;
-    }
-}
-
-// Host screen: the header follows the network thread (binding takes a moment; a port in use fails).
-// Join screen: the mission fetch reports a refused password once.
-bool g_join_refused_shown = false;
-void join_frame() {
-    if (g_join_refused_shown) return;
-    if (net_session_wrong_password()) {
-        g_join_refused_shown = true;
-        LOG("lobby: the host refused the session password");
-        set_status(L"Wrong session password. Leave, and type the host's password.");
-    } else if (net_session_host_unknown()) {
-        g_join_refused_shown = true;
-        LOG("lobby: the host's name did not resolve");
-        set_status(L"Couldn't find the host. Leave, and check the address.");
-    }
-}
-
-bool g_host_bound = false;
-void host_frame() {
-    if (g_host_bound) return;
-    uint16_t port = 0;
-    bool failed = false;
-    if (host_session_port(&port, &failed)) {
-        g_host_bound = true;
-        const std::wstring h = L"Hosting on port " + std::to_wstring(port) + L" - 0 players joined";
-        set_text(session_item::kHeader, h.c_str());
-        set_status(L"Waiting for players. Set up the mission when you are ready.");
-    } else if (failed) {
-        g_host_bound = true;
-        LOG("lobby: the host could not open its port; closing the session");
-        net_session_close();
-        set_text(session_item::kHeader, L"Not hosting");
-        set_status(L"Could not open UDP port 7777: is another game or program using it?");
     }
 }
 
@@ -334,8 +502,7 @@ void host_frame() {
 class LobbyHandler {
 public:
     virtual void frame() {
-        if (g_mnu && g_screen == Screen::Host) host_frame();
-        if (g_mnu && g_screen == Screen::Join) join_frame();
+        if (g_mnu && g_screen != Screen::Connect) session_frame();
     }
     // 0 when a popup or another screen opens over this one (MenuSystem +0xbde0), 1 when it is on top again (+0xbe70).
     virtual void activate(int /*on_top*/) {}
@@ -353,12 +520,11 @@ public:
 };
 LobbyHandler g_handler;
 
-/// <summary>Which lobby screen is open, from its items: only the connect screen has an EDIT field, only the join
-/// screen has the "you fly" line.</summary>
+/// <summary>Which lobby screen is open: only the connect screen has an EDIT field; the host and join screens share
+/// their items, so the session's role tells them apart (none: the join screen's wording).</summary>
 Screen identify_screen() {
     if (item_iface(lobby_item::kAddress, kIfaceEdit)) return Screen::Connect;
-    if (item_iface(session_item::kYouFly, kIfaceText)) return Screen::Join;
-    return Screen::Host;
+    return net_session_role() == NetRole::Host ? Screen::Host : Screen::Join;
 }
 
 void init_connect_screen() {
@@ -381,25 +547,22 @@ void init_connect_screen() {
         have_options ? "" : ", Options.ini not available");
 }
 
-// L4 fills the player count, the host's callsign and ping, the mission summary, the pilot list and the "you fly" line.
 void init_session_screen() {
     const bool host = g_screen == Screen::Host;
     const NetRole role = net_session_role();
-    std::wstring header;
+    g_next_roster = 0;
+    g_refusal_shown = false;
     if (role != (host ? NetRole::Host : NetRole::Client)) {
-        header = L"Not in a session";
+        set_text(session_item::kHeader, L"Not in a session");
         set_status(L"The session has ended. Go back to start a new one.");
     } else if (host) {
-        g_host_bound = false;
-        header = L"Starting the host...";
-        set_status(L"Opening UDP port 7777...");
+        set_text(session_item::kHeader, L"Starting the host...");
+        set_status(L"Waiting for players. Set up the mission when you are ready.");
     } else {
-        header = L"Host at " + g_join_address;
-        g_join_refused_shown = false;
-        set_status(L"Waiting for the host's mission.");
+        set_text(session_item::kHeader, (L"Host at " + g_join_address).c_str());
+        set_status(g_ready ? L"Ready." : L"Pick a seat, then Ready.");
     }
-    set_text(session_item::kHeader, header.c_str());
-    LOG("lobby: %s screen opened (header \"%ls\")", host ? "host" : "join", header.c_str());
+    LOG("lobby: %s screen opened", host ? "host" : "join");
 }
 
 /// <summary>Logs loose screen files our MenuSystem.ini sections override (MenuSystem.ini is looked up first).</summary>

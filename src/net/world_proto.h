@@ -32,11 +32,21 @@ enum class WorldType : uint8_t {
     HandoverBegin = 36,   // the world owner's snapshot offer, reliable (net/handover_format.h)
     HandoverChunk = 37,   // ... its chunks, reliable, 80 bytes each
     HandoverDone = 38,    // the receiver's answer, reliable
+    LobbyStatus = 39,     // client to host, reliable, on every mission-fetch round: callsign, ready, seat wish, content
+    LobbyRoster = 40,     // host to client, reliable, the answer: the pilots, seats, mission summary and Launch count
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 38;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 40;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
+
+struct LobbyStatusMsg;
+struct LobbyRosterMsg;
+size_t encode(const LobbyStatusMsg& m, uint8_t* out, size_t cap);
+size_t encode(const LobbyRosterMsg& m, uint8_t* out, size_t cap);
+/// <summary>Decoders NUL-terminate the strings.</summary>
+Status decode(const uint8_t* data, size_t len, LobbyStatusMsg& out);
+Status decode(const uint8_t* data, size_t len, LobbyRosterMsg& out);
 
 /// <summary>Payload bytes per chunk: a chunk packet (972 bytes) stays under ENet's 1,024-byte limit and one datagram.</summary>
 inline constexpr size_t kMissionChunkData = 960;
@@ -85,6 +95,39 @@ struct MissionOfferMsg {
     uint8_t seat;           // the member of the host's flight the host assigned this client (kNoSeat: none free)
     uint8_t host_seat;      // the member the host flies
 };
+/// <summary>The lobby (L4): rows in a roster, and the host's answer to a status.</summary>
+inline constexpr int kLobbyRows = 8;
+inline constexpr uint8_t kLobbyOk = 0;          // the status was taken (and a seat wish granted)
+inline constexpr uint8_t kLobbySeatTaken = 1;   // the wished seat is not free: the pilot keeps the one it had
+inline constexpr uint8_t kLobbyContent = 2;     // the client's game content differs from the host's: not in the lobby
+inline constexpr uint8_t kLobbyFull = 3;        // no room for another pilot
+inline constexpr uint8_t kLobbyRowHost = 1, kLobbyRowReady = 2, kLobbyRowYou = 4;
+inline constexpr uint8_t kLobbyNoWish = 0xff;   // want_seat: keep the seat
+struct LobbyStatusMsg {
+    Header h;
+    uint32_t tag;           // the client's world tag (as in its mission request)
+    char callsign[16];
+    uint8_t ready;
+    uint8_t want_seat;      // a member of the host's player flight, or kLobbyNoWish
+    uint8_t leaving;        // 1: the pilot leaves the session (the host drops its row at once)
+    uint32_t content_hash;  // hooks/content_hash: what the host compares with its own
+};
+struct LobbyRow {
+    char callsign[16];  // empty: a free seat (the AI flies it)
+    uint8_t seat;       // member of the player flight, kNoSeat: none yet
+    uint8_t flags;      // kLobbyRow*
+};
+struct LobbyRosterMsg {
+    Header h;
+    uint32_t mission_id;  // the host's mission (0: none yet)
+    uint32_t launch_seq;  // counts the host's Launches (L7)
+    uint8_t members;      // seats in the player flight (0: no mission)
+    uint8_t count;        // rows used
+    uint8_t result;       // kLobby* for the status this answers
+    uint8_t your_seat;    // kNoSeat: none
+    char summary[3][40];  // the mission in three short lines (ASCII)
+    LobbyRow rows[kLobbyRows];
+};
 struct MissionChunkHead {
     Header h;
     uint32_t mission_id;
@@ -92,6 +135,7 @@ struct MissionChunkHead {
     uint16_t len;  // payload bytes that follow (1..kMissionChunkData; only the last chunk may be shorter)
 };
 #pragma pack(pop)
+static_assert(sizeof(LobbyStatusMsg) == 31 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 280);
 static_assert(sizeof(MissionRequestMsg) == 12);  // 4:4 have id, 8:4 tag
 static_assert(sizeof(MissionOfferMsg) == 23);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status,
                                                  // 21:1 seat, 22:1 host seat

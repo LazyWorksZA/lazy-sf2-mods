@@ -202,12 +202,67 @@ bool HostCore::send_world(uint8_t slot, uint32_t gen, const uint8_t* data, size_
 
 int HostCore::seat_for(uint32_t tag) {
     std::lock_guard<std::mutex> lock(mission_mx_);
-    return seats_.claim(tag);
+    return lobby_ ? book_.seat_of(tag) : seats_.claim(tag);
 }
 
 void HostCore::release_seat(uint32_t tag) {
     std::lock_guard<std::mutex> lock(mission_mx_);
-    seats_.release(tag);
+    if (!lobby_) seats_.release(tag);  // in the lobby a seat stays with its pilot until it leaves or expires
+}
+
+void HostCore::enable_lobby(uint32_t content_hash) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    lobby_ = true;
+    content_hash_ = content_hash;
+}
+
+uint8_t HostCore::lobby_host(const char* callsign, int want_seat) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    return book_.set_host(callsign, want_seat);
+}
+
+void HostCore::set_lobby_info(const char* const lines[3], uint32_t launch_seq) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    for (int i = 0; i < 3; ++i) set_str(summary_[i], lines[i]);
+    launch_seq_ = launch_seq;
+}
+
+HostCore::LobbyView HostCore::lobby_view() const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    LobbyView v;
+    v.members = book_.members();
+    v.clients = book_.clients();
+    v.host_seat = book_.host_seat();
+    v.mission_id = mission_ ? mission_->id : 0;
+    v.launch_seq = launch_seq_;
+    v.count = book_.rows(v.rows, LobbyBook::kHostTag);
+    std::memcpy(v.summary, summary_, sizeof(v.summary));
+    return v;
+}
+
+bool HostCore::lobby_ready(uint32_t tag) const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    return book_.ready(tag);
+}
+
+size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint8_t* out, size_t cap) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    LobbyRosterMsg r{};
+    if (s.content_hash != content_hash_) {
+        r.result = kLobbyContent;
+        book_.update(s.tag, s.callsign, false, -1, true, now_ms());  // not in the lobby
+    } else {
+        r.result = book_.update(s.tag, s.callsign, s.ready != 0, s.want_seat == kLobbyNoWish ? -1 : s.want_seat,
+                                s.leaving != 0, now_ms());
+    }
+    r.mission_id = mission_ ? mission_->id : 0;
+    r.launch_seq = launch_seq_;
+    r.members = static_cast<uint8_t>(book_.members());
+    const int seat = book_.seat_of(s.tag);
+    r.your_seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;
+    std::memcpy(r.summary, summary_, sizeof(r.summary));
+    r.count = static_cast<uint8_t>(book_.rows(r.rows, s.tag));
+    return encode(r, out, cap);
 }
 
 bool HostCore::seat_active(uint32_t tag) const {
@@ -217,6 +272,7 @@ bool HostCore::seat_active(uint32_t tag) const {
 
 SeatPlan HostCore::seat_plan() const {
     std::lock_guard<std::mutex> lock(mission_mx_);
+    if (lobby_) return SeatPlan{book_.members(), book_.host_seat() < 0 ? 0 : book_.host_seat()};
     return seats_.plan();
 }
 
@@ -237,6 +293,7 @@ void HostCore::set_mission(std::vector<uint8_t> packed, uint32_t id, uint32_t ra
     std::lock_guard<std::mutex> lock(mission_mx_);
     mission_ = std::move(b);
     seats_.reset(seats);  // a new mission: seats are given out again
+    if (lobby_) book_.set_members(seats.members);  // the pilots keep their seats where the new flight has them
 }
 
 // The network thread. Everything below runs on it, and only it touches ENet.
@@ -423,6 +480,17 @@ void HostCore::run() {
             e.channel = channel;
             e.len = static_cast<uint16_t>(encode_hit(hm, WorldType::HitClaim, e.data, sizeof(e.data)));
             if (!push_in(e, true)) drop(n_queue_);
+            return;
+        }
+        if (wt == static_cast<uint8_t>(WorldType::LobbyStatus)) {  // answered here, like a mission request
+            LobbyStatusMsg ls;
+            if (channel != kChannelReliable || decode(data, len, ls) != Status::Ok || ls.tag == 0) return drop(n_format_);
+            if (!lobby_) return drop(n_state_);
+            if (ls.tag != slot_tag[slot]) {  // the tag holds a slot while this connection is open (as a request)
+                slot_tag[slot] = ls.tag;
+            }
+            uint8_t out[sizeof(LobbyRosterMsg)];
+            send_raw(slot, out, lobby_answer(ls, out, sizeof(out)));
             return;
         }
         MissionRequestMsg rq;
@@ -796,6 +864,10 @@ void HostCore::run() {
         }
         if (now >= next_report) {
             next_report = now + 1000;
+            if (lobby_) {
+                std::lock_guard<std::mutex> lock(mission_mx_);
+                book_.expire(now);
+            }
             for (uint32_t& p : pings) p = 0;
             const HostCounters c = counters();
             uint32_t quota_now = 0, quota_before = 0;

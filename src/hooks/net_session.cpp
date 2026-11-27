@@ -105,7 +105,7 @@ bool net_session_host(uint16_t port, const char* callsign, const std::string& pa
     if (env_session(why)) return false;
     if (!prepare_dir(why)) return false;
     const char* reason = "";
-    if (!host_session_start("0.0.0.0", port, callsign, password, &reason)) {
+    if (!host_session_start("0.0.0.0", port, callsign, password, content_hash(), &reason)) {
         *why = reason;
         return false;
     }
@@ -133,7 +133,7 @@ bool net_session_join(const char* host, uint16_t port, const char* callsign, con
         *why = reason;
         return false;
     }
-    if (!world_session_begin(false, g_dir)) {  // after the client: the mission fetch asks it for the host's address
+    if (!world_session_begin(false, g_dir, callsign, content_hash())) {  // after the client: the fetch asks it for the address
         client_session_stop();
         *why = "the shared world is already configured for this launch";
         return false;

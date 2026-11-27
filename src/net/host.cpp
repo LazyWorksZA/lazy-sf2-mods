@@ -46,6 +46,7 @@ using avatar_logic::dist3;
 // no step runs then, and the network thread copies the address at its start).
 std::atomic<bool> g_enabled{false};
 bool g_from_env = false;
+uint32_t g_lobby_hash = 0;  // a lobby session: the content hash (0: no lobby, the variables' flows)
 net::AuthKey g_key;  // the session's key (PBKDF2 of LAZYSF2_PASSWORD or the lobby's password over a fresh salt)
 char g_addr[48] = {};
 uint16_t g_port = 0;
@@ -925,6 +926,10 @@ bool start_running() {
     g_checked_gen = g_aircraft_generation.load(std::memory_order_acquire);
     g_epoch = sim_player_epoch();
     g_running.store(true);
+    if (g_lobby_hash) {
+        g_core->enable_lobby(g_lobby_hash);
+        g_core->lobby_host(g_callsign, -1);
+    }
     // Returns at once; the thread binds and logs "net: host on udp <addr>:<port>" (or why it could not).
     if (!g_core->start(g_addr, g_port, core_log, g_key)) {
         g_running.store(false);
@@ -947,8 +952,25 @@ void host_on_modules_loaded() {
 
 bool host_configured() { return g_enabled.load(); }
 
+bool host_lobby_view(net::HostCore::LobbyView* out) {
+    if (!g_running.load() || !g_core || !g_lobby_hash) return false;
+    *out = g_core->lobby_view();
+    return true;
+}
+
+uint8_t host_lobby_seat(int want_seat) {
+    if (!g_running.load() || !g_core || !g_lobby_hash) return net::kLobbyFull;
+    const uint8_t r = g_core->lobby_host(g_callsign, want_seat);
+    world_set_own_seat(g_core->lobby_view().host_seat);
+    return r;
+}
+
+void host_lobby_info(const char* const lines[3], uint32_t launch_seq) {
+    if (g_running.load() && g_core && g_lobby_hash) g_core->set_lobby_info(lines, launch_seq);
+}
+
 bool host_session_start(const char* addr, uint16_t port, const char* callsign, const std::string& password,
-                        const char** why) {
+                        uint32_t content_hash, const char** why) {
     if (g_from_env) {
         *why = "LAZYSF2_HOST is set for this launch";
         return false;
@@ -963,6 +985,7 @@ bool host_session_start(const char* addr, uint16_t port, const char* callsign, c
     }
     std::snprintf(g_addr, sizeof(g_addr), "%s", addr);
     g_port = port;
+    g_lobby_hash = content_hash;
     std::snprintf(g_callsign, sizeof(g_callsign), "%s", callsign && *callsign ? callsign : "HOST");
     g_enabled = true;
     if (!start_running()) {
@@ -1003,6 +1026,7 @@ void host_session_stop() {
         g_seat_plan = net::SeatPlan{};
     }
     g_enabled = false;
+    g_lobby_hash = 0;
     net::auth_wipe(g_key);
     LOG("net: host session closed");
 }
@@ -1022,6 +1046,7 @@ void host_publish_mission(const uint8_t* packed, size_t n, uint32_t id, uint32_t
     g_mission_raw = raw;
     g_seat_plan = net::SeatPlan{members, host_member};
     if (g_core_started.load()) g_core->set_mission(g_mission, id, raw, g_seat_plan);
+    if (g_core_started.load() && g_lobby_hash) world_set_own_seat(g_core->lobby_view().host_seat);  // the lobby's seat
     LOG("net: host serves mission 0x%08lx (%zu bytes packed, %lu unpacked); seats: %d members, the host flies %d",
         static_cast<unsigned long>(id), n, static_cast<unsigned long>(raw), members, host_member);
 }

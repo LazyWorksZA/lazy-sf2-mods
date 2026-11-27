@@ -47,6 +47,17 @@ public:
     uint8_t latest_seat() const { return latest_seat_.load(std::memory_order_acquire); }
     /// <summary>The host refused the session password, or could not prove it: the fetch has stopped asking.</summary>
     bool wrong_password() const { return wrong_password_.load(std::memory_order_acquire); }
+    // --- The lobby (L4): with it on, each round also sends a LobbyStatus and waits for the roster. ---
+    /// <summary>Before start(): turns the lobby on with this pilot's callsign and content hash.</summary>
+    void enable_lobby(const char* callsign, uint32_t content_hash);
+    /// <summary>Any thread: Ready on or off, and a seat wish (-1: none); both go out on the next round, which they
+    /// start at once.</summary>
+    void set_ready(bool ready);
+    void want_seat(int seat);
+    /// <summary>Any thread: the latest roster and the connection's round trip (ms). False before the first.</summary>
+    bool roster(LobbyRosterMsg* out, uint32_t* rtt_ms) const;
+    /// <summary>Tells the host this pilot leaves (one more round), waiting at most wait_ms; the fetch then stops.</summary>
+    void leave(int wait_ms);
     /// <summary>The host's name did not resolve (or not in time): the fetch has stopped. Any thread.</summary>
     bool host_unknown() const { return host_unknown_.load(std::memory_order_acquire); }
 
@@ -64,6 +75,16 @@ private:
     std::atomic<uint8_t> latest_seat_{kNoSeat};
     std::atomic<bool> wrong_password_{false};
     std::atomic<bool> host_unknown_{false};
+    // The lobby.
+    bool lobby_ = false;  // set before start()
+    char callsign_[16] = {};
+    uint32_t content_hash_ = 0;
+    std::atomic<bool> ready_{false}, poke_{false}, leaving_{false}, left_{false};
+    std::atomic<int> want_{-1};
+    std::atomic<uint32_t> rtt_{0};
+    mutable std::mutex roster_mx_;
+    LobbyRosterMsg roster_{};  // under roster_mx_
+    bool have_roster_ = false;  // under roster_mx_
     static constexpr int kLookupMs = 10000;
     AuthClient auth_;
     std::mutex mx_;

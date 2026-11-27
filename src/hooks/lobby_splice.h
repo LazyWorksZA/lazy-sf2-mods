@@ -3,6 +3,8 @@
 // See lazy-sf2-recon: recon-notes §28.
 #include <string>
 
+#include "net/world_proto.h"
+
 namespace LazyWorks::SF2Patch::hooks {
 
 /// <summary>The screen the stock (hidden) Multiplayer button goes to: the lobby's connect screen.</summary>
@@ -45,6 +47,9 @@ inline constexpr LobbyText kLobbyTexts[] = {
     {L"TXT_LAZY_LOBBY_COL_STATUS", L"Status"},
     {L"TXT_LAZY_LOBBY_PASSWORD", L"Session password"},
     {L"TXT_LAZY_LOBBY_PASS_HINT", L"Required. The host sets it; players type the same."},
+    {L"TXT_LAZY_LOBBY_SEAT_PREV", L"< Seat"},
+    {L"TXT_LAZY_LOBBY_SEAT_NEXT", L"Seat >"},
+    {L"TXT_LAZY_LOBBY_SEAT_INFO", L"Take the previous or next free seat in your flight."},
 };
 
 /// <summary>MenuItemNNN numbers of the connect screen's items (the menu code addresses them by number).</summary>
@@ -59,20 +64,22 @@ inline constexpr int kPassword = 15;  // EDIT; not masked (the menu system's EDI
 inline constexpr int kCount = 16;
 }  // namespace lobby_item
 
-/// <summary>Item numbers shared by the host and join screens.</summary>
+/// <summary>Item numbers shared by the host and join screens (the menu code tells them apart by the session's role).</summary>
 namespace session_item {
 inline constexpr int kLeave = 1;          // Close session / Leave; also Esc
 inline constexpr int kAction = 2;         // Launch / Ready
 inline constexpr int kMissionButton = 3;  // Set up mission... / Briefing...
 inline constexpr int kHeader = 5;
-inline constexpr int kSummary = 7;        // mission summary lines (TEXTAREA)
-inline constexpr int kSeats = 12;         // pilot list columns (TEXTAREAs)
-inline constexpr int kCallsigns = 13;
-inline constexpr int kStates = 14;
-inline constexpr int kStatus = 15;
-inline constexpr int kYouFly = 16;  // join screen only: identifies it
-inline constexpr int kHostCount = 15;
-inline constexpr int kJoinCount = 16;
+inline constexpr int kSummary = 7;        // three lines: 7, 8, 9
+inline constexpr int kSeatPrev = 14;      // < Seat
+inline constexpr int kSeatNext = 15;      // Seat >
+inline constexpr int kStatus = 16;
+inline constexpr int kYouFly = 17;
+inline constexpr int kRowFirst = 18;      // kLobbyRows rows of three TEXT items: seat, callsign, status
+inline constexpr int row_seat(int r) { return kRowFirst + 3 * r; }
+inline constexpr int row_callsign(int r) { return kRowFirst + 3 * r + 1; }
+inline constexpr int row_status(int r) { return kRowFirst + 3 * r + 2; }
+inline constexpr int kCount = kRowFirst + 3 * net::kLobbyRows - 1;
 }  // namespace session_item
 
 /// <summary>Characters the Address and Session password fields hold (TextBufferSize minus the terminator).</summary>

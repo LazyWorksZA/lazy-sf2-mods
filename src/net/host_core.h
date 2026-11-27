@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "net/auth.h"
+#include "net/lobby_book.h"
 #include "net/protocol.h"
 #include "net/world_proto.h"
 
@@ -137,6 +138,25 @@ public:
     /// </summary>
     int seat_for(uint32_t tag);
     SeatPlan seat_plan() const;
+
+    // --- The lobby (L4): with it on, seats are the pilots' own choice (LobbyBook) instead of the join-order rule. ---
+    /// <summary>Before start(): turns the lobby on; clients whose content hash differs are kept out of it.</summary>
+    void enable_lobby(uint32_t content_hash);
+    /// <summary>Game thread: the host's own row (callsign, seat wish or -1). Returns kLobbyOk or kLobbySeatTaken.</summary>
+    uint8_t lobby_host(const char* callsign, int want_seat);
+    /// <summary>Game thread: the mission summary (three ASCII lines) and the Launch count every roster carries.</summary>
+    void set_lobby_info(const char* const lines[3], uint32_t launch_seq);
+    struct LobbyView {
+        int members = 0, clients = 0, host_seat = -1;
+        uint32_t mission_id = 0, launch_seq = 0;
+        size_t count = 0;
+        LobbyRow rows[kLobbyRows] = {};
+        char summary[3][40] = {};
+    };
+    /// <summary>Any thread: the roster as the host sees it.</summary>
+    LobbyView lobby_view() const;
+    /// <summary>Any thread: whether that client is Ready (for Launch, L7).</summary>
+    bool lobby_ready(uint32_t tag) const;
     uint32_t mission_id() const;
     /// <summary>True while the tag holds a seat (one of its connections is open).</summary>
     bool seat_active(uint32_t tag) const;
@@ -221,6 +241,13 @@ private:
     std::mutex world_mx_;
     WorldRing world_states_{kWorldStatesCap}, world_events_{kWorldEventsCap};  // under world_mx_
     SeatBook seats_;  // under mission_mx_
+    bool lobby_ = false;                 // set before start()
+    uint32_t content_hash_ = 0;          // set before start()
+    LobbyBook book_;                     // under mission_mx_
+    char summary_[3][40] = {};           // under mission_mx_
+    uint32_t launch_seq_ = 0;            // under mission_mx_
+    /// <summary>Network thread: a client's LobbyStatus, answered with its roster (under mission_mx_).</summary>
+    size_t lobby_answer(const LobbyStatusMsg& s, uint8_t* out, size_t cap);
     void release_seat(uint32_t tag);
     mutable std::mutex mission_mx_;
     std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer

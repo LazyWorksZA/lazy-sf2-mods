@@ -92,6 +92,8 @@ enum class Mode { Off, Save, Load };
 // Set in world_install() from the variables, or by a lobby session (world_session_begin/end, menus only).
 Mode g_mode = Mode::Off;
 std::wstring g_session_dir;       // lobby session: where the world files go when the probe is off
+char g_lobby_callsign[16] = {};   // a joined lobby session: this pilot's callsign for the roster
+uint32_t g_lobby_hash = 0;        // ... and its content hash (0: no lobby)
 std::wstring g_load_path;         // LAZYSF2_WORLD_LOAD, full path
 bool g_join = false;              // LAZYSF2_WORLD_JOIN=1 (with LAZYSF2_CONNECT): fetch the host's mission in menus
 bool g_seat_from_env = false;     // LAZYSF2_WORLD_SEAT was given: it wins over the host's seat
@@ -1020,6 +1022,14 @@ void publish_mission(const Armed& a) {
     own_flight(&members, &host_member);
     host_publish_mission(packed.data(), packed.size(), id, raw, members, host_member);
     g_published_id = id;
+    // The lobby's summary of it (three short ASCII lines).
+    char l1[40], l2[40], l3[40];
+    const WorldSidecar& s = a.sidecar;
+    std::snprintf(l1, sizeof(l1), "Theatre: %s", s.theatre.c_str());
+    std::snprintf(l2, sizeof(l2), "%04d-%02d-%02d %02d:%02d, %s", s.year, s.month, s.day, s.hour, s.minute, s.aircraft.c_str());
+    std::snprintf(l3, sizeof(l3), "Player flight: %d aircraft", members);
+    const char* const lines[3] = {l1, l2, l3};
+    host_lobby_info(lines, 0);
     g_world_host.store(true, std::memory_order_release);
 }
 
@@ -2776,9 +2786,10 @@ void start_fetch() {
     char host[64] = {};
     uint16_t port = 0;
     if (!g_fetch) g_fetch = new (std::nothrow) net::MissionFetch;
+    if (g_fetch && g_lobby_hash) g_fetch->enable_lobby(g_lobby_callsign, g_lobby_hash);  // a lobby session: 1 s rounds
     net::AuthClient auth;
     if (!g_fetch || !client_connect_target(host, sizeof(host), &port) || !client_auth(&auth) ||
-        !g_fetch->start(host, port, g_tag, auth, fetch_log))
+        !g_fetch->start(host, port, g_tag, auth, fetch_log, g_lobby_hash ? 1000 : 5000))
         LOG("world: join: could not start the mission fetch");
 }
 
@@ -2790,7 +2801,7 @@ uint32_t new_tag() {
 }
 }  // namespace
 
-bool world_session_begin(bool host, const std::wstring& dir) {
+bool world_session_begin(bool host, const std::wstring& dir, const char* callsign, uint32_t content_hash) {
     if (g_mode != Mode::Off || g_join || g_remote || g_seat >= 0) {
         LOG("world: a session is already configured (LAZYSF2_WORLD_* or an earlier session); not changed");
         return false;
@@ -2806,6 +2817,8 @@ bool world_session_begin(bool host, const std::wstring& dir) {
     } else {
         g_join = true;
         g_tag = new_tag();
+        std::snprintf(g_lobby_callsign, sizeof(g_lobby_callsign), "%s", callsign ? callsign : "");
+        g_lobby_hash = content_hash;
         g_mode = Mode::Load;
         g_seat = 1;  // until the host suggests one
         g_remote = true;
@@ -2817,6 +2830,7 @@ bool world_session_begin(bool host, const std::wstring& dir) {
 }
 
 void world_session_end() {
+    if (g_fetch) g_fetch->leave(600);  // the host drops this pilot's row at once
     // Stops and joins its thread, which never waits for the resolver (MissionFetch looks names up on a thread of its
     // own and abandons it); a fetch cannot be restarted, so the next session makes a new one.
     delete g_fetch;
@@ -2836,12 +2850,32 @@ void world_session_end() {
     g_load_path.clear();
     g_fetched_id = g_flying_id = 0;
     g_session_dir.clear();
+    g_lobby_hash = 0;
+    world_set_own_seat(-1);
     LOG("world: session ended; Single Mission is stock again");
 }
 
 uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 
 bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password(); }
+
+bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms) { return g_fetch && g_fetch->roster(out, rtt_ms); }
+void world_lobby_ready(bool ready) {
+    if (g_fetch) g_fetch->set_ready(ready);
+}
+void world_lobby_want_seat(int seat) {
+    if (g_fetch) g_fetch->want_seat(seat);
+}
+
+void world_set_own_seat(int member) {
+    if (g_join || g_seat_from_env) return;  // a joined client's seat comes from the host's mission offer
+    const int seat = member > 0 ? member : -1;  // member 0 is the mission's own player seat: stock
+    if (seat == g_seat) return;
+    g_seat = seat;
+    LOG("world: this PC's pilot flies member %d of the player flight%s", member < 0 ? 0 : member,
+        seat < 0 ? " (the mission's own seat)" : "");
+    if (seat >= 0) world_on_modules_loaded();  // the seat hook (SingleMission slot 32)
+}
 bool world_fetch_host_unknown() { return g_fetch && g_fetch->host_unknown(); }
 
 bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) {
