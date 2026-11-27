@@ -259,11 +259,15 @@ private:
     uint32_t session_id_ = 0;            // under mission_mx_; drawn by enable_lobby
     /// <summary>Network thread: a client's LobbyStatus, answered with its roster (under mission_mx_).</summary>
     size_t lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap, bool* content_refused);
-    /// <summary>Under mission_mx_: tags whose last status was refused for its game content (no mission for them).
-    /// </summary>
-    uint32_t content_refused_[16] = {};
+    /// <summary>Under mission_mx_: (tag, sending address) pairs whose last status was refused for the build check
+    /// (no mission for them). Keyed on both, so another peer cannot get a player's tag refused.</summary>
+    struct Refused {
+        uint32_t tag;
+        uint64_t from;
+    };
+    Refused content_refused_[16] = {};
     size_t content_refused_n_ = 0;
-    bool content_refused(uint32_t tag) const;
+    bool content_refused(uint32_t tag, uint64_t from) const;
     void release_seat(uint32_t tag);
     mutable std::mutex mission_mx_;
     std::shared_ptr<const MissionBlob> mission_;  // under mission_mx_; the network thread copies the pointer

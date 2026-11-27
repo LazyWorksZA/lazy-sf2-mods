@@ -249,9 +249,9 @@ HostCore::LobbyView HostCore::lobby_view() const {
     return v;
 }
 
-bool HostCore::content_refused(uint32_t tag) const {
+bool HostCore::content_refused(uint32_t tag, uint64_t from) const {
     for (size_t i = 0; i < content_refused_n_; ++i)
-        if (content_refused_[i] == tag) return true;
+        if (content_refused_[i].tag == tag && content_refused_[i].from == from) return true;
     return false;
 }
 
@@ -262,13 +262,13 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
     // The tags kept out for their content get no mission (a small ring: the newest replace the oldest).
     size_t at = content_refused_n_;
     for (size_t i = 0; i < content_refused_n_; ++i)
-        if (content_refused_[i] == s.tag) at = i;
+        if (content_refused_[i].tag == s.tag && content_refused_[i].from == from) at = i;
     if (*refused && at == content_refused_n_) {
         if (content_refused_n_ < 16) {
-            content_refused_[content_refused_n_++] = s.tag;
+            content_refused_[content_refused_n_++] = {s.tag, from};
         } else {
             for (size_t i = 1; i < 16; ++i) content_refused_[i - 1] = content_refused_[i];
-            content_refused_[15] = s.tag;
+            content_refused_[15] = {s.tag, from};
         }
     } else if (!*refused && at < content_refused_n_) {
         for (size_t i = at + 1; i < content_refused_n_; ++i) content_refused_[i - 1] = content_refused_[i];
@@ -568,9 +568,11 @@ void HostCore::run() {
                 for (size_t i = 0; i < content_logged_n; ++i) seen = seen || content_logged[i] == peers[slot]->address.host;
                 if (!seen) {
                     if (content_logged_n < 16) content_logged[content_logged_n++] = peers[slot]->address.host;
-                    char ip[24];
-                    say("lobby: %s (\"%s\") kept out: its game content 0x%08x differs from ours 0x%08x", ip_text(peers[slot], ip, sizeof(ip)),
-                        ls.callsign, static_cast<unsigned>(ls.content_hash), static_cast<unsigned>(content_hash_));
+                    char ip[24], cs[sizeof(ls.callsign)] = {};
+                    for (size_t i = 0, k = 0; i < sizeof(ls.callsign) && ls.callsign[i] && k + 1 < sizeof(cs); ++i)
+                        if (ls.callsign[i] >= 0x20 && ls.callsign[i] < 0x7f && ls.callsign[i] != '"') cs[k++] = ls.callsign[i];
+                    say("lobby: %s (\"%s\") kept out: its build check 0x%08x differs from ours 0x%08x", ip_text(peers[slot], ip, sizeof(ip)),
+                        cs, static_cast<unsigned>(ls.content_hash), static_cast<unsigned>(content_hash_));
                 }
             }
             send_raw(slot, out, n);
@@ -595,8 +597,9 @@ void HostCore::run() {
         if (!b) {
             o.status = kOfferNone;
         } else if (lobby_ && [&] {
+                       const uint64_t from = (static_cast<uint64_t>(peers[slot]->address.host) << 16) | peers[slot]->address.port;
                        std::lock_guard<std::mutex> lock(mission_mx_);
-                       return content_refused(rq.tag);
+                       return content_refused(rq.tag, from);
                    }()) {
             o.status = kOfferRefused;  // kept out of the lobby for its game content: no mission
         } else if (b->packed.size() > kMissionMaxPacked) {
