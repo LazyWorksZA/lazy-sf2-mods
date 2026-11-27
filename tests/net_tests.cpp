@@ -9940,9 +9940,9 @@ void lobby_loopback_tests() {
     f1.enable_lobby("BRAVO", 0x1234u);
     f2.enable_lobby("CHARLIE", 0x1234u);
     bad.enable_lobby("ZULU", 0x9999u);
-    f1.start("127.0.0.1", core.port(), 0x11u, test_auth(), nullptr, 200);
-    f2.start("127.0.0.1", core.port(), 0x22u, test_auth(), nullptr, 200);
-    bad.start("127.0.0.1", core.port(), 0x33u, test_auth(), nullptr, 200);
+    f1.start("127.0.0.1", core.port(), 0x11u, test_auth(), nullptr, 400);
+    f2.start("127.0.0.1", core.port(), 0x22u, test_auth(), nullptr, 400);
+    bad.start("127.0.0.1", core.port(), 0x33u, test_auth(), nullptr, 400);
     LobbyRosterMsg r1{}, r2{}, rb{};
     uint32_t rtt = 0;
     auto wait = [&](auto pred) {
@@ -9962,8 +9962,12 @@ void lobby_loopback_tests() {
     const bool moved = wait([&] { return f1.roster(&r1, &rtt) && r1.your_seat == 3; });
     expect(moved, "a client's seat wish is granted through the fetch");
     f2.want_seat(3);
-    const bool refused = wait([&] { return f2.roster(&r2, &rtt) && r2.result == kLobbySeatTaken; });
-    if (!refused || r2.your_seat != s2) std::printf("    DBG refused %d your %u s2 %d result %u r1 %u\n", refused, r2.your_seat, s2, r2.result, r1.your_seat);
+    int wseat = -1;
+    uint8_t wres = 0;
+    bool answered = false;  // wish_answer is read once: wait() asks its predicate again at the end
+    wait([&] { return answered = answered || f2.wish_answer(&wseat, &wres); });
+    const bool refused = answered && wseat == 3 && wres == kLobbySeatTaken;
+    f2.roster(&r2, &rtt);
     expect(refused && r2.your_seat == s2, "the same seat for the second client is refused; it keeps its own");
     f1.set_ready(true);
     const bool ready = wait([&] { return core.lobby_ready(0x11u); });
@@ -10010,7 +10014,12 @@ void lobby_flow_splice_tests() {
     expect(splice_hangar_for_lobby(hc, false) == 0, "a Hangar already spliced is left alone");
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "lobby") == 0) {  // a quick loop over the lobby loopback
+        lobby_loopback_tests();
+        std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
+        return g_fail ? 1 : 0;
+    }
     object_type_tests();
     std::printf("protocol_selftest\n");
     const char* why = nullptr;

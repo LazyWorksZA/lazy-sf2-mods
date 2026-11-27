@@ -14,7 +14,7 @@ namespace LazyWorks::SF2Patch::net {
 class LobbyBook {
 public:
     static constexpr size_t kMax = 8;              // pilots, the host included
-    static constexpr uint64_t kExpireMs = 6000;    // a client not heard of for this long has left
+    static constexpr uint64_t kExpireMs = 15000;   // a client not heard of for this long has left (it asks every second)
     static constexpr uint32_t kHostTag = 0;        // the host's own row (client tags are never 0)
 
     /// <summary>The player flight's size for a new mission: seats past it are dropped, and pilots without a seat get

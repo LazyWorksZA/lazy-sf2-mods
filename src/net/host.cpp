@@ -965,8 +965,12 @@ uint8_t host_lobby_seat(int want_seat) {
     return r;
 }
 
-void host_lobby_info(const char* const lines[3], uint32_t launch_seq) {
-    if (g_running.load() && g_core && g_lobby_hash) g_core->set_lobby_info(lines, launch_seq);
+void host_lobby_info(const char* const lines[3]) {
+    if (g_running.load() && g_core && g_lobby_hash) g_core->set_lobby_info(lines);
+}
+
+void host_lobby_launch(uint32_t launch_seq) {
+    if (g_running.load() && g_core && g_lobby_hash) g_core->set_lobby_launch(launch_seq);
 }
 
 bool host_session_start(const char* addr, uint16_t port, const char* callsign, const std::string& password,

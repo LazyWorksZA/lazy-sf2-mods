@@ -51,6 +51,14 @@ void MissionFetch::set_ready(bool ready) {
     poke_.store(true);
 }
 
+bool MissionFetch::wish_answer(int* seat, uint8_t* result) {
+    const uint32_t a = wish_answer_.exchange(0);
+    if (!a) return false;
+    *seat = static_cast<int>((a >> 8) & 0xff);
+    *result = static_cast<uint8_t>(a & 0xff);
+    return true;
+}
+
 void MissionFetch::want_seat(int seat) {
     want_.store(seat);
     poke_.store(true);
@@ -225,6 +233,8 @@ void MissionFetch::run() {
                         if (wish >= 0) {
                             int expected = wish;
                             want_.compare_exchange_strong(expected, -1);  // answered (granted or refused)
+                            // Kept until read: later rounds (no wish) answer kLobbyOk and would hide a refusal.
+                            wish_answer_.store((static_cast<uint32_t>(wish) << 8) | rr.result | 0x10000u);
                         }
                         if (leaving) left_.store(true);
                         roster_done = true;

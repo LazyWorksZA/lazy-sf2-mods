@@ -144,8 +144,10 @@ public:
     void enable_lobby(uint32_t content_hash);
     /// <summary>Game thread: the host's own row (callsign, seat wish or -1). Returns kLobbyOk or kLobbySeatTaken.</summary>
     uint8_t lobby_host(const char* callsign, int want_seat);
-    /// <summary>Game thread: the mission summary (three ASCII lines) and the Launch count every roster carries.</summary>
-    void set_lobby_info(const char* const lines[3], uint32_t launch_seq);
+    /// <summary>Game thread: the mission summary (three ASCII lines) every roster carries.</summary>
+    void set_lobby_info(const char* const lines[3]);
+    /// <summary>Game thread: the Launch count (with kLaunchFlying while the host flies it).</summary>
+    void set_lobby_launch(uint32_t launch_seq);
     struct LobbyView {
         int members = 0, clients = 0, host_seat = -1;
         uint32_t mission_id = 0, launch_seq = 0;

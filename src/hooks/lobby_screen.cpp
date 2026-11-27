@@ -39,6 +39,7 @@ constexpr int kTextSet = 0x0c / 4;  // TEXT SetText(text)
 constexpr int kEditSet = 0x18 / 4;  // EDIT SetText(text)
 constexpr int kEditGet = 0x1c / 4;  // EDIT GetText(buf, n)
 constexpr int kCmdGoTo = 3;         // go to the item's DestinationMenu
+constexpr int kCmdLeave = 0;        // leave the menus: (0,1) flies the selected mission
 constexpr DWORD kMmgStamp = 0x51d21faa, kMmgSize = 0x25000;  // Core\MissionManager.dll
 constexpr DWORD kMmgVtableRva = 0x1b2c4;
 constexpr int kMmgSelectMission = 0x14 / 4;  // SelectMission(name): loads SingleMission, Campaign or InstantAction
@@ -72,6 +73,9 @@ std::wstring g_saved_address;  // what Options.ini holds (as last read or writte
 std::wstring g_join_address;   // the address Join was clicked with
 bool g_ready = false;          // join screen: this pilot's Ready (sent with every status)
 int g_wished = -1;             // join screen: the seat asked for, until the roster answers
+uint32_t g_launches = 0;       // host: Launches in this session
+uint32_t g_flown = 0;          // client: the Launch it flew (or was told about), so each is taken once
+uint32_t g_told = 0;           // client: the Launch it said "not ready" about
 enum class Screen { Connect, Host, Join };
 Screen g_screen = Screen::Connect;
 
@@ -201,9 +205,9 @@ bool select_terrain(const std::string& theatre) {
     return ok;
 }
 
-/// <summary>Join screen, Briefing: the host's mission into the stock Single Mission (its theatre selected first, as
-/// the New page would), then the stock Hangar shows it. False with a status line when it cannot.</summary>
-bool open_briefing() {
+/// <summary>Join screen, Briefing and Launch: the host's latest mission into the stock Single Mission (its theatre
+/// selected first, as the New page would). False with a status line when it cannot.</summary>
+bool load_host_mission() {
     std::string theatre;
     const int r = world_lobby_fetched(&theatre);
     if (r != 0) {
@@ -222,7 +226,7 @@ bool open_briefing() {
         set_status(L"The host's mission could not be loaded.");
         return false;
     }
-    LOG("lobby: Briefing: the host's mission is loaded (theatre %s); opening the Hangar", theatre.c_str());
+    LOG("lobby: the host's mission is loaded (theatre %s)", theatre.c_str());
     return true;
 }
 
@@ -292,6 +296,7 @@ void start_host() {
         return;
     }
     LOG("lobby: hosting as \"%s\" on port %u", cs.c_str(), static_cast<unsigned>(kLobbyPort));
+    g_launches = 0;
     post(kCmdGoTo, lobby_item::kHost);
 }
 
@@ -328,6 +333,7 @@ void start_join() {
     g_join_address = std::wstring(host, host + std::strlen(host)) + L":" + std::to_wstring(port);
     g_ready = false;
     g_wished = -1;
+    g_flown = g_told = 0;
     LOG("lobby: joining %s:%u as \"%s\"", host, static_cast<unsigned>(port), cs.c_str());
     post(kCmdGoTo, lobby_item::kJoin);
 }
@@ -484,16 +490,38 @@ void session_frame() {
     if (!r.have) return;
     show_roster(r);
     if (g_screen == Screen::Join) {
+        // The host's Launch: a ready pilot loads the latest mission and flies; one that is not ready is told, and flies
+        // as soon as it is (late join) while the host's flight runs.
+        const uint32_t launch = r.launch_seq & ~net::kLaunchFlying;
+        if ((r.launch_seq & net::kLaunchFlying) && launch != g_flown) {
+            if (g_ready && r.you >= 0) {
+                g_flown = launch;
+                LOG("lobby: the host launched (Launch %u); joining the flight", launch);
+                if (load_host_mission()) {
+                    g_ready = false;
+                    world_lobby_ready(false);
+                    set_status(L"Launching...");
+                    post(kCmdLeave, 1);
+                    return;
+                }
+            } else if (g_told != launch) {
+                g_told = launch;
+                set_status(L"The host has launched: press Ready to join the flight.");
+            }
+        }
         if (r.result == net::kLobbyContent && !g_refusal_shown) {
             g_refusal_shown = true;
             LOG("lobby: the host's game content differs from ours; not in its lobby");
             set_status(L"Your game content differs from the host's (aircraft, weapons, terrains or patches).");
-        } else if (g_wished >= 0 && r.you == g_wished) {
-            g_wished = -1;
-            set_status((L"You took seat " + seat_text(r.you) + L".").c_str());
-        } else if (g_wished >= 0 && r.result == net::kLobbySeatTaken) {
-            set_status((L"Seat " + seat_text(g_wished) + L" was taken; you keep " + seat_text(r.you) + L".").c_str());
-            g_wished = -1;
+        } else {
+            int seat = -1;
+            uint8_t res = 0;
+            if (world_lobby_wish_answer(&seat, &res) && seat == g_wished) {
+                g_wished = -1;
+                set_status(res == net::kLobbyOk
+                               ? (L"You took seat " + seat_text(seat) + L".").c_str()
+                               : (L"Seat " + seat_text(seat) + L" was taken; you keep " + seat_text(r.you) + L".").c_str());
+            }
         }
     }
 }
@@ -542,8 +570,15 @@ void session_click(int item) {
             break;
         case session_item::kAction:
             if (host) {
-                LOG("lobby: Launch clicked; not wired up yet");
-                set_status(L"Launch is not available yet.");
+                if (!world_host_armed()) {
+                    set_status(L"Set up the mission first.");
+                    break;
+                }
+                ++g_launches;
+                host_lobby_launch(g_launches | net::kLaunchFlying);
+                LOG("lobby: Launch %u: the host flies; ready pilots follow, the others may join late", g_launches);
+                set_status(L"Launching...");
+                post(kCmdLeave, 1);
             } else {
                 const Roster r = read_roster();
                 if (!g_ready && r.you < 0) {
@@ -566,7 +601,8 @@ void session_click(int item) {
                 }
                 LOG("lobby: Set up mission: opening Single Mission");
                 post(kCmdGoTo, item);  // its DestinationMenu: SingleMissionScreen
-            } else if (open_briefing()) {
+            } else if (load_host_mission()) {
+                LOG("lobby: Briefing: opening the Hangar");
                 post(kCmdGoTo, item);  // its DestinationMenu: HangarScreen
             }
             break;
@@ -638,6 +674,7 @@ void init_session_screen() {
         set_text(session_item::kHeader, L"Not in a session");
         set_status(L"The session has ended. Go back to start a new one.");
     } else if (host) {
+        if (g_launches) host_lobby_launch(g_launches);  // back from the flight: no longer flying, no late joins
         set_text(session_item::kHeader, L"Starting the host...");
         set_status(L"Waiting for players. Set up the mission when you are ready.");
     } else {

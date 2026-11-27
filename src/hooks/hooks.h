@@ -397,7 +397,10 @@ bool host_session_start(const char* addr, uint16_t port, const char* callsign, c
 /// to its flight through world_set_own_seat); the mission summary lines and Launch count sent to the clients.</summary>
 bool host_lobby_view(net::HostCore::LobbyView* out);
 uint8_t host_lobby_seat(int want_seat);
-void host_lobby_info(const char* const lines[3], uint32_t launch_seq);
+void host_lobby_info(const char* const lines[3]);
+void host_lobby_launch(uint32_t launch_seq);
+/// <summary>world_sync.cpp: a host session's mission is armed for the next flight (Set up mission was Accepted).</summary>
+bool world_host_armed();
 /// <summary>content_hash.cpp: this install's content (game cats, the player's aircraft, weapons, ground objects and
 /// terrains folders), cached. Menu thread.</summary>
 uint32_t content_hash();
@@ -407,6 +410,7 @@ void world_set_own_seat(int member);
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms);
 void world_lobby_ready(bool ready);
 void world_lobby_want_seat(int seat);
+bool world_lobby_wish_answer(int* seat, uint8_t* result);
 /// <summary>world_sync.cpp, a joined lobby session, menu thread: takes the fetched mission (0 ok, 1 none yet, 2 its
 /// theatre is not installed, 3 not usable) and its theatre; then loads it into the running Single Mission with its
 /// seed and forced options, as an Accept would (true when armed for the flight).</summary>

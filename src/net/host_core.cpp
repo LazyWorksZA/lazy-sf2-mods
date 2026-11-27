@@ -221,9 +221,13 @@ uint8_t HostCore::lobby_host(const char* callsign, int want_seat) {
     return book_.set_host(callsign, want_seat);
 }
 
-void HostCore::set_lobby_info(const char* const lines[3], uint32_t launch_seq) {
+void HostCore::set_lobby_info(const char* const lines[3]) {
     std::lock_guard<std::mutex> lock(mission_mx_);
     for (int i = 0; i < 3; ++i) set_str(summary_[i], lines[i]);
+}
+
+void HostCore::set_lobby_launch(uint32_t launch_seq) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
     launch_seq_ = launch_seq;
 }
 

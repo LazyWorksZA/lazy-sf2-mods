@@ -103,6 +103,7 @@ inline constexpr uint8_t kLobbyContent = 2;     // the client's game content dif
 inline constexpr uint8_t kLobbyFull = 3;        // no room for another pilot
 inline constexpr uint8_t kLobbyRowHost = 1, kLobbyRowReady = 2, kLobbyRowYou = 4;
 inline constexpr uint8_t kLobbyNoWish = 0xff;   // want_seat: keep the seat
+inline constexpr uint32_t kLaunchFlying = 0x80000000u;  // launch_seq: the host is flying that Launch (late joiners may)
 struct LobbyStatusMsg {
     Header h;
     uint32_t tag;           // the client's world tag (as in its mission request)
@@ -120,7 +121,7 @@ struct LobbyRow {
 struct LobbyRosterMsg {
     Header h;
     uint32_t mission_id;  // the host's mission (0: none yet)
-    uint32_t launch_seq;  // counts the host's Launches (L7)
+    uint32_t launch_seq;  // counts the host's Launches (L7); kLaunchFlying set while the host's flight runs
     uint8_t members;      // seats in the player flight (0: no mission)
     uint8_t count;        // rows used
     uint8_t result;       // kLobby* for the status this answers

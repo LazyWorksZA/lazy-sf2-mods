@@ -1049,7 +1049,7 @@ void publish_mission(const Armed& a) {
     std::snprintf(l2, sizeof(l2), "%04d-%02d-%02d %02d:%02d, %s", s.year, s.month, s.day, s.hour, s.minute, s.aircraft.c_str());
     std::snprintf(l3, sizeof(l3), "Player flight: %d aircraft", members);
     const char* const lines[3] = {l1, l2, l3};
-    host_lobby_info(lines, 0);
+    host_lobby_info(lines);
     g_world_host.store(true, std::memory_order_release);
 }
 
@@ -2883,8 +2883,16 @@ bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms) { return g_f
 void world_lobby_ready(bool ready) {
     if (g_fetch) g_fetch->set_ready(ready);
 }
+bool world_lobby_wish_answer(int* seat, uint8_t* result) { return g_fetch && g_fetch->wish_answer(seat, result); }
 void world_lobby_want_seat(int seat) {
     if (g_fetch) g_fetch->want_seat(seat);
+}
+
+bool world_host_armed() {
+    AcquireSRWLockShared(&g_lock);
+    const bool armed = g_mode == Mode::Save && g_armed.on;
+    ReleaseSRWLockShared(&g_lock);
+    return armed;
 }
 
 int world_lobby_fetched(std::string* theatre) {

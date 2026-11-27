@@ -54,6 +54,8 @@ public:
     /// start at once.</summary>
     void set_ready(bool ready);
     void want_seat(int seat);
+    /// <summary>Any thread, once per answer: the seat last wished for and the host's kLobby* answer to it.</summary>
+    bool wish_answer(int* seat, uint8_t* result);
     /// <summary>Any thread: the latest roster and the connection's round trip (ms). False before the first.</summary>
     bool roster(LobbyRosterMsg* out, uint32_t* rtt_ms) const;
     /// <summary>Tells the host this pilot leaves (one more round), waiting at most wait_ms; the fetch then stops.</summary>
@@ -81,6 +83,7 @@ private:
     uint32_t content_hash_ = 0;
     std::atomic<bool> ready_{false}, poke_{false}, leaving_{false}, left_{false};
     std::atomic<int> want_{-1};
+    std::atomic<uint32_t> wish_answer_{0};  // 0x10000 | seat << 8 | result, 0: none
     std::atomic<uint32_t> rtt_{0};
     mutable std::mutex roster_mx_;
     LobbyRosterMsg roster_{};  // under roster_mx_
