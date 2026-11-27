@@ -115,5 +115,9 @@ bool splice_single_mission_for_lobby(std::wstring& text);
 /// number (the Hangar hook posts it instead of Fly), or 0 and leaves the text untouched if the file is not as expected.
 /// </summary>
 int splice_hangar_for_lobby(std::wstring& text, bool host);
+/// <summary>DEBRIEFSCREEN.INI in a lobby session (L8): Exit (its OK) goes back to the host or join screen; Refly and
+/// the Mission Editor are moved off the screen (the screen's code keeps them active). False (text untouched) if the
+/// file is not as expected.</summary>
+bool splice_debrief_for_lobby(std::wstring& text, bool host);
 
 }  // namespace LazyWorks::SF2Patch::hooks

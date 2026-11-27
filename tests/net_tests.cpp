@@ -10170,8 +10170,36 @@ void lobby_loopback_tests() {
 
 
 void lobby_flow_splice_tests() {
-    std::printf("lobby flow splices (L5: Single Mission and Hangar in a session)\n");
+    std::printf("lobby flow splices (L5: Single Mission and Hangar in a session; L8: Debrief)\n");
     using namespace LazyWorks::SF2Patch::hooks;
+    {
+        const std::wstring stock =
+            L"[DebriefScreen]\r\nMenuItem004=ReflyButton\r\nMenuItem005=ExitButton\r\nMenuItem011=MissionEditorButton\r\n\r\n"
+            L"[ReflyButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=\r\nTextPosition=48,694\r\n\r\n"
+            L"[ExitButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MainScreen\r\nTextPosition=976,694\r\n\r\n"
+            L"[MissionEditorButton]\r\nMenuItemType=HOTSPOT\r\nPosition=729,588\r\nDestinationMenu=MissionEditor\r\n"
+            L"Active=FALSE\r\nEnabled=FALSE\r\n";
+        std::wstring h = stock, c = stock;
+        expect(splice_debrief_for_lobby(h, true) && splice_debrief_for_lobby(c, false) &&
+                   h.find(L"[ExitButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyHostScreen\r\n") != std::wstring::npos &&
+                   c.find(L"[ExitButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyJoinScreen\r\n") != std::wstring::npos,
+               "Debrief: Exit returns to the host or join screen");
+        auto section = [](const std::wstring& s, const wchar_t* name) {
+            const size_t b = s.find(name);
+            if (b == std::wstring::npos) return std::wstring();
+            const size_t e = s.find(L"\n[", b);
+            return s.substr(b, e == std::wstring::npos ? std::wstring::npos : e - b);
+        };
+        const std::wstring refly = section(h, L"[ReflyButton]"), editor = section(h, L"[MissionEditorButton]");
+        expect(refly.find(L"TextPosition=4000,4000\r\n") != std::wstring::npos && refly.find(L"Active=FALSE") != std::wstring::npos &&
+                   refly.find(L"Enabled=FALSE") != std::wstring::npos &&
+                   editor.find(L"Position=4000,4000\r\nDestinationMenu=DebriefScreen\r\nActive=FALSE\r\nEnabled=FALSE\r\n") !=
+                       std::wstring::npos,
+               "Debrief: Refly and the Mission Editor off the screen");
+        std::wstring bad = L"[DebriefScreen]\r\n[ExitButton]\r\nDestinationMenu=MainScreen\r\n";
+        const std::wstring before = bad;
+        expect(!splice_debrief_for_lobby(bad, true) && bad == before, "Debrief without a Refly section: left stock");
+    }
     std::wstring sm = L"[SingleMissionScreen]\r\nMenuItem004=CancelButton\r\nMenuItem009=MissionEditorButton\r\n\r\n"
                       L"[CancelButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MainScreen\r\n\r\n"
                       L"[MissionEditorButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MissionEditor\r\n";

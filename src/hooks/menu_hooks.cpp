@@ -73,7 +73,7 @@ std::atomic<bool> g_lobby_spliced{false};  // the last MenuSystem.ini read got t
 int g_selected = 0;                  // current selection on the Graphics page (UI thread)
 
 // Menu inis we edit as the file service reads them.
-enum class MenuFile : int { None, Options, MenuSystem, MainScreen, SingleMission, Hangar };
+enum class MenuFile : int { None, Options, MenuSystem, MainScreen, SingleMission, Hangar, Debrief };
 std::atomic<int> g_hangar_return{0};  // the Hangar's hidden back-to-lobby item in this menu session (0: none)
 
 bool ends_with_file(const wchar_t* name, const wchar_t* file) {
@@ -92,6 +92,7 @@ MenuFile menu_file(const wchar_t* name) {
         if (ends_with_file(name, L"SingleMissionScreen.ini") && net_session_role() == NetRole::Host)
             return MenuFile::SingleMission;
         if (ends_with_file(name, L"HangarScreen.ini")) return MenuFile::Hangar;
+        if (ends_with_file(name, L"DebriefScreen.ini")) return MenuFile::Debrief;
     } else if (ends_with_file(name, L"HangarScreen.ini")) {
         g_hangar_return = 0;  // a stock Hangar: its Fly is the game's own
     }
@@ -368,6 +369,16 @@ size_t encode_ini(const std::wstring& out, bool wide, char* buf, unsigned bytes)
 int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
     bool wide = false;
     std::wstring text = decode_ini(buf, n, wide);
+    if (kind == MenuFile::Debrief) {
+        const bool host = net_session_role() == NetRole::Host;
+        const size_t need = splice_debrief_for_lobby(text, host) ? encode_ini(text, wide, buf, bytes) : 0;
+        if (!need) {
+            LOG("menu: DEBRIEFSCREEN.INI left stock in the lobby session (not as expected, or no room)");
+            return n;
+        }
+        LOG("menu: Debrief set for the lobby session (Exit returns to the %s screen, no Refly)", host ? "host" : "join");
+        return static_cast<int>(need);
+    }
     if (kind == MenuFile::SingleMission || kind == MenuFile::Hangar) {
         const bool host = net_session_role() == NetRole::Host;
         int item = 0;

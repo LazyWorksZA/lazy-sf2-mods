@@ -214,6 +214,25 @@ bool splice_single_mission_for_lobby(std::wstring& text) {
     return true;
 }
 
+bool splice_debrief_for_lobby(std::wstring& text, bool host) {
+    std::wstring t = text;
+    size_t b = 0, e = 0;
+    if (!section_range(t, L"ExitButton", b, e)) return false;
+    set_key(t, b, e, L"DestinationMenu", host ? kLobbyHostScreen : kLobbyJoinScreen);
+    if (!section_range(t, L"ReflyButton", b, e)) return false;  // a Refly we cannot hide would fly alone
+    set_key(t, b, e, L"Active", L"FALSE");
+    set_key(t, b, e, L"Enabled", L"FALSE");
+    set_key(t, b, e, L"TextPosition", L"4000,4000");
+    if (section_range(t, L"MissionEditorButton", b, e)) {
+        set_key(t, b, e, L"Active", L"FALSE");
+        set_key(t, b, e, L"Enabled", L"FALSE");
+        set_key(t, b, e, L"Position", L"4000,4000");
+        set_key(t, b, e, L"DestinationMenu", L"DebriefScreen");
+    }
+    text = std::move(t);
+    return true;
+}
+
 int splice_hangar_for_lobby(std::wstring& text, bool host) {
     std::wstring t = text;
     size_t b = 0, e = 0;

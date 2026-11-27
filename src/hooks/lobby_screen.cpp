@@ -711,7 +711,7 @@ void init_session_screen() {
     } else if (host) {
         if (g_launches) host_lobby_launch(g_launches);  // back from the flight: no longer flying, no late joins
         set_text(session_item::kHeader, L"Starting the host...");
-        set_status(L"Waiting for players. Set up the mission when you are ready.");
+        set_status(g_launches ? L"Set up the next mission, then Launch." : L"Waiting for players. Set up the mission when you are ready.");
     } else {
         set_text(session_item::kHeader, (L"Host at " + g_join_address).c_str());
         set_status(g_ready ? L"Ready." : L"Pick a seat, then Ready.");
