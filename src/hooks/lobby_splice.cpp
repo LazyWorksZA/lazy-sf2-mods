@@ -2,6 +2,8 @@
 
 #include <cwchar>
 #include <cwctype>
+#include <initializer_list>
+#include <vector>
 
 namespace LazyWorks::SF2Patch::hooks {
 namespace {
@@ -49,6 +51,100 @@ void set_key(std::wstring& t, size_t begin, size_t& end, const std::wstring& key
     end += line.size();
 }
 
+std::wstring pos(int x, int y) { return std::to_wstring(x) + L"," + std::to_wstring(y); }
+
+// Builders for the ini sections; every item section ends with a blank line.
+struct Ini {
+    std::wstring t;
+    void line(const std::wstring& key, const std::wstring& value) { t += key + L"=" + value + L"\r\n"; }
+    void screen(const wchar_t* name, const wchar_t* background, const std::vector<std::wstring>& items,
+                const std::wstring& dll) {
+        t += L"[" + std::wstring(name) + L"]\r\n";
+        line(L"MenuType", L"NORMAL_MENU");
+        line(L"BackgroundImage", background);
+        int n = 0;
+        wchar_t key[16];
+        for (const std::wstring& item : items) {
+            swprintf_s(key, L"MenuItem%03d", ++n);
+            line(key, item);
+        }
+        line(L"MenuCodeDLL", dll);
+        line(L"RememberMenu", L"TRUE");
+        line(L"DefaultSelection", L"-1");
+        line(L"MouseAnimation", L"MouseAnimation");
+        line(L"BackgroundMusic", L"");
+        line(L"TextFilename", L"NetworkConnectScreen.str");
+        t += L"\r\n";
+    }
+    void button(const wchar_t* name, const wchar_t* dest, const wchar_t* style, const wchar_t* id, int x, int y,
+                const wchar_t* info) {
+        t += L"[" + std::wstring(name) + L"]\r\n";
+        line(L"MenuItemType", L"TEXTBUTTON");
+        line(L"DestinationMenu", dest);
+        line(L"TextSetting", style);
+        line(L"ButtonSetting", L"MenuButtonSetting");
+        line(L"TextStringID", id);
+        line(L"TextPosition", pos(x, y));
+        line(L"InfoTextSetting", L"InfoTextSetting");
+        line(L"InfoTextStringID", info);
+        t += L"\r\n";
+    }
+    void text(const wchar_t* name, const wchar_t* style, const wchar_t* id, int x, int y) {
+        t += L"[" + std::wstring(name) + L"]\r\n";
+        line(L"MenuItemType", L"TEXT");
+        line(L"TextSetting", style);
+        line(L"TextStringID", id);
+        if (x >= 0) line(L"TextPosition", pos(x, y));
+        t += L"\r\n";
+    }
+    void area(const wchar_t* name, int x, int y, int w, int h, bool scroll) {
+        t += L"[" + std::wstring(name) + L"]\r\n";
+        line(L"MenuItemType", L"TEXTAREA");
+        line(L"TextSetting", L"MediumTextLeft");
+        line(L"ScrollBarSetting", scroll ? L"ScrollBarSetting" : L"");
+        line(L"Position", pos(x, y));
+        line(L"Width", std::to_wstring(w));
+        line(L"Height", std::to_wstring(h));
+        line(L"Spacing", L"2");
+        t += L"\r\n";
+    }
+};
+
+// The host and join screens: the Roster background's wide panel (x 88-938, header rule at y 146), mission on the
+// left, pilots on the right, the session's own buttons in the bottom bar like Exit and Fly on the stock screens.
+void session_screen(Ini& ini, bool host, const std::wstring& dll) {
+    const std::wstring p = host ? L"LazyHost" : L"LazyJoin";
+    auto n = [&](const wchar_t* s) { return p + s; };
+    std::vector<std::wstring> names = {n(L"LeaveButton"),  n(L"ActionButton"), n(L"MissionButton"), n(L"Title"),
+                                       n(L"Header"),       n(L"MissionLabel"), n(L"Summary"),       n(L"PilotsLabel"),
+                                       n(L"SeatHead"),     n(L"CallsignHead"), n(L"StatusHead"),    n(L"Seats"),
+                                       n(L"Callsigns"),    n(L"States"),       n(L"Status"),        n(L"YouFly")};
+    names.resize(host ? session_item::kHostCount : session_item::kJoinCount);
+    ini.screen(host ? kLobbyHostScreen : kLobbyJoinScreen, L"RosterScreen.JPG", names, dll);
+
+    ini.button(names[0].c_str(), kLobbyScreen, L"LargerTextLeft",
+               host ? L"TXT_LAZY_LOBBY_CLOSE" : L"TXT_LAZY_LOBBY_LEAVE", 48, 694,
+               host ? L"TXT_LAZY_LOBBY_CLOSE_INFO" : L"TXT_LAZY_LOBBY_LEAVE_INFO");
+    ini.button(names[1].c_str(), L"", L"LargerTextRight", host ? L"TXT_LAZY_LOBBY_LAUNCH" : L"TXT_LAZY_LOBBY_READY",
+               976, 694, host ? L"TXT_LAZY_LOBBY_LAUNCH_INFO" : L"TXT_LAZY_LOBBY_READY_INFO");
+    ini.button(names[2].c_str(), L"", L"LargerTextCenter", host ? L"TXT_LAZY_LOBBY_SETUP" : L"TXT_LAZY_LOBBY_BRIEFING",
+               298, 575, host ? L"TXT_LAZY_LOBBY_SETUP_INFO" : L"TXT_LAZY_LOBBY_BRIEFING_INFO");
+    ini.text(names[3].c_str(), L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
+    ini.text(names[4].c_str(), L"LargerTextCenter", L"", 513, 120);
+    ini.text(names[5].c_str(), L"LargerTextLeft", host ? L"TXT_LAZY_LOBBY_MISSION" : L"TXT_LAZY_LOBBY_HOST_MISSION",
+             108, 172);
+    ini.area(names[6].c_str(), 108, 192, 380, 330, true);
+    ini.text(names[7].c_str(), L"LargerTextLeft", L"TXT_LAZY_LOBBY_PILOTS", 528, 172);
+    ini.text(names[8].c_str(), L"MediumTextLeft", L"TXT_LAZY_LOBBY_SEAT", 528, 192);
+    ini.text(names[9].c_str(), L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 600, 192);
+    ini.text(names[10].c_str(), L"MediumTextLeft", L"TXT_LAZY_LOBBY_COL_STATUS", 800, 192);
+    ini.area(names[11].c_str(), 528, 214, 66, 340, false);
+    ini.area(names[12].c_str(), 600, 214, 194, 340, false);
+    ini.area(names[13].c_str(), 800, 214, 115, 340, false);
+    ini.text(names[14].c_str(), L"MediumTextLeft", L"", 108, 612);
+    if (!host) ini.text(names[15].c_str(), L"MediumTextLeft", L"", 108, 532);
+}
+
 }  // namespace
 
 bool splice_main_screen_button(std::wstring& text) {
@@ -66,154 +162,76 @@ bool splice_main_screen_button(std::wstring& text) {
 }
 
 bool splice_lobby_screen(std::wstring& text, const std::wstring& menu_code_dll) {
-    if (lower(text).find(L"[" + lower(kLobbyScreen) + L"]") != std::wstring::npos) return false;
+    const std::wstring low = lower(text);
+    for (const wchar_t* s : {kLobbyScreen, kLobbyHostScreen, kLobbyJoinScreen}) {
+        if (low.find(L"[" + lower(s) + L"]") != std::wstring::npos) return false;
+    }
     // The ini value runs to the end of the line, and MenuSystem treats a name with ':' as an absolute path.
     if (menu_code_dll.size() < 4 || menu_code_dll.size() > 200 || menu_code_dll[1] != L':' ||
         menu_code_dll.find_first_of(L"\r\n;[]") != std::wstring::npos) {
         return false;
     }
 
-    std::wstring t = text;
-    if (!t.empty() && t.back() != L'\n') t += L"\r\n";
-    // Laid out on the Hangar background: the left panel (x 20-490, header rule at y 146), buttons in the panel's
-    // bottom row like the Hangar's, Back where the stock screens put Exit.
-    t += L"\r\n[NetworkConnectScreen]\r\n"
-         L"MenuType=NORMAL_MENU\r\n"
-         L"BackgroundImage=DefaultHangarScreen.JPG\r\n"
-         L"MenuItem001=LazyLobbyBackButton\r\n"
-         L"MenuItem002=LazyLobbyHostButton\r\n"
-         L"MenuItem003=LazyLobbyJoinButton\r\n"
-         L"MenuItem004=LazyLobbyTitle\r\n"
-         L"MenuItem005=LazyLobbyPanelTitle\r\n"
-         L"MenuItem006=LazyLobbyCallsignLabel\r\n"
-         L"MenuItem007=LazyLobbyCallsign\r\n"
-         L"MenuItem008=LazyLobbyAddressLabel\r\n"
-         L"MenuItem009=LazyLobbyAddress\r\n"
-         L"MenuItem010=LazyLobbyStatus\r\n"
-         L"MenuItem011=LazyLobbyPlayersLabel\r\n"
-         L"MenuItem012=LazyLobbyPlayers\r\n"
-         L"MenuCodeDLL=";
-    t += menu_code_dll;
-    t += L"\r\n"
-         L"RememberMenu=TRUE\r\n"
-         L"DefaultSelection=-1\r\n"
-         L"MouseAnimation=MouseAnimation\r\n"
-         L"BackgroundMusic=\r\n"
-         L"TextFilename=NetworkConnectScreen.str\r\n"
-         L"\r\n"
-         L"[LazyLobbyBackButton]\r\n"
-         L"MenuItemType=TEXTBUTTON\r\n"
-         L"DestinationMenu=MainScreen\r\n"
-         L"TextSetting=LargerTextLeft\r\n"
-         L"ButtonSetting=MenuButtonSetting\r\n"
-         L"TextStringID=TXT_MENU_BACK\r\n"
-         L"TextPosition=48,694\r\n"
-         L"InfoTextSetting=InfoTextSetting\r\n"
-         L"InfoTextStringID=TXT_MENU_BACK_MAIN_INFO\r\n"
-         L"\r\n"
-         L"[LazyLobbyHostButton]\r\n"
-         L"MenuItemType=TEXTBUTTON\r\n"
-         L"DestinationMenu=\r\n"
-         L"TextSetting=LargerTextCenter\r\n"
-         L"ButtonSetting=MenuButtonSetting\r\n"
-         L"TextStringID=TXT_MENU_HOST\r\n"
-         L"TextPosition=112,614\r\n"
-         L"InfoTextSetting=InfoTextSetting\r\n"
-         L"InfoTextStringID=TXT_MENU_HOST_INFO\r\n"
-         L"\r\n"
-         L"[LazyLobbyJoinButton]\r\n"
-         L"MenuItemType=TEXTBUTTON\r\n"
-         L"DestinationMenu=\r\n"
-         L"TextSetting=LargerTextCenter\r\n"
-         L"ButtonSetting=MenuButtonSetting\r\n"
-         L"TextStringID=TXT_MENU_JOIN\r\n"
-         L"TextPosition=257,614\r\n"
-         L"InfoTextSetting=InfoTextSetting\r\n"
-         L"InfoTextStringID=";
-    t += kLobbyJoinInfoKey;
-    t += L"\r\n"
-         L"\r\n"
-         L"[LazyLobbyTitle]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=LazyLobbyTitleText\r\n"
-         L"TextStringID=TXT_MENU_MULTIPLAYER_TITLE\r\n"
-         L"\r\n"
-         L"[LazyLobbyPanelTitle]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=LargerTextCenter\r\n"
-         L"TextStringID=TXT_MENU_TYPE_MISSION\r\n"
-         L"TextPosition=257,120\r\n"
-         L"\r\n"
-         L"[LazyLobbyCallsignLabel]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=MediumTextLeft\r\n"
-         L"TextStringID=TXT_MENU_CALLSIGNTEXT\r\n"
-         L"TextPosition=46,172\r\n"
-         L"\r\n"
-         L"[LazyLobbyCallsign]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=MediumTextLeft\r\n"
-         L"TextStringID=\r\n"
-         L"TextPosition=180,172\r\n"
-         L"\r\n"
-         L"[LazyLobbyAddressLabel]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=MediumTextLeft\r\n"
-         L"TextStringID=TXT_MENU_ADDRESS_TEXT\r\n"
-         L"TextPosition=46,209\r\n"
-         L"\r\n"
-         L"[LazyLobbyAddress]\r\n"
-         L"MenuItemType=EDIT\r\n"
-         L"Position=180,206\r\n"
-         L"Width=280\r\n"
-         L"Height=22\r\n"
-         L"EditFieldSetting=EditFieldSetting\r\n"
-         L"TextBufferSize=64\r\n"
-         L"NumberOnly=FALSE\r\n"
-         L"TabSelectable=TRUE\r\n"
-         L"DefaultTextStringID=\r\n"
-         L"InfoTextSetting=InfoTextSetting\r\n"
-         L"InfoTextStringID=TXT_MENU_TCPIP_INFO\r\n"
-         L"\r\n"
-         L"[LazyLobbyStatus]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=MediumTextLeft\r\n"
-         L"TextStringID=";
-    t += kLobbyStatusKey;
-    t += L"\r\n"
-         L"TextPosition=46,246\r\n"
-         L"\r\n"
-         L"[LazyLobbyPlayersLabel]\r\n"
-         L"MenuItemType=TEXT\r\n"
-         L"TextSetting=MediumTextLeft\r\n"
-         L"TextStringID=TXT_MENU_NUM_PLAYERS\r\n"
-         L"TextPosition=46,290\r\n"
-         L"\r\n"
-         L"[LazyLobbyPlayers]\r\n"
-         L"MenuItemType=TEXTAREA\r\n"
-         L"TextSetting=MediumTextLeft\r\n"
-         L"ScrollBarSetting=ScrollBarSetting\r\n"
-         L"Position=46,312\r\n"
-         L"Width=430\r\n"
-         L"Height=270\r\n"
-         L"Spacing=2\r\n"
-         L"\r\n"
-         // The stock screen title style lives in TitleTextSetting.ini, which MenuSystem.ini does not include.
-         L"[LazyLobbyTitleText]\r\n"
-         L"TextFontName=Impact\r\n"
-         L"TextSize=32\r\n"
-         L"TextBold=FALSE\r\n"
-         L"TextItalic=FALSE\r\n"
-         L"TextUnderline=FALSE\r\n"
-         L"TextStrikeOut=FALSE\r\n"
-         L"TextShadow=FALSE\r\n"
-         L"HorizontalAlignment=RIGHT\r\n"
-         L"VerticalAlignment=CENTER\r\n"
-         L"ForegroundColor=250,250,250\r\n"
-         L"TransparentBackground=FALSE\r\n"
-         L"BackgroundColor=0,0,0\r\n"
-         L"Position=999,25\r\n";
-    text = std::move(t);
+    Ini ini;
+    ini.t = text;
+    if (!ini.t.empty() && ini.t.back() != L'\n') ini.t += L"\r\n";
+    ini.t += L"\r\n";
+    // Connect screen on the Hangar background: its left panel (x 20-490, header rule at y 146) holds the form; Back
+    // where the stock screens put Exit.
+    ini.screen(kLobbyScreen, L"DefaultHangarScreen.JPG",
+               {L"LazyLobbyBackButton", L"LazyLobbyHostButton", L"LazyLobbyJoinButton", L"LazyLobbyTitle",
+                L"LazyLobbyPanelTitle", L"LazyLobbyCallsignLabel", L"LazyLobbyCallsign", L"LazyLobbyAddressLabel",
+                L"LazyLobbyAddress", L"LazyLobbyAddressHint", L"LazyLobbyStatus", L"LazyLobbyNetHint1",
+                L"LazyLobbyNetHint2"},
+               menu_code_dll);
+    ini.button(L"LazyLobbyBackButton", L"MainScreen", L"LargerTextLeft", L"TXT_MENU_BACK", 48, 694,
+               L"TXT_MENU_BACK_MAIN_INFO");
+    ini.button(L"LazyLobbyHostButton", kLobbyHostScreen, L"LargerTextCenter", L"TXT_MENU_HOST", 112, 292,
+               L"TXT_MENU_HOST_INFO");
+    ini.button(L"LazyLobbyJoinButton", kLobbyJoinScreen, L"LargerTextCenter", L"TXT_MENU_JOIN", 257, 292,
+               L"TXT_LAZY_LOBBY_JOIN_INFO");
+    ini.text(L"LazyLobbyTitle", L"LazyLobbyTitleText", L"TXT_MENU_MULTIPLAYER_TITLE", -1, -1);
+    ini.text(L"LazyLobbyPanelTitle", L"LargerTextCenter", L"TXT_MENU_TYPE_MISSION", 257, 120);
+    ini.text(L"LazyLobbyCallsignLabel", L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 46, 172);
+    ini.text(L"LazyLobbyCallsign", L"MediumTextLeft", L"", 180, 172);
+    ini.text(L"LazyLobbyAddressLabel", L"MediumTextLeft", L"TXT_MENU_ADDRESS_TEXT", 46, 209);
+    ini.t += L"[LazyLobbyAddress]\r\n";
+    ini.line(L"MenuItemType", L"EDIT");
+    ini.line(L"Position", L"180,206");
+    ini.line(L"Width", L"280");
+    ini.line(L"Height", L"22");
+    ini.line(L"EditFieldSetting", L"EditFieldSetting");
+    ini.line(L"TextBufferSize", std::to_wstring(kLobbyAddressChars + 1));
+    ini.line(L"NumberOnly", L"FALSE");
+    ini.line(L"TabSelectable", L"TRUE");
+    ini.line(L"DefaultTextStringID", L"");
+    ini.line(L"InfoTextSetting", L"InfoTextSetting");
+    ini.line(L"InfoTextStringID", L"TXT_MENU_TCPIP_INFO");
+    ini.t += L"\r\n";
+    ini.text(L"LazyLobbyAddressHint", L"MediumTextLeft", L"TXT_MENU_TCPIP_INFO", 46, 240);
+    ini.text(L"LazyLobbyStatus", L"MediumTextLeft", L"TXT_LAZY_LOBBY_STATUS", 46, 340);
+    ini.text(L"LazyLobbyNetHint1", L"MediumTextLeft", L"TXT_LAZY_LOBBY_NET_HINT1", 46, 372);
+    ini.text(L"LazyLobbyNetHint2", L"MediumTextLeft", L"TXT_LAZY_LOBBY_NET_HINT2", 46, 392);
+
+    session_screen(ini, true, menu_code_dll);
+    session_screen(ini, false, menu_code_dll);
+
+    // The stock screen title style lives in TitleTextSetting.ini, which MenuSystem.ini does not include.
+    ini.t += L"[LazyLobbyTitleText]\r\n"
+             L"TextFontName=Impact\r\n"
+             L"TextSize=32\r\n"
+             L"TextBold=FALSE\r\n"
+             L"TextItalic=FALSE\r\n"
+             L"TextUnderline=FALSE\r\n"
+             L"TextStrikeOut=FALSE\r\n"
+             L"TextShadow=FALSE\r\n"
+             L"HorizontalAlignment=RIGHT\r\n"
+             L"VerticalAlignment=CENTER\r\n"
+             L"ForegroundColor=250,250,250\r\n"
+             L"TransparentBackground=FALSE\r\n"
+             L"BackgroundColor=0,0,0\r\n"
+             L"Position=999,25\r\n";
+    text = std::move(ini.t);
     return true;
 }
 

@@ -3101,39 +3101,87 @@ void lobby_splice_tests() {
     const std::wstring sys = L"[MenuSystem]\r\nStartMenu=MainScreen\r\n\r\n#include \"MenuSetting.ini\"\r\n";
     const std::wstring dll = L"C:\\Games\\Strike Fighters 2 (x86)\\winmm.dll";
     std::wstring s = sys;
-    expect(splice_lobby_screen(s, dll), "lobby screen spliced");
+    expect(splice_lobby_screen(s, dll), "lobby screens spliced");
     expect(s.rfind(sys, 0) == 0, "stock text kept in front");
-    expect(s.find(L"\r\n[NetworkConnectScreen]\r\nMenuType=NORMAL_MENU\r\n") != std::wstring::npos &&
-               s.find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos,
-           "screen section with this DLL as menu code");
-    const std::pair<int, const wchar_t*> numbered[] = {
-        {lobby_item::kBack, L"LazyLobbyBackButton\r\n"}, {lobby_item::kHost, L"LazyLobbyHostButton\r\n"},
-        {lobby_item::kJoin, L"LazyLobbyJoinButton\r\n"}, {lobby_item::kCallsign, L"LazyLobbyCallsign\r\n"},
-        {lobby_item::kAddress, L"LazyLobbyAddress\r\n"}, {lobby_item::kStatus, L"LazyLobbyStatus\r\n"},
-        {lobby_item::kPlayers, L"LazyLobbyPlayers\r\n"}};
-    bool items = true;
-    wchar_t key[64];
-    for (const auto& [n, name] : numbered) {
-        swprintf_s(key, L"MenuItem%03d=%ls", n, name);
-        items &= s.find(key) != std::wstring::npos;
+
+    // A section's text, from its header to the blank line that ends it.
+    auto section = [&](const std::wstring& name) {
+        const size_t b = s.find(L"\r\n[" + name + L"]\r\n");
+        if (b == std::wstring::npos) return std::wstring();
+        const size_t e = s.find(L"\r\n\r\n", b + 2);
+        return s.substr(b + 2, (e == std::wstring::npos ? s.size() : e) - b - 2);
+    };
+    auto item_name = [&](const std::wstring& screen, int n) {
+        wchar_t key[24];
+        swprintf_s(key, L"MenuItem%03d=", n);
+        const std::wstring sec = section(screen);
+        const size_t p = sec.find(key);
+        if (p == std::wstring::npos) return std::wstring();
+        const size_t v = p + 12;
+        return sec.substr(v, sec.find(L"\r\n", v) - v);
+    };
+    auto items = [&](const std::wstring& screen) {
+        int n = 0;
+        while (!item_name(screen, n + 1).empty()) ++n;
+        return n;
+    };
+    auto has = [&](const std::wstring& screen, int n, const std::wstring& line) {
+        return section(item_name(screen, n)).find(line + L"\r\n") != std::wstring::npos;
+    };
+
+    const std::wstring c = kLobbyScreen, h = kLobbyHostScreen, j = kLobbyJoinScreen;
+    expect(section(c).find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos &&
+               section(h).find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos &&
+               section(j).find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos,
+           "three screens, each with this DLL as menu code");
+    expect(items(c) == lobby_item::kCount && items(h) == session_item::kHostCount &&
+               items(j) == session_item::kJoinCount,
+           "contiguous item counts: connect 13, host 15, join 16");
+    expect(has(c, lobby_item::kBack, L"DestinationMenu=MainScreen") &&
+               has(c, lobby_item::kHost, L"DestinationMenu=" + h) && has(c, lobby_item::kJoin, L"DestinationMenu=" + j),
+           "connect: Back to the main menu, Host and Join to their screens");
+    expect(has(c, lobby_item::kAddress, L"MenuItemType=EDIT") && has(c, lobby_item::kAddress, L"TextBufferSize=64") &&
+               has(c, lobby_item::kCallsign, L"MenuItemType=TEXT") && has(c, lobby_item::kStatus, L"MenuItemType=TEXT"),
+           "connect: callsign text, 63-character address field, status text at the menu code's numbers");
+    bool one_edit = true;
+    for (const std::wstring& screen : {h, j}) {
+        for (int n = 1; n <= items(screen); ++n) one_edit &= !has(screen, n, L"MenuItemType=EDIT");
     }
-    expect(items, "item numbers match the menu code's");
-    int count = 0;
-    for (int i = 1; i <= 13; ++i) {
-        swprintf_s(key, L"MenuItem%03d=", i);
-        if (s.find(key) == std::wstring::npos) break;
-        count = i;
+    expect(one_edit, "the connect screen is the only one with an EDIT field");
+    bool session = true;
+    for (const std::wstring& screen : {h, j}) {
+        session &= has(screen, session_item::kLeave, L"DestinationMenu=" + c) &&
+                   has(screen, session_item::kAction, L"MenuItemType=TEXTBUTTON") &&
+                   has(screen, session_item::kMissionButton, L"MenuItemType=TEXTBUTTON") &&
+                   has(screen, session_item::kHeader, L"MenuItemType=TEXT") &&
+                   has(screen, session_item::kSummary, L"MenuItemType=TEXTAREA") &&
+                   has(screen, session_item::kSeats, L"MenuItemType=TEXTAREA") &&
+                   has(screen, session_item::kCallsigns, L"MenuItemType=TEXTAREA") &&
+                   has(screen, session_item::kStates, L"MenuItemType=TEXTAREA") &&
+                   has(screen, session_item::kStatus, L"MenuItemType=TEXT");
     }
-    expect(count == 12, "12 contiguous items");
-    expect(s.find(L"[LazyLobbyAddress]\r\nMenuItemType=EDIT\r\n") != std::wstring::npos &&
-               s.find(L"TextBufferSize=64\r\n") != std::wstring::npos && kLobbyAddressChars == 63,
-           "address is an EDIT field of 63 characters");
-    expect(s.find(L"[LazyLobbyBackButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MainScreen\r\n") !=
-               std::wstring::npos,
-           "Back goes to the main screen");
+    expect(session, "host and join: Leave to the connect screen, buttons, header, summary, pilot columns, status");
+    expect(has(j, session_item::kYouFly, L"MenuItemType=TEXT") && item_name(h, session_item::kYouFly).empty(),
+           "only the join screen has the 'you fly' line");
+    expect(has(h, session_item::kAction, L"TextStringID=TXT_LAZY_LOBBY_LAUNCH") &&
+               has(j, session_item::kAction, L"TextStringID=TXT_LAZY_LOBBY_READY") &&
+               has(h, session_item::kLeave, L"TextStringID=TXT_LAZY_LOBBY_CLOSE") &&
+               has(j, session_item::kLeave, L"TextStringID=TXT_LAZY_LOBBY_LEAVE"),
+           "Launch/Close session on the host screen, Ready/Leave on the join screen");
+
+    bool keys_known = true;
+    for (size_t p = s.find(L"TXT_LAZY_"); p != std::wstring::npos; p = s.find(L"TXT_LAZY_", p + 1)) {
+        const std::wstring key = s.substr(p, s.find_first_of(L"\r\n", p) - p);
+        bool found = false;
+        for (const LobbyText& t : kLobbyTexts) found |= key == t.key;
+        keys_known &= found;
+    }
+    for (const LobbyText& t : kLobbyTexts) keys_known &= std::wcslen(t.key) <= 31;
+    expect(keys_known, "every TXT_LAZY_ key used has an English text, and keys stay within 31 characters");
+
     const std::wstring once = s;
     expect(!splice_lobby_screen(s, dll) && s == once, "second splice refused");
-    std::wstring lower_case = L"[networkconnectscreen]\r\n";
+    std::wstring lower_case = L"[lazylobbyjoinscreen]\r\n";
     expect(!splice_lobby_screen(lower_case, dll), "an existing screen (any case) is left alone");
     std::wstring t = sys;
     expect(!splice_lobby_screen(t, L"winmm.dll") && t == sys, "relative path refused");

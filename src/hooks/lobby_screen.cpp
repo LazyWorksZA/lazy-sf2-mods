@@ -1,5 +1,5 @@
-// Multiplayer lobby screen: this DLL is the screen's menu code (MenuCodeDLL in the spliced MenuSystem.ini), so the menu
-// system calls InitMenuCode/ExitMenuCode here and drives our handler like a stock screen's. The last address is kept in
+// Multiplayer lobby screens (connect, host, join): this DLL is their menu code (MenuCodeDLL in the spliced
+// MenuSystem.ini), so the menu system calls InitMenuCode/ExitMenuCode here and drives our handler like a stock screen's. The last address is kept in
 // Options.ini [OtherOptions] LobbyAddress, through the game's own Options.ini object.
 // See lazy-sf2-recon: recon-notes §28.
 #include <windows.h>
@@ -59,6 +59,9 @@ using GetText_t = void(__fastcall*)(void* iface, void* edx, wchar_t* buf, size_t
 void* g_sys = nullptr;
 void* g_mnu = nullptr;
 std::wstring g_saved_address;  // what Options.ini holds (as last read or written)
+std::wstring g_join_address;   // the address Join was clicked with
+enum class Screen { Connect, Host, Join };
+Screen g_screen = Screen::Connect;
 
 /// <summary>The OPT service object if the exe is the expected build and the object is as analysed, else nullptr.</summary>
 void* opt_object() {
@@ -111,7 +114,7 @@ void set_text(int item, const wchar_t* text) {
 }
 
 void set_status(const wchar_t* text) {
-    set_text(lobby_item::kStatus, text);
+    set_text(g_screen == Screen::Connect ? lobby_item::kStatus : session_item::kStatus, text);
     LOG("lobby: status \"%ls\"", text);
 }
 
@@ -159,6 +162,57 @@ int clicked_item(const int* ev) {
     return item > 0 && item_iface(item, kIfaceSelection) ? item : 0;
 }
 
+void connect_click(int item) {
+    switch (item) {
+        case lobby_item::kBack:
+            take_address();
+            LOG("lobby: Back");
+            post(kCmdGoTo, item);
+            break;
+        case lobby_item::kHost: {
+            const std::wstring a = take_address();
+            // L3 starts the host here and goes on only if it runs.
+            LOG("lobby: Host clicked (address \"%ls\"); session control is not wired up yet", a.c_str());
+            post(kCmdGoTo, item);
+            break;
+        }
+        case lobby_item::kJoin: {
+            const std::wstring a = take_address();
+            if (a.empty()) {
+                LOG("lobby: Join clicked with no address");
+                set_status(L"Type the host's address first.");
+                break;
+            }
+            g_join_address = a;
+            LOG("lobby: Join clicked (address \"%ls\"); session control is not wired up yet", a.c_str());
+            post(kCmdGoTo, item);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void session_click(int item) {
+    const bool host = g_screen == Screen::Host;
+    switch (item) {
+        case session_item::kLeave:
+            LOG("lobby: %s", host ? "Close session" : "Leave");
+            post(kCmdGoTo, item);
+            break;
+        case session_item::kAction:
+            LOG("lobby: %s clicked; not wired up yet", host ? "Launch" : "Ready");
+            set_status(host ? L"Launch is not available yet." : L"Ready is not available yet.");
+            break;
+        case session_item::kMissionButton:
+            LOG("lobby: %s clicked; not wired up yet", host ? "Set up mission" : "Briefing");
+            set_status(host ? L"Mission set-up is not available yet." : L"The briefing is not available yet.");
+            break;
+        default:
+            break;
+    }
+}
+
 /// <summary>The handler object the menu system calls (thiscall slots: 0 frame, 2 refresh, 3 input event).</summary>
 class LobbyHandler {
 public:
@@ -167,30 +221,49 @@ public:
     virtual void refresh() {}
     virtual void handle_event(const int* ev) {
         if (!g_mnu || !ev) return;
-        switch (clicked_item(ev)) {
-            case lobby_item::kBack:
-                take_address();
-                LOG("lobby: Back");
-                post(kCmdGoTo, lobby_item::kBack);
-                break;
-            case lobby_item::kHost: {
-                const std::wstring a = take_address();
-                LOG("lobby: Host clicked (address \"%ls\"); hosting is not wired up yet", a.c_str());
-                set_status(L"Hosting is not available yet.");
-                break;
-            }
-            case lobby_item::kJoin: {
-                const std::wstring a = take_address();
-                LOG("lobby: Join clicked (address \"%ls\"); joining is not wired up yet", a.c_str());
-                set_status(a.empty() ? L"Type the host's address first." : L"Joining is not available yet.");
-                break;
-            }
-            default:
-                break;
+        const int item = clicked_item(ev);
+        if (item <= 0) return;
+        if (g_screen == Screen::Connect) {
+            connect_click(item);
+        } else {
+            session_click(item);
         }
     }
 };
 LobbyHandler g_handler;
+
+/// <summary>Which lobby screen is open, from its items: only the connect screen has an EDIT field, only the join
+/// screen has the "you fly" line.</summary>
+Screen identify_screen() {
+    if (item_iface(lobby_item::kAddress, kIfaceEdit)) return Screen::Connect;
+    if (item_iface(session_item::kYouFly, kIfaceText)) return Screen::Join;
+    return Screen::Host;
+}
+
+void init_connect_screen() {
+    wchar_t callsign[64] = {};
+    read_option(L"Pilot", L"Callsign", callsign, _countof(callsign));
+    set_text(lobby_item::kCallsign, callsign);
+    wchar_t address[kLobbyAddressChars + 1] = {};
+    const bool have_options = read_option(kAddressSection, kAddressKey, address, _countof(address));
+    g_saved_address = address;
+    if (void* e = item_iface(lobby_item::kAddress, kIfaceEdit)) {
+        reinterpret_cast<SetText_t>(vtable_slot(e, kEditSet))(e, nullptr, address);
+    }
+    set_text(lobby_item::kStatus, L"Not connected.");
+    LOG("lobby: connect screen opened (callsign \"%ls\", saved address \"%ls\"%s)", callsign, address,
+        have_options ? "" : ", Options.ini not available");
+}
+
+// L3/L4 fill these from the session: "Hosting on port N · K players joined", "Host X · address · ping", the mission
+// summary, the pilot list and the "you fly" line.
+void init_session_screen() {
+    const bool host = g_screen == Screen::Host;
+    std::wstring header = host ? L"Not hosting yet" : L"Not joined yet · " + g_join_address;
+    set_text(session_item::kHeader, header.c_str());
+    set_text(session_item::kStatus, L"Session control is not built yet.");
+    LOG("lobby: %s screen opened (header \"%ls\")", host ? "host" : "join", header.c_str());
+}
 
 void pin_this_module() {
     static bool done = false;
@@ -248,21 +321,13 @@ extern "C" __declspec(dllexport) void __cdecl InitMenuCode(void* sys, void** han
         return;
     }
     pin_this_module();
-
-    wchar_t callsign[64] = {};
-    read_option(L"Pilot", L"Callsign", callsign, _countof(callsign));
-    set_text(lobby_item::kCallsign, callsign);
-
-    wchar_t address[kLobbyAddressChars + 1] = {};
-    const bool have_options = read_option(kAddressSection, kAddressKey, address, _countof(address));
-    g_saved_address = address;
-    if (void* e = item_iface(lobby_item::kAddress, kIfaceEdit)) {
-        reinterpret_cast<SetText_t>(vtable_slot(e, kEditSet))(e, nullptr, address);
+    g_screen = identify_screen();
+    if (g_screen == Screen::Connect) {
+        init_connect_screen();
+    } else {
+        init_session_screen();
     }
-    set_text(lobby_item::kStatus, L"Not connected.");
     *handler = &g_handler;
-    LOG("lobby: screen opened (callsign \"%ls\", saved address \"%ls\"%s)", callsign, address,
-        have_options ? "" : ", Options.ini not available");
 }
 
 /// <summary>Menu-code exit: the menu system calls it when the lobby screen closes, before it frees the DLL reference.</summary>
