@@ -44,20 +44,28 @@ constexpr BYTE kOpenPrologue[] = {0x55, 0x8b, 0xec, 0x64, 0xa1, 0x00, 0x00, 0x00
 using Open_t = int(__fastcall*)(void* mnu, void* edx, const wchar_t* name, int remember);
 Open_t o_open = nullptr;
 
-bool current_is_debrief(const void* mnu) {
+// The open screen's name as MNU holds it (for the log only: after a flight the exe opens the Debrief another way, so
+// this may still name the screen before the flight). SEH only.
+void current_name(const void* mnu, wchar_t* out, size_t n) {
+    out[0] = L'\0';
     __try {
-        const wchar_t* cur = reinterpret_cast<const wchar_t*>(static_cast<const BYTE*>(mnu) + kMnuCurrentName);
-        return _wcsnicmp(cur, L"DebriefScreen", 14) == 0;
+        wcsncpy_s(out, n, reinterpret_cast<const wchar_t*>(static_cast<const BYTE*>(mnu) + kMnuCurrentName), _TRUNCATE);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        out[0] = L'\0';
     }
 }
 
 // The session Debrief's Accept: its screen code sends it to the screen the flight came from (Single Mission) or the
-// main menu, never through a command we see; the open itself is turned to the lobby screen.
+// main menu, never through a command we see; the open itself is turned to the lobby screen. Whether the Debrief is
+// the open screen is our own record (its ini was read, no other screen's since).
 int __fastcall h_open(void* mnu, void* edx, const wchar_t* name, int remember) {
-    if (name && lobby_debrief_return_item(nullptr) > 0 && current_is_debrief(mnu) &&
-        (_wcsicmp(name, L"SingleMissionScreen") == 0 || _wcsicmp(name, L"MainScreen") == 0)) {
+    const bool debrief = lobby_debrief_return_item(nullptr) > 0;
+    if (name && (debrief || net_session_role() != NetRole::None)) {
+        wchar_t cur[64];
+        current_name(mnu, cur, _countof(cur));
+        LOG("lobby: screen open %ls (MNU's current %ls%s)", name, cur, debrief ? "; the session Debrief is open" : "");
+    }
+    if (name && debrief && (_wcsicmp(name, L"SingleMissionScreen") == 0 || _wcsicmp(name, L"MainScreen") == 0)) {
         const wchar_t* lobby = net_session_role() == NetRole::Host ? kLobbyHostScreen : kLobbyJoinScreen;
         LOG("lobby: Debrief Accept: %ls opens instead of %ls", lobby, name);
         lobby_debrief_closed();
