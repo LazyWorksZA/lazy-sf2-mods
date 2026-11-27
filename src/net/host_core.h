@@ -159,6 +159,9 @@ public:
     LobbyView lobby_view() const;
     /// <summary>Any thread: whether that client is Ready (for Launch, L7).</summary>
     bool lobby_ready(uint32_t tag) const;
+    /// <summary>Game thread, at the flight's start: the host's seat in a flight of members, from the book (-1: none).
+    /// </summary>
+    int lobby_host_seat_for(int members);
     uint32_t mission_id() const;
     /// <summary>True while the tag holds a seat (one of its connections is open).</summary>
     bool seat_active(uint32_t tag) const;

@@ -92,6 +92,8 @@ MenuFile menu_file(const wchar_t* name) {
         if (ends_with_file(name, L"SingleMissionScreen.ini") && net_session_role() == NetRole::Host)
             return MenuFile::SingleMission;
         if (ends_with_file(name, L"HangarScreen.ini")) return MenuFile::Hangar;
+    } else if (ends_with_file(name, L"HangarScreen.ini")) {
+        g_hangar_return = 0;  // a stock Hangar: its Fly is the game's own
     }
     return MenuFile::None;
 }

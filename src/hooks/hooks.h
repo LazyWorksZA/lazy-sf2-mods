@@ -407,6 +407,9 @@ bool host_lobby_view(net::HostCore::LobbyView* out);
 uint8_t host_lobby_seat(int want_seat);
 void host_lobby_info(const char* const lines[3]);
 void host_lobby_launch(uint32_t launch_seq);
+/// <summary>Game thread, at the flight's start: the hosting lobby's seat for the host in a flight of members (the book
+/// decides, so the host never flies a client's seat); -2 outside a hosted lobby, -1 if no seat is free.</summary>
+int host_lobby_seat_for(int members);
 /// <summary>world_sync.cpp: a host session's mission is armed for the next flight (Set up mission was Accepted).</summary>
 bool world_host_armed();
 /// <summary>content_hash.cpp: this install's content (game cats, the player's aircraft, weapons, ground objects and

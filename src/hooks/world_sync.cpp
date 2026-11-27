@@ -1234,8 +1234,22 @@ void check_seat(void* msn) {
 
 void* g_remote_deferred = nullptr;  // the MSN whose mark pass waits for the host's session (game thread)
 
+// Hosting a lobby: the seat the host flies is the book's for this flight's size, taken as the flight starts.
+void host_lobby_seat(void* msn) {
+    if (g_join || g_seat_from_env) return;
+    PlayerFlight f{};
+    if (!read_player_flight(msn, &f)) return;
+    const int s = host_lobby_seat_for(f.members);
+    if (s == -2) return;
+    const int seat = s > 0 ? s : -1;  // member 0 is the mission's own seat: stock
+    if (seat == g_seat) return;
+    LOG("world: the lobby gives the host member %d of this %d-member flight (was %d)", s < 0 ? 0 : s, f.members, g_seat);
+    g_seat = seat;
+}
+
 int __fastcall h_Slot32(void* msn) {
     HMODULE sm = GetModuleHandleW(L"SingleMission.dll");
+    if (sm && msn == at_rva(sm, kRvaMsn) && g_mode == Mode::Save) host_lobby_seat(msn);
     if ((g_seat < 0 && !g_remote) || !sm || msn != at_rva(sm, kRvaMsn)) return o_Slot32(msn);
     if (g_remote) remote_before_start();
     const bool seated = g_seat >= 0 && apply_seat(msn);

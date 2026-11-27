@@ -202,9 +202,13 @@ bool splice_single_mission_for_lobby(std::wstring& text) {
     size_t b = 0, e = 0;
     if (!section_range(t, L"CancelButton", b, e)) return false;
     set_key(t, b, e, L"DestinationMenu", kLobbyHostScreen);
+    // The editor's pencil is a HOTSPOT the screen's code keeps active: moved off the 1024x768 screen and pointed at
+    // this screen, so it can be neither seen nor used.
     if (section_range(t, L"MissionEditorButton", b, e)) {
         set_key(t, b, e, L"Active", L"FALSE");
         set_key(t, b, e, L"Enabled", L"FALSE");
+        set_key(t, b, e, L"Position", L"4000,4000");
+        set_key(t, b, e, L"DestinationMenu", L"SingleMissionScreen");
     }
     text = std::move(t);
     return true;

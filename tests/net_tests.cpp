@@ -10008,9 +10008,9 @@ void lobby_book_tests() {
     expect(b.seat_of(0xA) == 0 && !b.ready(0xA), "a seat change after Ready clears Ready");
     LobbyRow rows[kLobbyRows];
     const size_t n = b.rows(rows, 0xA);
-    expect(n == 4 && std::strcmp(rows[0].callsign, "ALPHA") == 0 && (rows[0].flags & kLobbyRowHost) &&
-               (rows[1].flags & kLobbyRowYou) && rows[3].callsign[0] == 0 && rows[3].seat == 3,
-           "roster: the host first, the reader marked, free seats as AI rows");
+    expect(n == 4 && rows[0].seat == 0 && (rows[0].flags & kLobbyRowYou) && std::strcmp(rows[1].callsign, "ALPHA") == 0 &&
+               (rows[1].flags & kLobbyRowHost) && rows[2].seat == 2 && rows[3].callsign[0] == 0 && rows[3].seat == 3,
+           "roster: in seat order, the host and the reader marked, free seats as AI rows");
     expect(b.update(0xB, "CHARLIE", false, -1, true, 1400) == kLobbyOk && b.seat_of(0xB) == -1 && b.clients() == 1,
            "a pilot that leaves drops its row and frees its seat");
     b.update(0xC, "DELTA", false, -1, false, 1500);
@@ -10039,13 +10039,21 @@ void lobby_book_tests() {
     d.set_members(4, 2);
     LobbyRow dr[kLobbyRows];
     const size_t dn = d.rows(dr, LobbyBook::kHostTag);
-    expect(dn == 4 && std::strcmp(dr[1].callsign, "PILOT 2") == 0 && std::strcmp(dr[2].callsign, "PILOT 3") == 0 &&
-               std::strcmp(dr[3].callsign, "BR AVO") == 0,
+    expect(dn == 4 && std::strcmp(dr[0].callsign, "PILOT 2") == 0 && std::strcmp(dr[1].callsign, "PILOT 3") == 0 &&
+               std::strcmp(dr[2].callsign, "ALPHA") == 0 && std::strcmp(dr[3].callsign, "BR AVO") == 0,
            "callsigns: printable ASCII, trimmed; none left reads PILOT n (never a free row)");
     expect(d.host_seat() == 2 && d.seat_of(0x5) == 0 && d.seat_of(0x6) == 1 && d.seat_of(0x7) == 3,
            "a host without a seat gets its mission's member; the others the free ones");
     d.set_members(4, 0);
     expect(d.host_seat() == 2, "a host with a seat keeps it when the mission says another member");
+    LobbyBook e;
+    e.set_members(4);
+    e.set_host("ALPHA", 3);
+    e.update(0x8, "BRAVO", false, 0, false, 0);
+    expect(e.host_seat() == 3 && e.seat_of(0x8) == 0, "host at #4, a client at #1");
+    expect(e.host_seat_for(2) == 1 && e.seat_of(0x8) == 0 && e.members() == 2,
+           "a 2-ship: the host's seat is gone, so the book gives it the free #2, never the client's #1");
+    expect(e.host_seat_for(2) == 1, "asked again for the same flight: the same seat");
 }
 
 void lobby_loopback_tests() {
@@ -10169,7 +10177,8 @@ void lobby_flow_splice_tests() {
                       L"[MissionEditorButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=MissionEditor\r\n";
     expect(splice_single_mission_for_lobby(sm) &&
                sm.find(L"[CancelButton]\r\nMenuItemType=TEXTBUTTON\r\nDestinationMenu=LazyLobbyHostScreen\r\n") != std::wstring::npos &&
-               sm.find(L"DestinationMenu=MissionEditor\r\nActive=FALSE\r\nEnabled=FALSE\r\n") != std::wstring::npos,
+               sm.find(L"DestinationMenu=SingleMissionScreen\r\nActive=FALSE\r\nEnabled=FALSE\r\nPosition=4000,4000\r\n") !=
+                   std::wstring::npos,
            "Single Mission: Cancel back to the host screen, the editor hidden");
     std::wstring none = L"[Other]\r\n";
     expect(!splice_single_mission_for_lobby(none) && none == L"[Other]\r\n", "an unexpected file stays stock");

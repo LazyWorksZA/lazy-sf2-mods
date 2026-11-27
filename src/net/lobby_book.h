@@ -114,8 +114,19 @@ public:
         return n;
     }
 
-    /// <summary>The roster for one reader: the pilots (the host first, then in join order), then the free seats (flown by
-    /// the AI), at most kLobbyRows. you: the reader's tag (kHostTag for the host's own view).</summary>
+    /// <summary>The host's seat for a flight of `members` (the game thread, as the flight starts): if its seat is not in
+    /// that flight, the book first gives it the first free one there, so the host never flies a client's seat. -1: none
+    /// free.</summary>
+    int host_seat_for(int members) {
+        Pilot* h = find(kHostTag);
+        if (!h) return -1;
+        if (members != members_) set_members(members);
+        if (h->seat < 0 || h->seat >= members_) h->seat = first_free();
+        return h->seat;
+    }
+
+    /// <summary>The roster for one reader: the pilots and the free seats (flown by the AI) in seat order, pilots without
+    /// a seat last, at most kLobbyRows. you: the reader's tag (kHostTag for the host's own view).</summary>
     size_t rows(LobbyRow* out, uint32_t you) const {
         size_t k = 0;
         for (size_t i = 0; i < n_ && k < static_cast<size_t>(kLobbyRows); ++i) {
@@ -131,6 +142,13 @@ public:
             LobbyRow& r = out[k++];
             r = LobbyRow{};
             r.seat = static_cast<uint8_t>(m);
+        }
+        // Stable insertion sort by seat (kNoSeat, 255, sorts last).
+        for (size_t i = 1; i < k; ++i) {
+            const LobbyRow r = out[i];
+            size_t j = i;
+            for (; j > 0 && out[j - 1].seat > r.seat; --j) out[j] = out[j - 1];
+            out[j] = r;
         }
         return k;
     }

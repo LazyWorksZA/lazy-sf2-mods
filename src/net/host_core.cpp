@@ -276,6 +276,11 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
     return encode(r, out, cap);
 }
 
+int HostCore::lobby_host_seat_for(int members) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    return lobby_ ? book_.host_seat_for(members) : -1;
+}
+
 bool HostCore::seat_active(uint32_t tag) const {
     std::lock_guard<std::mutex> lock(mission_mx_);
     return seats_.active(tag);

@@ -969,6 +969,11 @@ void host_lobby_info(const char* const lines[3]) {
     if (g_running.load() && g_core && g_lobby_hash) g_core->set_lobby_info(lines);
 }
 
+int host_lobby_seat_for(int members) {
+    if (!g_running.load() || !g_core || !g_lobby_hash) return -2;
+    return g_core->lobby_host_seat_for(members);
+}
+
 void host_lobby_launch(uint32_t launch_seq) {
     if (g_running.load() && g_core && g_lobby_hash) g_core->set_lobby_launch(launch_seq);
 }
