@@ -1,12 +1,13 @@
 // Multiplayer lobby screens (connect, host, join): this DLL is their menu code (MenuCodeDLL in the spliced
-// MenuSystem.ini), so the menu system calls InitMenuCode/ExitMenuCode here and drives our handler like a stock screen's. The last address is kept in
-// Options.ini [OtherOptions] LobbyAddress, through the game's own Options.ini object.
-// See lazy-sf2-recon: recon-notes §28.
+// MenuSystem.ini), so the menu system calls InitMenuCode/ExitMenuCode here and drives our handler like a stock
+// screen's. The last address is kept in Options.ini [OtherOptions] LobbyAddress, through the game's own Options.ini
+// object. See lazy-sf2-recon: recon-notes §28.
 #include <windows.h>
 
 #include <cwchar>
 #include <string>
 
+#include "config.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "hooks/lobby_splice.h"
@@ -265,10 +266,29 @@ void init_session_screen() {
     LOG("lobby: %s screen opened (header \"%ls\")", host ? "host" : "join", header.c_str());
 }
 
+/// <summary>Logs loose screen files our MenuSystem.ini sections override (MenuSystem.ini is looked up first).</summary>
+void log_overridden_screen_files() {
+    wchar_t exe[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring game = (n && n < MAX_PATH) ? exe : L"";
+    game = game.substr(0, game.find_last_of(L'\\') + 1);
+    const std::wstring data = config::game_data_dir();
+    for (const wchar_t* screen : {kLobbyScreen, kLobbyHostScreen, kLobbyJoinScreen}) {
+        for (const std::wstring& dir : {game, game + L"Menu\\", data.empty() ? data : data + L"\\Menu\\"}) {
+            if (dir.empty()) continue;
+            const std::wstring file = dir + screen + L".ini";
+            if (GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                LOG("lobby: %ls exists; the lobby's own [%ls] is used instead", file.c_str(), screen);
+            }
+        }
+    }
+}
+
 void pin_this_module() {
     static bool done = false;
     if (done) return;
     done = true;
+    log_overridden_screen_files();  // here, not in the file-read hook: a shell call, outside the file service's lock
     HMODULE self = nullptr;
     const BOOL ok = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                                        reinterpret_cast<LPCWSTR>(&pin_this_module), &self);
@@ -317,6 +337,7 @@ extern "C" __declspec(dllexport) void __cdecl InitMenuCode(void* sys, void** han
     HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
     if (!g_mnu || !mnu_dll || *static_cast<void**>(g_mnu) != at_rva(mnu_dll, kMnuVtableRva)) {
         LOG("lobby: menu service not as expected; the lobby screen is inert");
+        if (g_mnu) reinterpret_cast<Service_t>(vtable_slot(sys, kSysReleaseService))(sys, nullptr, L"MNU", &g_mnu);
         g_mnu = nullptr;
         return;
     }

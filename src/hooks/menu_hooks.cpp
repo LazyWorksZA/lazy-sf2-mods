@@ -363,8 +363,18 @@ int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
         g_lobby_spliced = false;
         const std::wstring dll = lobby_menu_code_path();
         if (dll.empty()) return n;
+        static bool refusal_logged = false;  // menu thread; MenuSystem.ini is read on every return to the menus
+        // An 8-bit file can't carry a non-ASCII path: the truncated MenuCodeDLL would give a screen with no way out.
+        if (!wide && std::any_of(dll.begin(), dll.end(), [](wchar_t ch) { return ch > 0x7f; })) {
+            if (!refusal_logged) LOG("menu: MenuSystem.ini is 8-bit and the mod path is not ASCII; lobby not added");
+            refusal_logged = true;
+            return n;
+        }
         if (!splice_lobby_screen(text, dll)) {
-            LOG("menu: MenuSystem.ini already defines the lobby screen, or the DLL path is unusable; lobby not added");
+            if (!refusal_logged) {
+                LOG("menu: MenuSystem.ini already defines a lobby screen, or the mod path is unusable; lobby not added");
+            }
+            refusal_logged = true;
             return n;
         }
         const size_t need = encode_ini(text, wide, buf, bytes);
