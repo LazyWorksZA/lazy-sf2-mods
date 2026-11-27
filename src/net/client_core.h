@@ -75,7 +75,7 @@ struct ClientCounters {
 /// <summary>Limits a test may shorten. The defaults are the protocol's.</summary>
 struct ClientLimits {
     uint32_t connect_ms = 5000;   // ENet connection
-    uint32_t welcome_ms = 15000;  // the host's game thread may be loading
+    uint32_t welcome_ms = 60000;  // the host's game thread may be loading the flight (20-60 s on slower PCs)
     uint32_t silence_ms = kTimeoutMs;
     /// <summary>Tests only: replaces ENet's name lookup (ipv4 as ENetAddress::host). Runs on the lookup thread.</summary>
     using ResolveFn = bool (*)(const char* name, uint32_t* ipv4);

@@ -30,9 +30,10 @@ namespace LazyWorks::SF2Patch::net {
 
 inline constexpr int kMaxClients = 4;
 inline constexpr uint32_t kTimeoutMs = 5000;  // no packet from a peer for this long (wall clock) ends it
-// ... except after its Hello, while it waits for its Welcome: a client sends nothing then, and the host's game thread
-// may be loading the flight (a client waits ClientLimits::welcome_ms, 15 s, for it).
-inline constexpr uint32_t kAwaitWelcomeMs = 20000;
+// ... except after its password answer and Hello, while it waits for its Welcome: a client sends nothing then, and the
+// host's game thread may be loading the flight (a client waits ClientLimits::welcome_ms, 60 s, for it). Connections
+// before the answer keep AuthLimits' deadline.
+inline constexpr uint32_t kAwaitWelcomeMs = 65000;
 
 /// <summary>What the game thread reads from the core.</summary>
 struct HostEvent {

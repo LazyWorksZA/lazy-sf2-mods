@@ -1242,8 +1242,9 @@ void bot_loopback_tests() {
                    code(30, 5, nan, 0, "127.0.0.1:7777") == 1 && code(30, 5, 0, inf, "127.0.0.1:7777") == 1,
                "the bot rejects non-finite numbers and a port with trailing characters");
     }
-    {  // hosts that go quiet: no listener (code 3 at 4 s), a connected host without a Welcome (code 3 at 15 s), a Welcome then
-       // silence (code 4 at 4 s), and the real core, whose own 5 s timer kicks a client that never gets welcomed (code 4)
+    {  // hosts that go quiet: no listener (code 3 at 4 s), a connected host without a Welcome (code 3 after the bot's
+       // welcome_wait, 15 s here), a Welcome then silence (code 4 at 4 s), and the real core, which keeps a client that
+       // waits for its Welcome (code 3: the bot gives up first)
         using Clk = std::chrono::steady_clock;
         struct Run {
             int code = -1;
@@ -1255,6 +1256,7 @@ void bot_loopback_tests() {
             c.password = kTestPassword;
             c.host = host;
             c.duration = 20.0;
+            c.welcome_wait = 15.0;  // the game's 60 s would make these checks slow
             Run r;
             const auto t0 = Clk::now();
             r.code = bot::run_bot(c).code;

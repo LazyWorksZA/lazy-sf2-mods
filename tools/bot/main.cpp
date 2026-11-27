@@ -51,7 +51,7 @@ void usage() {
         "content hash (its lazysf2.log: \"lobby: content hash 0x...\"); another value is kept out. Exit code 0 ok\n"
         "(the flight's code if it flew), 2 refused or stopped, 3 no roster within 15 s.\n"
         "Client exit code 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no ENet connection within\n"
-        "4 s, or no Welcome within 15 s of connecting, 4 the host closed the connection or went silent for 4 s.\n"
+        "4 s, or no Welcome within 60 s of the Hello, 4 the host closed the connection or went silent for 4 s.\n"
         "Serve defaults: bind 127.0.0.1, BOTHOST, F-4E, orbit, until Ctrl+C. The jet's States go out at 20 Hz. Without\n"
         "--start (HEADING in degrees) the jet starts 2 km ahead of the client's first State, at its altitude and heading,\n"
         "and a second Welcome puts the client on its wing. --pause-at S --pause-for S freezes the host time S seconds\n"

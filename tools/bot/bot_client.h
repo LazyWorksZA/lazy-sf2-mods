@@ -33,6 +33,7 @@ struct BotConfig {
     /// the bot's seat by it; the chunks are counted, not kept), then Hello with that tag, and count the world
     /// messages that follow (the stream, events, jet states...).</summary>
     bool world_join = false;
+    double welcome_wait = 60.0;  // seconds after the Hello before giving up on the Welcome (as the game's client)
     uint32_t world_tag = 0;  // world_join: this tag (a lobby pilot's, whose seat the host keeps) instead of a fresh one
     uint32_t rng_seed = 12345;
     std::function<void(const char*)> log;     // may be empty
@@ -40,7 +41,7 @@ struct BotConfig {
 };
 
 struct BotResult {
-    int code = 0;  // 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no connection within 4 s or no Welcome within 15 s of connecting, 4 the host closed the connection (with or without a Bye) or went silent for 4 s
+    int code = 0;  // 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no connection within 4 s or no Welcome within welcome_wait (60 s) of the Hello, 4 the host closed the connection (with or without a Bye) or went silent for 4 s
     uint16_t client_id = 0;
     uint32_t generated = 0;  // States produced (seq numbers used)
     uint32_t sent = 0;       // States handed to ENet

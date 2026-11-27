@@ -667,7 +667,7 @@ BotResult run_bot(const BotConfig& cfg) {
     enet_host_flush(r.host);
 
     // Welcome. With --lag the Hello and the Welcome each wait their turn in the queues.
-    for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < kWelcomeWait && !r.cancelled();)
+    for (double t0 = wall_now(); !r.welcomed && !r.disconnected && wall_now() - t0 < cfg.welcome_wait && !r.cancelled();)
         r.service(1);
     if (!r.welcomed) {
         r.say("bot: no Welcome from the host (%s)",
