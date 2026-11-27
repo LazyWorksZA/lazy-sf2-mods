@@ -30,7 +30,7 @@ void usage() {
         "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
         "            [--world-event destroyed|awake|asleep,A|G,SLOT,MEMBER,SECONDS ...] [--jet none|ab|guns|ab+guns]\n"
         "            [--hit A|G,SLOT,MEMBER,EVERY_S] [--launch WEAPON,GUIDED,A|G|N,SLOT,MEMBER,EVERY_S]\n"
-        "            [--stores [WEAPON]] [--damage [A,SLOT,MEMBER]] [--clock S] [--log FILE]\n"
+        "            [--stores [WEAPON]] [--damage [A,SLOT,MEMBER]] [--clock S] [--seat-state] [--log FILE]\n"
         "lazysf2-bot --fetch ADDR:PORT --out DIR [--duration SECONDS]\n"
         "Client defaults: 127.0.0.1:7777, BOT1, F-4E, straight, 30 Hz, 30 s, no loss, no jitter, no lag.\n"
         "--script formation flies on the host's predicted jet, --offset metres right, back and up in its heading frame\n"
@@ -53,7 +53,8 @@ void usage() {
         "--stores sends the jet's loadout (station 1: WEAPON x2, default AIM-9J) every 10 s and its consumables (fuel,\n"
         "rounds, chaff, flares) every 2 s. --damage plays a damage story on the jet (hit 3 s, part lost 6 s, fire 8 s,\n"
         "ejection 10 s, destroyed 12 s; the attacker A,SLOT,MEMBER if given) and 2 flares every 5 s. --clock S sends\n"
-        "the world owner's mission clock (S seconds at the Welcome, then running) every 2 s.\n"
+        "the world owner's mission clock (S seconds at the Welcome, then running) every 2 s. --seat-state sends the\n"
+        "client its seat's state as a late joiner gets it (airborne 3 km ahead, 2,000 kg fuel, an AIM-9J).\n"
         "Serve exit code 0 ok, 1 bad arguments, 2 cannot listen.\n");
 }
 
@@ -361,6 +362,9 @@ int main(int argc, char** argv) {
             scfg.launch_kind = kind == 'A' ? 1 : kind == 'G' ? 2 : 0;
             scfg.launch_a = static_cast<uint16_t>(la);
             scfg.launch_b = static_cast<uint16_t>(lb);
+            serve_only = true;
+        } else if (a == "--seat-state") {
+            scfg.seat_state = true;
             serve_only = true;
         } else if (a == "--clock" && (v = val())) {
             ok = to_double(v, &scfg.clock_start) && scfg.clock_start >= 0;

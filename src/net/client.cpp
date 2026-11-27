@@ -306,6 +306,23 @@ void move_player(void* player, const cl::JoinPose& t, double* turned, float* old
     obj_write(player, kOffSpeed, &speed, 1);
 }
 
+}  // namespace
+
+void client_place_player(void* player, const double pos[3], const float vel[3], const float ang[3]) {
+    if (!player) return;
+    cl::JoinPose t{};
+    for (int i = 0; i < 3; ++i) {
+        t.pos[i] = pos[i];
+        t.vel[i] = vel[i];
+        t.ang[i] = ang[i];
+    }
+    double turned = 0;
+    float old_speed = 0;
+    move_player(player, t, &turned, &old_speed);
+}
+
+namespace {
+
 void join(void* player, const net::WelcomeMsg& w, double wall) {
     if (world_client_tag() != 0) {
         // A shared-world join flies the host's mission in its own seat: no teleport onto the host's wing.

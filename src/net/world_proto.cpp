@@ -67,6 +67,15 @@ Status decode(const uint8_t* d, size_t n, WeaponLaunchMsg& out) {
     if (s == Status::Ok) out.weapon[sizeof(out.weapon) - 1] = '\0';
     return s;
 }
+size_t encode(const SeatStateMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::SeatState, o, c); }
+Status decode(const uint8_t* d, size_t n, SeatStateMsg& out) {
+    SeatStateMsg m;
+    const Status s = decode_fixed(d, n, WorldType::SeatState, m);
+    if (s != Status::Ok) return s;
+    if (m.n > 12) return Status::BadType;
+    out = m;
+    return Status::Ok;
+}
 size_t encode(const MissionClockMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::MissionClock, o, c); }
 Status decode(const uint8_t* d, size_t n, MissionClockMsg& out) { return decode_fixed(d, n, WorldType::MissionClock, out); }
 size_t encode(const DamageStateMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::DamageState, o, c); }

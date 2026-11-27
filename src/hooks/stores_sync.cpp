@@ -6,6 +6,7 @@
 // state's configuration bits. Game thread only. See lazy-sf2-recon: network-recon §11.3 and §11.4.
 #include <windows.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "hooks/hook_util.h"
@@ -103,11 +104,9 @@ bool send(const uint8_t* d, size_t n, bool reliable) {
     return host_world_active() ? host_world_send_all(d, n, reliable) : client_world_send(d, n, reliable);
 }
 
-// Sends the loadout in parts. False if a part could not be queued.
-bool send_loadout(const Entry now[jet::kLoadoutStations]) {
-    net::LoadoutEntry all[jet::kLoadoutStations];
+size_t to_entries(const Entry now[jet::kLoadoutStations], net::LoadoutEntry* all, size_t max) {
     size_t k = 0;
-    for (size_t i = 0; i < jet::kLoadoutStations; ++i) {
+    for (size_t i = 0; i < jet::kLoadoutStations && k < max; ++i) {
         if (now[i].weapon < 0) continue;
         net::LoadoutEntry& e = all[k++];
         e = net::LoadoutEntry{};
@@ -118,6 +117,13 @@ bool send_loadout(const Entry now[jet::kLoadoutStations]) {
         e.count = static_cast<uint8_t>(now[i].count < 0 ? 0 : now[i].count > 255 ? 255 : now[i].count);
         e.state = static_cast<uint8_t>(now[i].state);
     }
+    return k;
+}
+
+// Sends the loadout in parts. False if a part could not be queued.
+bool send_loadout(const Entry now[jet::kLoadoutStations]) {
+    net::LoadoutEntry all[jet::kLoadoutStations];
+    const size_t k = to_entries(now, all, jet::kLoadoutStations);
     const size_t parts = k == 0 ? 1 : (k + net::kLoadoutPart - 1) / net::kLoadoutPart;
     const uint16_t seq = ++g_tx.seq;
     for (size_t p = 0; p < parts; ++p) {
@@ -168,8 +174,8 @@ struct TankMax {
 };
 struct Rx {
     uint32_t epoch = 0;
-    void* avatar[5] = {};
-    Tried tried[5][jet::kLoadoutStations];
+    void* avatar[6] = {};                   // peers 0..4, and 5 for our own jet (a seat takeover)
+    Tried tried[6][jet::kLoadoutStations];
     TankMax tanks[64];
     uint64_t rearms = 0, gave_up = 0, empty = 0, unknown = 0, fuel = 0;
 };
@@ -200,8 +206,24 @@ int set_station(BYTE* avatar, const SysRef* sys, int n, int station, int32_t wea
     }
 }
 
-void apply_loadout(const net::LoadoutMsg& m, BYTE* avatar, uintptr_t ao) {
-    const int peer = m.peer < 5 ? m.peer : 4;
+// The game's rearm called directly (+0x3d760, __fastcall(obj)), for a jet that is not REMOTEOBJECT (our own, in a seat
+// takeover): remote event 0x16 applies only to remote copies. Its first bytes are checked first. 0 done, 1 refused,
+// 2 faulted.
+constexpr unsigned char kRearmPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x14, 0x8b, 0x91, 0x30, 0x03, 0x00, 0x00};
+int direct_rearm(BYTE* obj, uintptr_t ao) {
+    __try {
+        const BYTE* f = reinterpret_cast<const BYTE*>(ao + 0x3d760);
+        if (std::memcmp(f, kRearmPrologue, sizeof(kRearmPrologue)) != 0) return 1;
+        reinterpret_cast<uint32_t(__fastcall*)(void*)>(ao + 0x3d760)(obj);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
+
+void apply_entries(int peer_in, const net::LoadoutEntry* entries, size_t count, BYTE* avatar, uintptr_t ao, bool direct,
+                   const char* what) {
+    const int peer = peer_in < 6 && peer_in >= 0 ? peer_in : 5;
     if (g_rx.avatar[peer] != avatar) {
         g_rx.avatar[peer] = avatar;
         for (Tried& t : g_rx.tried[peer]) t = Tried{};
@@ -214,8 +236,8 @@ void apply_loadout(const net::LoadoutMsg& m, BYTE* avatar, uintptr_t ao) {
     int32_t want_weapon[jet::kLoadoutStations] = {};
     int want_count[jet::kLoadoutStations] = {};
     int nrebuild = 0, unknown = 0, missing = 0, gave_up = 0, empty = 0;
-    for (size_t i = 0; i < m.n; ++i) {
-        const net::LoadoutEntry& e = m.e[i];
+    for (size_t i = 0; i < count; ++i) {
+        const net::LoadoutEntry& e = entries[i];
         if (e.station >= jet::kLoadoutStations) continue;
         int32_t weapon = e.weapon;
         char name[64];
@@ -251,18 +273,18 @@ void apply_loadout(const net::LoadoutMsg& m, BYTE* avatar, uintptr_t ao) {
     if (nrebuild) {
         for (int st = 0; st < static_cast<int>(jet::kLoadoutStations); ++st)
             set_station(avatar, sys, n, st, rebuild[st] ? want_weapon[st] : 0, rebuild[st] ? want_count[st] : 0, rebuild[st]);
-        ev = aircraft_remote_event(avatar, kRearmEvent, nullptr);
+        ev = direct ? direct_rearm(avatar, ao) : aircraft_remote_event(avatar, kRearmEvent, nullptr);
         ++g_rx.rearms;
     }
     g_rx.gave_up += static_cast<uint64_t>(gave_up);
     if (unknown) ++g_rx.unknown;
     if (empty && log_milestone(++g_rx.empty))
         LOG("stores: peer %u's jet has %d station(s) emptied that its avatar still carries (the rearm cannot empty one)",
-            static_cast<unsigned>(m.peer), empty);
+            static_cast<unsigned>(peer), empty);
     if (nrebuild || missing || gave_up || (unknown && log_milestone(g_rx.unknown)))
-        LOG("stores: peer %u's loadout (part %u/%u): %d station(s) rebuilt%s, %d given up (the rebuild did not take), %d "
-            "of an unknown weapon, %d the avatar does not have (skipped)",
-            static_cast<unsigned>(m.peer), static_cast<unsigned>(m.part + 1), static_cast<unsigned>(m.parts), nrebuild,
+        LOG("stores: %s: %d station(s) rebuilt%s, %d given up (the rebuild did not take), %d of an unknown weapon, %d "
+            "the aircraft does not have (skipped)",
+            what, nrebuild,
             ev < 0 ? "" : ev == 0 ? " (rearm)" : ev == 1 ? " (rearm REFUSED: interface not the one we read)" : " (rearm FAULTED)",
             gave_up, unknown, missing);
 }
@@ -282,6 +304,40 @@ float& tank_max(const BYTE* tank, float now) {
     static float none;
     none = now;
     return none;
+}
+
+void apply_loadout(const net::LoadoutMsg& m, BYTE* avatar, uintptr_t ao) {
+    char what[64];
+    std::snprintf(what, sizeof(what), "peer %u's loadout (part %u/%u)", static_cast<unsigned>(m.peer),
+                  static_cast<unsigned>(m.part + 1), static_cast<unsigned>(m.parts));
+    apply_entries(m.peer, m.e, m.n, avatar, ao, false, what);
+}
+
+// Scales the tanks of one kind (external or internal) to a total, each at most the most it has held. SEH by caller.
+void scale_tanks(const SysRef* sys, int n, const float owner[2], float total[2]) {
+    for (int i = 0; i < n; ++i)
+        if (sys[i].vt == kRvaFuelTank) {
+            float f = 0;
+            int16_t ext = 0;
+            std::memcpy(&f, sys[i].sys + jet::kTankFuel, 4);
+            std::memcpy(&ext, sys[i].sys + jet::kTankExternal, 2);
+            tank_max(sys[i].sys, f);
+            if (f > 0) total[ext ? 1 : 0] += f;
+        }
+    const float k[2] = {net::fuel_scale(total[0], owner[0]), net::fuel_scale(total[1], owner[1])};
+    for (int i = 0; i < n; ++i) {
+        if (sys[i].vt != kRvaFuelTank) continue;
+        float f = 0;
+        int16_t ext = 0;
+        std::memcpy(&f, sys[i].sys + jet::kTankFuel, 4);
+        std::memcpy(&ext, sys[i].sys + jet::kTankExternal, 2);
+        const float kk = k[ext ? 1 : 0];
+        if (kk == 1.0f) continue;
+        f = f > 0 ? f * kk : 0;
+        const float cap = tank_max(sys[i].sys, 0);
+        if (f > cap) f = cap;
+        std::memcpy(sys[i].sys + jet::kTankFuel, &f, 4);
+    }
 }
 
 void apply_consumables(const net::ConsumablesMsg& m, BYTE* avatar, uintptr_t ao) {
@@ -329,6 +385,38 @@ void apply_consumables(const net::ConsumablesMsg& m, BYTE* avatar, uintptr_t ao)
 }
 
 }  // namespace
+
+size_t stores_read_entries(void* obj, net::LoadoutEntry* out, size_t max) {
+    Entry e[jet::kLoadoutStations];
+    return obj && read_loadout(obj, e) ? to_entries(e, out, max) : 0;
+}
+
+void stores_apply_entries(void* obj, const net::LoadoutEntry* e, size_t n, const char* what) {
+    const uintptr_t ao = ao_base();
+    if (obj && ao) apply_entries(5, e, n, static_cast<BYTE*>(obj), ao, true, what);
+}
+
+bool stores_read_fuel(void* obj, float* internal, float* external) {
+    Consum c;
+    const uintptr_t ao = ao_base();
+    if (!obj || !ao || !read_consumables(obj, ao, &c)) return false;
+    *internal = c.fuel;
+    *external = c.fuel_ext;
+    return true;
+}
+
+void stores_set_fuel(void* obj, float internal, float external) {
+    const uintptr_t ao = ao_base();
+    if (!obj || !ao) return;
+    SysRef sys[kMaxSys];
+    const int n = jet_list_systems(obj, ao, sys, kMaxSys);
+    const float owner[2] = {internal, external};
+    float total[2] = {};
+    __try {
+        scale_tanks(sys, n, owner, total);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
 void stores_tick(void* player) {
     const uintptr_t ao = ao_base();

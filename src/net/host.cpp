@@ -312,8 +312,21 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
                callsign);
         return;
     }
-    const AvatarPick pick{aircraft, {join[0], join[1], join[2]}, pang[1], {pvel[0], pvel[1], pvel[2]},
-                          seat >= 0 ? world_member_object(seat) : nullptr};
+    // Shared world: the seat aircraft's current state, before the take, for the client's takeover in place (task 3);
+    // the avatar stays where the seat aircraft is instead of moving to the wing.
+    void* const seat_obj = seat >= 0 ? world_member_object(seat) : nullptr;
+    net::SeatStateMsg seat_state{};
+    const bool have_seat_state = seat_obj && seat_state_capture(seat, seat_obj, &seat_state);
+    if (have_seat_state && (seat_state.flags & net::kSeatAirborne)) {
+        net::ObjPose sp{};
+        net::dequantise(seat_state.pose, &sp);
+        for (int i = 0; i < 3; ++i) {
+            join[i] = sp.pos[i];
+            pvel[i] = sp.vel[i];
+        }
+        pang[1] = sp.ang[1];
+    }
+    const AvatarPick pick{aircraft, {join[0], join[1], join[2]}, pang[1], {pvel[0], pvel[1], pvel[2]}, seat_obj};
     AvatarHandle taken[net::kMaxClients];
     handles(taken);
     const uint32_t air_gen = g_aircraft_generation.load(std::memory_order_acquire);  // before the table read
@@ -401,6 +414,7 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
             world_send_to(slot, ab, net::encode(st[i], ab, sizeof(ab)), true);
         }
         g_avatar_states.forget(slot + 1);  // its own comes from it again
+        if (have_seat_state) seat_state_send(slot, seat_state);
     }
     LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg, theatre %s; "
         "host \"%s\" (%s)",

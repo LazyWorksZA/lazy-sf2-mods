@@ -28,8 +28,9 @@ enum class WorldType : uint8_t {
     DamageState = 32,     // a player's jet damage, reliable, on change (polled 4 times a second): relayed
     Countermeasure = 33,  // a player's chaff and flare releases, reliable, as they happen: relayed
     MissionClock = 34,    // the world owner's mission clock, unreliable, every 2 s: owner to the others
+    SeatState = 35,       // host to a client after its Welcome, reliable: its seat aircraft's current state
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 34;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 35;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -783,6 +784,43 @@ inline ClockFix clock_fix(double local, const MissionClockMsg& m, double latency
     const double d = f.target - local;
     f.set = d > kClockTolerance || d < -kClockTolerance;
     return f;
+}
+
+// ---- seat takeover in place (handover task 3) ----
+
+#pragma pack(push, 1)
+/// <summary>
+/// The host's current state of the aircraft in a client's seat, sent after each Welcome: on a late join or a
+/// reconnect the client's jet takes it over in place (pose, velocity, fuel, stores) instead of starting where the
+/// mission put it. pose.kind/a/b is the seat's key.
+/// </summary>
+struct SeatStateMsg {
+    Header h;
+    uint8_t seat;
+    uint8_t flags;  // kSeat*
+    uint32_t host_ms;
+    WorldObjState pose;
+    uint16_t fuel, fuel_ext;  // kg / 4
+    uint8_t damage;
+    uint8_t n;
+    LoadoutEntry e[12];
+};
+#pragma pack(pop)
+static_assert(sizeof(SeatStateMsg) == 135);  // 4:1 seat, 5:1 flags, 6:4 ms, 10:35 pose, 45:4 fuel, 49:1 damage, 50:1 n,
+                                             // 51:84 entries
+inline constexpr uint8_t kSeatAlive = 0x01, kSeatAirborne = 0x02;
+size_t encode(const SeatStateMsg& m, uint8_t* out, size_t cap);
+/// <summary>Checks the size and n <= 12.</summary>
+Status decode(const uint8_t* data, size_t len, SeatStateMsg& out);
+
+/// <summary>Metres between the client's jet and the seat's state below which it is already there (a reconnect).</summary>
+inline constexpr double kSeatTakeoverMin = 50.0;
+/// <summary>
+/// Whether the client's jet takes the seat's state: the seat aircraft lives and flies on the host, and the jet is not
+/// already there. A seat still parked where the mission put it needs nothing (the jet is parked there too).
+/// </summary>
+inline bool seat_takeover_due(const SeatStateMsg& m, double dist) {
+    return (m.flags & kSeatAlive) && (m.flags & kSeatAirborne) && dist >= kSeatTakeoverMin;
 }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>

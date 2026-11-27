@@ -1805,6 +1805,10 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         mission_clock_apply(data, len, host_now);
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::SeatState)) {
+        seat_state_apply(data, len, host_now);
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables) ||
         wt == static_cast<uint8_t>(net::WorldType::DamageState) || wt == static_cast<uint8_t>(net::WorldType::Countermeasure)) {
         uint16_t peer = 0;
@@ -2305,6 +2309,15 @@ void* world_object_of_key(uint8_t kind, uint16_t a, uint16_t b, uint32_t* id_out
         return nullptr;
     if (id_out) *id_out = id;
     return obj;
+}
+
+void* world_player_object() {
+    SlotTable t{};
+    Om om;
+    uint32_t player = 0xffffffffu;
+    BYTE* obj = nullptr;
+    int group = 0;
+    return world_tables(&t, &om, &player) && resolve_obj(om, player, &obj, &group) && group == 1 ? obj : nullptr;
 }
 
 uint32_t world_player_id() {

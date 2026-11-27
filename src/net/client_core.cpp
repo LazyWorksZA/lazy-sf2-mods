@@ -410,6 +410,7 @@ void ClientCore::run() {
         LoadoutMsg lom;
         DamageStateMsg dsm;
         MissionClockMsg mcm;
+        SeatStateMsg ssm;
         CountermeasureMsg cmm;
         ConsumablesMsg com;
         const bool ok =
@@ -433,7 +434,9 @@ void ClientCore::run() {
                         (wt == static_cast<uint8_t>(WorldType::Countermeasure) && channel == kChannelReliable &&
                          decode(data, len, cmm) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::MissionClock) && channel == kChannelUnreliable &&
-                         decode(data, len, mcm) == Status::Ok);
+                         decode(data, len, mcm) == Status::Ok) ||
+                        (wt == static_cast<uint8_t>(WorldType::SeatState) && channel == kChannelReliable &&
+                         decode(data, len, ssm) == Status::Ok);
         if (!ok) return drop(n_format_);
         if (!welcomed || len > sizeof(WorldPacket::data)) return drop(n_state_);
         // Reliable world messages (events, jet states) are never dropped: they share the events ring.

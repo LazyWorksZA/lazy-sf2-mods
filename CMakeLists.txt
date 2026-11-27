@@ -89,6 +89,7 @@ add_library(lazysf2 SHARED
     src/hooks/damage_sync.cpp
     src/hooks/mission_clock.cpp
     src/hooks/remote_ground.cpp
+    src/hooks/seat_takeover.cpp
     src/hooks/world_sync.cpp
     src/net/protocol.cpp
     src/net/world_proto.cpp

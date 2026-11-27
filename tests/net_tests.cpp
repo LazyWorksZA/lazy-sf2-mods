@@ -8967,6 +8967,61 @@ void clock_ground_tests() {
            "loopback: --clock sends the owner's mission clock every 2 s (unreliable), running with host time");
 }
 
+void seat_takeover_tests() {
+    std::printf("seat takeover in place (handover task 3)\n");
+    SeatStateMsg m{};
+    m.seat = 2;
+    m.flags = kSeatAlive | kSeatAirborne;
+    m.host_ms = 123456;
+    m.pose.pos[0] = 5000000;
+    m.fuel = fuel_to_wire(2000.0f);
+    m.n = 1;
+    m.e[0].station = 4;
+    m.e[0].count = 2;
+    uint8_t b[160];
+    SeatStateMsg r{};
+    const size_t n = encode(m, b, sizeof(b));
+    expect(n == 135 && peek_world_type(b, n) == 35 && decode(b, n, r) == Status::Ok && r.pose.pos[0] == 5000000 &&
+               r.e[0].station == 4 && r.fuel == 500,
+           "seat: 135 bytes, round trip");
+    m.n = 13;
+    expect(decode(b, encode(m, b, sizeof(b)), r) == Status::BadType, "seat: at most 12 stations");
+    m.n = 1;
+    SeatStateMsg parked = m;
+    parked.flags = kSeatAlive;
+    SeatStateMsg dead = m;
+    dead.flags = kSeatAirborne;
+    expect(seat_takeover_due(m, 8000.0) && !seat_takeover_due(m, 20.0) && !seat_takeover_due(parked, 8000.0) &&
+               !seat_takeover_due(dead, 8000.0),
+           "seat: a late joiner takes over a live, flying seat it is far from; not a parked or destroyed one, not when "
+           "already there (a reconnect)");
+    std::printf("    estimate: 135 B once per Welcome\n");
+
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    s.cfg.seat_state = true;
+    if (!s.start()) return expect(false, "bot serve listening (--seat-state)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<SeatStateMsg> got;
+    WorldPacket wp[8];
+    serve_run_for(c, 2.5, [&] {
+        const size_t k = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k; ++i) {
+            SeatStateMsg q{};
+            if (decode(wp[i].data, wp[i].len, q) == Status::Ok) got.push_back(q);
+        }
+        return !got.empty();
+    });
+    s.finish();
+    c.core.stop(false);
+    expect(got.size() == 1 && (got[0].flags & kSeatAirborne) && got[0].n == 1 && got[0].fuel == fuel_to_wire(2000.0f) &&
+               got[0].e[0].hash == weapon_name_hash("AIM-9J"),
+           "loopback: --seat-state sends the seat's state once, reliably, after the client's first State");
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -9051,6 +9106,7 @@ int main() {
     stores_tests();
     damage_tests();
     clock_ground_tests();
+    seat_takeover_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

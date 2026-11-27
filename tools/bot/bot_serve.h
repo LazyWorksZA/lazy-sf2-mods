@@ -81,6 +81,10 @@ struct ServeConfig {
     /// and running with host time.</summary>
     bool clock = false;
     double clock_start = 0;
+    /// <summary>--seat-state: after the client's first State, its seat's state as a late joiner gets it (SeatState):
+    /// airborne 3 km ahead of the client at its altitude and heading, 200 m/s, 2,000 kg of fuel, one AIM-9J on
+    /// station 1.</summary>
+    bool seat_state = false;
 };
 
 struct ServeResult {
@@ -113,6 +117,7 @@ struct ServeResult {
     uint32_t damage_sent = 0, cm_sent = 0, damage_rx = 0, cm_rx = 0;
     uint8_t last_rx_level = 0;
     uint32_t clocks_sent = 0;
+    uint32_t seat_states_sent = 0;
 };
 
 /// <summary>

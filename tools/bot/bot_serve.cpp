@@ -615,6 +615,32 @@ struct Serve {
             ++c.rx;
             ++res.client_states;
             c.last_game_time = s.game_time;
+            if (!c.got_state && cfg.seat_state) {
+                SeatStateMsg ss{};
+                ss.seat = 1;
+                ss.flags = kSeatAlive | kSeatAirborne;
+                ss.host_ms = static_cast<uint32_t>(host_t * 1000.0);
+                ObjPose op{};
+                const double h = s.ang[1];
+                op.pos[0] = s.pos[0] + 3000.0 * std::sin(h);
+                op.pos[1] = s.pos[1] + 3000.0 * std::cos(h);
+                op.pos[2] = s.pos[2];
+                op.vel[0] = static_cast<float>(200.0 * std::sin(h));
+                op.vel[1] = static_cast<float>(200.0 * std::cos(h));
+                op.ang[1] = s.ang[1];
+                quantise(op, &ss.pose);
+                ss.pose.kind = 1;
+                ss.fuel = fuel_to_wire(2000.0f);
+                ss.n = 1;
+                ss.e[0].station = 1;
+                ss.e[0].weapon = 0xffff;
+                ss.e[0].hash = weapon_name_hash("AIM-9J");
+                ss.e[0].count = 1;
+                uint8_t sb[sizeof(ss)];
+                const size_t sn = encode(ss, sb, sizeof(sb));
+                if (sn && core.send_world(c.slot, c.gen, sb, sn, true)) ++res.seat_states_sent;
+                say("bot serve: client %u: its seat's state sent (airborne 3 km ahead)", static_cast<unsigned>(c.slot + 1));
+            }
             if (!c.got_state) {
                 c.got_state = true;
                 c.first_state_wall = wall;

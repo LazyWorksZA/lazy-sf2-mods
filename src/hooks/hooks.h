@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "hooks/aircraft_side.h"
+#include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::hooks {
 
@@ -447,6 +448,21 @@ bool host_world_send_all(const uint8_t* data, size_t len, bool reliable = true);
 /// and on change) and consumables (every 2 s); a peer's message goes onto the avatar that shows that peer.</summary>
 void stores_tick(void* player);
 void stores_apply(const uint8_t* data, size_t len, void* avatar);
+/// <summary>Seat takeover helpers: an aircraft's loaded stations as wire entries; the same entries rebuilt on a local
+/// (not REMOTEOBJECT) jet through the game's rearm called directly; its internal and external fuel, read and set.</summary>
+size_t stores_read_entries(void* obj, net::LoadoutEntry* out, size_t max);
+void stores_apply_entries(void* obj, const net::LoadoutEntry* e, size_t n, const char* what);
+bool stores_read_fuel(void* obj, float* internal, float* external);
+void stores_set_fuel(void* obj, float internal, float external);
+/// <summary>Seat takeover (seat_takeover.cpp): the host sends a client its seat aircraft's state after the Welcome;
+/// the client's jet takes it over in place. world_player_object: our player's aircraft, or null.</summary>
+bool seat_state_capture(int seat, void* obj, net::SeatStateMsg* out);
+void seat_state_send(int slot, const net::SeatStateMsg& m);
+void seat_state_apply(const uint8_t* data, size_t len, double host_now);
+void* world_player_object();
+/// <summary>Client: writes the player's pose (position, velocity, angles; the matrix, heading copy and speed follow),
+/// as the join move does.</summary>
+void client_place_player(void* player, const double pos[3], const float vel[3], const float ang[3]);
 /// <summary>Damage, death, ejection and countermeasures (damage_sync.cpp), game thread: the player's step sends its
 /// jet's damage (polled 4 times a second, on change) and its chaff/flare releases; a peer's goes onto its avatar.</summary>
 void damage_tick(void* player);
