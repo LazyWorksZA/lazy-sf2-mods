@@ -325,11 +325,12 @@ void log_ai(const char* when) {
 
 void probe_step() {
     if (g_probe_epoch != sim_player_epoch()) {
+        if (g_probe_log_at >= 0) LOG("handover probe: the player changed; the 10 s line is dropped");
         g_probe_epoch = sim_player_epoch();
         g_probe_marked = false;
         g_probe_log_at = -1;
     }
-    if (g_probe_log_at >= 0 && sim_game_time() >= g_probe_log_at) {
+    if (g_probe_log_at >= 0 && wall_s() >= g_probe_log_at) {
         g_probe_log_at = -1;
         log_ai("10 s after the hand-back");
     }
@@ -350,7 +351,7 @@ void probe_step() {
         "object(s) back to their AI",
         a.aircraft, a.vehicles, a.flights, a.missing, n);
     log_ai("at the hand-back");
-    g_probe_log_at = sim_game_time() + 10.0;
+    g_probe_log_at = wall_s() + 10.0;
 }
 
 void step_cb(void*, float, bool is_player) {

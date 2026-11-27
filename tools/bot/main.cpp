@@ -24,7 +24,7 @@ void usage() {
     std::printf(
         "lazysf2-bot --host ADDR:PORT [--callsign BOT1] [--aircraft F-4E]\n"
         "            [--script straight|orbit|breaks|climb|formation] [--offset R,B,U] [--rate HZ] [--duration SECONDS]\n"
-        "            [--loss PERCENT] [--jitter MS] [--lag MS] [--log-remote] [--drop] [--log FILE]\n"
+        "            [--loss PERCENT] [--jitter MS] [--lag MS] [--log-remote] [--drop] [--world-join] [--log FILE]\n"
         "lazysf2-bot --serve PORT [--bind ADDR] [--callsign BOTHOST] [--aircraft F-4E] [--script straight|orbit|breaks|climb]\n"
         "            [--start X,Y,Z,HEADING] [--lag MS] [--pause-at S --pause-for S] [--record DIR] [--duration SECONDS]\n"
         "            [--mission world_NNN.msn [--seats MEMBERS,HOST_MEMBER]] [--world world_NNN.manifest.txt]\n"
@@ -39,6 +39,8 @@ void usage() {
         "sequenced (unreliable) channel a late State is dropped by the host, so jitter also acts as extra loss.\n"
         "--lag holds every packet sent and every packet received for MS (a fixed delay each way).\n"
         "--log-remote logs one line per second per remote jet. --drop exits without Bye (tests the host's 5 s timeout).\n"
+        "--world-join joins a shared-world host: asks for its mission (a seat tag), then Hello with that tag, and counts\n"
+        "the world stream and events it gets.\n"
         "Client exit code 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no ENet connection within\n"
         "4 s, or no Welcome within 15 s of connecting, 4 the host closed the connection or went silent for 4 s.\n"
         "Serve defaults: bind 127.0.0.1, BOTHOST, F-4E, orbit, until Ctrl+C. The jet's States go out at 20 Hz. Without\n"
@@ -244,6 +246,9 @@ int main(int argc, char** argv) {
         }
         if (a == "--drop") {
             cfg.drop = true;
+            client_only = true;
+        } else if (a == "--world-join") {
+            cfg.world_join = true;
             client_only = true;
         } else if (a == "--log-remote") {
             cfg.log_remote = true;

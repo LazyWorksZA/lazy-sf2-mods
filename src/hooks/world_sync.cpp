@@ -5,6 +5,9 @@
 // Fixed RVAs, July 2013 build only. See lazy-sf2-recon: network-recon §10.1, §10.3 and §10.10.
 #include <windows.h>
 
+#include <knownfolders.h>
+#include <shlobj.h>
+
 #include <MinHook.h>
 
 #include <atomic>
@@ -709,21 +712,38 @@ bool page_theatre(void* page, char* out, size_t cap) {
         return false;
     }
 }
-bool set_page_theatre(void* page, const std::string& theatre) {
-    if (theatre.empty() || theatre.size() >= MAX_PATH) return false;
-    __try {
-        wchar_t* w = reinterpret_cast<wchar_t*>(static_cast<BYTE*>(page) + kPageSettings + kHdrMap);
-        size_t i = 0;
-        for (; i < theatre.size(); ++i) w[i] = static_cast<unsigned char>(theatre[i]);
-        w[i] = L'\0';
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+
+// Whether this PC has the theatre: its ini in the game's or the user's Terrains folder (loose, or in a cat).
+bool theatre_installed(const std::string& theatre) {
+    if (theatre.empty()) return false;
+    std::wstring t(theatre.begin(), theatre.end());
+    std::vector<uint8_t> bytes;
+    wchar_t exe[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::wstring dir(exe);
+        dir.resize(dir.find_last_of(L'\\'));
+        const std::wstring game = dir + L"\\Terrains\\" + t;
+        const DWORD a = GetFileAttributesW(game.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) return true;
+        if (read_game_file(game + L"\\" + t + L".ini", bytes)) return true;  // also finds a stock theatre in a cat
     }
+    PWSTR saved = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SavedGames, 0, nullptr, &saved)) && saved) {
+        const std::wstring user = std::wstring(saved) + L"\\ThirdWire\\StrikeFighters2\\Terrains\\" + t;
+        const DWORD a = GetFileAttributesW(user.c_str());
+        ok = (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) || read_game_file(user + L"\\" + t + L".ini", bytes);
+    }
+    CoTaskMemFree(saved);
+    return ok;
 }
+
+bool g_join_no_theatre = false;  // join: the host's mission is in a theatre this PC does not have
 
 void accept_load(const Ctx& c, void* page, bool new_page) {
     if (g_join) take_fetched_mission();
+    g_join_no_theatre = false;
     if (g_load_path.empty()) return;
     const std::wstring side_path = world_companion_path(g_load_path, L".sidecar.txt");
     std::string text, err;
@@ -742,14 +762,18 @@ void accept_load(const Ctx& c, void* page, bool new_page) {
             "the generated mission");
         return;
     }
-    // The terrain is chosen from the generated mission's state, which Load does not replace: so on the New page,
-    // generate for the file's theatre first (a GERMANYCE mission must not fly on the page's DESERT).
+    // The flight's terrain is the theatre selected on the New page (the menu's own choice; neither the page's
+    // settings field, a new Generate nor MSN Load changes it: live check 2026-11-27), so a mission in another theatre
+    // would fly on the wrong terrain. Refuse it and say what to do.
     char have[64] = {};
     if (new_page && !s.theatre.empty() && page_theatre(page, have, sizeof(have)) && s.theatre != have) {
-        const bool set = set_page_theatre(page, s.theatre) &&
-                         call_generate(c.msn, static_cast<BYTE*>(page) + kPageSettings);
-        LOG("world: the New page was on theatre %s; the mission to load is in %s: %s", have, s.theatre.c_str(),
-            set ? "generated for that theatre first" : "COULD NOT switch the theatre (the flight may load the wrong terrain)");
+        const bool installed = theatre_installed(s.theatre);
+        if (g_join && !installed) g_join_no_theatre = true;
+        LOG("world: load REFUSED: the mission is in theatre %s, the New page is on %s. %s; flying the generated mission%s",
+            s.theatre.c_str(), have,
+            installed ? "Select that theatre on the New page and Accept again" : "That theatre is not installed on this PC",
+            g_join ? (installed ? " (the host's session will refuse it)" : ", and leaving the host's session when it welcomes us") : "");
+        return;
     }
     if (!call_seed(c.rnd, s.seed)) {
         LOG("world: ERR RND Seed faulted; flying the generated mission");
@@ -2738,6 +2762,11 @@ uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 
 bool world_client_welcome(uint32_t mission_id, uint8_t seat, uint8_t host_seat) {
     if (!g_join) return true;
+    if (g_join_no_theatre) {
+        LOG("world: join: the host's mission is in a theatre this PC does not have; leaving (Bye 8). Install the "
+            "theatre to join this mission");
+        return false;
+    }
     if (g_flying_id == 0 || mission_id != g_flying_id) {
         LOG("world: join: the host flies mission 0x%08lx and we fly %s0x%08lx; leaving (Bye 8)",
             static_cast<unsigned long>(mission_id), g_flying_id ? "" : "a generated mission, not ",

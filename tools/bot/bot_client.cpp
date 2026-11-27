@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "net/host_core.h"
+#include "net/world_proto.h"
 #include "net/host_session.h"
 #include "net/receiver_math.h"
 #include "net/remote_jet.h"
@@ -198,6 +199,40 @@ struct Runner {
     }
 
     void refuse() { ++res.dropped_rx; }
+    bool seat_known = false;  // --world-join: the host's SeatState for us
+    double seat_pos[3] = {}, seat_heading = 0;
+
+    /// <summary>A world message: counted (and the mission offer logged), only for a world join.</summary>
+    void world_packet(uint8_t wt, const uint8_t* data, size_t len) {
+        if (!cfg.world_join) return refuse();
+        if (wt == static_cast<uint8_t>(WorldType::MissionOffer)) {
+            MissionOfferMsg o{};
+            if (decode(data, len, o) == Status::Ok) {
+                res.mission_offered = true;
+                say("bot: the host offers mission 0x%08x (%u chunks, status %u), seat %u", static_cast<unsigned>(o.mission_id),
+                    static_cast<unsigned>(o.chunk_count), static_cast<unsigned>(o.status), static_cast<unsigned>(o.seat));
+            }
+        } else if (wt == static_cast<uint8_t>(WorldType::MissionChunk)) {
+            ++res.mission_chunks;
+        } else if (wt == static_cast<uint8_t>(WorldType::WorldStates)) {
+            if (res.world_states++ == 0) say("bot: first world states from the host (%zu bytes)", len);
+        } else if (wt == static_cast<uint8_t>(WorldType::WorldEvents)) {
+            ++res.world_events;
+        } else if (wt == static_cast<uint8_t>(WorldType::SeatState)) {
+            SeatStateMsg ss{};
+            if (decode(data, len, ss) == Status::Ok && !seat_known) {
+                ObjPose p{};
+                dequantise(ss.pose, &p);
+                for (int i = 0; i < 3; ++i) seat_pos[i] = p.pos[i];
+                seat_heading = p.ang[1];
+                seat_known = true;
+                say("bot: our seat %u is at (%.0f, %.0f, %.0f) on the host; flying it from there", static_cast<unsigned>(ss.seat),
+                    seat_pos[0], seat_pos[1], seat_pos[2]);
+            }
+        } else {
+            ++res.world_other;
+        }
+    }
 
     /// <summary>A received packet, checked as ClientCore checks it. rx is the wall time it is handled.</summary>
     void process(uint8_t channel, const uint8_t* data, size_t len, double rx) {
@@ -329,6 +364,11 @@ struct Runner {
             const double rx = wall_now();
             last_rx = rx;
             const size_t len = ev.packet->dataLength;
+            if (const uint8_t wt = peek_world_type(ev.packet->data, len)) {
+                world_packet(wt, ev.packet->data, len);  // any size; never --lag'd
+                enet_packet_destroy(ev.packet);
+                return;
+            }
             if (len > kMaxMessage) {
                 refuse();
             } else if (lag > 0.0) {
@@ -569,6 +609,16 @@ BotResult run_bot(const BotConfig& cfg) {
     set_str(hello.callsign, cfg.callsign.c_str());
     set_str(hello.aircraft, cfg.aircraft.c_str());
     uint8_t buf[128];
+    if (cfg.world_join) {
+        // The host keys a shared-world seat by the tag of a mission request: ask first, on the same connection.
+        res.world_tag = (static_cast<uint32_t>(wall_now() * 1e6) ^ (cfg.rng_seed * 2654435761u)) | 1u;
+        MissionRequestMsg rq{};
+        rq.have_id = 0;
+        rq.tag = res.world_tag;
+        r.post(buf, encode(rq, buf, sizeof(buf)), kChannelReliable, false);
+        hello.world_tag = res.world_tag;
+        r.say("bot: world join: mission request with tag 0x%08x", static_cast<unsigned>(res.world_tag));
+    }
     r.post(buf, encode(hello, buf, sizeof(buf)), kChannelReliable, false);
     r.pump(wall_now());
     enet_host_flush(r.host);
@@ -639,10 +689,11 @@ BotResult run_bot(const BotConfig& cfg) {
             }
         }
 
-        if (!flying && r.clock.have_pong()) {
+        if (!flying && r.clock.have_pong() && (!cfg.world_join || r.seat_known || wall - r.welcomed_at > 1.0)) {
             const double t0 = r.clock.now(wall);
-            r.flight.start(formation ? Script::Straight : cfg.script, r.welcome.spawn_pos,
-                           static_cast<double>(r.welcome.spawn_heading), t0);
+            // A world join flies its seat from where the host's copy of it is (SeatState), else from the Welcome.
+            r.flight.start(formation ? Script::Straight : cfg.script, r.seat_known ? r.seat_pos : r.welcome.spawn_pos,
+                           r.seat_known ? r.seat_heading : static_cast<double>(r.welcome.spawn_heading), t0);
             last_t = t0;
             flying = true;
             fly_start = wall;
@@ -765,6 +816,10 @@ BotResult run_bot(const BotConfig& cfg) {
           "offset %.4f s, best rtt %.1f ms",
           res.generated, res.sent, res.lost, res.held_ticks, res.pings, res.pongs, res.clock_resets, res.offset,
           res.best_rtt * 1000.0);
+    if (cfg.world_join)
+        r.say("bot: world join: mission %s (%u chunks), %u world states, %u world events, %u other world messages",
+              res.mission_offered ? "offered" : "NOT offered", res.mission_chunks, res.world_states, res.world_events,
+              res.world_other);
     r.say("bot: received: %u host States (age p90 %.0f ms), %u relayed, %u PeerInfo, %u PeerLeft, %u refused%s",
           res.host_states, res.host_age_p90 * 1000.0, res.relayed_states, res.peer_infos, res.peer_lefts, res.dropped_rx,
           res.host_bye >= 0 ? ", host Bye" : "");

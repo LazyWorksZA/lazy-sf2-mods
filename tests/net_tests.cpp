@@ -9195,6 +9195,30 @@ void handover_tests() {
            "loopback: a client's world offer (paced, 16 chunks a step) reaches the host, unpacks, and is answered");
 }
 
+void bot_world_join_tests() {
+    std::printf("bot --world-join (a shared-world client for host-side runs)\n");
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    std::vector<uint8_t> msn(4000, 7);
+    expect(pack_mission("seed=1\n", msn, &s.cfg.mission, &s.cfg.mission_id, &s.cfg.mission_raw), "pack a mission");
+    bot::ServeConfig::WorldObj o;
+    o.a = 2;
+    o.pos[2] = 2000.0;
+    s.cfg.world.push_back(o);
+    if (!s.start()) return expect(false, "bot serve listening (mission and world)");
+    bot::BotConfig bc;
+    bc.host = "127.0.0.1:" + std::to_string(s.port.load());
+    bc.duration = 2.5;
+    bc.world_join = true;
+    bc.log = bot_log;
+    const bot::BotResult r = bot::run_bot(bc);
+    s.finish();
+    expect(r.code == 0 && r.world_tag != 0 && r.mission_offered && r.mission_chunks >= 1 && r.world_states >= 10,
+           "loopback: the bot asks for the mission with a seat tag, Hellos with it, and receives the world stream");
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -9281,6 +9305,7 @@ int main() {
     clock_ground_tests();
     seat_takeover_tests();
     handover_tests();
+    bot_world_join_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

@@ -28,6 +28,10 @@ struct BotConfig {
     bool offset_set = false;  // ... if set; otherwise the Welcome's slot: 150 m right per client id, 50 m back
     bool log_remote = false;                // one line per second per remote id
     bool drop = false;                      // exit without Bye
+    /// <summary>A shared-world join: before the Hello, ask the host for its mission with a world tag (the host keys
+    /// the bot's seat by it; the chunks are counted, not kept), then Hello with that tag, and count the world
+    /// messages that follow (the stream, events, jet states...).</summary>
+    bool world_join = false;
     uint32_t rng_seed = 12345;
     std::function<void(const char*)> log;     // may be empty
     const std::atomic<bool>* cancel = nullptr;  // set to end the run early (with a Bye)
@@ -51,6 +55,10 @@ struct BotResult {
     uint32_t dropped_rx = 0;  // packets refused: malformed, wrong channel or id, out of range, or not announced
     int host_bye = -1;        // the reason of the host's Bye, -1 if none came
     double host_age_p90 = 0;  // seconds: host time at handling minus the stamp, of the host's States
+    // --world-join: what the world gave the bot.
+    uint32_t world_tag = 0;
+    bool mission_offered = false;
+    uint32_t mission_chunks = 0, world_states = 0, world_events = 0, world_other = 0;
     // --script formation: each sent State against where the host really was at its time (from the host's States
     // received later) plus the offset.
     // The percentiles come from a uniform sample of at most 65536 values. States sent across a gap in the host's
