@@ -262,7 +262,9 @@ void MissionFetch::run() {
                     } else {
                         if (o.status != kOfferSame && !logged_none)
                             say("net: the host has %s; asking again",
-                                o.status == kOfferNone ? "no mission yet" : "a mission it cannot send");
+                                o.status == kOfferNone      ? "no mission yet"
+                                : o.status == kOfferRefused ? "a mission it does not send us (our game content differs)"
+                                                            : "a mission it cannot send");
                         if (o.status != kOfferSame) logged_none = true;
                         offer_done = true;
                     }

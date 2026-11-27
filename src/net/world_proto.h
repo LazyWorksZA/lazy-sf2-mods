@@ -58,6 +58,7 @@ inline constexpr uint8_t kOfferOk = 0;       // chunks follow, in order, on the 
 inline constexpr uint8_t kOfferNone = 1;     // the host has no mission yet: ask again later
 inline constexpr uint8_t kOfferTooBig = 2;   // the host's mission is over kMissionMaxPacked
 inline constexpr uint8_t kOfferSame = 3;     // the client already holds this mission (have_id): no chunks
+inline constexpr uint8_t kOfferRefused = 4;  // lobby: the client's game content differs from the host's: no mission
 
 /// <summary>What the host's seat table needs to know of its own flight.</summary>
 struct SeatPlan {
@@ -130,6 +131,7 @@ struct LobbyRosterMsg {
     char summary[3][40];  // the mission in three short lines (ASCII)
     LobbyRow rows[kLobbyRows];
     uint32_t session;     // random per host session: a client still joined when the host hosts again sees it change
+    uint32_t content_hash;  // the host's (hooks/content_hash), shown to a client it keeps out
 };
 struct MissionChunkHead {
     Header h;
@@ -138,7 +140,7 @@ struct MissionChunkHead {
     uint16_t len;  // payload bytes that follow (1..kMissionChunkData; only the last chunk may be shorter)
 };
 #pragma pack(pop)
-static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 284);
+static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 288);
 static_assert(sizeof(MissionRequestMsg) == 12);  // 4:4 have id, 8:4 tag
 static_assert(sizeof(MissionOfferMsg) == 23);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status,
                                                  // 21:1 seat, 22:1 host seat

@@ -10211,6 +10211,10 @@ void lobby_loopback_tests() {
     expect(both && r1.your_seat + r2.your_seat == 3 && r1.your_seat != r2.your_seat && r1.members == 4 && r1.mission_id == 77,
            "two clients get the roster with their default seats");
     expect(rb.result == kLobbyContent && rb.your_seat == kNoSeat, "a client with other game content is kept out");
+    std::vector<uint8_t> bad_packed;
+    MissionOfferMsg bad_offer{};
+    expect(rb.content_hash == 0x1234u && bad.latest_id() == 0 && !bad.take(&bad_packed, &bad_offer),
+           "it is told the host's content hash and gets no mission");
     uint64_t age = 99999;
     expect(f1.roster(&r1, &rtt, &age) && r1.session != 0 && r1.session == r2.session && age < 3000 && rtt < 1000,
            "the roster carries the host session's id, its age and the round's own answer time");

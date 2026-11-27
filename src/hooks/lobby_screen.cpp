@@ -449,6 +449,7 @@ struct Roster {
     uint32_t launch_seq = 0;
     uint32_t mission_id = 0;
     uint32_t session = 0;
+    uint32_t host_content = 0;
     uint32_t rtt_ms = 0;
     uint64_t age_ms = 0;
     std::wstring host_callsign;
@@ -458,6 +459,9 @@ struct Roster {
 };
 
 constexpr uint64_t kHostGoneMs = 5000;
+
+struct Roster;
+std::wstring content_refusal_text(const Roster& r);
 
 Roster read_roster(bool host) {
     Roster r;
@@ -483,6 +487,7 @@ Roster read_roster(bool host) {
         r.launch_seq = m.launch_seq;
         r.mission_id = m.mission_id;
         r.session = m.session;
+        r.host_content = m.content_hash;
         r.count = m.count;
         std::memcpy(r.rows, m.rows, sizeof(r.rows));
         for (int i = 0; i < 3; ++i) r.summary[i] = widen(m.summary[i]);
@@ -631,10 +636,13 @@ void session_frame() {
                 set_status(L"The host has launched: press Ready to join the flight.");
             }
         }
-        if (r.result == net::kLobbyContent && !g_refusal_shown) {
+        if (r.result == net::kLobbyContent) {
+            // Kept on the status line for as long as the host keeps us out (the host sends no mission meanwhile).
+            if (!g_refusal_shown)
+                LOG("lobby: the host's game content 0x%08lx differs from ours 0x%08lx; not in its lobby",
+                    static_cast<unsigned long>(r.host_content), static_cast<unsigned long>(world_lobby_hash()));
             g_refusal_shown = true;
-            LOG("lobby: the host's game content differs from ours; not in its lobby");
-            set_status(L"Your game content differs from the host's (aircraft, weapons, terrains or patches).");
+            set_status(content_refusal_text(r).c_str());
         } else {
             int seat = -1;
             uint8_t res = 0;
@@ -646,6 +654,14 @@ void session_frame() {
             }
         }
     }
+}
+
+std::wstring content_refusal_text(const Roster& r) {
+    wchar_t b[200];
+    swprintf_s(b, L"Your game content differs from the host's (yours %08lX, the host's %08lX): aircraft, weapons, "
+                  L"ground objects, terrains or game files.",
+               static_cast<unsigned long>(world_lobby_hash()), static_cast<unsigned long>(r.host_content));
+    return b;
 }
 
 /// <summary>Client: Ready for the host's current mission, if this pilot has a seat in it. Returns nullptr, or why
@@ -676,6 +692,10 @@ int next_free_seat(const Roster& r, int dir) {
 
 void change_seat(int dir) {
     const Roster r = read_roster(g_screen == Screen::Host);
+    if (g_screen == Screen::Join && r.result == net::kLobbyContent) {
+        set_status(content_refusal_text(r).c_str());
+        return;
+    }
     const int seat = next_free_seat(r, dir);
     if (seat < 0) {
         set_status(r.members == 0 ? L"No seats yet: the host has not set up the mission." : L"No other seat is free.");

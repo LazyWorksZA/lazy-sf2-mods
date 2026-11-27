@@ -423,6 +423,8 @@ uint32_t content_hash();
 /// <summary>world_sync.cpp: the member of the player flight this PC's player flies (the host's lobby seat; -1: stock).</summary>
 void world_set_own_seat(int member);
 /// <summary>world_sync.cpp, a joined lobby session: the latest roster (and round trip), Ready, a seat wish.</summary>
+/// <summary>world_sync.cpp: this PC's content hash for the joined lobby session (0: none).</summary>
+uint32_t world_lobby_hash();
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms = nullptr);
 void world_lobby_ready(bool ready, uint32_t mission_id);
 void world_lobby_want_seat(int seat);

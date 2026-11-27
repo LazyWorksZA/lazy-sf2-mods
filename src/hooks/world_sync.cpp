@@ -2917,6 +2917,8 @@ uint32_t world_client_tag() { return g_join ? g_tag : 0; }
 
 bool world_fetch_wrong_password() { return g_fetch && g_fetch->wrong_password(); }
 
+uint32_t world_lobby_hash() { return g_lobby_hash; }
+
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms) {
     return g_fetch && g_fetch->roster(out, rtt_ms, age_ms);
 }

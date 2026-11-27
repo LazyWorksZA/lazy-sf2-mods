@@ -249,10 +249,32 @@ HostCore::LobbyView HostCore::lobby_view() const {
     return v;
 }
 
-size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap) {
+bool HostCore::content_refused(uint32_t tag) const {
+    for (size_t i = 0; i < content_refused_n_; ++i)
+        if (content_refused_[i] == tag) return true;
+    return false;
+}
+
+size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap, bool* refused) {
     std::lock_guard<std::mutex> lock(mission_mx_);
     LobbyRosterMsg r{};
-    if (s.content_hash != content_hash_) {
+    *refused = s.content_hash != content_hash_;
+    // The tags kept out for their content get no mission (a small ring: the newest replace the oldest).
+    size_t at = content_refused_n_;
+    for (size_t i = 0; i < content_refused_n_; ++i)
+        if (content_refused_[i] == s.tag) at = i;
+    if (*refused && at == content_refused_n_) {
+        if (content_refused_n_ < 16) {
+            content_refused_[content_refused_n_++] = s.tag;
+        } else {
+            for (size_t i = 1; i < 16; ++i) content_refused_[i - 1] = content_refused_[i];
+            content_refused_[15] = s.tag;
+        }
+    } else if (!*refused && at < content_refused_n_) {
+        for (size_t i = at + 1; i < content_refused_n_; ++i) content_refused_[i - 1] = content_refused_[i];
+        --content_refused_n_;
+    }
+    if (*refused) {
         r.result = kLobbyContent;
         book_.update(s.tag, s.callsign, false, -1, true, now_ms(), from);  // not in the lobby
     } else {
@@ -268,6 +290,7 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
     r.mission_id = mission_ ? mission_->id : 0;
     r.launch_seq = launch_seq_;
     r.session = session_id_;
+    r.content_hash = content_hash_;
     r.members = static_cast<uint8_t>(book_.members());
     const int seat = book_.seat_of(s.tag);
     r.your_seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;
@@ -372,6 +395,8 @@ void HostCore::run() {
     uint64_t last_rx[kMaxClients] = {};
     uint32_t pings[kMaxClients] = {};
     uint32_t lobby_msgs[kMaxClients] = {};
+    uint32_t content_logged[16] = {};  // addresses whose content refusal was logged
+    size_t content_logged_n = 0;
     uint32_t gens[kMaxClients] = {};
     uint64_t mission_ask_ms[kMaxClients] = {};
     uint32_t slot_tag[kMaxClients] = {};  // the world tag each connection carried (request or Hello)
@@ -534,8 +559,20 @@ void HostCore::run() {
             // The fetch connects anew each round from one address, so a row is bound to that address (lobby_book.h).
             const uint64_t from = (static_cast<uint64_t>(peers[slot]->address.host) << 16) | peers[slot]->address.port;
             uint8_t out[sizeof(LobbyRosterMsg)];
-            const size_t n = lobby_answer(ls, from, out, sizeof(out));
+            bool refused = false;
+            const size_t n = lobby_answer(ls, from, out, sizeof(out), &refused);
             if (!n) return drop(n_state_);  // another address's row: unanswered
+            if (refused) {
+                // Once per address (the fetch asks every second): which content it has, and ours.
+                bool seen = false;
+                for (size_t i = 0; i < content_logged_n; ++i) seen = seen || content_logged[i] == peers[slot]->address.host;
+                if (!seen) {
+                    if (content_logged_n < 16) content_logged[content_logged_n++] = peers[slot]->address.host;
+                    char ip[24];
+                    say("lobby: %s (\"%s\") kept out: its game content 0x%08x differs from ours 0x%08x", ip_text(peers[slot], ip, sizeof(ip)),
+                        ls.callsign, static_cast<unsigned>(ls.content_hash), static_cast<unsigned>(content_hash_));
+                }
+            }
             send_raw(slot, out, n);
             return;
         }
@@ -557,6 +594,11 @@ void HostCore::run() {
         o.host_seat = kNoSeat;
         if (!b) {
             o.status = kOfferNone;
+        } else if (lobby_ && [&] {
+                       std::lock_guard<std::mutex> lock(mission_mx_);
+                       return content_refused(rq.tag);
+                   }()) {
+            o.status = kOfferRefused;  // kept out of the lobby for its game content: no mission
         } else if (b->packed.size() > kMissionMaxPacked) {
             o.status = kOfferTooBig;
         } else {
@@ -576,6 +618,7 @@ void HostCore::run() {
         if (!send_raw(slot, out, encode(o, out, sizeof(out)))) return;
         if (o.status == kOfferSame) return;  // the regular poll of a client that is up to date: no log line
         if (o.status != kOfferOk) {
+            if (o.status == kOfferRefused) return;  // logged once per address with its status
             say("net: peer %u asked for the mission: %s", static_cast<unsigned>(slot + 1),
                 o.status == kOfferNone ? "none yet" : "too big to send");
             return;
