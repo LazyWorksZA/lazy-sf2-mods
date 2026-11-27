@@ -74,22 +74,37 @@ int __fastcall h_open(void* mnu, void* edx, const wchar_t* name, int remember) {
     return o_open(mnu, edx, name, remember);
 }
 
+bool still_module(HMODULE base, const wchar_t* file);
+
+HMODULE g_mnu_base = nullptr;
+
+// The game frees MenuSystem.dll for the flight and loads it again for the menus after it (live: no screen open was
+// seen after a flight), so the detour is made again for each image, as for HangarScreen.dll.
 void hook_screen_open() {
-    static bool done = false;
     HMODULE m = GetModuleHandleW(L"MenuSystem.dll");
-    if (done || !m) return;
-    done = true;  // MenuSystem.dll stays loaded: hooked once
+    if (!m) return;
     const auto* target = static_cast<const BYTE*>(at_rva(m, kMnuOpenRva));
+    if (m == g_mnu_base && *target == 0xE9) return;  // hooked (MinHook writes a JMP rel32)
+    static HMODULE bad = nullptr;
+    if (m == bad) return;
+    if (g_mnu_base && g_mnu_base != m && still_module(g_mnu_base, L"\\MenuSystem.dll"))
+        (void)MH_RemoveHook(at_rva(g_mnu_base, kMnuOpenRva));
+    const bool again = g_mnu_base != nullptr;
+    g_mnu_base = nullptr;
     if (!is_expected_build(m, kMnuStamp, kMnuSize, "MenuSystem.dll") ||
         std::memcmp(target, kOpenPrologue, sizeof(kOpenPrologue)) != 0) {
+        bad = m;
         LOG("lobby: MenuSystem screen open not hooked (build or prologue); the debrief's Accept stays stock");
         return;
     }
-    create_and_enable(at_rva(m, kMnuOpenRva), reinterpret_cast<void*>(&h_open), reinterpret_cast<void**>(&o_open),
-                      "MenuSystem screen open");
+    (void)MH_RemoveHook(at_rva(m, kMnuOpenRva));  // an entry left by an earlier image at this base
+    if (again) LOG("lobby: MenuSystem.dll was loaded again (at %p); its screen open is hooked again", static_cast<void*>(m));
+    if (create_and_enable(at_rva(m, kMnuOpenRva), reinterpret_cast<void*>(&h_open), reinterpret_cast<void**>(&o_open),
+                          "MenuSystem screen open"))
+        g_mnu_base = m;
 }
 
-bool still_hangar(HMODULE base) {
+bool still_module(HMODULE base, const wchar_t* file) {
     HMODULE h = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(base), &h) ||
@@ -97,10 +112,9 @@ bool still_hangar(HMODULE base) {
         return false;
     wchar_t path[MAX_PATH] = {};
     const DWORD n = GetModuleFileNameW(base, path, MAX_PATH);
-    static constexpr wchar_t kName[] = L"\\HangarScreen.dll";
-    constexpr DWORD kLen = static_cast<DWORD>(_countof(kName) - 1);
+    const DWORD kLen = static_cast<DWORD>(wcslen(file));
     return n >= kLen && n < MAX_PATH &&
-           CompareStringOrdinal(path + n - kLen, static_cast<int>(kLen), kName, static_cast<int>(kLen), TRUE) == CSTR_EQUAL;
+           CompareStringOrdinal(path + n - kLen, static_cast<int>(kLen), file, static_cast<int>(kLen), TRUE) == CSTR_EQUAL;
 }
 
 }  // namespace
@@ -115,7 +129,7 @@ void lobby_flow_on_modules_loaded() {
     if (!(m == g_base && *target == 0xE9)) {
         static HMODULE bad = nullptr;
         if (m != bad) {
-            if (g_base && g_base != m && still_hangar(g_base)) (void)MH_RemoveHook(at_rva(g_base, kHangarEventRva));
+            if (g_base && g_base != m && still_module(g_base, L"\\HangarScreen.dll")) (void)MH_RemoveHook(at_rva(g_base, kHangarEventRva));
             g_base = nullptr;
             if (!is_expected_build(m, kHangarStamp, kHangarSize, "HangarScreen.dll") ||
                 std::memcmp(target, kPrologue, sizeof(kPrologue)) != 0) {

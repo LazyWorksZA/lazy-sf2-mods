@@ -798,12 +798,16 @@ void __fastcall guarded_post(void* mnu, void* edx, int cmd, int a, int b) {
 
 /// <summary>Replaces MNU's PostCommand vtable slot with guarded_post, once (MenuSystem.dll stays loaded).</summary>
 void guard_fly(void* mnu) {
-    static bool tried = false;
-    if (tried) return;
-    tried = true;
+    // Once per MenuSystem.dll image: the game loads it again after each flight, with a stock vtable.
     HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
-    if (!is_expected_build(mnu_dll, kMnuTimestamp, kMnuImageSize, "MenuSystem.dll")) return;
+    static HMODULE bad = nullptr;
+    if (!mnu_dll || mnu_dll == bad) return;
+    if (!is_expected_build(mnu_dll, kMnuTimestamp, kMnuImageSize, "MenuSystem.dll")) {
+        bad = mnu_dll;
+        return;
+    }
     void** slot = static_cast<void**>(at_rva(mnu_dll, kMnuVtableRva)) + kMnuPostCommand;
+    if (*slot == reinterpret_cast<void*>(&guarded_post)) return;
     DWORD old = 0;
     if (*static_cast<void**>(mnu) != at_rva(mnu_dll, kMnuVtableRva) ||
         !VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
