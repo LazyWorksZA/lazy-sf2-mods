@@ -27,8 +27,9 @@ enum class WorldType : uint8_t {
     Consumables = 31,     // a player's fuel, ammunition and countermeasures, unreliable, every 2 s: relayed
     DamageState = 32,     // a player's jet damage, reliable, on change (polled 4 times a second): relayed
     Countermeasure = 33,  // a player's chaff and flare releases, reliable, as they happen: relayed
+    MissionClock = 34,    // the world owner's mission clock, unreliable, every 2 s: owner to the others
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 33;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 34;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -741,6 +742,47 @@ inline bool kill_event_allowed(bool client_join, bool remote_copy) { return !(cl
 inline uint8_t released(int before, int now) {
     const int d = before - now;
     return static_cast<uint8_t>(d <= 0 ? 0 : d > 255 ? 255 : d);
+}
+
+// ---- the mission clock (handover task 1) ----
+
+#pragma pack(push, 1)
+/// <summary>The world owner's mission clocks (MSN +0x10, the elapsed mission time the formations follow, and +0x14) in
+/// ms, at the owner's game time owner_ms (host time).</summary>
+struct MissionClockMsg {
+    Header h;
+    uint16_t peer;  // the owner
+    uint16_t seq;
+    uint32_t owner_ms;
+    uint32_t clock_ms;
+    uint32_t clock2_ms;
+};
+#pragma pack(pop)
+static_assert(sizeof(MissionClockMsg) == 20);  // 4:2 peer, 6:2 seq, 8:4 owner ms, 12:4 clock, 16:4 second clock
+size_t encode(const MissionClockMsg& m, uint8_t* out, size_t cap);
+Status decode(const uint8_t* data, size_t len, MissionClockMsg& out);
+inline uint32_t clock_to_wire(float s) { return s > 0.0f ? static_cast<uint32_t>(static_cast<double>(s) * 1000.0 + 0.5) : 0; }
+
+/// <summary>Corrections smaller than this are left to drift (the clocks run at the same game rate).</summary>
+inline constexpr double kClockTolerance = 0.25;
+/// <summary>
+/// The mission clock a receiver should have now: the owner's at owner_ms, advanced by the age of the message on the
+/// shared host clock (0..2 s; older ones are not used). set is false when the local clock is within the tolerance.
+/// </summary>
+struct ClockFix {
+    bool set = false;
+    double target = 0, target2 = 0;
+};
+inline ClockFix clock_fix(double local, const MissionClockMsg& m, double host_now) {
+    ClockFix f;
+    double age = host_now - m.owner_ms / 1000.0;
+    if (age < 0) age = 0;
+    if (age > 2.0) return f;
+    f.target = m.clock_ms / 1000.0 + age;
+    f.target2 = m.clock2_ms / 1000.0 + age;
+    const double d = f.target - local;
+    f.set = d > kClockTolerance || d < -kClockTolerance;
+    return f;
 }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>

@@ -224,6 +224,28 @@ struct Serve {
             cfg.hit_kind == 1 ? 'A' : 'G', static_cast<unsigned>(cfg.hit_a), static_cast<unsigned>(cfg.hit_b));
     }
 
+    // --clock: the mission clock.
+    double clock_t0 = -1, clock_next = 0;
+    uint16_t clock_seq = 0;
+    void clock_tick() {
+        if (!c.on) {
+            clock_t0 = -1;
+            return;
+        }
+        if (clock_t0 < 0) clock_t0 = clock_next = host_t;
+        if (host_t < clock_next) return;
+        clock_next += 2.0;
+        MissionClockMsg m{};
+        m.seq = ++clock_seq;
+        m.owner_ms = static_cast<uint32_t>(host_t * 1000.0);
+        const float t = static_cast<float>(cfg.clock_start + (host_t - clock_t0));
+        m.clock_ms = clock_to_wire(t);
+        m.clock2_ms = clock_to_wire(t);
+        uint8_t buf[sizeof(m)];
+        const size_t n = encode(m, buf, sizeof(buf));
+        if (n && core.send_world(c.slot, c.gen, buf, n, false)) ++res.clocks_sent;
+    }
+
     // --damage: the jet's damage story and flares.
     double dmg_t0 = -1, dmg_next_cm = 0;
     DamageStep dmg_last{};
@@ -804,6 +826,7 @@ ServeResult run_serve(const ServeConfig& cfg) {
         if (cfg.launch) sv.launch_tick();
         if (cfg.stores) sv.stores_tick();
         if (cfg.damage) sv.damage_tick();
+        if (cfg.clock) sv.clock_tick();
         if (wall >= next_step) {
             next_step += kServeStep;
             if (next_step < wall - 0.25) next_step = wall + kServeStep;  // fell far behind: do not burst

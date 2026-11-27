@@ -756,6 +756,7 @@ void world_tick(void* player, double now) {
     if (g_nclients > 0) {
         stores_tick(player);
         damage_tick(player);
+        mission_clock_tick();
     }
     for (int s = 0; s < net::kMaxClients; ++s) {
         if (!g_world_behind[s]) continue;

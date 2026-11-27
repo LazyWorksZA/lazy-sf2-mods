@@ -8900,6 +8900,55 @@ void damage_tests() {
            "loopback: the client's damage and chaff reach the host");
 }
 
+void clock_ground_tests() {
+    std::printf("mission clock and parked copies (handover tasks 1 and 2)\n");
+    MissionClockMsg m{};
+    m.owner_ms = 100000;
+    m.clock_ms = clock_to_wire(321.5f);
+    m.clock2_ms = clock_to_wire(321.5f);
+    uint8_t b[32];
+    MissionClockMsg r{};
+    const size_t n = encode(m, b, sizeof(b));
+    expect(n == 20 && peek_world_type(b, n) == 34 && decode(b, n, r) == Status::Ok && r.clock_ms == 321500 &&
+               clock_to_wire(-1.0f) == 0,
+           "clock: 20 bytes, ms, round trip");
+    const ClockFix late = clock_fix(300.0, m, 100.4);
+    const ClockFix close = clock_fix(321.8, m, 100.4);
+    const ClockFix stale = clock_fix(300.0, m, 103.0);
+    expect(late.set && std::fabs(late.target - 321.9) < 1e-6 && !close.set && !stale.set,
+           "clock: the owner's clock advanced by the message's age; within 0.25 s left alone; older than 2 s not used");
+    std::printf("    estimate: 20 B every 2 s from the owner to each other PC (about 25 B/s with headers)\n");
+    namespace hk = LazyWorks::SF2Patch::hooks;
+    expect(hk::copy_on_ground(0.5f, 0.8f, 3.0f) && hk::copy_on_ground(1.7f, 0.8f, 60.0f) && !hk::copy_on_ground(5.0f, 0.8f, 3.0f) &&
+               !hk::copy_on_ground(0.5f, 0.8f, 150.0f),
+           "ground: a slow copy at its gear height is on the ground; a high or fast one is airborne");
+
+    ServeRun s;
+    s.cfg.script = bot::Script::Straight;
+    s.cfg.has_start = true;
+    s.cfg.start[2] = 3000.0;
+    s.cfg.clock = true;
+    s.cfg.clock_start = 600.0;
+    if (!s.start()) return expect(false, "bot serve listening (--clock)");
+    ServeClient c;
+    expect(c.core.start("127.0.0.1", s.port, cc_hello(0), cc_client_log), "client start");
+    std::vector<MissionClockMsg> got;
+    WorldPacket wp[8];
+    serve_run_for(c, 4.5, [&] {
+        const size_t k = c.core.poll_world(wp, 8);
+        for (size_t i = 0; i < k; ++i) {
+            MissionClockMsg q{};
+            if (decode(wp[i].data, wp[i].len, q) == Status::Ok) got.push_back(q);
+        }
+        return false;
+    });
+    s.finish();
+    c.core.stop(false);
+    expect(got.size() >= 2 && got[0].clock_ms >= 600000 && got[0].clock_ms < 600100 &&
+               got[1].clock_ms - got[0].clock_ms > 1900 && got[1].clock_ms - got[0].clock_ms < 2100,
+           "loopback: --clock sends the owner's mission clock every 2 s (unreliable), running with host time");
+}
+
 int main() {
     object_type_tests();
     std::printf("protocol_selftest\n");
@@ -8983,6 +9032,7 @@ int main() {
     weapon_launch_tests();
     stores_tests();
     damage_tests();
+    clock_ground_tests();
 
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

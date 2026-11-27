@@ -87,6 +87,16 @@ inline bool block_damage(bool remote_on, uint32_t flags, uint32_t remote_mask) {
 }
 
 /// <summary>Log the 1st, 10th, 100th, ... occurrence (n counts from 1).</summary>
+/// <summary>
+/// A REMOTEOBJECT aircraft that sits on the ground (handover task 2): the game marks every remote copy airborne each
+/// frame (+0x48dd0), so a parked or taxiing copy would be handed back "in the air". height is its height above the
+/// terrain (+0x620), gear the larger of its gear height (+0x2fc) and the type's minimum (data +0x7c8), speed m/s.
+/// See lazy-sf2-recon: network-recon §12.1.3.
+/// </summary>
+inline bool copy_on_ground(float height, float gear, float speed) {
+    return height <= gear + 1.0f && speed < 90.0f;
+}
+
 inline bool log_milestone(uint64_t n) {
     if (n == 0) return false;
     while (n % 10 == 0) n /= 10;

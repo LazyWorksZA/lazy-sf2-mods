@@ -77,6 +77,10 @@ struct ServeConfig {
     bool damage = false;
     uint8_t damage_attacker_kind = 0;
     uint16_t damage_attacker_a = 0, damage_attacker_b = 0;
+    /// <summary>--clock S: the world owner's mission clock (MissionClock every 2 s), S seconds at the client's Welcome
+    /// and running with host time.</summary>
+    bool clock = false;
+    double clock_start = 0;
 };
 
 struct ServeResult {
@@ -108,6 +112,7 @@ struct ServeResult {
     uint16_t last_rx_fuel = 0;
     uint32_t damage_sent = 0, cm_sent = 0, damage_rx = 0, cm_rx = 0;
     uint8_t last_rx_level = 0;
+    uint32_t clocks_sent = 0;
 };
 
 /// <summary>

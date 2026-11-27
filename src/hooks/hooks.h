@@ -457,6 +457,16 @@ void __fastcall h_incoming_missile(void* iface, void* edx, int missile, int stag
 extern void* g_o_aircraft_kill_event;
 extern void* g_o_incoming_missile;
 /// <summary>A joined client's world is remote (the T4 block is on); the aircraft REMOTEOBJECT mask (0 before).</summary>
+/// <summary>The mission clock (handover task 1, mission_clock.cpp): the host sends it every 2 s; a client sets its own
+/// through the mission's setter when it is off. world_*: MSN +0x10/+0x14, read, and set through MSN slot 19 (checked;
+/// 0 done, 1 refused, 2 faulted).</summary>
+void mission_clock_tick();
+void mission_clock_apply(const uint8_t* data, size_t len, double host_now);
+bool world_mission_clock(float* t10, float* t14);
+int world_set_mission_clock(float t10, float t14);
+/// <summary>The ground-contact step's detour (remote_ground.cpp, handover task 2).</summary>
+void __fastcall h_ground_contact(void* obj);
+extern void* g_o_ground_contact;
 bool world_remote_on();
 uint32_t world_remote_mask();
 uint32_t world_remote_mask_ground();

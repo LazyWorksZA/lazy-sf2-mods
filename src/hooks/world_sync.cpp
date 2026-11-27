@@ -1801,6 +1801,10 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         weapons_apply_launch(data, len, host_now);
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::MissionClock)) {
+        mission_clock_apply(data, len, host_now);
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables) ||
         wt == static_cast<uint8_t>(net::WorldType::DamageState) || wt == static_cast<uint8_t>(net::WorldType::Countermeasure)) {
         uint16_t peer = 0;
@@ -2220,6 +2224,52 @@ void* checked_damage_fn(void** vt, int slot) {
 }  // namespace
 
 bool world_remote_on() { return g_remote_on.load(std::memory_order_acquire); }
+
+namespace {
+constexpr DWORD kRvaMsnSetClock = 0xa160;  // MSN slot 19: thiscall(float), writes +0x10
+constexpr size_t kMsnClock = 0x10, kMsnClock2 = 0x14, kMsnSetClockSlot = 19;
+uintptr_t sm_base_checked() {
+    static HMODULE seen = nullptr;
+    static uintptr_t base = 0;
+    HMODULE m = GetModuleHandleW(L"SingleMission.dll");
+    if (m != seen) {
+        seen = m;
+        base = m && is_expected_build(m, kSmStamp, kSmSize, "SingleMission.dll (clock)") ? reinterpret_cast<uintptr_t>(m) : 0;
+    }
+    return base;
+}
+}  // namespace
+
+bool world_mission_clock(float* t10, float* t14) {
+    const uintptr_t sm = sm_base_checked();
+    if (!sm) return false;
+    __try {
+        const BYTE* msn = reinterpret_cast<const BYTE*>(sm + kRvaMsn);
+        if (*reinterpret_cast<const uintptr_t*>(msn) != sm + kRvaMsnVtable) return false;
+        std::memcpy(t10, msn + kMsnClock, 4);
+        std::memcpy(t14, msn + kMsnClock2, 4);
+        return std::isfinite(*t10) && std::isfinite(*t14);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int world_set_mission_clock(float t10, float t14) {
+    const uintptr_t sm = sm_base_checked();
+    if (!sm || !std::isfinite(t10) || !std::isfinite(t14)) return 1;
+    __try {
+        BYTE* msn = reinterpret_cast<BYTE*>(sm + kRvaMsn);
+        void** vt = *reinterpret_cast<void***>(msn);
+        if (reinterpret_cast<uintptr_t>(vt) != sm + kRvaMsnVtable ||
+            reinterpret_cast<uintptr_t>(vt[kMsnSetClockSlot]) != sm + kRvaMsnSetClock)
+            return 1;
+        reinterpret_cast<void(__fastcall*)(void*, void*, float)>(vt[kMsnSetClockSlot])(msn, nullptr, t10);
+        std::memcpy(msn + kMsnClock2, &t14, 4);  // the second clock has no setter
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 2;
+    }
+}
 uint32_t world_remote_mask() { return g_mask_air.load(std::memory_order_relaxed); }
 uint32_t world_remote_mask_ground() { return g_mask_ground.load(std::memory_order_relaxed); }
 
@@ -2511,6 +2561,8 @@ void world_on_modules_loaded() {
          "world: aircraft kill event (remote copies on a client)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x38, 0x56, 0x8b, 0xf1}, 9},
         {0x40d40, reinterpret_cast<void*>(&h_incoming_missile), &g_o_incoming_missile,
          "world: incoming-missile notice (avatars' auto-dispense)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x14, 0x56, 0x57, 0x8b}, 9},
+        {0x48dd0, reinterpret_cast<void*>(&h_ground_contact), &g_o_ground_contact,
+         "world: ground contact (remote copies on the ground)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x20, 0x56, 0x8b, 0xf1}, 9},
     };
     static const HookDef kGo[] = {
         LZ_DMG(3, 5, 0x18e60, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x8b, 0x45, 0x08),
@@ -2534,7 +2586,7 @@ void world_on_modules_loaded() {
          "world: ship kill event (remote copies on a client)", {0x55, 0x8b, 0xec, 0x83, 0xec, 0x38, 0x56, 0x8b, 0xf1}, 9},
     };
 #undef LZ_DMG
-    hook_image(L"AircraftObject.dll", "AircraftObject.dll", kAoStamp, kAoSize, kAo, 5, g_ao, g_ao_bad);
+    hook_image(L"AircraftObject.dll", "AircraftObject.dll", kAoStamp, kAoSize, kAo, 6, g_ao, g_ao_bad);
     hook_image(L"GroundObject.dll", "GroundObject.dll", kGoStamp, kGoSize, kGo, 4, g_go, g_go_bad);
     hook_image(L"GroundMobileObject.dll", "GroundMobileObject.dll", kGmStamp, kGmSize, kGm, 4, g_gm, g_gm_bad);
     hook_image(L"NavalObject.dll", "NavalObject.dll", kNvStamp, kNvSize, kNv, 4, g_nv, g_nv_bad);
