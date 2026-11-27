@@ -8,6 +8,7 @@
 
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
+#include "hooks/lobby_splice.h"
 #include "log.h"
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -34,6 +35,52 @@ void __fastcall h_event(void* self, void* edx, const int* ev) {
     o_event(self, edx, ev);
 }
 
+// MenuSystem's screen open (MNU +0xd9e0, thiscall (name, remember)): every way to another screen ends here. See
+// lazy-sf2-recon: recon-notes §28.1.
+constexpr DWORD kMnuStamp = 0x51d21fc1, kMnuSize = 0x41000;
+constexpr DWORD kMnuOpenRva = 0xd9e0;
+constexpr DWORD kMnuCurrentName = 0x430;  // the open screen's name (wide, MAX_PATH)
+constexpr BYTE kOpenPrologue[] = {0x55, 0x8b, 0xec, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x6a, 0xff, 0x68};
+using Open_t = int(__fastcall*)(void* mnu, void* edx, const wchar_t* name, int remember);
+Open_t o_open = nullptr;
+
+bool current_is_debrief(const void* mnu) {
+    __try {
+        const wchar_t* cur = reinterpret_cast<const wchar_t*>(static_cast<const BYTE*>(mnu) + kMnuCurrentName);
+        return _wcsnicmp(cur, L"DebriefScreen", 14) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The session Debrief's Accept: its screen code sends it to the screen the flight came from (Single Mission) or the
+// main menu, never through a command we see; the open itself is turned to the lobby screen.
+int __fastcall h_open(void* mnu, void* edx, const wchar_t* name, int remember) {
+    if (name && lobby_debrief_return_item(nullptr) > 0 && current_is_debrief(mnu) &&
+        (_wcsicmp(name, L"SingleMissionScreen") == 0 || _wcsicmp(name, L"MainScreen") == 0)) {
+        const wchar_t* lobby = net_session_role() == NetRole::Host ? kLobbyHostScreen : kLobbyJoinScreen;
+        LOG("lobby: Debrief Accept: %ls opens instead of %ls", lobby, name);
+        lobby_debrief_closed();
+        return o_open(mnu, edx, lobby, remember);
+    }
+    return o_open(mnu, edx, name, remember);
+}
+
+void hook_screen_open() {
+    static bool done = false;
+    HMODULE m = GetModuleHandleW(L"MenuSystem.dll");
+    if (done || !m) return;
+    done = true;  // MenuSystem.dll stays loaded: hooked once
+    const auto* target = static_cast<const BYTE*>(at_rva(m, kMnuOpenRva));
+    if (!is_expected_build(m, kMnuStamp, kMnuSize, "MenuSystem.dll") ||
+        std::memcmp(target, kOpenPrologue, sizeof(kOpenPrologue)) != 0) {
+        LOG("lobby: MenuSystem screen open not hooked (build or prologue); the debrief's Accept stays stock");
+        return;
+    }
+    create_and_enable(at_rva(m, kMnuOpenRva), reinterpret_cast<void*>(&h_open), reinterpret_cast<void**>(&o_open),
+                      "MenuSystem screen open");
+}
+
 bool still_hangar(HMODULE base) {
     HMODULE h = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -51,6 +98,7 @@ bool still_hangar(HMODULE base) {
 }  // namespace
 
 void lobby_flow_on_modules_loaded() {
+    if (!lobby_menu_code_path().empty()) hook_screen_open();  // only where the lobby can exist at all
     HMODULE m = GetModuleHandleW(L"HangarScreen.dll");
     if (!m) return;
     auto* target = static_cast<const BYTE*>(at_rva(m, kHangarEventRva));

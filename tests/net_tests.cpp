@@ -10347,10 +10347,24 @@ void lobby_launch_tests() {
     const int hs = core.lobby_host_seat_for(2);                              // slot 32
     int seat = -2;
     HostEvent ev[16];
+    uint8_t hello_slot = 0xff;
+    uint32_t hello_gen = 0;
     for (size_t n = core.poll(ev, 16); n; n = core.poll(ev, 16))
         for (size_t i = 0; i < n; ++i)
-            if (ev[i].kind == HostEvent::Message && ev[i].len > 3 && ev[i].data[3] == static_cast<uint8_t>(MsgType::Hello))
+            if (ev[i].kind == HostEvent::Message && ev[i].len > 3 && ev[i].data[3] == static_cast<uint8_t>(MsgType::Hello)) {
                 seat = core.seat_for(0x55u);
+                hello_slot = ev[i].slot;
+                hello_gen = ev[i].gen;
+            }
+    // The game thread welcomes it now; its last packet (the Hello) is 9.5 s old.
+    core.set_welcomed(hello_slot, hello_gen, true);
+    bool cut = false;
+    for (int k = 0; k < 60; ++k) {
+        fl.idle(10);
+        for (size_t n = core.poll(ev, 16); n; n = core.poll(ev, 16))
+            for (size_t i = 0; i < n; ++i) cut = cut || (ev[i].kind == HostEvent::Disconnect && ev[i].slot == hello_slot);
+    }
+    expect(!cut && !fl.disconnected, "the quiet timer starts again at the Welcome (not from a Hello seconds old)");
     std::printf("    host seat %d, pilot seat at its Hello %d\n", hs, seat);
     expect(!fl.disconnected, "a flight connection waiting for its Welcome is not cut while the host loads (9.5 s)");
     expect(hs == 0 && seat == 1, "after the host's load the pilot's Hello with the lobby tag gets its lobby seat (#2)");
@@ -10393,13 +10407,21 @@ void bot_lobby_loop_test() {
                 HelloMsg h;
                 if (decode(ev[i].data, ev[i].len, h) == Status::Ok) {
                     seat = core.seat_for(h.world_tag);
+                    core.set_welcomed(ev[i].slot, ev[i].gen, true);  // as the game thread does, after its load
                     char row[120];
                     core.lobby_describe(h.world_tag, row, sizeof(row));
                     std::printf("    Hello tag 0x%08x -> seat %d (%s)\n", h.world_tag, seat, row);
                 }
             }
     expect(seat == 1, "the real bot's flight Hello gets its lobby seat");
-    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    bool cut = false;
+    for (int k = 0; k < 150; ++k) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        for (size_t n = core.poll(ev, 16); n; n = core.poll(ev, 16))
+            for (size_t i = 0; i < n; ++i) cut = cut || (ev[i].kind == HostEvent::Disconnect && ev[i].reason == 1);
+    }
+    expect(!cut, "welcomed after the host's load: not cut by the 5 s quiet timer");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     core.stop(false);
 }
 

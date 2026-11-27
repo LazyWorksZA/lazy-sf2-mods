@@ -383,6 +383,7 @@ void HostCore::run() {
     uint64_t auth_deadline[kMaxClients] = {};
     uint64_t refused_at[kMaxClients] = {};  // a refused connection is cut after a short grace for its Bye
     uint64_t challenged_at[kMaxClients] = {};
+    bool welcomed_seen[kMaxClients] = {};  // the game thread's Welcome was noticed here (the quiet timer restarted)
     struct Evictor {
         uint32_t ip = 0;
         uint64_t at = 0;
@@ -409,6 +410,7 @@ void HostCore::run() {
         auth_deadline[slot] = 0;
         refused_at[slot] = 0;
         challenged_at[slot] = 0;
+        welcomed_seen[slot] = false;
         mission_ask_ms[slot] = 0;
         // The connection's seat is released when no other open connection carries the same tag.
         if (const uint32_t tag = slot_tag[slot]) {
@@ -937,7 +939,14 @@ void HostCore::run() {
                 free_slot(i);
                 continue;
             }
-            const bool awaiting = hello_seen[i] && !(slot_state_[i].load(std::memory_order_acquire) & 1);
+            const bool welcomed = (slot_state_[i].load(std::memory_order_acquire) & 1) != 0;
+            if (welcomed && !welcomed_seen[i]) {
+                // The client was quiet while it waited (its last packet is its Hello, perhaps a minute old): the 5 s
+                // quiet timer starts again from its Welcome.
+                welcomed_seen[i] = true;
+                last_rx[i] = now;
+            }
+            const bool awaiting = hello_seen[i] && !welcomed;
             if (now - last_rx[i] >= (awaiting ? kAwaitWelcomeMs : kTimeoutMs)) {
                 enet_peer_disconnect_now(peers[i], 0);
                 HostEvent e;

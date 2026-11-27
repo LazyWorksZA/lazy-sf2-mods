@@ -788,25 +788,11 @@ bool hangar_back(void* mnu, const char* how) {
     return true;
 }
 
-// The menu system's command. While the Hangar's handler runs, its fly command goes back to the lobby; on the
-// session Debrief, going to Exit's (Accept's) destination goes to the lobby instead (the Debrief's code points Exit at
-// the Single Mission screen itself).
+// The menu system's command, while the Hangar's handler runs: its fly command goes back to the lobby. (The Debrief's
+// Accept posts nothing here: lobby_flow.cpp turns the screen it opens instead.)
 void __fastcall guarded_post(void* mnu, void* edx, int cmd, int a, int b) {
     if (g_in_hangar > 0 && cmd == kCmdLeave && a == 1 && lobby_hangar_return_item() > 0 && hangar_back(mnu, "fly command"))
         return;
-    int exit_item = 0;
-    if (const int back = lobby_debrief_return_item(&exit_item)) {
-        static int seen_cmd = -1, seen_a = -1;  // what the Debrief posts, once each (to check its Accept live)
-        if (cmd != seen_cmd || a != seen_a) LOG("lobby: debrief command (%d, %d)", cmd, a);
-        seen_cmd = cmd;
-        seen_a = a;
-        if ((cmd == kCmdGoTo && a == exit_item) || (cmd == kCmdLeave && a == 1)) {
-            LOG("lobby: Debrief %s: back to the lobby", cmd == kCmdLeave ? "fly" : "Accept");
-            lobby_debrief_closed();
-            g_post(mnu, edx, kCmdGoTo, back, kCmdArg);
-            return;
-        }
-    }
     g_post(mnu, edx, cmd, a, b);
 }
 
@@ -827,7 +813,7 @@ void guard_fly(void* mnu) {
     g_post = reinterpret_cast<PostCommand_t>(*slot);
     *slot = reinterpret_cast<void*>(&guarded_post);
     VirtualProtect(slot, sizeof(void*), old, &old);
-    LOG("lobby: the Hangar's fly command and the Debrief's Accept are guarded (MenuSystem PostCommand slot)");
+    LOG("lobby: the Hangar's fly command is guarded (MenuSystem PostCommand slot)");
 }
 
 }  // namespace
@@ -907,7 +893,7 @@ extern "C" __declspec(dllexport) void __cdecl InitMenuCode(void* sys, void** han
         return;
     }
     pin_this_module();
-    guard_fly(g_mnu);  // before any session: the Hangar's and the Debrief's ways back go through it
+    guard_fly(g_mnu);  // before any session
     lobby_debrief_closed();
     g_screen = identify_screen();
     if (g_screen == Screen::Connect) {
