@@ -135,12 +135,10 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     std::vector<std::wstring> names = {n(L"LeaveButton"), n(L"ActionButton"), n(L"MissionButton"), n(L"Title"),
                                        n(L"Header"),      n(L"MissionLabel"), n(L"Summary1"),      n(L"Summary2"),
                                        n(L"Summary3"),    n(L"PilotsLabel"),  n(L"SeatHead"),      n(L"CallsignHead"),
-                                       n(L"StatusHead"),  n(L"SeatPrev"),     n(L"SeatNext"),      n(L"Status"),
-                                       n(L"YouFly")};
+                                       n(L"StatusHead"),  n(L"Status"),       n(L"YouFly")};
     for (int r = 0; r < net::kLobbyRows; ++r) {
         const std::wstring k = std::to_wstring(r + 1);
-        names.push_back(n(L"RowSeat" + k));
-        names.push_back(n(L"RowCallsign" + k));
+        names.push_back(n(L"RowButton" + k));
         names.push_back(n(L"RowStatus" + k));
     }
     ini.screen(host ? kLobbyHostScreen : kLobbyJoinScreen, L"RosterScreen.JPG", names, dll);
@@ -160,19 +158,16 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     ini.text(at(6), L"LargerTextLeft", host ? L"TXT_LAZY_LOBBY_MISSION" : L"TXT_LAZY_LOBBY_HOST_MISSION", 108, 172);
     for (int i = 0; i < 3; ++i) ini.text(at(session_item::kSummary + i), L"MediumTextLeft", kLobbyBlankKey, 108, 200 + 22 * i);
     ini.text(at(10), L"LargerTextLeft", L"TXT_LAZY_LOBBY_PILOTS", 528, 172);
-    ini.text(at(11), L"MediumTextLeft", L"TXT_LAZY_LOBBY_SEAT", 528, 192);
-    ini.text(at(12), L"MediumTextLeft", L"TXT_MENU_CALLSIGNTEXT", 600, 192);
+    ini.text(at(11), L"MediumTextLeft", L"TXT_LAZY_LOBBY_SEAT_CALLSIGN", 528, 192);
+    ini.text(at(12), L"MediumTextLeft", kLobbyBlankKey, 600, 192);
     ini.text(at(13), L"MediumTextLeft", L"TXT_LAZY_LOBBY_COL_STATUS", 800, 192);
-    ini.button(at(session_item::kSeatPrev), L"", L"LargerTextLeft", L"TXT_LAZY_LOBBY_SEAT_PREV", 528, 410,
-               L"TXT_LAZY_LOBBY_SEAT_INFO");
-    ini.button(at(session_item::kSeatNext), L"", L"LargerTextRight", L"TXT_LAZY_LOBBY_SEAT_NEXT", 915, 410,
-               L"TXT_LAZY_LOBBY_SEAT_INFO");
     ini.text(at(session_item::kStatus), L"MediumTextLeft", kLobbyBlankKey, 108, 612);
     ini.text(at(session_item::kYouFly), L"MediumTextLeft", kLobbyBlankKey, 108, 532);
+    // Each row's seat and callsign is a button in the rows' own text style (it lights up under the pointer, as the
+    // stock buttons do); its text is set at run time (lobby_screen.cpp, through the button's text object).
     for (int r = 0; r < net::kLobbyRows; ++r) {
         const int y = 214 + 22 * r;
-        ini.text(at(session_item::row_seat(r)), L"MediumTextLeft", kLobbyBlankKey, 528, y);
-        ini.text(at(session_item::row_callsign(r)), L"MediumTextLeft", kLobbyBlankKey, 600, y);
+        ini.button(at(session_item::row_button(r)), L"", L"MediumTextLeft", kLobbyBlankKey, 528, y, L"TXT_LAZY_LOBBY_ROW_INFO");
         ini.text(at(session_item::row_status(r)), L"MediumTextLeft", kLobbyBlankKey, 800, y);
     }
 }

@@ -35,7 +35,9 @@ constexpr int kSysReleaseService = 0x0c / 4;  // ReleaseService(tag, void** p)
 constexpr int kMnuItemUnderPointer = 0x10 / 4;
 constexpr int kMnuPostCommand = 0x24 / 4;  // PostCommand(cmd, a, b)
 constexpr int kMnuGetItem = 0x50 / 4;      // int GetItem(item, type, void** iface)
-constexpr int kIfaceSelection = 2, kIfaceText = 4, kIfaceEdit = 7;
+constexpr int kIfaceSelection = 2, kIfaceText = 4, kIfaceEdit = 7, kIfaceTextButton = 9;
+constexpr DWORD kStaticTextVtableRva = 0x305ac;  // mnuStaticTextClass's own vtable (a TEXTBUTTON's text object)
+constexpr int kStaticTextSetText = 0x34 / 4;      // +0x11b00, as the TEXT interface's SetText calls it
 constexpr int kTextSet = 0x0c / 4;  // TEXT SetText(text)
 constexpr int kEditSet = 0x18 / 4;  // EDIT SetText(text)
 constexpr int kEditGet = 0x1c / 4;  // EDIT GetText(buf, n)
@@ -137,6 +139,31 @@ void* item_iface(int item, int type) {
 void set_text(int item, const wchar_t* text) {
     if (!text || !*text) text = L" ";
     if (void* t = item_iface(item, kIfaceText)) reinterpret_cast<SetText_t>(vtable_slot(t, kTextSet))(t, nullptr, text);
+}
+
+/// <summary>Sets a TEXTBUTTON's text at run time, through the text object the button draws (MenuSystem: the button's
+/// interface 9 at +0x4f4 holds it at -0xc, a static text whose slot 13 is SetText; see lazy-sf2-recon: recon-notes
+/// §28.4). Checked against the static text's vtable; logs once and does nothing if not as expected.</summary>
+void set_button_text(int item, const wchar_t* text) {
+    if (!text || !*text) text = L" ";
+    void* iface = item_iface(item, kIfaceTextButton);
+    HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
+    void* inner = nullptr;
+    if (iface && mnu_dll) {
+        __try {
+            inner = *reinterpret_cast<void**>(static_cast<BYTE*>(iface) - 0xc);
+            if (inner && *static_cast<void**>(inner) != at_rva(mnu_dll, kStaticTextVtableRva)) inner = nullptr;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            inner = nullptr;
+        }
+    }
+    if (!inner) {
+        static bool logged = false;
+        if (!logged) LOG("lobby: a seat row's button text object is not as expected; the rows stay blank");
+        logged = true;
+        return;
+    }
+    reinterpret_cast<SetText_t>(vtable_slot(inner, kStaticTextSetText))(inner, nullptr, text);
 }
 
 void set_status(const wchar_t* text) {
@@ -503,24 +530,27 @@ Roster read_roster(bool host) {
 
 bool g_refusal_shown = false;
 ULONGLONG g_next_roster = 0;  // the roster is redrawn twice a second
+size_t g_rows_shown = 0;        // the rows as last drawn: a click on row n means the seat shown there
+net::LobbyRow g_rows[net::kLobbyRows] = {};
 
 void show_roster(const Roster& r) {
     const bool host = g_screen == Screen::Host;
+    g_rows_shown = r.count;
+    std::memcpy(g_rows, r.rows, sizeof(g_rows));
     for (int i = 0; i < net::kLobbyRows; ++i) {
-        std::wstring seat, cs, st;
+        std::wstring label, st;
         if (static_cast<size_t>(i) < r.count) {
             const net::LobbyRow& row = r.rows[i];
-            seat = seat_text(row.seat);
+            label = seat_text(row.seat) + L"   ";
             if (row.callsign[0]) {
-                cs = widen(row.callsign);
-                if (row.flags & net::kLobbyRowYou) cs += L" (you)";
+                label += widen(row.callsign);
+                if (row.flags & net::kLobbyRowYou) label += L" (you)";
                 st = (row.flags & net::kLobbyRowHost) ? L"Host" : (row.flags & net::kLobbyRowReady) ? L"Ready" : L"Not ready";
             } else {
-                cs = L"AI";
+                label += L"free (AI)";
             }
         }
-        set_text(session_item::row_seat(i), seat.c_str());
-        set_text(session_item::row_callsign(i), cs.c_str());
+        set_button_text(session_item::row_button(i), label.c_str());
         set_text(session_item::row_status(i), st.c_str());
     }
     const std::wstring players = std::to_wstring(r.clients) + (r.clients == 1 ? L" player joined" : L" players joined");
@@ -541,7 +571,7 @@ void show_roster(const Roster& r) {
     if (r.members == 0) {
         set_text(session_item::kYouFly, L"Seats appear once the host has set up the mission.");
     } else if (r.you < 0) {
-        set_text(session_item::kYouFly, L"No seat yet: pick a free one with < Seat or Seat >.");
+        set_text(session_item::kYouFly, L"No seat yet: click a free seat in the list.");
     } else {
         std::wstring y = L"You fly seat " + seat_text(r.you) + L" of the player flight";
         if (!host) y += L" with the host's loadout";
@@ -714,19 +744,17 @@ const wchar_t* try_ready() {
     return nullptr;
 }
 
-/// <summary>The next free seat after (dir 1) or before (dir -1) this pilot's, from the roster's free rows; -1 if none.</summary>
-int next_free_seat(const Roster& r, int dir) {
-    if (r.members <= 0) return -1;
-    const int from = r.you < 0 ? (dir > 0 ? -1 : r.members) : r.you;
-    for (int step = 1; step <= r.members; ++step) {
-        const int s = ((from + dir * step) % r.members + r.members) % r.members;
-        for (size_t i = 0; i < r.count; ++i)
-            if (!r.rows[i].callsign[0] && r.rows[i].seat == s) return s;
+/// <summary>A click on seat row `row`: a free seat is asked for (the host decides); this pilot's own row and other
+/// pilots' rows only say so; an unused row does nothing.</summary>
+void take_seat_row(int row) {
+    if (row < 0 || static_cast<size_t>(row) >= g_rows_shown) return;
+    const net::LobbyRow pick = g_rows[row];
+    if (pick.seat == net::kNoSeat) return;
+    if (pick.flags & net::kLobbyRowYou) return;
+    if (pick.callsign[0]) {
+        set_status((L"Seat " + seat_text(pick.seat) + L" is " + widen(pick.callsign) + L"'s.").c_str());
+        return;
     }
-    return -1;
-}
-
-void change_seat(int dir) {
     const Roster r = read_roster(g_screen == Screen::Host);
     if (g_screen == Screen::Join && r.result == net::kLobbyContent) {
         set_status(content_refusal_text(r).c_str());
@@ -738,11 +766,7 @@ void change_seat(int dir) {
             return;
         }
     }
-    const int seat = next_free_seat(r, dir);
-    if (seat < 0) {
-        set_status(r.members == 0 ? L"No seats yet: the host has not set up the mission." : L"No other seat is free.");
-        return;
-    }
+    const int seat = pick.seat;
     LOG("lobby: seat %d asked for", seat);
     if (g_screen == Screen::Host) {
         const uint8_t res = host_lobby_seat(seat);
@@ -806,11 +830,8 @@ void session_click(int item) {
                 post(kCmdGoTo, item);  // its DestinationMenu: HangarScreen
             }
             break;
-        case session_item::kSeatPrev:
-        case session_item::kSeatNext:
-            change_seat(item == session_item::kSeatNext ? 1 : -1);
-            break;
         default:
+            take_seat_row(session_item::row_of_button(item));
             break;
     }
 }

@@ -50,9 +50,8 @@ inline constexpr LobbyText kLobbyTexts[] = {
     {L"TXT_LAZY_LOBBY_DONE", L"Done"},
     {L"TXT_LAZY_LOBBY_DONE_INFO", L"Back to the lobby: the players get this mission."},
     {L"TXT_LAZY_LOBBY_HANGAR_READY", L"Ready: back to the lobby."},
-    {L"TXT_LAZY_LOBBY_SEAT_PREV", L"< Seat"},
-    {L"TXT_LAZY_LOBBY_SEAT_NEXT", L"Seat >"},
-    {L"TXT_LAZY_LOBBY_SEAT_INFO", L"Take the previous or next free seat in your flight."},
+    {L"TXT_LAZY_LOBBY_ROW_INFO", L"Click a free seat to take it."},
+    {L"TXT_LAZY_LOBBY_SEAT_CALLSIGN", L"Seat and callsign"},
 };
 
 /// <summary>MenuItemNNN numbers of the connect screen's items (the menu code addresses them by number).</summary>
@@ -74,15 +73,16 @@ inline constexpr int kAction = 2;         // Launch / Ready
 inline constexpr int kMissionButton = 3;  // Set up mission... / Briefing...
 inline constexpr int kHeader = 5;
 inline constexpr int kSummary = 7;        // three lines: 7, 8, 9
-inline constexpr int kSeatPrev = 14;      // < Seat
-inline constexpr int kSeatNext = 15;      // Seat >
-inline constexpr int kStatus = 16;
-inline constexpr int kYouFly = 17;
-inline constexpr int kRowFirst = 18;      // kLobbyRows rows of three TEXT items: seat, callsign, status
-inline constexpr int row_seat(int r) { return kRowFirst + 3 * r; }
-inline constexpr int row_callsign(int r) { return kRowFirst + 3 * r + 1; }
-inline constexpr int row_status(int r) { return kRowFirst + 3 * r + 2; }
-inline constexpr int kCount = kRowFirst + 3 * net::kLobbyRows - 1;
+inline constexpr int kStatus = 14;
+inline constexpr int kYouFly = 15;
+inline constexpr int kRowFirst = 16;      // kLobbyRows rows: a TEXTBUTTON ("#n  Callsign"; a click takes a free seat), a TEXT
+inline constexpr int row_button(int r) { return kRowFirst + 2 * r; }
+inline constexpr int row_status(int r) { return kRowFirst + 2 * r + 1; }
+/// <summary>The row whose button is item, or -1.</summary>
+inline constexpr int row_of_button(int item) {
+    return item >= kRowFirst && item < kRowFirst + 2 * net::kLobbyRows && (item - kRowFirst) % 2 == 0 ? (item - kRowFirst) / 2 : -1;
+}
+inline constexpr int kCount = kRowFirst + 2 * net::kLobbyRows - 1;
 }  // namespace session_item
 
 /// <summary>Characters the Address and Session password fields hold (TextBufferSize minus the terminator).</summary>

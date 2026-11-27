@@ -3205,7 +3205,7 @@ void lobby_splice_tests() {
                section(j).find(L"MenuCodeDLL=" + dll + L"\r\n") != std::wstring::npos,
            "three screens, each with this DLL as menu code");
     expect(items(c) == lobby_item::kCount && items(h) == session_item::kCount && items(j) == session_item::kCount,
-           "contiguous item counts: connect 16, host and join 41");
+           "contiguous item counts: connect 16, host and join 31");
     expect(has(c, lobby_item::kBack, L"DestinationMenu=MainScreen") &&
                has(c, lobby_item::kHost, L"DestinationMenu=" + h) && has(c, lobby_item::kJoin, L"DestinationMenu=" + j),
            "connect: Back to the main menu, Host and Join to their screens");
@@ -3224,17 +3224,18 @@ void lobby_splice_tests() {
                    has(screen, session_item::kMissionButton, L"MenuItemType=TEXTBUTTON") &&
                    has(screen, session_item::kHeader, L"MenuItemType=TEXT") &&
                    has(screen, session_item::kSummary + 2, L"MenuItemType=TEXT") &&
-                   has(screen, session_item::kSeatPrev, L"MenuItemType=TEXTBUTTON") &&
-                   has(screen, session_item::kSeatNext, L"MenuItemType=TEXTBUTTON") &&
                    has(screen, session_item::kStatus, L"MenuItemType=TEXT") &&
                    has(screen, session_item::kYouFly, L"MenuItemType=TEXT");
         for (int r = 0; r < kLobbyRows; ++r)
-            session &= has(screen, session_item::row_seat(r), L"MenuItemType=TEXT") &&
-                       has(screen, session_item::row_callsign(r), L"MenuItemType=TEXT") &&
+            session &= has(screen, session_item::row_button(r), L"MenuItemType=TEXTBUTTON") &&
+                       has(screen, session_item::row_button(r), L"DestinationMenu=") &&
+                       has(screen, session_item::row_button(r), L"TextStringID=" + std::wstring(kLobbyBlankKey)) &&
+                       session_item::row_of_button(session_item::row_button(r)) == r &&
+                       session_item::row_of_button(session_item::row_status(r)) == -1 &&
                        has(screen, session_item::row_status(r), L"MenuItemType=TEXT") &&
                        has(screen, session_item::row_status(r), L"TextStringID=" + std::wstring(kLobbyBlankKey));
     }
-    expect(session, "host and join: Leave, buttons, header, summary lines, seat buttons, status, 8 pilot rows of TEXT");
+    expect(session, "host and join: Leave, buttons, header, summary lines, status, 8 seat rows (a button and a status)");
     expect(has(c, lobby_item::kPassword, L"MenuItemType=EDIT") && has(c, lobby_item::kPassword, L"TextBufferSize=32") &&
                has(c, lobby_item::kPassword, L"EditFieldSetting=EditFieldSetting"),
            "connect: the Session password field (31 characters) at the menu code's number");
