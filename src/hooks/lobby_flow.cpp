@@ -39,33 +39,20 @@ void __fastcall h_event(void* self, void* edx, const int* ev) {
 // lazy-sf2-recon: recon-notes §28.1.
 constexpr DWORD kMnuStamp = 0x51d21fc1, kMnuSize = 0x41000;
 constexpr DWORD kMnuOpenRva = 0xd9e0;
-constexpr DWORD kMnuCurrentName = 0x430;  // the open screen's name (wide, MAX_PATH)
 constexpr BYTE kOpenPrologue[] = {0x55, 0x8b, 0xec, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x6a, 0xff, 0x68};
 using Open_t = int(__fastcall*)(void* mnu, void* edx, const wchar_t* name, int remember);
 Open_t o_open = nullptr;
 
-// The open screen's name as MNU holds it (for the log only: after a flight the exe opens the Debrief another way, so
-// this may still name the screen before the flight). SEH only.
-void current_name(const void* mnu, wchar_t* out, size_t n) {
-    out[0] = L'\0';
-    __try {
-        wcsncpy_s(out, n, reinterpret_cast<const wchar_t*>(static_cast<const BYTE*>(mnu) + kMnuCurrentName), _TRUNCATE);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        out[0] = L'\0';
-    }
-}
-
 // The session Debrief's Accept: its screen code sends it to the screen the flight came from (Single Mission) or the
-// main menu, never through a command we see; the open itself is turned to the lobby screen. Whether the Debrief is
-// the open screen is our own record (its ini was read, no other screen's since).
+// main menu, never through a command we see; the open itself is turned to the host's or the pilot's lobby screen.
+// Whether the Debrief is the open screen is our own record (its ini was read, no other screen's since): MNU's own
+// current name still holds the screen before the flight then.
 int __fastcall h_open(void* mnu, void* edx, const wchar_t* name, int remember) {
-    const bool debrief = lobby_debrief_return_item(nullptr) > 0;
-    if (name && (debrief || net_session_role() != NetRole::None)) {
-        wchar_t cur[64];
-        current_name(mnu, cur, _countof(cur));
-        LOG("lobby: screen open %ls (MNU's current %ls%s)", name, cur, debrief ? "; the session Debrief is open" : "");
-    }
-    if (name && debrief && (_wcsicmp(name, L"SingleMissionScreen") == 0 || _wcsicmp(name, L"MainScreen") == 0)) {
+    // The host's flight came from Single Mission; a pilot's from its join screen (perhaps by the Hangar): any stock
+    // screen the Debrief returns to becomes the lobby.
+    if (name && lobby_debrief_return_item(nullptr) > 0 &&
+        (_wcsicmp(name, L"SingleMissionScreen") == 0 || _wcsicmp(name, L"MainScreen") == 0 ||
+         _wcsicmp(name, L"HangarScreen") == 0)) {
         const wchar_t* lobby = net_session_role() == NetRole::Host ? kLobbyHostScreen : kLobbyJoinScreen;
         LOG("lobby: Debrief Accept: %ls opens instead of %ls", lobby, name);
         lobby_debrief_closed();
