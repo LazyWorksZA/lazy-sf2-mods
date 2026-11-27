@@ -56,8 +56,9 @@ public:
     void want_seat(int seat);
     /// <summary>Any thread, once per answer: the seat last wished for and the host's kLobby* answer to it.</summary>
     bool wish_answer(int* seat, uint8_t* result);
-    /// <summary>Any thread: the latest roster and the connection's round trip (ms). False before the first.</summary>
-    bool roster(LobbyRosterMsg* out, uint32_t* rtt_ms) const;
+    /// <summary>Any thread: the latest roster, the time from this round's status to its roster (ms, a round trip
+    /// including the host's answer), and optionally how long ago it came (ms). False before the first.</summary>
+    bool roster(LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms = nullptr) const;
     /// <summary>Tells the host this pilot leaves (one more round), waiting at most wait_ms; the fetch then stops.</summary>
     void leave(int wait_ms);
     /// <summary>The host's name did not resolve (or not in time): the fetch has stopped. Any thread.</summary>
@@ -89,6 +90,7 @@ private:
     mutable std::mutex roster_mx_;
     LobbyRosterMsg roster_{};  // under roster_mx_
     bool have_roster_ = false;  // under roster_mx_
+    uint64_t roster_ms_ = 0;    // under roster_mx_: when it came
     static constexpr int kLookupMs = 10000;
     AuthClient auth_;
     std::mutex mx_;

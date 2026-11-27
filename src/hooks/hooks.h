@@ -121,9 +121,9 @@ void lobby_hangar_enter(void* self);
 void lobby_hangar_leave();
 /// <summary>Menu thread: the menus start again (MenuSystem.ini read), as after a flight.</summary>
 void lobby_menus_entered();
-/// <summary>Menu thread: the session Debrief's hidden way back to the lobby while it is the open screen, and its Exit
-/// (Accept) item; 0 when none.</summary>
-int lobby_debrief_return_item(int* exit_item);
+/// <summary>Menu thread: the session Debrief's hidden way back to the lobby while it is the open screen (0: none). The
+/// screen open (lobby_flow.cpp) uses it as the record that the session Debrief is open.</summary>
+int lobby_debrief_return_item();
 /// <summary>Menu thread: one of our screens opened (the Debrief is closed).</summary>
 void lobby_debrief_closed();
 /// <summary>Join: the id of the host's mission the next load flies (0: none).</summary>
@@ -417,13 +417,13 @@ void host_lobby_launch(uint32_t launch_seq);
 int host_lobby_seat_for(int members);
 /// <summary>world_sync.cpp: a host session's mission is armed for the next flight (Set up mission was Accepted).</summary>
 bool world_host_armed();
-/// <summary>content_hash.cpp: this install's content (game cats, the player's aircraft, weapons, ground objects and
-/// terrains folders), cached. Menu thread.</summary>
+/// <summary>content_hash.cpp: this install's content (game cats; the player's aircraft, weapons, ground objects and
+/// terrains folders with the names and sizes of their .ini files), computed for each session. Menu thread.</summary>
 uint32_t content_hash();
 /// <summary>world_sync.cpp: the member of the player flight this PC's player flies (the host's lobby seat; -1: stock).</summary>
 void world_set_own_seat(int member);
 /// <summary>world_sync.cpp, a joined lobby session: the latest roster (and round trip), Ready, a seat wish.</summary>
-bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms);
+bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms = nullptr);
 void world_lobby_ready(bool ready, uint32_t mission_id);
 void world_lobby_want_seat(int seat);
 bool world_lobby_wish_answer(int* seat, uint8_t* result);

@@ -3,6 +3,7 @@
 #include "net/world_proto.h"
 #include "net/handover_format.h"
 
+#include <random>
 #include <enet/enet.h>
 
 #include <chrono>
@@ -212,9 +213,12 @@ void HostCore::release_seat(uint32_t tag) {
 }
 
 void HostCore::enable_lobby(uint32_t content_hash) {
+    std::random_device rd;
+    const uint32_t id = rd() | 1u;  // never 0
     std::lock_guard<std::mutex> lock(mission_mx_);
     lobby_ = true;
     content_hash_ = content_hash;
+    session_id_ = id;
 }
 
 uint8_t HostCore::lobby_host(const char* callsign, int want_seat) {
@@ -245,11 +249,6 @@ HostCore::LobbyView HostCore::lobby_view() const {
     return v;
 }
 
-bool HostCore::lobby_ready(uint32_t tag) const {
-    std::lock_guard<std::mutex> lock(mission_mx_);
-    return book_.ready(tag);
-}
-
 size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap) {
     std::lock_guard<std::mutex> lock(mission_mx_);
     LobbyRosterMsg r{};
@@ -268,6 +267,7 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
     }
     r.mission_id = mission_ ? mission_->id : 0;
     r.launch_seq = launch_seq_;
+    r.session = session_id_;
     r.members = static_cast<uint8_t>(book_.members());
     const int seat = book_.seat_of(s.tag);
     r.your_seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;

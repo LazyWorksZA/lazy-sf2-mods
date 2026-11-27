@@ -50,7 +50,7 @@ Open_t o_open = nullptr;
 int __fastcall h_open(void* mnu, void* edx, const wchar_t* name, int remember) {
     // The host's flight came from Single Mission; a pilot's from its join screen (perhaps by the Hangar): any stock
     // screen the Debrief returns to becomes the lobby.
-    if (name && lobby_debrief_return_item(nullptr) > 0 &&
+    if (name && lobby_debrief_return_item() > 0 &&
         (_wcsicmp(name, L"SingleMissionScreen") == 0 || _wcsicmp(name, L"MainScreen") == 0 ||
          _wcsicmp(name, L"HangarScreen") == 0)) {
         const wchar_t* lobby = net_session_role() == NetRole::Host ? kLobbyHostScreen : kLobbyJoinScreen;

@@ -80,6 +80,8 @@ uint32_t g_flown = 0;          // client: the Launch it flew (or was told about)
 uint32_t g_told = 0;           // client: the Launch it said "not ready" about
 uint32_t g_trying = 0;         // client: the Launch it is loading the mission for (logged once)
 uint32_t g_closed = 0;         // host: the Launch whose late joins were closed on the return to the menus
+uint32_t g_session = 0;        // client: the host session the roster comes from (a new one resets the Launch state)
+bool g_host_gone = false;      // client: "the host has gone" is shown
 enum class Screen { Connect, Host, Join };
 Screen g_screen = Screen::Connect;
 
@@ -248,6 +250,8 @@ void post(int cmd, int a) {
 }
 
 /// <summary>The stock screens' click test: a left-button release over a button, or Esc (reported as item 1).</summary>
+bool is_esc(const int* ev) { return ev[0] == 1 && (ev[3] & 0xf) != 0 && ev[2] == 1; }
+
 int clicked_item(const int* ev) {
     int item = 0;
     if (ev[0] == 3) {
@@ -290,6 +294,18 @@ void clear_password_field() {
     }
 }
 
+/// <summary>Everything one lobby session keeps on this side, back to its start (a new session, host or join).</summary>
+void reset_session_state() {
+    g_ready = false;
+    g_ready_mission = 0;
+    g_pending_status.clear();
+    g_wished = -1;
+    g_launches = g_closed = 0;
+    g_flown = g_told = g_trying = 0;
+    g_session = 0;
+    g_host_gone = false;
+}
+
 void start_host() {
     take_address();
     std::string password = take_password();
@@ -309,7 +325,7 @@ void start_host() {
         return;
     }
     LOG("lobby: hosting as \"%s\" on port %u", cs.c_str(), static_cast<unsigned>(kLobbyPort));
-    g_launches = 0;
+    reset_session_state();
     post(kCmdGoTo, lobby_item::kHost);
 }
 
@@ -344,10 +360,7 @@ void start_join() {
         return;
     }
     g_join_address = widen_ansi(host) + L":" + std::to_wstring(port);
-    g_ready = false;
-    g_ready_mission = 0;
-    g_wished = -1;
-    g_flown = g_told = g_trying = 0;
+    reset_session_state();
     LOG("lobby: joining %s:%u as \"%s\"", host, static_cast<unsigned>(port), cs.c_str());
     post(kCmdGoTo, lobby_item::kJoin);
 }
@@ -385,12 +398,16 @@ struct Roster {
     uint8_t result = net::kLobbyOk;
     uint32_t launch_seq = 0;
     uint32_t mission_id = 0;
+    uint32_t session = 0;
     uint32_t rtt_ms = 0;
+    uint64_t age_ms = 0;
     std::wstring host_callsign;
     std::wstring summary[3];
     size_t count = 0;
     net::LobbyRow rows[net::kLobbyRows] = {};
 };
+
+constexpr uint64_t kHostGoneMs = 5000;
 
 Roster read_roster(bool host) {
     Roster r;
@@ -408,13 +425,14 @@ Roster read_roster(bool host) {
         for (int i = 0; i < 3; ++i) r.summary[i] = widen(v.summary[i]);
     } else {
         net::LobbyRosterMsg m;
-        if (!world_lobby_roster(&m, &r.rtt_ms)) return r;
+        if (!world_lobby_roster(&m, &r.rtt_ms, &r.age_ms)) return r;
         r.have = true;
         r.members = m.members;
         r.you = m.your_seat == net::kNoSeat ? -1 : m.your_seat;
         r.result = m.result;
         r.launch_seq = m.launch_seq;
         r.mission_id = m.mission_id;
+        r.session = m.session;
         r.count = m.count;
         std::memcpy(r.rows, m.rows, sizeof(r.rows));
         for (int i = 0; i < 3; ++i) r.summary[i] = widen(m.summary[i]);
@@ -458,7 +476,7 @@ void show_roster(const Roster& r) {
         if (r.summary[0].empty()) set_text(session_item::kSummary, L"No mission yet: Set up mission...");
     } else {
         std::wstring h = L"Host " + (r.host_callsign.empty() ? std::wstring(L"?") : r.host_callsign) + L" - " +
-                         g_join_address + L" - ping " + std::to_wstring(r.rtt_ms) + L" ms";
+                         g_join_address + L" - answers in " + std::to_wstring(r.rtt_ms) + L" ms";
         set_text(session_item::kHeader, h.c_str());
         for (int i = 0; i < 3; ++i) set_text(session_item::kSummary + i, r.summary[i].c_str());
         if (r.summary[0].empty()) set_text(session_item::kSummary, L"The host has not set up a mission yet.");
@@ -503,6 +521,35 @@ void session_frame() {
     if (!r.have) return;
     show_roster(r);
     if (g_screen == Screen::Join) {
+        if (r.age_ms > kHostGoneMs) {  // the fetch asks every second: nothing for this long, the host is gone
+            if (!g_host_gone) {
+                g_host_gone = true;
+                LOG("lobby: no roster from the host for %llu s; the host has gone", static_cast<unsigned long long>(r.age_ms / 1000));
+                set_text(session_item::kHeader, (L"Host at " + g_join_address + L" - not answering").c_str());
+                set_status(L"The host has gone. Leave, or wait for it to host again.");
+            }
+            return;
+        }
+        if (g_host_gone) {
+            g_host_gone = false;
+            set_status(L"The host is back.");
+        }
+        if (r.session != g_session) {  // the host closed and hosted again: its Launch count starts again
+            if (g_session) {
+                LOG("lobby: the host started a new session; Launch and Ready start again");
+                set_status(L"The host started a new session. Pick a seat, then Ready.");
+            }
+            g_session = r.session;
+            g_flown = g_told = g_trying = 0;
+            if (g_ready) world_lobby_ready(false, 0);
+            g_ready = false;
+            g_ready_mission = 0;
+        }
+        if (r.result == net::kLobbyFull && !g_refusal_shown) {
+            g_refusal_shown = true;
+            LOG("lobby: the host's lobby is full");
+            set_status(L"The host's lobby is full (8 pilots).");
+        }
         if (g_ready && r.mission_id != g_ready_mission) {  // Ready was for a mission the host has replaced
             g_ready = false;
             g_ready_mission = 0;
@@ -667,6 +714,12 @@ public:
     virtual void refresh() {}
     virtual void handle_event(const int* ev) {
         if (!g_mnu || !ev) return;
+        if (g_screen != Screen::Connect && is_esc(ev)) {
+            // The game has no yes/no box we can use here: Esc does not end a session (the Close / Leave button does).
+            set_status(g_screen == Screen::Host ? L"Esc does not close the session: use Close session."
+                                                : L"Esc does not leave the session: use Leave.");
+            return;
+        }
         const int item = clicked_item(ev);
         if (item <= 0) return;
         if (g_screen == Screen::Connect) {
@@ -796,7 +849,7 @@ void __fastcall guarded_post(void* mnu, void* edx, int cmd, int a, int b) {
     g_post(mnu, edx, cmd, a, b);
 }
 
-/// <summary>Replaces MNU's PostCommand vtable slot with guarded_post, once (MenuSystem.dll stays loaded).</summary>
+/// <summary>Replaces MNU's PostCommand vtable slot with guarded_post, once per MenuSystem.dll image.</summary>
 void guard_fly(void* mnu) {
     // Once per MenuSystem.dll image: the game loads it again after each flight, with a stock vtable.
     HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
@@ -853,8 +906,15 @@ void lobby_hangar_leave() {
 }
 
 std::wstring lobby_menu_code_path() {
+    // Asked from the loading thread (module watch) and the menu thread: decided once, under a lock, as soon as
+    // MenuSystem.dll is loaded (the decision holds for its later images: same build).
+    static SRWLOCK lock = SRWLOCK_INIT;
     static int state = 0;  // 0 = undecided, 1 = ok, -1 = not available
     static std::wstring path;
+    AcquireSRWLockExclusive(&lock);
+    struct Unlock {
+        ~Unlock() { ReleaseSRWLockExclusive(&lock); }
+    } unlock;
     if (state != 0) return path;
     HMODULE mnu = GetModuleHandleW(L"MenuSystem.dll");
     if (!mnu) return {};  // not loaded yet: decide on a later read

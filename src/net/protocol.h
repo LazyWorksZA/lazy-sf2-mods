@@ -9,7 +9,8 @@ namespace LazyWorks::SF2Patch::net {
 
 inline constexpr uint16_t kMagic = 0x5A4C;  // bytes 'L','Z' on the wire (little-endian)
 // v3 adds the shared-world messages (world_proto.h); v4 the jet controls in AvatarState (Phase 5); v5 the session
-// password (AuthChallenge, AuthAnswer). Each version is a clean break: an older peer is refused with BadVersion.
+// password, proven both ways (AuthChallenge, AuthAnswer, AuthProof), and the lobby (world_proto.h: LobbyStatus,
+// LobbyRoster). Each version is a clean break: an older peer is refused with BadVersion.
 inline constexpr uint8_t kVersion = 5;
 
 /// <summary>ENet channels.</summary>

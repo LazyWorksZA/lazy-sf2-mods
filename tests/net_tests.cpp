@@ -10151,6 +10151,14 @@ void lobby_book_tests() {
     expect(k.seat_of(0xA) == -1, "a new client does not get the host's last seat either");
 }
 
+// The host's view: whether the pilot with this callsign is Ready.
+bool row_ready(HostCore& core, const char* callsign) {
+    const HostCore::LobbyView v = core.lobby_view();
+    for (size_t i = 0; i < v.count; ++i)
+        if (std::strcmp(v.rows[i].callsign, callsign) == 0) return (v.rows[i].flags & kLobbyRowReady) != 0;
+    return false;
+}
+
 void lobby_loopback_tests() {
     std::printf("lobby loopback (roster, seats, content hash)\n");
     HostCore core;
@@ -10180,6 +10188,9 @@ void lobby_loopback_tests() {
     expect(both && r1.your_seat + r2.your_seat == 3 && r1.your_seat != r2.your_seat && r1.members == 4 && r1.mission_id == 77,
            "two clients get the roster with their default seats");
     expect(rb.result == kLobbyContent && rb.your_seat == kNoSeat, "a client with other game content is kept out");
+    uint64_t age = 99999;
+    expect(f1.roster(&r1, &rtt, &age) && r1.session != 0 && r1.session == r2.session && age < 3000 && rtt < 1000,
+           "the roster carries the host session's id, its age and the round's own answer time");
     const HostCore::LobbyView v = core.lobby_view();
     expect(v.clients == 2 && v.host_seat == 0, "the host sees both clients");
     {
@@ -10227,9 +10238,9 @@ void lobby_loopback_tests() {
     expect(wait([&] { return f1.latest_seat() == 3; }), "a changed seat is offered again with the same mission");
     f1.set_ready(true, 76);
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    expect(!core.lobby_ready(0x11u), "Ready for another mission does not count");
+    expect(!row_ready(core, "BRAVO"), "Ready for another mission does not count");
     f1.set_ready(true, 77);
-    const bool ready = wait([&] { return core.lobby_ready(0x11u); });
+    const bool ready = wait([&] { return row_ready(core, "BRAVO"); });
     expect(ready, "Ready reaches the host");
     // A late joiner, after the mission was set: its first round offers it a seat.
     MissionFetch f3;
@@ -10324,7 +10335,7 @@ void lobby_launch_tests() {
     uint32_t rtt = 0;
     wait([&] { return f.roster(&r, &rtt) && r.your_seat == 1; }, 10000);
     f.set_ready(true, 91);
-    wait([&] { return core.lobby_ready(0x55u); }, 10000);
+    wait([&] { return row_ready(core, "BOT1"); }, 10000);
     core.set_lobby_launch(1u | kLaunchFlying);
     TestClient fl;
     fl.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);
@@ -10390,7 +10401,7 @@ void bot_lobby_loop_test() {
     std::snprintf(cmd, sizeof(cmd), "start \"\" /b tools\\lazysf2-bot.exe --lobby 127.0.0.1:%u --content 1234 --password %s --seat 2 --duration 5",
                   static_cast<unsigned>(core.port()), kTestPassword);
     std::system(cmd);
-    for (int i = 0; i < 1500 && !core.lobby_ready(0)/*never*/ ; ++i) {
+    for (int i = 0; i < 1500; ++i) {
         HostCore::LobbyView v = core.lobby_view();
         if (v.clients && v.count >= 2 && (v.rows[1].flags & kLobbyRowReady)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

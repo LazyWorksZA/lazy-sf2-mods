@@ -129,6 +129,7 @@ struct LobbyRosterMsg {
     uint8_t your_seat;    // kNoSeat: none
     char summary[3][40];  // the mission in three short lines (ASCII)
     LobbyRow rows[kLobbyRows];
+    uint32_t session;     // random per host session: a client still joined when the host hosts again sees it change
 };
 struct MissionChunkHead {
     Header h;
@@ -137,7 +138,7 @@ struct MissionChunkHead {
     uint16_t len;  // payload bytes that follow (1..kMissionChunkData; only the last chunk may be shorter)
 };
 #pragma pack(pop)
-static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 280);
+static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 284);
 static_assert(sizeof(MissionRequestMsg) == 12);  // 4:4 have id, 8:4 tag
 static_assert(sizeof(MissionOfferMsg) == 23);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status,
                                                  // 21:1 seat, 22:1 host seat

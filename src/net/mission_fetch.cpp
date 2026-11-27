@@ -65,10 +65,11 @@ void MissionFetch::want_seat(int seat) {
     poke_.store(true);
 }
 
-bool MissionFetch::roster(LobbyRosterMsg* out, uint32_t* rtt_ms) const {
+bool MissionFetch::roster(LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms) const {
     std::lock_guard<std::mutex> lock(roster_mx_);
     if (!have_roster_) return false;
     *out = roster_;
+    if (age_ms) *age_ms = ms_now() - roster_ms_;
     *rtt_ms = rtt_.load();
     return true;
 }
@@ -152,6 +153,7 @@ void MissionFetch::run() {
                 if (enet_peer_send(peer, kChannelReliable, p) != 0) enet_packet_destroy(p);
         };
         uint64_t t0 = ms_now(), last_rx = t0;
+        uint64_t status_sent = t0;
         while (!stop_.load() && !round_done && !refused) {
             ENetEvent ev;
             const int r = enet_host_service(host, &ev, 10);
@@ -205,6 +207,7 @@ void MissionFetch::run() {
                             ls.content_hash = content_hash_;
                             uint8_t lb[sizeof(LobbyStatusMsg)];
                             send(lb, encode(ls, lb, sizeof(lb)));
+                            status_sent = ms_now();
                         }
                         MissionRequestMsg rq{};
                         rq.have_id = have;
@@ -233,8 +236,9 @@ void MissionFetch::run() {
                             std::lock_guard<std::mutex> lock(roster_mx_);
                             roster_ = rr;
                             have_roster_ = true;
+                            roster_ms_ = now;
                         }
-                        rtt_.store(peer->roundTripTime);
+                        rtt_.store(static_cast<uint32_t>(now - status_sent));
                         if (wish >= 0) {
                             int expected = wish;
                             want_.compare_exchange_strong(expected, -1);  // answered (granted or refused)

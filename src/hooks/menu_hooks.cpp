@@ -75,7 +75,6 @@ int g_selected = 0;                  // current selection on the Graphics page (
 // Menu inis we edit as the file service reads them.
 enum class MenuFile : int { None, Options, MenuSystem, MainScreen, SingleMission, Hangar, Debrief };
 std::atomic<int> g_debrief_return{0};  // the session Debrief's hidden way back while it is the open screen (0: none)
-std::atomic<int> g_debrief_exit{0};    // ... and its Exit (Accept) item number
 std::atomic<int> g_hangar_return{0};  // the Hangar's hidden back-to-lobby item in this menu session (0: none)
 
 bool ends_with_file(const wchar_t* name, const wchar_t* file) {
@@ -398,7 +397,6 @@ int splice_lobby_file(MenuFile kind, char* buf, int n, unsigned bytes) {
             LOG("menu: DEBRIEFSCREEN.INI left stock in the lobby session (not as expected, or no room)");
             return n;
         }
-        g_debrief_exit = exit_item;
         g_debrief_return = item;
         LOG("menu: Debrief set for the lobby session (Exit returns to the %s screen, no Refly)", host ? "host" : "join");
         return static_cast<int>(need);
@@ -916,10 +914,7 @@ bool old_opts_still_loaded(HMODULE base) {
 }  // namespace
 
 int lobby_hangar_return_item() { return g_hangar_return.load(); }
-int lobby_debrief_return_item(int* exit_item) {
-    if (exit_item) *exit_item = g_debrief_exit.load();
-    return g_debrief_return.load();
-}
+int lobby_debrief_return_item() { return g_debrief_return.load(); }
 void lobby_debrief_closed() { g_debrief_return = 0; }
 
 bool install_menu_hooks() {

@@ -162,7 +162,6 @@ public:
     /// <summary>Any thread: the roster as the host sees it.</summary>
     LobbyView lobby_view() const;
     /// <summary>Any thread: whether that client is Ready (for Launch, L7).</summary>
-    bool lobby_ready(uint32_t tag) const;
     /// <summary>Game thread, at the flight's start: the host's seat in a flight of members, from the book (-1: none).
     /// </summary>
     int lobby_host_seat_for(int members);
@@ -257,6 +256,7 @@ private:
     LobbyBook book_;                     // under mission_mx_
     char summary_[3][40] = {};           // under mission_mx_
     uint32_t launch_seq_ = 0;            // under mission_mx_
+    uint32_t session_id_ = 0;            // under mission_mx_; drawn by enable_lobby
     /// <summary>Network thread: a client's LobbyStatus, answered with its roster (under mission_mx_).</summary>
     size_t lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap);
     void release_seat(uint32_t tag);
