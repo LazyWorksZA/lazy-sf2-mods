@@ -138,6 +138,7 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
                                        n(L"StatusHead"),  n(L"Status"),       n(L"YouFly")};
     for (int r = 0; r < net::kLobbyRows; ++r) {
         const std::wstring k = std::to_wstring(r + 1);
+        names.push_back(n(L"RowLabel" + k));
         names.push_back(n(L"RowButton" + k));
         names.push_back(n(L"RowStatus" + k));
     }
@@ -167,7 +168,8 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     // stock buttons do); its text is set at run time (lobby_screen.cpp, through the button's text object).
     for (int r = 0; r < net::kLobbyRows; ++r) {
         const int y = 214 + 22 * r;
-        ini.button(at(session_item::row_button(r)), L"", L"MediumTextLeft", kLobbyBlankKey, 528, y, L"TXT_LAZY_LOBBY_ROW_INFO");
+        ini.text(at(session_item::row_label(r)), L"MediumTextLeft", kLobbyBlankKey, 528, y);
+        ini.button(at(session_item::row_button(r)), L"", L"MediumTextLeft", session_item::kLobbyRowBlankKey, 528, y, L"TXT_LAZY_LOBBY_ROW_INFO");
         ini.text(at(session_item::row_status(r)), L"MediumTextLeft", kLobbyBlankKey, 800, y);
     }
 }

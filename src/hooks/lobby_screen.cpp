@@ -157,12 +157,13 @@ void set_button_text(int item, const wchar_t* text) {
             inner = nullptr;
         }
     }
-    if (!inner) {
-        static bool logged = false;
-        if (!logged) LOG("lobby: a seat row's button text object is not as expected; the rows stay blank");
-        logged = true;
-        return;
+    static bool traced = false;  // the first write, for the live check of this path
+    if (!traced) {
+        traced = true;
+        LOG("lobby: seat row button %d: interface %p, text object %p (%s), text \"%ls\"", item, iface, inner,
+            inner ? "as expected" : "not as expected: the row's TEXT shows it alone", text);
     }
+    if (!inner) return;
     reinterpret_cast<SetText_t>(vtable_slot(inner, kStaticTextSetText))(inner, nullptr, text);
 }
 
@@ -550,6 +551,7 @@ void show_roster(const Roster& r) {
                 label += L"free (AI)";
             }
         }
+        set_text(session_item::row_label(i), label.c_str());
         set_button_text(session_item::row_button(i), label.c_str());
         set_text(session_item::row_status(i), st.c_str());
     }

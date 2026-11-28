@@ -105,6 +105,38 @@ uint32_t hash_theatre(const std::string& map, std::vector<std::string>* ground) 
 
 const std::vector<std::string> kAircraftFiles = {"aircraftdatafile", "loadoutfile", "avionicsdatafilename"};
 
+// Weapons, racks and tanks are entries of Objects\Weapons\WeaponData.ini ([WeaponDataNNN] TypeName=...), not files
+// of their own (a weapon's own small ini only names its model). Read once per listing or check.
+struct WeaponIndex {
+    bool loaded = false;
+    acmi::Ini ini;
+};
+WeaponIndex* g_weapons = nullptr;  // menu thread: set for the duration of mission_content / mission_content_check
+
+uint32_t hash_weapon(const std::string& name) {
+    WeaponIndex local;
+    WeaponIndex& w = g_weapons ? *g_weapons : local;
+    if (!w.loaded) {
+        w.loaded = true;
+        std::vector<uint8_t> bytes;
+        if (read_content_file(L"Objects\\Weapons\\WeaponData.ini", &bytes)) w.ini = acmi::parse_ini(bytes.data(), bytes.size());
+    }
+    const std::string want = acmi::to_lower_ascii(name);
+    for (const acmi::IniSection& s : w.ini.sections) {
+        bool match = false;
+        for (const auto& kv : s.items)
+            if (kv.first == "typename" && acmi::to_lower_ascii(kv.second) == want) match = true;
+        if (!match) continue;
+        uint32_t h = kSeed;
+        for (const auto& kv : s.items) {
+            const std::string line = kv.first + "=" + kv.second + "\n";
+            h = content_fnv(h, reinterpret_cast<const uint8_t*>(line.data()), line.size());
+        }
+        return h ? h : 1u;
+    }
+    return 0;
+}
+
 }  // namespace
 
 uint32_t content_entry_hash(char kind, const std::string& name) {
@@ -112,13 +144,18 @@ uint32_t content_entry_hash(char kind, const std::string& name) {
     switch (kind) {
         case 'T': return hash_theatre(name, nullptr);
         case 'A': return hash_object(L"Objects\\Aircraft\\" + widen_ansi(name), name, kAircraftFiles);
-        case 'W': return hash_object(L"Objects\\Weapons\\" + widen_ansi(name), name, {});
+        case 'W': return hash_weapon(name);
         case 'G': return hash_object(L"Objects\\GroundObject\\" + widen_ansi(name), name, {});
         default: return 0;
     }
 }
 
 std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
+    WeaponIndex weapons_index;
+    g_weapons = &weapons_index;
+    struct Clear {
+        ~Clear() { g_weapons = nullptr; }
+    } clear;
     std::vector<ContentEntry> out;
     const MissionUses uses = mission_uses(acmi::parse_ini(msn.data(), msn.size()));
     auto have = [&](char kind, const std::string& n) {
@@ -126,8 +163,9 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
             if (e.kind == kind && acmi::to_lower_ascii(e.name) == acmi::to_lower_ascii(n)) return true;
         return false;
     };
-    std::vector<std::string> ground;
-    if (!uses.theatre.empty()) out.push_back({'T', uses.theatre, hash_theatre(uses.theatre, &ground)});
+    // The theatre's types file names ground object categories (SAMLauncher, AAA), not object folders: the objects are
+    // picked at run time, so they are compared through the theatre entry (its types file) only.
+    if (!uses.theatre.empty()) out.push_back({'T', uses.theatre, hash_theatre(uses.theatre, nullptr)});
     std::vector<std::string> weapons, dropped = uses.dropped;
     for (const auto& [type, loadout] : uses.aircraft) {
         acmi::Ini main;
@@ -149,9 +187,15 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
         }
     }
     for (const auto& w : weapons) out.push_back({'W', w, content_entry_hash('W', w)});
-    for (const auto& g : ground) out.push_back({'G', g, content_entry_hash('G', g)});
     size_t missing = 0;
-    for (const auto& e : out) missing += e.hash == 0;
+    std::string missing_names;
+    for (const auto& e : out) {
+        if (e.hash) continue;
+        ++missing;
+        missing_names += (missing_names.empty() ? "" : ", ") + std::string(1, e.kind) + ":" + e.name;
+    }
+    if (missing)
+        LOG("lobby: not found on this PC, so not compared: %s", missing_names.c_str());
     if (!dropped.empty()) {
         std::string names;
         for (size_t i = 0; i < dropped.size() && i < 6; ++i) names += (i ? ", " : "") + dropped[i];
@@ -159,13 +203,18 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
             "they are not compared: %s%s",
             dropped.size(), names.c_str(), dropped.size() > 6 ? ", ..." : "");
     }
-    LOG("lobby: the mission uses %zu content entries (theatre %s, %zu aircraft types, %zu weapons, %zu ground objects); "
-        "%zu not found here",
-        out.size(), uses.theatre.c_str(), uses.aircraft.size(), weapons.size(), ground.size(), missing);
+    LOG("lobby: the mission uses %zu content entries (theatre %s, %zu aircraft types, %zu weapons and racks); %zu not "
+        "found here",
+        out.size(), uses.theatre.c_str(), uses.aircraft.size(), weapons.size(), missing);
     return out;
 }
 
 std::string mission_content_check(const std::string& sidecar_text) {
+    WeaponIndex weapons_index;
+    g_weapons = &weapons_index;
+    struct Clear {
+        ~Clear() { g_weapons = nullptr; }
+    } clear;
     std::vector<ContentEntry> host = parse_content(sidecar_text);
     if (host.empty()) return {};  // a host that sends no list: nothing to compare
     if (host.size() > kMaxContentEntries)

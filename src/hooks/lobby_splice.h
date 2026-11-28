@@ -51,6 +51,7 @@ inline constexpr LobbyText kLobbyTexts[] = {
     {L"TXT_LAZY_LOBBY_DONE_INFO", L"Back to the lobby: the players get this mission."},
     {L"TXT_LAZY_LOBBY_HANGAR_READY", L"Ready: back to the lobby."},
     {L"TXT_LAZY_LOBBY_ROW_INFO", L"Click a free seat to take it."},
+    {L"TXT_LAZY_LOBBY_ROW_BLANK", L"                                        "},
     {L"TXT_LAZY_LOBBY_SEAT_CALLSIGN", L"Seat and callsign"},
 };
 
@@ -75,14 +76,20 @@ inline constexpr int kHeader = 5;
 inline constexpr int kSummary = 7;        // three lines: 7, 8, 9
 inline constexpr int kStatus = 14;
 inline constexpr int kYouFly = 15;
-inline constexpr int kRowFirst = 16;      // kLobbyRows rows: a TEXTBUTTON ("#n  Callsign"; a click takes a free seat), a TEXT
-inline constexpr int row_button(int r) { return kRowFirst + 2 * r; }
-inline constexpr int row_status(int r) { return kRowFirst + 2 * r + 1; }
+// kLobbyRows rows of three items: the seat and callsign as TEXT, a TEXTBUTTON over it with the same text (the stock
+// hover; a click takes a free seat), and the status as TEXT. The TEXT is what is known to show run-time text; the
+// button's text is set too, and its placeholder is wide so its click area covers the row whatever its text does.
+inline constexpr int kRowFirst = 16;
+inline constexpr int row_label(int r) { return kRowFirst + 3 * r; }
+inline constexpr int row_button(int r) { return kRowFirst + 3 * r + 1; }
+inline constexpr int row_status(int r) { return kRowFirst + 3 * r + 2; }
 /// <summary>The row whose button is item, or -1.</summary>
 inline constexpr int row_of_button(int item) {
-    return item >= kRowFirst && item < kRowFirst + 2 * net::kLobbyRows && (item - kRowFirst) % 2 == 0 ? (item - kRowFirst) / 2 : -1;
+    return item >= kRowFirst && item < kRowFirst + 3 * net::kLobbyRows && (item - kRowFirst) % 3 == 1 ? (item - kRowFirst) / 3 : -1;
 }
-inline constexpr int kCount = kRowFirst + 2 * net::kLobbyRows - 1;
+inline constexpr int kCount = kRowFirst + 3 * net::kLobbyRows - 1;
+/// <summary>The seat buttons' placeholder text: wide spaces, so the click area is a whole row.</summary>
+inline constexpr const wchar_t* kLobbyRowBlankKey = L"TXT_LAZY_LOBBY_ROW_BLANK";
 }  // namespace session_item
 
 /// <summary>Characters the Address and Session password fields hold (TextBufferSize minus the terminator).</summary>
