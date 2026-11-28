@@ -47,7 +47,7 @@ void usage() {
         "--lobby joins a host's lobby as a pilot, as the game's join screen does: it shows in the roster with its\n"
         "callsign, asks for seat N (1-based, as the lobby shows it) once the host has a mission, presses Ready for that\n"
         "mission (again after each new one), logs each roster change, and when the host launches follows it as a\n"
-        "--world-join client with the lobby's tag for --duration (default 30 s), then leaves. --content is the host's\n"
+        "--world-join client with the lobby's tag for --duration (default 30 s) flying --script (orbit unless given), then leaves. --content is the host's\n"
         "build check (its lazysf2.log: \"lobby: build check 0x...\"); another value is kept out. Exit code 0 ok\n"
         "(the flight's code if it flew), 2 refused or stopped, 3 no roster within 15 s.\n"
         "Client exit code 0 ok, 1 bad arguments, 2 cannot connect (bad address, refused), 3 no ENet connection within\n"
@@ -553,6 +553,7 @@ int main(int argc, char** argv) {
         scfg.pause_for = pause_for;
     }
     if (serve && !script_given) scfg.script = bot::Script::Orbit;
+    if (!lobby_spec.empty() && !script_given) cfg.script = bot::Script::Orbit;  // lobby bots fly, so the host sees States
     scfg.launch_shooter_a = scfg.hit ? scfg.hit_a : 0;
     if (serve && scfg.script == bot::Script::Formation) {
         std::printf("--serve cannot fly formation: it is the lead\n");

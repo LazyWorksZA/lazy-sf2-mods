@@ -29,6 +29,7 @@
 #include "acmi/tacview_terrain.h"
 #include "acmi/tacview_writer.h"
 #include "acmi/terrain_texture.h"
+#include "net/traffic_line.h"
 #include "hooks/lobby_logic.h"
 #include "hooks/mission_content.h"
 #include "hooks/gen_filter.h"
@@ -6822,6 +6823,30 @@ FhBotRun fh_run_bot(FakeHost& h, bot::BotConfig cfg, F each) {
     return out;
 }
 
+void traffic_line_format() {
+    std::printf("traffic_line_format\n");
+    char b[200];
+    const TrafficPeer two[] = {{1, 20, 0}, {2, 31, 150}};
+    format_traffic_line(b, sizeof(b), 1234, 567, 89, two, 2);
+    expect(std::strcmp(b, "net: traffic: up 1234 B/s, down 567 B/s, datagrams 89/s (peer 1: rtt 20 ms, queued 0 B, peer 2: rtt 31 ms, queued 150 B)") == 0,
+           "line with two peers");
+    format_traffic_line(b, sizeof(b), 0, 0, 0, nullptr, 0);
+    expect(std::strcmp(b, "net: traffic: up 0 B/s, down 0 B/s, datagrams 0/s") == 0, "line with no peers");
+    char tiny[30];
+    format_traffic_line(tiny, sizeof(tiny), 1, 2, 3, two, 2);
+    expect(std::strlen(tiny) < sizeof(tiny), "a small buffer is cut, not overrun");
+
+    TrafficMeter m;
+    const TrafficPeer p[] = {{1, 20, 0}};
+    expect(!m.tick(1000, 0xfffffff0u, 50, 10, p, 1, b, sizeof(b)), "the first tick only starts the interval");
+    expect(!m.tick(5000, 0, 0, 0, p, 1, b, sizeof(b)), "nothing before the interval");
+    expect(m.tick(11000, 0x00000010u, 20050, 2010, p, 1, b, sizeof(b)), "a line after 10 s");
+    // sent wraps: 0x20 bytes in 10 s = 3 B/s (rounded); received 20000 B = 2000 B/s; 2000 datagrams = 200/s
+    expect(std::strcmp(b, "net: traffic: up 3 B/s, down 2000 B/s, datagrams 200/s (peer 1: rtt 20 ms, queued 0 B)") == 0,
+           "rates, with a wrapped counter");
+    expect(!m.tick(15000, 0x00000010u, 20050, 2010, p, 1, b, sizeof(b)), "the interval restarts after a line");
+}
+
 // M1 (Task 8 review): the bot against a host that sends its jet, PeerInfo and, at the end, a Bye signed 0.
 void bot_host_traffic_tests() {
     std::printf("bot: against a host that sends its jet, PeerInfo and Bye 0\n");
@@ -10777,6 +10802,7 @@ int main(int argc, char** argv) {
         std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
         return g_fail ? 1 : 0;
     }
+    traffic_line_format();
     object_type_tests();
     std::printf("protocol_selftest\n");
     const char* why = nullptr;

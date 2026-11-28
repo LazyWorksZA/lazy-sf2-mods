@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "net/receiver_math.h"
+#include "net/traffic_line.h"
 
 namespace LazyWorks::SF2Patch::net {
 
@@ -468,6 +469,7 @@ void HostCore::run() {
     uint32_t next_gen = 1;
     uint64_t next_report = now_ms() + 1000;
     HostCounters reported{};
+    TrafficMeter traffic;
 
     auto free_slot = [&](int slot) {
         peers[slot] = nullptr;
@@ -1045,6 +1047,16 @@ void HostCore::run() {
         enet_host_flush(host);
 
         const uint64_t now = now_ms();
+        {
+            TrafficPeer tp[kMaxClients];
+            size_t tn = 0;
+            for (int i = 0; i < kMaxClients; ++i)
+                if (peers[i])
+                    tp[tn++] = {static_cast<unsigned>(i + 1), peers[i]->roundTripTime, static_cast<unsigned>(peers[i]->totalWaitingData)};
+            char tline[256];
+            if (traffic.tick(now, host->totalSentData, host->totalReceivedData, host->totalSentPackets, tp, tn, tline, sizeof(tline)))
+                say("%s", tline);
+        }
         for (int i = 0; i < kMaxClients; ++i) {
             if (!peers[i]) continue;
             rtt_[i].store(peers[i]->roundTripTime, std::memory_order_relaxed);

@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "net/receiver_math.h"
+#include "net/traffic_line.h"
 
 namespace LazyWorks::SF2Patch::net {
 
@@ -338,6 +339,7 @@ void ClientCore::run() {
     uint32_t pongs_this_second = 0;
     uint16_t my_id = 0;
     ClientCounters reported{};
+    TrafficMeter traffic;
 
     auto drop = [&](std::atomic<uint32_t>& counter) { counter.fetch_add(1, std::memory_order_relaxed); };
     auto publish_clock = [&] {
@@ -725,6 +727,13 @@ void ClientCore::run() {
         }
         if (ended) break;
         const double now = wall_now();
+        if (connected) {
+            const TrafficPeer tp = {0, peer->roundTripTime, static_cast<unsigned>(peer->totalWaitingData)};
+            char tline[256];
+            if (traffic.tick(static_cast<uint64_t>(now * 1000.0), host->totalSentData, host->totalReceivedData,
+                             host->totalSentPackets, &tp, 1, tline, sizeof(tline)))
+                say("%s", tline);
+        }
 
         if (!connected && now >= connect_deadline) {
             say("net: client: no answer to the connect request after %u ms", static_cast<unsigned>(limits_.connect_ms));
