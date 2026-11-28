@@ -2,6 +2,8 @@
 // then through the exe's file manager (loose files in the game folder, then the cats), as the game finds them.
 #include <windows.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -40,12 +42,25 @@ bool read_loose(const std::wstring& path, std::vector<uint8_t>* out) {
     return ok;
 }
 
+// Where the first file of the entry being hashed was found (for the log): the game's own order, see
+// lazy-sf2-recon: recon-notes §21.4 and the start-up table (the player's folder overrides the game folder; the file
+// manager's Open +0x94e0 tries the loose file, then the mounted cats by bare name, newest cat first).
+const char* g_source = nullptr;
+
 // rel: a path under the game folder, as "Objects\Aircraft\F-4E\F-4E.ini".
 bool read_content_file(const std::wstring& rel, std::vector<uint8_t>* out) {
     const std::wstring user = config::game_data_dir();
-    if (!user.empty() && read_loose(user + L"\\" + rel, out)) return true;
+    if (!user.empty() && read_loose(user + L"\\" + rel, out)) {
+        if (!g_source) g_source = "mod folder";
+        return true;
+    }
     const std::wstring game = game_dir();
-    return !game.empty() && read_game_file(game + L"\\" + rel, *out);
+    if (game.empty()) return false;
+    const std::wstring full = game + L"\\" + rel;
+    const DWORD a = GetFileAttributesW(full.c_str());
+    if (!read_game_file(full, *out)) return false;
+    if (!g_source) g_source = a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) ? "game folder" : "a cat";
+    return true;
 }
 
 uint32_t add_file(uint32_t h, const std::string& name, const std::vector<uint8_t>& bytes) {
@@ -109,6 +124,7 @@ const std::vector<std::string> kAircraftFiles = {"aircraftdatafile", "loadoutfil
 // of their own (a weapon's own small ini only names its model). Read once per listing or check.
 struct WeaponIndex {
     bool loaded = false;
+    const char* source = nullptr;  // where WeaponData.ini was found
     acmi::Ini ini;
 };
 WeaponIndex* g_weapons = nullptr;  // menu thread: set for the duration of mission_content / mission_content_check
@@ -119,8 +135,13 @@ uint32_t hash_weapon(const std::string& name) {
     if (!w.loaded) {
         w.loaded = true;
         std::vector<uint8_t> bytes;
+        const char* before = g_source;
+        g_source = nullptr;
         if (read_content_file(L"Objects\\Weapons\\WeaponData.ini", &bytes)) w.ini = acmi::parse_ini(bytes.data(), bytes.size());
+        w.source = g_source;
+        g_source = before;
     }
+    if (!g_source) g_source = w.source;
     const std::string want = acmi::to_lower_ascii(name);
     for (const acmi::IniSection& s : w.ini.sections) {
         bool match = false;
@@ -137,14 +158,86 @@ uint32_t hash_weapon(const std::string& name) {
     return 0;
 }
 
+constexpr int kPoolLine = 80, kPoolMax = 20000;
+
+// SEH only (no C++ objects): the records as "category:name" lines into lines[kPoolMax][kPoolLine]. -1 when not as
+// expected.
+int read_ground_pool(char* lines) {
+    HMODULE om = GetModuleHandleW(L"ObjectManager.dll");
+    if (!om) return -1;
+    const BYTE* mgr = static_cast<const BYTE*>(at_rva(om, 0x234d0));
+    __try {
+        if (*reinterpret_cast<void* const*>(mgr) != at_rva(om, 0x1d55c)) return -1;
+        const uint32_t n = *reinterpret_cast<const uint32_t*>(mgr + 0x08);
+        const BYTE* arr = *reinterpret_cast<const BYTE* const*>(mgr + 0x0c);
+        if (!arr || n == 0 || n > 64) return -1;
+        void* cls = nullptr;
+        for (uint32_t i = 0; i < n && !cls; ++i) {
+            const wchar_t* name = *reinterpret_cast<const wchar_t* const*>(arr + 0x10 * i + 0x08);
+            if (name && _wcsnicmp(name, L"GroundObject", 12) == 0 && (name[12] == 0 || name[12] == L'.'))
+                cls = *reinterpret_cast<void* const*>(arr + 0x10 * i);
+        }
+        if (!cls) return -1;
+        using Count_t = int(__fastcall*)(void*, void*);
+        using Get_t = void(__fastcall*)(void*, void*, int, void**);
+        const int count = reinterpret_cast<Count_t>(vtable_slot(cls, 0))(cls, nullptr);
+        if (count <= 0 || count > kPoolMax) return -1;
+        for (int i = 0; i < count; ++i) {
+            void* rec = nullptr;
+            reinterpret_cast<Get_t>(vtable_slot(cls, 0x10 / 4))(cls, nullptr, i, &rec);
+            if (!rec) return -1;
+            const BYTE* r = static_cast<const BYTE*>(rec);
+            const short category = *reinterpret_cast<const short*>(r + 0xbe4);
+            const wchar_t* type = reinterpret_cast<const wchar_t*>(r + 0x04);
+            if (category < 0 || category > 255) return -1;
+            char* line = lines + static_cast<size_t>(i) * kPoolLine;
+            int k = std::snprintf(line, kPoolLine, "%d:", static_cast<int>(category));
+            for (int c = 0; c < 64 && type[c] && k < kPoolLine - 1; ++c) {
+                if (type[c] < 0x20 || type[c] > 0x7e) return -1;  // not a type record as analysed
+                line[k++] = static_cast<char>(type[c] >= 'A' && type[c] <= 'Z' ? type[c] + 32 : type[c]);
+            }
+            line[k] = 0;
+            if (k <= 2) return -1;
+        }
+        return count;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// The ground object types the game picks from (by category, at generate and at the flight's start): the type
+// records of the GroundObject class, read from ObjectManager's class table (see lazy-sf2-recon: recon-notes §20,
+// §28.7d). The pool hash covers each record's category and name. 0 when anything is not as expected (fails closed).
+uint32_t ground_pool_hash() {
+    if (!is_expected_build(GetModuleHandleW(L"ObjectManager.dll"), 0x51d21fa8, 0x28000, "ObjectManager.dll")) return 0;
+    std::vector<char> buf(static_cast<size_t>(kPoolMax) * kPoolLine, 0);
+    const int n = read_ground_pool(buf.data());
+    if (n <= 0) return 0;
+    std::vector<std::string> items;
+    items.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) items.emplace_back(buf.data() + static_cast<size_t>(i) * kPoolLine);
+    std::sort(items.begin(), items.end());
+    uint32_t h = kSeed;
+    for (const auto& s : items) h = content_fnv(h, reinterpret_cast<const uint8_t*>(s.c_str()), s.size() + 1);
+    return h ? h : 1u;
+}
+
 }  // namespace
 
-uint32_t content_entry_hash(char kind, const std::string& name) {
+uint32_t content_entry_hash(char kind, const std::string& name, const char** source) {
+    g_source = nullptr;
+    struct Report {
+        const char** out;
+        ~Report() {
+            if (out) *out = g_source ? g_source : "nowhere";
+        }
+    } report{source};
     if (!content_name_ok(name)) return 0;
     switch (kind) {
         case 'T': return hash_theatre(name, nullptr);
         case 'A': return hash_object(L"Objects\\Aircraft\\" + widen_ansi(name), name, kAircraftFiles);
         case 'W': return hash_weapon(name);
+        case 'P': return ground_pool_hash();
         case 'G': return hash_object(L"Objects\\GroundObject\\" + widen_ansi(name), name, {});
         default: return 0;
     }
@@ -186,7 +279,9 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
             }
         }
     }
-    for (const auto& w : weapons) out.push_back({'W', w, content_entry_hash('W', w)});
+    for (const auto& w : weapons) out.push_back({'W', w, content_entry_hash('W', w, nullptr)});
+    out.push_back({'P', "GroundObjects", ground_pool_hash()});
+    if (out.back().hash == 0) LOG("lobby: the ground object pool could not be read here; joined pilots will be told");
     size_t missing = 0;
     std::string missing_names;
     for (const auto& e : out) {
@@ -221,7 +316,15 @@ std::string mission_content_check(const std::string& sidecar_text) {
         return "the host's list is too long to check (" + std::to_string(host.size()) + " entries)";
     std::vector<ContentEntry> mine;
     mine.reserve(host.size());
-    for (const auto& e : host) mine.push_back({e.kind, e.name, content_entry_hash(e.kind, e.name)});
+    std::string sources;  // where this PC's differing or missing entries came from, for tracing a mismatch to a mod
+    for (const auto& e : host) {
+        const char* from = nullptr;
+        mine.push_back({e.kind, e.name, content_entry_hash(e.kind, e.name, &from)});
+        if (e.hash != 0 && mine.back().hash != e.hash)
+            sources += (sources.empty() ? "" : ", ") + std::string(1, e.kind) + ":" + e.name + " (" +
+                       (mine.back().hash ? from : "not found") + ")";
+    }
+    if (!sources.empty()) LOG("lobby: this PC's copies that differ from the host's: %s", sources.c_str());
     return content_diff(host, mine);
 }
 

@@ -12,8 +12,9 @@
 
 namespace LazyWorks::SF2Patch::hooks {
 
-/// <summary>One thing a mission uses. kind: 'T' theatre, 'A' aircraft, 'W' weapon, 'G' ground object. hash 0: the
-/// PC has none.</summary>
+/// <summary>One thing a mission uses. kind: 'T' theatre, 'A' aircraft, 'W' weapon, 'G' ground object, 'P' the pool
+/// of ground object types the game picks from at run time (by category). hash 0: the PC has none ('P': could not be
+/// read, which never counts as a match).</summary>
 struct ContentEntry {
     char kind = 0;
     std::string name;
@@ -161,7 +162,7 @@ inline std::vector<ContentEntry> parse_content(const std::string& text) {
         const size_t last = v.rfind(':');
         if (v.size() < 5 || v[1] != ':' || last == std::string::npos || last < 3) continue;
         const char kind = v[0];
-        if (kind != 'T' && kind != 'A' && kind != 'W' && kind != 'G') continue;
+        if (kind != 'T' && kind != 'A' && kind != 'W' && kind != 'G' && kind != 'P') continue;
         const std::string name = v.substr(2, last - 2), hex = v.substr(last + 1);
         if (!content_name_ok(name) || hex.empty() || hex.size() > 8) continue;
         char* end = nullptr;
@@ -182,6 +183,12 @@ inline std::string content_diff(const std::vector<ContentEntry>& host, const std
         uint32_t mine = 0;
         for (const ContentEntry& l : local)
             if (l.kind == h.kind && acmi::to_lower_ascii(l.name) == acmi::to_lower_ascii(h.name)) mine = l.hash;
+        if (h.kind == 'P') {
+            // The ground object pool: the same set or the units placed from one seed differ; unreadable never matches.
+            if (h.hash != 0 && mine == h.hash) continue;
+            differs.push_back(h.hash == 0 || mine == 0 ? "ground objects (could not be compared)" : "ground objects");
+            continue;
+        }
         if (mine == h.hash || h.hash == 0) continue;  // the host lacks it too: its flight never uses it
         (mine == 0 ? missing : differs).push_back(h.name);
     }

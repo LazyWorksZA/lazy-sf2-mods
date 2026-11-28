@@ -10516,6 +10516,12 @@ void mission_content_tests() {
     expect(hk::content_diff(host, mine).empty(), "content: all the same: nothing to report");
     mine[4].hash = 0x55;
     expect(hk::content_diff(host, mine).empty(), "content: what the host lacks matches whatever this PC has");
+    const std::vector<hk::ContentEntry> hp = {{'P', "GroundObjects", 0x77}}, h0 = {{'P', "GroundObjects", 0}};
+    expect(hk::content_diff(hp, {{'P', "GroundObjects", 0x77}}).empty() &&
+               hk::content_diff(hp, {{'P', "GroundObjects", 0x78}}) == "differs: ground objects" &&
+               hk::content_diff(h0, {{'P', "GroundObjects", 0}}) == "differs: ground objects (could not be compared)" &&
+               hk::parse_content("content=P:GroundObjects:77\n").size() == 1,
+           "content: the ground object pool must match; unreadable on either side never matches");
     expect(hk::content_name_ok("F-4E (USAF)") && !hk::content_name_ok(" lead") && !hk::content_name_ok("a\\b") &&
                !hk::content_name_ok(std::string(65, 'x')),
            "content: names with spaces inside are kept; path characters, edge spaces and long names are not");
