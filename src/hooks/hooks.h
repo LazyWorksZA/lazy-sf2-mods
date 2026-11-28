@@ -122,6 +122,9 @@ void lobby_hangar_enter(void* self);
 void lobby_hangar_leave();
 /// <summary>Menu thread: the menus start again (MenuSystem.ini read), as after a flight.</summary>
 void lobby_menus_entered();
+/// <summary>lobby_screen.cpp, menu thread, with a lobby screen open: makes theatre the next flight's terrain (TER slot
+/// 9, as the New page and the Briefing do), which mounts its cat. False when not possible here.</summary>
+bool lobby_select_theatre(const std::string& theatre);
 /// <summary>Menu thread: the session Debrief's hidden way back to the lobby while it is the open screen (0: none). The
 /// screen open (lobby_flow.cpp) uses it as the record that the session Debrief is open.</summary>
 int lobby_debrief_return_item();

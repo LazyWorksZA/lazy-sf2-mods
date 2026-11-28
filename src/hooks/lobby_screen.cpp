@@ -179,7 +179,11 @@ void set_button_text(int item, const wchar_t* text) {
 
 void set_status(const wchar_t* text) {
     set_text(g_screen == Screen::Connect ? lobby_item::kStatus : session_item::kStatus, text);
-    LOG("lobby: status \"%ls\"", text);
+    static std::wstring last;  // a lasting status is set again every redraw: logged when it changes
+    if (text && last != text) {
+        last = text;
+        LOG("lobby: status \"%ls\"", text);
+    }
 }
 
 std::wstring read_address() {
@@ -961,6 +965,8 @@ void pin_this_module() {
 }
 
 }  // namespace
+
+bool lobby_select_theatre(const std::string& theatre) { return select_terrain(theatre); }
 
 bool game_option_int(const wchar_t* section, const wchar_t* key, int* out) {
     wchar_t buf[32] = {};

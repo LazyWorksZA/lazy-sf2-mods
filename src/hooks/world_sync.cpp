@@ -760,6 +760,31 @@ void apply_lobby_seat() {
 
 // Join: a mission fetched from the host becomes the file to load (written to the probe folder as world_NNN.msn and
 // its sidecar, so Load reads it by path as for LAZYSF2_WORLD_LOAD). Menu thread.
+bool theatre_installed(const std::string& theatre);
+
+/// <summary>mission_content_check, after selecting the mission's theatre when this PC has it: its files are in its cat,
+/// which the game mounts only for the selected theatre (see lazy-sf2-recon: recon-notes, lobby content check). When the
+/// selection is not possible yet, the check waits (kContentNotReady) rather than report the theatre missing.</summary>
+std::string content_check_here(const std::string& sidecar) {
+    static std::string logged;  // selected at every check (another theatre may have been selected since): logged on change
+    WorldSidecar side;
+    std::string err;
+    if (parse_sidecar(sidecar, &side, &err) && !side.theatre.empty() && theatre_installed(side.theatre)) {
+        const bool ok = lobby_select_theatre(side.theatre);
+        const std::string note = (ok ? "+" : "-") + side.theatre;
+        if (logged != note) {
+            logged = note;
+            if (ok)
+                LOG("world: join: theatre %s selected for the content check", side.theatre.c_str());
+            else
+                LOG("world: join: theatre %s cannot be selected yet; its content is checked once it can be",
+                    side.theatre.c_str());
+        }
+        if (!ok) return std::string(1, kContentNotReady);
+    }
+    return mission_content_check(sidecar);
+}
+
 void take_fetched_mission() {
     if (!g_fetch) return;
     std::vector<uint8_t> packed, msn;
@@ -802,7 +827,7 @@ void take_fetched_mission() {
         return;
     }
     if (g_lobby_hash) {
-        g_content_diff = mission_content_check(sidecar);
+        g_content_diff = content_check_here(sidecar);
         g_content_id = offer.mission_id;
         g_content_sidecar = sidecar;  // kept: a check that waits for this PC's type list runs again later
         if (g_content_diff.empty())
@@ -3053,7 +3078,7 @@ ContentCheck world_lobby_content(uint32_t mission_id, std::string* text) {
     // A newer mission has arrived: take it now (files written, its content checked), not at the briefing.
     if (g_fetch && g_content_id != mission_id && g_fetch->has_fresh()) take_fetched_mission();
     if (g_content_id == mission_id && g_content_diff.size() == 1 && g_content_diff[0] == kContentNotReady) {
-        g_content_diff = mission_content_check(g_content_sidecar);  // this PC's type list may be ready now
+        g_content_diff = content_check_here(g_content_sidecar);  // this PC's type list may be ready now
         if (g_content_diff.size() == 1 && g_content_diff[0] == kContentNotReady) return ContentCheck::Pending;
         LOG("world: join: content check of mission 0x%08lx done: %s", static_cast<unsigned long>(mission_id),
             g_content_diff.empty() ? "this PC has everything it uses" : g_content_diff.c_str());
