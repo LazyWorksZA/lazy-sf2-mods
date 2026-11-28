@@ -42,7 +42,9 @@ struct TakeCtx {
     const AvatarHandle* taken;
     int n_taken;
     uint32_t mask;
+    const void* own;  // the jet we fly (the mission's player object): never an avatar
     // out
+    bool own_unflagged = false;  // own was listed but not as the tracker's player
     bool found = false;
     void* obj = nullptr;
     unsigned long long seq = 0;
@@ -56,8 +58,14 @@ struct TakeCtx {
 void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the shared lock: no logging, no allocation
     auto& c = *static_cast<TakeCtx*>(vctx);
     const LiveAircraft* player = nullptr;
-    for (size_t i = 0; i < n; ++i)
+    for (size_t i = 0; i < n; ++i) {
+        if (list[i].obj == c.own) {
+            if (!list[i].is_player) c.own_unflagged = true;
+            player = &list[i];
+            break;
+        }
         if (list[i].is_player) player = &list[i];
+    }
     // Distances from where the avatar goes (the join position on the host, the remote's State on the client); from the
     // player only if the placement is not a finite position.
     double ref[3];
@@ -71,7 +79,7 @@ void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
     AvatarRank rank;
     if (c.pick->prefer) {
         for (size_t i = 0; i < n && chosen == n; ++i)
-            if (list[i].obj == c.pick->prefer && !list[i].is_player &&
+            if (list[i].obj == c.pick->prefer && !list[i].is_player && list[i].obj != c.own &&
                 !avatar_logic::is_taken(c.taken, c.n_taken, list[i].obj, list[i].seq))
                 chosen = i;
         if (chosen < n) {
@@ -85,7 +93,9 @@ void take_cb(const LiveAircraft* list, size_t n, void* vctx) {  // under the sha
         for (size_t i = 0; i < n; ++i) {
             double p[3];
             obj_read(list[i].obj, kOffPos, p, 3);
-            picker.offer(i, avatar_candidate(list[i], p, ref, c.taken, c.n_taken));
+            LiveAircraft a = list[i];
+            if (a.obj == c.own) a.is_player = true;
+            picker.offer(i, avatar_candidate(a, p, ref, c.taken, c.n_taken));
         }
         if (!picker.found()) return;
         chosen = picker.index();
@@ -148,7 +158,10 @@ bool avatar_take(const AvatarPick& pick, const AvatarHandle* taken, int n_taken,
     c.taken = taken;
     c.n_taken = n_taken;
     c.mask = mask;
+    c.own = world_player_object();
     probe_with_aircraft(take_cb, &c);
+    if (c.own_unflagged)
+        LOG("avatar: our own jet %p is not the aircraft tracker's player; it was kept out of the avatar choice", c.own);
     if (!c.found) {
         put_why(why, why_cap, "no free friendly AI aircraft to use as an avatar");
         return false;

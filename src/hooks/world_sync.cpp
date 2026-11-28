@@ -1516,6 +1516,11 @@ void mark_one(const Om& om, uint32_t id, uint32_t player, RemoteKind kind, Remot
     const bool resolved = resolve_obj(om, id, &obj, &group);
     // Never the player's jet: by the mission's player id, the aircraft tracker's player, or its player flag.
     if (resolved && (id == player || (group == 1 && (obj == sim_player_object() || has_player_flag(obj))))) {
+        if (id != player)
+            LOG("world: remote: aircraft 0x%08lx (%p) left local as a player (%s) though the mission's player is "
+                "0x%08lx", static_cast<unsigned long>(id), obj,
+                obj == sim_player_object() ? "the aircraft tracker's player" : "its player flag",
+                static_cast<unsigned long>(player));
         ++c->player;
         return;
     }
@@ -2107,6 +2112,9 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         cs.af = module_if(L"AircraftFormation.dll", kAfStamp, kAfSize, "AircraftFormation.dll");
     }
     if (!cs.have_masks) return;
+    BYTE* own_jet = nullptr;  // never written from the stream
+    int own_group = 0;
+    if (!resolve_obj(om, player, &own_jet, &own_group)) own_jet = nullptr;
     auto object_of = [&](uint8_t kind, uint16_t a, uint16_t b, BYTE** obj, int* group) {
         uint32_t id = 0;
         if (kind != 1 && kind != 2) return false;
@@ -2171,6 +2179,15 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
             int group = 0;
             if (!object_of(q.kind, q.a, q.b, &obj, &group)) {
                 ++cs.missing;
+                continue;
+            }
+            if (obj == own_jet || obj == sim_player_object()) {
+                static uint32_t logged_epoch = 0xffffffffu;
+                if (logged_epoch != sim_player_epoch()) {
+                    logged_epoch = sim_player_epoch();
+                    LOG("world: ERR stream: a host state (kind %u, %u:%u) targets our own jet %p; skipped",
+                        static_cast<unsigned>(q.kind), static_cast<unsigned>(q.a), static_cast<unsigned>(q.b), obj);
+                }
                 continue;
             }
             if (client_drives_object(obj) || cs.destroyed.count(net::world_key(q.kind, q.a, q.b))) continue;
@@ -2465,6 +2482,14 @@ void world_avatar_refresh(int peer, void* avatar) {
 }
 
 void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
+    if (avatar && avatar == world_player_object()) {
+        static uint32_t logged_epoch = 0xffffffffu;
+        if (logged_epoch != sim_player_epoch()) {
+            logged_epoch = sim_player_epoch();
+            LOG("world: ERR avatar: a peer's state targets our own jet %p; skipped", avatar);
+        }
+        return;
+    }
     net::AvatarStateMsg m;
     if (net::decode(data, len, m) != net::Status::Ok || m.peer > 4 || !avatar) return;
     if (g_arx_epoch != sim_player_epoch()) {  // a new flight: nothing applied yet
