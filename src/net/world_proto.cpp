@@ -57,6 +57,18 @@ uint8_t peek_world_type(const uint8_t* data, size_t len) {
 
 size_t encode(const LobbyStatusMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::LobbyStatus, o, c); }
 size_t encode(const LobbyRosterMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::LobbyRoster, o, c); }
+size_t encode(const LobbyInventoryMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::LobbyInventory, o, c); }
+Status decode(const uint8_t* d, size_t n, LobbyInventoryMsg& out) {
+    const Status s = decode_fixed(d, n, WorldType::LobbyInventory, out);
+    if (s != Status::Ok) return s;
+    if (out.count > kInventoryPerChunk || out.total > kMaxInventory || out.first + out.count > out.total || out.tag == 0)
+        return Status::BadType;
+    for (int i = 0; i < out.count; ++i) {
+        if (out.e[i].kind != 'A' && out.e[i].kind != 'G') return Status::BadType;
+        out.e[i].name[sizeof(out.e[i].name) - 1] = 0;
+    }
+    return Status::Ok;
+}
 Status decode(const uint8_t* d, size_t n, LobbyStatusMsg& out) {
     const Status s = decode_fixed(d, n, WorldType::LobbyStatus, out);
     if (s == Status::Ok) out.callsign[sizeof(out.callsign) - 1] = 0;

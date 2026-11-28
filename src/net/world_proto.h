@@ -34,8 +34,10 @@ enum class WorldType : uint8_t {
     HandoverDone = 38,    // the receiver's answer, reliable
     LobbyStatus = 39,     // client to host, reliable, on every mission-fetch round: callsign, ready, seat wish, content
     LobbyRoster = 40,     // host to client, reliable, the answer: the pilots, seats, mission summary and Launch count
+    LobbyInventory = 41,  // client to host, reliable: its aircraft and ground object types with hashes, in chunks (once a
+                          // session, and again while the roster says the host lacks some)
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 40;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 41;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -47,6 +49,11 @@ size_t encode(const LobbyRosterMsg& m, uint8_t* out, size_t cap);
 /// <summary>Decoders NUL-terminate the strings.</summary>
 Status decode(const uint8_t* data, size_t len, LobbyStatusMsg& out);
 Status decode(const uint8_t* data, size_t len, LobbyRosterMsg& out);
+struct LobbyInventoryMsg;
+size_t encode(const LobbyInventoryMsg& m, uint8_t* out, size_t cap);
+/// <summary>Checks counts (first + count <= total <= kMaxInventory, count <= kInventoryPerChunk, kinds 'A'/'G') and
+/// NUL-terminates the names.</summary>
+Status decode(const uint8_t* data, size_t len, LobbyInventoryMsg& out);
 
 /// <summary>Payload bytes per chunk: a chunk packet (972 bytes) stays under ENet's 1,024-byte limit and one datagram.</summary>
 inline constexpr size_t kMissionChunkData = 960;
@@ -132,6 +139,26 @@ struct LobbyRosterMsg {
     LobbyRow rows[kLobbyRows];
     uint32_t session;     // random per host session: a client still joined when the host hosts again sees it change
     uint32_t content_hash;  // the host's (hooks/content_hash), shown to a client it keeps out
+    uint16_t inventory_have;  // entries of this pilot's inventory the host holds (it sends all again while short)
+    uint16_t pad;
+};
+/// <summary>One type of a pilot's inventory: kind 'A' aircraft or 'G' ground object, the content list's hash.</summary>
+struct InventoryEntry {
+    uint8_t kind;
+    uint8_t pad[3];
+    uint32_t hash;
+    char name[40];
+};
+inline constexpr int kInventoryPerChunk = 18;
+inline constexpr uint16_t kMaxInventory = 4096;
+struct LobbyInventoryMsg {
+    Header h;
+    uint32_t tag;
+    uint16_t total;
+    uint16_t first;
+    uint8_t count;
+    uint8_t pad[3];
+    InventoryEntry e[kInventoryPerChunk];
 };
 struct MissionChunkHead {
     Header h;
@@ -140,7 +167,8 @@ struct MissionChunkHead {
     uint16_t len;  // payload bytes that follow (1..kMissionChunkData; only the last chunk may be shorter)
 };
 #pragma pack(pop)
-static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 288);
+static_assert(sizeof(LobbyStatusMsg) == 35 && sizeof(LobbyRow) == 18 && sizeof(LobbyRosterMsg) == 292);
+static_assert(sizeof(InventoryEntry) == 48 && sizeof(LobbyInventoryMsg) == 880);
 static_assert(sizeof(MissionRequestMsg) == 12);  // 4:4 have id, 8:4 tag
 static_assert(sizeof(MissionOfferMsg) == 23);    // 4:4 id, 8:4 packed, 12:4 raw, 16:2 chunk, 18:2 count, 20:1 status,
                                                  // 21:1 seat, 22:1 host seat

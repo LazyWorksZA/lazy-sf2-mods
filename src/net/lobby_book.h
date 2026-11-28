@@ -116,6 +116,22 @@ public:
         return p ? p->seat : -1;
     }
     int host_seat() const { return seat_of(kHostTag); }
+    /// <summary>Whether tag has a row made from this address.</summary>
+    bool owns(uint32_t tag, uint64_t from) const {
+        const Pilot* p = find(tag);
+        return p && p->tag != kHostTag && p->from == from;
+    }
+    /// <summary>The client rows' tags and callsigns (the host's left out).</summary>
+    size_t client_tags(uint32_t* tags, const char** callsigns, size_t cap) const {
+        size_t k = 0;
+        for (size_t i = 0; i < n_ && k < cap; ++i) {
+            if (p_[i].tag == kHostTag) continue;
+            tags[k] = p_[i].tag;
+            callsigns[k] = p_[i].callsign;
+            ++k;
+        }
+        return k;
+    }
     /// <summary>The row of tag: its seat and when it was last heard of; false if there is none.</summary>
     bool info(uint32_t tag, int* seat, uint64_t* seen_ms) const {
         const Pilot* p = find(tag);

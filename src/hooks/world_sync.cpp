@@ -23,6 +23,7 @@
 
 #include "hooks/aircraft_side.h"
 #include "hooks/hook_util.h"
+#include "hooks/gen_filter.h"
 #include "hooks/mission_content.h"
 #include "hooks/game_files.h"
 #include "hooks/hooks.h"
@@ -2880,6 +2881,8 @@ uint32_t new_tag() {
 }
 }  // namespace
 
+bool g_inventory_sent = false;  // join: the inventory was handed to this session's fetch
+
 bool world_session_begin(bool host, const std::wstring& dir, const char* callsign, uint32_t content_hash) {
     if (g_mode != Mode::Off || g_join || g_remote || g_seat >= 0) {
         LOG("world: a session is already configured (LAZYSF2_WORLD_* or an earlier session); not changed");
@@ -2887,6 +2890,8 @@ bool world_session_begin(bool host, const std::wstring& dir, const char* callsig
     }
     g_session_dir = dir;
     g_seed_from_env = false;
+    g_inventory_sent = false;
+    gen_inventory_start();  // once per game run, on a worker: the shared-content generator needs every PC's
     g_load_path.clear();
     g_fetched_id = g_flying_id = 0;
     g_host_seat = 0;
@@ -2977,6 +2982,22 @@ ContentCheck world_lobby_content(uint32_t mission_id, std::string* text) {
 }
 
 bool world_lobby_roster(net::LobbyRosterMsg* out, uint32_t* rtt_ms, uint64_t* age_ms) {
+    if (g_join && g_fetch && !g_inventory_sent) {
+        std::vector<ContentEntry> inv;
+        if (gen_inventory(&inv, nullptr)) {
+            g_inventory_sent = true;
+            std::vector<net::InventoryEntry> wire;
+            for (const auto& e : inv) {
+                if (e.name.size() >= sizeof(net::InventoryEntry::name)) continue;  // too long for the wire: not offered
+                net::InventoryEntry w{};
+                w.kind = static_cast<uint8_t>(e.kind);
+                w.hash = e.hash;
+                std::memcpy(w.name, e.name.c_str(), e.name.size());
+                wire.push_back(w);
+            }
+            g_fetch->set_inventory(std::move(wire));
+        }
+    }
     return g_fetch && g_fetch->roster(out, rtt_ms, age_ms);
 }
 void world_lobby_ready(bool ready, uint32_t mission_id) {

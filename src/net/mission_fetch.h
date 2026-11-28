@@ -42,6 +42,9 @@ public:
     /// <summary>A mission received since the last take(): true once per mission.</summary>
     bool take(std::vector<uint8_t>* packed, MissionOfferMsg* offer);
     /// <summary>The mission id the host named in its latest offer (0: none yet). Any thread.</summary>
+    /// <summary>Any thread: this pilot's inventory (lobby mode), sent once the host has proved itself and again while
+    /// the roster says the host holds fewer entries. At most kMaxInventory entries are kept.</summary>
+    void set_inventory(std::vector<InventoryEntry> entries);
     /// <summary>Any thread: a whole mission is waiting for take().</summary>
     bool has_fresh() const;
     /// <summary>Any thread: ask for the host's mission again in full at the next round (the last one could not be
@@ -93,6 +96,8 @@ private:
     std::atomic<bool> ready_{false}, poke_{false}, leaving_{false}, left_{false};
     std::atomic<uint32_t> ready_mission_{0};
     std::atomic<bool> refetch_{false};
+    std::mutex inv_mx_;
+    std::vector<InventoryEntry> inventory_;  // under inv_mx_
     std::atomic<int> want_{-1};
     std::atomic<uint32_t> wish_answer_{0};  // 0x10000 | seat << 8 | result, 0: none
     std::atomic<uint32_t> rtt_{0};

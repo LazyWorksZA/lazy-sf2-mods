@@ -220,4 +220,9 @@ inline std::string content_diff(const std::vector<ContentEntry>& host, const std
     return out;
 }
 
+/// <summary>mission_content.cpp: the hash of an aircraft ('A') or ground object ('G') type from its own folder (a
+/// type record's data path, absolute or relative to the game folder), as the content list hashes it. 0 if missing.
+/// </summary>
+uint32_t content_hash_in(char kind, const std::wstring& dir, const std::string& name);
+
 }  // namespace LazyWorks::SF2Patch::hooks

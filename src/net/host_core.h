@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -165,6 +166,9 @@ public:
     /// <summary>Game thread, at the flight's start: the host's seat in a flight of members, from the book (-1: none).
     /// </summary>
     int lobby_host_seat_for(int members);
+    /// <summary>Any thread: the complete inventories of the pilots in the lobby (in book order), and the callsigns of
+    /// those whose inventory has not all arrived.</summary>
+    void lobby_inventories(std::vector<std::vector<InventoryEntry>>* complete, std::vector<std::string>* waiting) const;
     /// <summary>For a log line: the lobby book's view of tag (row, seat, last heard of), into out.</summary>
     void lobby_describe(uint32_t tag, char* out, size_t cap) const;
     uint32_t mission_id() const;
@@ -259,6 +263,16 @@ private:
     uint32_t session_id_ = 0;            // under mission_mx_; drawn by enable_lobby
     /// <summary>Network thread: a client's LobbyStatus, answered with its roster (under mission_mx_).</summary>
     size_t lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* out, size_t cap, bool* content_refused);
+    /// <summary>Network thread: a chunk of a pilot's inventory, kept if the sending address owns the pilot's row.
+    /// </summary>
+    void lobby_inventory_chunk(const LobbyInventoryMsg& m, uint64_t from);
+    struct Inventory {  // under mission_mx_
+        uint32_t tag = 0;
+        uint16_t total = 0, have = 0;
+        std::vector<InventoryEntry> e;
+        std::vector<uint8_t> got;
+    };
+    std::vector<Inventory> inventories_;
     /// <summary>Under mission_mx_: (tag, sending address) pairs whose last status was refused for the build check
     /// (no mission for them). Keyed on both, so another peer cannot get a player's tag refused.</summary>
     struct Refused {

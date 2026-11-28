@@ -10231,6 +10231,40 @@ void lobby_loopback_tests() {
     const HostCore::LobbyView v = core.lobby_view();
     expect(v.clients == 2 && v.host_seat == 0, "the host sees both clients");
     {
+        // Inventories: f1 sends 40 types (three chunks); the host holds them all; f2 has sent none yet.
+        std::vector<InventoryEntry> inv(40);
+        for (size_t i = 0; i < inv.size(); ++i) {
+            inv[i].kind = i % 2 ? 'G' : 'A';
+            inv[i].hash = static_cast<uint32_t>(i + 1);
+            std::snprintf(inv[i].name, sizeof(inv[i].name), "TYPE%02zu", i);
+        }
+        f1.set_inventory(inv);
+        std::vector<std::vector<InventoryEntry>> complete;
+        std::vector<std::string> waiting;
+        const bool got = wait([&] {
+            complete.clear();
+            waiting.clear();
+            core.lobby_inventories(&complete, &waiting);
+            return complete.size() == 1;
+        });
+        expect(got && complete[0].size() == 40 && complete[0][39].hash == 40 && std::strcmp(complete[0][39].name, "TYPE39") == 0 &&
+                   waiting.size() == 1 && waiting[0] == "CHARLIE",
+               "the host holds a pilot's whole inventory (chunked) and names who has not sent one");
+        uint8_t b[sizeof(LobbyInventoryMsg)];
+        LobbyInventoryMsg badinv{};
+        badinv.tag = 1;
+        badinv.total = 5;
+        badinv.first = 4;
+        badinv.count = 2;
+        badinv.e[0].kind = 'A';
+        badinv.e[1].kind = 'A';
+        LobbyInventoryMsg back{};
+        expect(decode(b, encode(badinv, b, sizeof(b)), back) != Status::Ok, "an inventory chunk past its total is refused");
+        badinv.first = 0;
+        badinv.e[1].kind = 'X';
+        expect(decode(b, encode(badinv, b, sizeof(b)), back) != Status::Ok, "an inventory chunk with an unknown kind is refused");
+    }
+    {
         // Another connection (another address) presenting BRAVO's tag gets no roster and changes nothing.
         TestClient spoof;
         spoof.host = enet_host_create(nullptr, 1, kChannelCount, 0, 0);

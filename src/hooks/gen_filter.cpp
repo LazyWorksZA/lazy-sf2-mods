@@ -4,7 +4,11 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "hooks/gen_filter.h"
@@ -23,6 +27,7 @@ constexpr BYTE kPro23[] = {0x55, 0x8b, 0xec, 0x51, 0x8b, 0x0d};
 constexpr BYTE kProPick[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x14, 0x53, 0x8b, 0xd9, 0x8b, 0x83, 0xf8, 0x28, 0x00, 0x00, 0x56};
 constexpr size_t kAircraftSub = 0x6ec, kGroundSub = 0xb24;  // what the pickers pass the availability functions
 constexpr size_t kRecName = 0x04, kGroundCategory = 0xbe4;
+constexpr size_t kAircraftPath = 0x204, kGroundPath = 0x184;  // the type's data file / folder (260 wide characters)
 constexpr DWORD kOmStamp = 0x51d21fa8, kOmSize = 0x28000, kOmManager = 0x234d0, kOmVtable = 0x1d55c;
 
 using Avail1_t = int(__cdecl*)(int sub, int nation, int* date);
@@ -75,6 +80,7 @@ struct Rec {
     uintptr_t ptr;
     short category;
     wchar_t name[64];
+    wchar_t path[260];
 };
 constexpr int kMaxRecs = 20000;
 
@@ -119,6 +125,13 @@ int read_class(const wchar_t* prefix, bool ground, Rec* out) {
             }
             o.name[k] = 0;
             if (k == 0) return -1;
+            const wchar_t* path = reinterpret_cast<const wchar_t*>(r + (ground ? kGroundPath : kAircraftPath));
+            int p = 0;
+            for (; p < 259 && path[p]; ++p) {
+                if (path[p] < 0x20) return -1;
+                o.path[p] = path[p];
+            }
+            o.path[p] = 0;
         }
         return count;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -132,7 +145,93 @@ std::string narrow_name(const wchar_t* w) {
     return s;
 }
 
+// A record's folder: its data path, without a file name when it names an .ini.
+std::wstring record_dir(const wchar_t* path) {
+    std::wstring p(path);
+    if (p.size() > 4 && _wcsicmp(p.c_str() + p.size() - 4, L".ini") == 0) {
+        const size_t slash = p.find_last_of(L"\\/");
+        p.resize(slash == std::wstring::npos ? 0 : slash);
+    }
+    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    return p;
+}
+
 }  // namespace
+
+std::vector<ContentEntry> gen_local_inventory(std::string* why) {
+    std::vector<ContentEntry> out;
+    if (!is_expected_build(GetModuleHandleW(L"ObjectManager.dll"), kOmStamp, kOmSize, "ObjectManager.dll")) {
+        *why = "ObjectManager.dll is not the expected build";
+        return out;
+    }
+    std::vector<Rec> recs(kMaxRecs);
+    for (const bool ground : {false, true}) {
+        const int n = read_class(ground ? L"GroundObject" : L"AircraftObject", ground, recs.data());
+        if (n < 0) {
+            *why = ground ? "the ground object type records are not as expected" : "the aircraft type records are not as expected";
+            out.clear();
+            return out;
+        }
+        for (int i = 0; i < n; ++i) {
+            const std::string name = narrow_name(recs[i].name);
+            if (!content_name_ok(name)) continue;
+            out.push_back({ground ? 'G' : 'A', name, content_hash_in(ground ? 'G' : 'A', record_dir(recs[i].path), name)});
+        }
+    }
+    return out;
+}
+
+namespace {
+struct InventoryJob {
+    std::mutex mx;
+    bool done = false;
+    std::vector<ContentEntry> entries;
+    std::string why;
+};
+std::shared_ptr<InventoryJob> g_job;  // menu thread sets it once; the worker keeps its own reference
+}  // namespace
+
+void gen_inventory_start() {
+    if (g_job) return;
+    g_job = std::make_shared<InventoryJob>();
+    std::shared_ptr<InventoryJob> job = g_job;
+    try {
+        std::thread([job] {
+            const ULONGLONG t0 = GetTickCount64();
+            std::string why;
+            std::vector<ContentEntry> e = gen_local_inventory(&why);
+            size_t aircraft = 0, missing = 0;
+            for (const auto& x : e) {
+                aircraft += x.kind == 'A';
+                missing += x.hash == 0;
+            }
+            if (e.empty())
+                LOG("gen filter: this PC's inventory could not be built (%s)", why.c_str());
+            else
+                LOG("gen filter: this PC's inventory: %zu aircraft and %zu ground object types (%zu without their files) in "
+                    "%llu ms",
+                    aircraft, e.size() - aircraft, missing, static_cast<unsigned long long>(GetTickCount64() - t0));
+            std::lock_guard<std::mutex> lock(job->mx);
+            job->entries = std::move(e);
+            job->why = why;
+            job->done = true;
+        }).detach();
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(g_job->mx);
+        g_job->why = "no thread";
+        g_job->done = true;
+    }
+}
+
+bool gen_inventory(std::vector<ContentEntry>* out, std::string* why) {
+    std::shared_ptr<InventoryJob> job = g_job;
+    if (!job) return false;
+    std::lock_guard<std::mutex> lock(job->mx);
+    if (!job->done) return false;
+    *out = job->entries;
+    if (why) *why = job->why;
+    return true;
+}
 
 bool gen_filter_apply(const SharedTypes& s, std::string* why) {
     gen_filter_clear();

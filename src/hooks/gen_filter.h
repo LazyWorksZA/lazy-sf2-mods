@@ -86,6 +86,15 @@ inline bool shared_has(const std::vector<std::string>& sorted, const std::string
 /// detours return "not available" for the others). False, with *why, when the type records are not as analysed:
 /// nothing is filtered then (fails closed: the caller must not fly the mission as filtered).</summary>
 bool gen_filter_apply(const SharedTypes& s, std::string* why);
+/// <summary>Any thread (slow: it reads every type's files): this PC's aircraft and ground object types, each hashed
+/// from the folder its type record names (as the game found it). Empty, with *why, when the records are not as
+/// analysed.</summary>
+std::vector<ContentEntry> gen_local_inventory(std::string* why);
+/// <summary>Menu thread: builds this PC's inventory on a worker thread, once per game run (types do not change while
+/// the game runs). Later calls do nothing.</summary>
+void gen_inventory_start();
+/// <summary>Any thread: the inventory once built (true), else false; *why when it could not be built.</summary>
+bool gen_inventory(std::vector<ContentEntry>* out, std::string* why);
 /// <summary>Back to stock picking.</summary>
 void gen_filter_clear();
 bool gen_filter_active();

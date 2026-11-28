@@ -1,5 +1,7 @@
 #include "net/mission_fetch.h"
 
+#include <algorithm>
+
 #include "net/name_lookup.h"
 
 #include <enet/enet.h>
@@ -87,6 +89,12 @@ void MissionFetch::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
+void MissionFetch::set_inventory(std::vector<InventoryEntry> entries) {
+    if (entries.size() > kMaxInventory) entries.resize(kMaxInventory);
+    std::lock_guard<std::mutex> lock(inv_mx_);
+    inventory_ = std::move(entries);
+}
+
 bool MissionFetch::has_fresh() const {
     std::lock_guard<std::mutex> lock(mx_);
     return fresh_;
@@ -159,6 +167,7 @@ void MissionFetch::run() {
         };
         uint64_t t0 = ms_now(), last_rx = t0;
         uint64_t status_sent = t0;
+        bool inventory_sent = false;
         while (!stop_.load() && !round_done && !refused) {
             ENetEvent ev;
             const int r = enet_host_service(host, &ev, 10);
@@ -243,6 +252,25 @@ void MissionFetch::run() {
                             have_roster_ = true;
                             roster_ms_ = now;
                         }
+                        // The inventory, while the host holds less of it than there is (chunks, reliable, in order).
+                        {
+                            std::lock_guard<std::mutex> lock(inv_mx_);
+                            const size_t total = inventory_.size();
+                            if (total && rr.inventory_have != total && !inventory_sent) {
+                                inventory_sent = true;
+                                LobbyInventoryMsg im{};
+                                im.tag = tag_;
+                                im.total = static_cast<uint16_t>(total);
+                                uint8_t ib[sizeof(LobbyInventoryMsg)];
+                                for (size_t first = 0; first < total; first += kInventoryPerChunk) {
+                                    im.first = static_cast<uint16_t>(first);
+                                    im.count = static_cast<uint8_t>(std::min<size_t>(kInventoryPerChunk, total - first));
+                                    for (int i = 0; i < im.count; ++i) im.e[i] = inventory_[first + static_cast<size_t>(i)];
+                                    send(ib, encode(im, ib, sizeof(ib)));
+                                }
+                                say("net: mission fetch: sent this PC's inventory (%zu types) to the host", total);
+                            }
+                        }
                         rtt_.store(static_cast<uint32_t>(now - status_sent));
                         if (wish >= 0) {
                             int expected = wish;
@@ -295,7 +323,7 @@ void MissionFetch::run() {
         }
         // Leave between asks: a waiting client holds no host slot (the host keeps its seat by tag while free).
         if (connected) {
-            enet_peer_disconnect(peer, 0);
+            enet_peer_disconnect_later(peer, 0);  // _later: what is still queued (inventory chunks) goes first
             for (int i = 0; i < 20; ++i) {
                 ENetEvent ev;
                 const int r = enet_host_service(host, &ev, 10);

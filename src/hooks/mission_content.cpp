@@ -45,10 +45,22 @@ bool read_loose(const std::wstring& path, std::vector<uint8_t>* out) {
 // Where the first file of the entry being hashed was found (for the log): the game's own order, see
 // lazy-sf2-recon: recon-notes §21.4 and the start-up table (the player's folder overrides the game folder; the file
 // manager's Open +0x94e0 tries the loose file, then the mounted cats by bare name, newest cat first).
-const char* g_source = nullptr;
+thread_local const char* g_source = nullptr;  // per thread: the inventory is built on a worker
 
 // rel: a path under the game folder, as "Objects\Aircraft\F-4E\F-4E.ini".
 bool read_content_file(const std::wstring& rel, std::vector<uint8_t>* out) {
+    if (rel.size() > 2 && rel[1] == L':') {  // a type record's own folder (absolute): that loose file, else the cats
+        const DWORD a = GetFileAttributesW(rel.c_str());
+        const bool loose = a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+        if (!(loose ? read_loose(rel, out) : read_game_file(rel, *out))) return false;
+        if (!g_source) {
+            const std::wstring user = config::game_data_dir();
+            g_source = !loose ? "a cat"
+                       : !user.empty() && _wcsnicmp(rel.c_str(), user.c_str(), user.size()) == 0 ? "mod folder"
+                                                                                               : "game folder";
+        }
+        return true;
+    }
     const std::wstring user = config::game_data_dir();
     if (!user.empty() && read_loose(user + L"\\" + rel, out)) {
         if (!g_source) g_source = "mod folder";
@@ -127,7 +139,7 @@ struct WeaponIndex {
     const char* source = nullptr;  // where WeaponData.ini was found
     acmi::Ini ini;
 };
-WeaponIndex* g_weapons = nullptr;  // menu thread: set for the duration of mission_content / mission_content_check
+thread_local WeaponIndex* g_weapons = nullptr;  // menu thread: set for the duration of mission_content / mission_content_check
 
 uint32_t hash_weapon(const std::string& name) {
     WeaponIndex local;
@@ -223,6 +235,14 @@ uint32_t ground_pool_hash() {
 }
 
 }  // namespace
+
+uint32_t content_hash_in(char kind, const std::wstring& dir, const std::string& name) {
+    g_source = nullptr;
+    if (!content_name_ok(name) || dir.empty()) return 0;
+    if (kind == 'A') return hash_object(dir, name, kAircraftFiles);
+    if (kind == 'G') return hash_object(dir, name, {});
+    return 0;
+}
 
 uint32_t content_entry_hash(char kind, const std::string& name, const char** source) {
     g_source = nullptr;

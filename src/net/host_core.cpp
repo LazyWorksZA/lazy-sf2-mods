@@ -291,12 +291,58 @@ size_t HostCore::lobby_answer(const LobbyStatusMsg& s, uint64_t from, uint8_t* o
     r.launch_seq = launch_seq_;
     r.session = session_id_;
     r.content_hash = content_hash_;
+    for (const Inventory& x : inventories_)
+        if (x.tag == s.tag) r.inventory_have = x.have;
     r.members = static_cast<uint8_t>(book_.members());
     const int seat = book_.seat_of(s.tag);
     r.your_seat = seat >= 0 ? static_cast<uint8_t>(seat) : kNoSeat;
     std::memcpy(r.summary, summary_, sizeof(r.summary));
     r.count = static_cast<uint8_t>(book_.rows(r.rows, s.tag));
     return encode(r, out, cap);
+}
+
+void HostCore::lobby_inventory_chunk(const LobbyInventoryMsg& m, uint64_t from) {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    if (!book_.owns(m.tag, from)) return;  // only the pilot's own address fills its inventory
+    Inventory* inv = nullptr;
+    for (Inventory& x : inventories_)
+        if (x.tag == m.tag) inv = &x;
+    if (!inv || inv->total != m.total) {
+        if (!inv) {
+            if (inventories_.size() >= LobbyBook::kMax) return;
+            inventories_.emplace_back();
+            inv = &inventories_.back();
+        }
+        inv->tag = m.tag;
+        inv->total = m.total;
+        inv->have = 0;
+        inv->e.assign(m.total, InventoryEntry{});
+        inv->got.assign(m.total, 0);
+    }
+    for (int i = 0; i < m.count; ++i) {
+        const size_t at = static_cast<size_t>(m.first) + static_cast<size_t>(i);
+        inv->e[at] = m.e[i];
+        if (!inv->got[at]) {
+            inv->got[at] = 1;
+            ++inv->have;
+        }
+    }
+}
+
+void HostCore::lobby_inventories(std::vector<std::vector<InventoryEntry>>* complete, std::vector<std::string>* waiting) const {
+    std::lock_guard<std::mutex> lock(mission_mx_);
+    uint32_t tags[LobbyBook::kMax];
+    const char* names[LobbyBook::kMax];
+    const size_t n = book_.client_tags(tags, names, LobbyBook::kMax);
+    for (size_t i = 0; i < n; ++i) {
+        const Inventory* inv = nullptr;
+        for (const Inventory& x : inventories_)
+            if (x.tag == tags[i]) inv = &x;
+        if (inv && inv->total > 0 && inv->have == inv->total)
+            complete->push_back(inv->e);
+        else
+            waiting->push_back(names[i]);
+    }
 }
 
 void HostCore::lobby_describe(uint32_t tag, char* out, size_t cap) const {
@@ -549,6 +595,13 @@ void HostCore::run() {
             if (!push_in(e, true)) drop(n_queue_);
             return;
         }
+        if (wt == static_cast<uint8_t>(WorldType::LobbyInventory)) {
+            LobbyInventoryMsg im;
+            if (channel != kChannelReliable || decode(data, len, im) != Status::Ok) return drop(n_format_);
+            if (!lobby_ || !slot_tag[slot] || im.tag != slot_tag[slot]) return drop(n_state_);  // after its status
+            lobby_inventory_chunk(im, (static_cast<uint64_t>(peers[slot]->address.host) << 16) | peers[slot]->address.port);
+            return;
+        }
         if (wt == static_cast<uint8_t>(WorldType::LobbyStatus)) {  // answered here, like a mission request
             LobbyStatusMsg ls;
             if (channel != kChannelReliable || decode(data, len, ls) != Status::Ok || ls.tag == 0) return drop(n_format_);
@@ -692,7 +745,10 @@ void HostCore::run() {
 
     auto handle_packet = [&](int slot, uint8_t channel, const uint8_t* data, size_t len) {
         n_received_.fetch_add(1, std::memory_order_relaxed);
-        if (len > kMaxPacket) return drop(n_format_);
+        // Inventory chunks are answered on this thread and never queued: the only message over the queue's size.
+        if (len > kMaxPacket && !(len == sizeof(LobbyInventoryMsg) &&
+                                  peek_world_type(data, len) == static_cast<uint8_t>(WorldType::LobbyInventory)))
+            return drop(n_format_);
         if (!authed[slot]) return handle_auth(slot, channel, data, len);
         if (const uint8_t wt = peek_world_type(data, len)) return handle_world(slot, channel, wt, data, len);
         MsgType type{};
@@ -1009,6 +1065,12 @@ void HostCore::run() {
             next_report = now + 1000;
             if (lobby_) {
                 std::lock_guard<std::mutex> lock(mission_mx_);
+                // Inventories go with their pilots' rows.
+                for (size_t i = inventories_.size(); i > 0; --i) {
+                    int seat = 0;
+                    uint64_t seen = 0;
+                    if (!book_.info(inventories_[i - 1].tag, &seat, &seen)) inventories_.erase(inventories_.begin() + static_cast<long>(i - 1));
+                }
                 if (const int gone = book_.expire(now))
                     say("lobby: %d pilot(s) not heard of for %llu s; their rows and seats dropped", gone,
                         static_cast<unsigned long long>(LobbyBook::kExpireMs / 1000));
