@@ -153,6 +153,15 @@ Status decode_hit(const uint8_t* d, size_t n, WorldType t, HitMsg& out) {
     return Status::Ok;
 }
 size_t encode(const AvatarStateMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::AvatarState, o, c); }
+size_t encode(const JetAnimMsg& m, uint8_t* o, size_t c) { return encode_fixed(m, WorldType::JetAnim, o, c); }
+Status decode(const uint8_t* d, size_t n, JetAnimMsg& out) {
+    JetAnimMsg m;
+    const Status s = decode_fixed(d, n, WorldType::JetAnim, m);
+    if (s != Status::Ok) return s;
+    if (m.engine_count > 8 || (m.flags & ~(kAnimGun1 | kAnimGun2)) || (m.config & ~kAvatarConfigMask)) return Status::BadType;
+    out = m;
+    return Status::Ok;
+}
 Status decode(const uint8_t* d, size_t n, AvatarStateMsg& out) { return decode_fixed(d, n, WorldType::AvatarState, out); }
 Status decode(const uint8_t* d, size_t n, MissionRequestMsg& out) {
     return decode_fixed(d, n, WorldType::MissionRequest, out);

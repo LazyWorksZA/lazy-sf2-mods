@@ -36,8 +36,10 @@ enum class WorldType : uint8_t {
     LobbyRoster = 40,     // host to client, reliable, the answer: the pilots, seats, mission summary and Launch count
     LobbyInventory = 41,  // client to host, reliable: its aircraft and ground object types with hashes, in chunks (once a
                           // session, and again while the roster says the host lacks some)
+    JetAnim = 42,         // both ways, unreliable, 20 Hz: a player's control inputs, throttle and configuration, so its
+                          // copies' own systems move the surfaces, nosewheel, flaps, nozzle and afterburner (v7)
 };
-inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 41;
+inline constexpr uint8_t kWorldTypeFirst = 20, kWorldTypeLast = 42;
 
 /// <summary>The type byte of a v3 packet with a world type, or 0 (not one, or a bad header).</summary>
 uint8_t peek_world_type(const uint8_t* data, size_t len);
@@ -644,6 +646,43 @@ Status decode(const uint8_t* data, size_t len, LoadoutMsg& out);
 size_t encode(const ConsumablesMsg& m, uint8_t* out, size_t cap);
 /// <summary>Checks the size and guns <= 4.</summary>
 Status decode(const uint8_t* data, size_t len, ConsumablesMsg& out);
+
+#pragma pack(push, 1)
+/// <summary>A player's jet inputs (v7), sent unreliable at 20 Hz: the control axes the game's control surfaces and
+/// nosewheel steering read (input channels 0..2 and their trims 9..11), the throttle (channel 3, which drives the
+/// nozzle and afterburner), the engines, gun triggers and configuration bits. Its avatars get them in their input
+/// array and state word, and their own systems animate.</summary>
+struct JetAnimMsg {
+    Header h;
+    uint16_t peer;  // the owner: 0 the host, k client k (the host sets it from the connection)
+    uint16_t seq;   // per owner, increasing (wraps)
+    int8_t axis[6];  // pitch, roll, yaw, pitch trim, roll trim, yaw trim: -127..127 = -1..1
+    uint8_t throttle;  // 0..255 = 0..1
+    uint8_t engines;   // bit i: engine i runs
+    uint8_t engine_count;  // 0..8
+    uint8_t flags;     // kAnimGun1, kAnimGun2
+    uint16_t config;   // state word & kAvatarConfigMask
+};
+#pragma pack(pop)
+static_assert(sizeof(JetAnimMsg) == 20);  // 4:2 peer, 6:2 seq, 8:6 axes, 14:1 throttle, 15:1 engines, 16:1 count,
+                                          // 17:1 flags, 18:2 config
+inline constexpr uint8_t kAnimGun1 = 0x1, kAnimGun2 = 0x2;
+inline constexpr size_t kAnimAxes = 6;
+size_t encode(const JetAnimMsg& m, uint8_t* out, size_t cap);
+/// <summary>Checks the size, engine count <= 8, no unknown flag or configuration bit.</summary>
+Status decode(const uint8_t* data, size_t len, JetAnimMsg& out);
+
+/// <summary>A control axis (-1..1) as the wire's -127..127: clamped, rounded, not finite gives 0.</summary>
+inline int8_t axis_to_wire(float v) {
+    if (!(v == v) || v > 1e30f || v < -1e30f) return 0;
+    if (v > 1.0f) v = 1.0f;
+    if (v < -1.0f) v = -1.0f;
+    const float s = v * 127.0f;
+    return static_cast<int8_t>(s < 0 ? s - 0.5f : s + 0.5f);
+}
+inline float axis_from_wire(int8_t w) { return w < -127 ? -1.0f : static_cast<float>(w) / 127.0f; }
+/// <summary>Whether seq is newer than last (16-bit wrap: within half the range ahead).</summary>
+inline bool seq16_newer(uint16_t last, uint16_t seq) { return static_cast<int16_t>(static_cast<uint16_t>(seq - last)) > 0; }
 
 /// <summary>FNV-1a of an ASCII weapon name, folded to 16 bits; never 0.</summary>
 inline uint16_t weapon_name_hash(const char* s) {

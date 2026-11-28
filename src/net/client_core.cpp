@@ -388,6 +388,7 @@ void ClientCore::run() {
         HandoverDoneMsg hdm;
         CountermeasureMsg cmm;
         ConsumablesMsg com;
+        JetAnimMsg jam;
         const bool ok =
             (wt == static_cast<uint8_t>(WorldType::WorldSnapshot) && channel == kChannelReliable &&
              decode(data, len, snm) == Status::Ok) || (wt == static_cast<uint8_t>(WorldType::WorldStates) && channel == kChannelUnreliable &&
@@ -404,6 +405,8 @@ void ClientCore::run() {
                          decode(data, len, lom) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::Consumables) && channel == kChannelUnreliable &&
                          decode(data, len, com) == Status::Ok) ||
+                        (wt == static_cast<uint8_t>(WorldType::JetAnim) && channel == kChannelUnreliable &&
+                         decode(data, len, jam) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::DamageState) && channel == kChannelReliable &&
                          decode(data, len, dsm) == Status::Ok) ||
                         (wt == static_cast<uint8_t>(WorldType::Countermeasure) && channel == kChannelReliable &&

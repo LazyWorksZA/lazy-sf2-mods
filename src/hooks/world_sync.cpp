@@ -2166,6 +2166,11 @@ void world_client_apply(const uint8_t* data, size_t len, double host_now) {
         if (net::decode(data, len, am) == net::Status::Ok) world_avatar_apply(data, len, client_avatar_object(am.peer));
         return;
     }
+    if (wt == static_cast<uint8_t>(net::WorldType::JetAnim)) {
+        net::JetAnimMsg jm;
+        if (net::decode(data, len, jm) == net::Status::Ok) world_anim_apply(data, len, client_avatar_object(jm.peer));
+        return;
+    }
     if (wt == static_cast<uint8_t>(net::WorldType::WorldStates)) {
         net::WorldStatesHead h;
         const net::WorldObjState* r = nullptr;
@@ -2477,8 +2482,118 @@ JetControls controls_of(const net::AvatarStateMsg& m) {
 }
 }  // namespace
 
+// ---- jet animation inputs (JetAnim, v7) ----
+
+namespace {
+
+struct AnimRx {
+    net::JetAnimMsg m{};
+    bool have = false;
+    bool logged = false;
+    ULONGLONG at = 0;  // wall ms of the newest
+};
+AnimRx g_anim[5];
+uint32_t g_anim_epoch = 0xffffffffu;
+struct AnimTx {
+    uint16_t seq = 0;
+    ULONGLONG next = 0;
+    bool logged = false;
+    uint32_t epoch = 0xffffffffu;
+};
+AnimTx g_anim_tx;
+constexpr ULONGLONG kAnimEveryMs = 50;   // 20 Hz, the State rate
+constexpr ULONGLONG kAnimFreshMs = 1000;  // older: the avatar falls back to the last AvatarState
+
+void anim_epoch_check() {
+    if (g_anim_epoch == sim_player_epoch()) return;
+    g_anim_epoch = sim_player_epoch();
+    for (auto& a : g_anim) a = AnimRx{};
+}
+
+void anim_write(void* avatar, const net::JetAnimMsg& m) {
+    JetAxes a;
+    for (size_t i = 0; i < net::kAnimAxes; ++i) a.v[i] = net::axis_from_wire(m.axis[i]);
+    jet_write_axes(avatar, a);
+    JetControls c;
+    c.throttle = net::throttle_from_wire(m.throttle);
+    c.engines = m.engines;
+    c.engine_count = m.engine_count;
+    c.guns = m.flags & (net::kAnimGun1 | net::kAnimGun2);
+    jet_write_controls(avatar, c);
+    write_config(static_cast<BYTE*>(avatar), m.config);
+}
+
+}  // namespace
+
+void world_anim_tick(void* player, uint16_t own_peer, AnimSendFn send) {
+    if (!player || !send) return;
+    if (g_anim_tx.epoch != sim_player_epoch()) g_anim_tx = AnimTx{0, 0, false, sim_player_epoch()};
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_anim_tx.next) return;
+    g_anim_tx.next = now + kAnimEveryMs;
+    JetAxes a;
+    JetControls c;
+    OwnJet j;
+    if (!jet_read_axes(player, &a) || !jet_read_controls(player, &c) ||
+        !read_own_jet(static_cast<const BYTE*>(player), &j))
+        return;
+    net::JetAnimMsg m{};
+    m.peer = own_peer;
+    m.seq = ++g_anim_tx.seq;
+    for (size_t i = 0; i < net::kAnimAxes; ++i) m.axis[i] = net::axis_to_wire(a.v[i]);
+    m.throttle = net::throttle_to_wire(c.throttle);
+    m.engines = c.engines;
+    m.engine_count = c.engine_count;
+    m.flags = c.guns & (net::kAnimGun1 | net::kAnimGun2);
+    m.config = static_cast<uint16_t>(j.word & net::kAvatarConfigMask);
+    uint8_t buf[sizeof(m)];
+    const size_t n = net::encode(m, buf, sizeof(buf));
+    if (!n || !send(buf, n)) return;
+    if (!g_anim_tx.logged) {
+        g_anim_tx.logged = true;
+        LOG("world: jet animation inputs sent at 20 Hz (first: pitch %d, roll %d, yaw %d /127, throttle %u/255, config "
+            "0x%04x)",
+            m.axis[0], m.axis[1], m.axis[2], static_cast<unsigned>(m.throttle), static_cast<unsigned>(m.config));
+    }
+}
+
+void world_anim_apply(const uint8_t* data, size_t len, void* avatar) {
+    net::JetAnimMsg m;
+    if (net::decode(data, len, m) != net::Status::Ok || m.peer > 4) return;
+    anim_epoch_check();
+    AnimRx& r = g_anim[m.peer];
+    if (r.have && !net::seq16_newer(r.m.seq, m.seq)) return;  // late or repeated: unreliable, any order
+    r.m = m;
+    r.have = true;
+    r.at = GetTickCount64();
+    if (!avatar) return;
+    if (avatar == world_player_object()) {
+        static uint32_t logged_epoch = 0xffffffffu;
+        if (logged_epoch != sim_player_epoch()) {
+            logged_epoch = sim_player_epoch();
+            LOG("world: ERR jet animation: a peer's inputs target our own jet %p; skipped", avatar);
+        }
+        return;
+    }
+    anim_write(avatar, m);
+    if (!r.logged) {
+        r.logged = true;
+        LOG("world: jet animation inputs of peer %u: first received and applied to its avatar %p (pitch %d, roll %d, "
+            "yaw %d /127, throttle %u/255, config 0x%04x)",
+            static_cast<unsigned>(m.peer), avatar, m.axis[0], m.axis[1], m.axis[2], static_cast<unsigned>(m.throttle),
+            static_cast<unsigned>(m.config));
+    }
+}
+
 void world_avatar_refresh(int peer, void* avatar) {
-    if (peer < 0 || peer >= 5 || !avatar || !g_arx_have[peer] || g_arx_epoch != sim_player_epoch()) return;
+    if (peer < 0 || peer >= 5 || !avatar) return;
+    anim_epoch_check();
+    const AnimRx& r = g_anim[peer];
+    if (r.have && GetTickCount64() - r.at <= kAnimFreshMs) {  // the newest inputs, again after the avatar's update
+        anim_write(avatar, r.m);
+        return;
+    }
+    if (!g_arx_have[peer] || g_arx_epoch != sim_player_epoch()) return;
     jet_write_controls(avatar, controls_of(g_arx[peer]));
 }
 

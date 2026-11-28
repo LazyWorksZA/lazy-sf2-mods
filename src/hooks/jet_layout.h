@@ -18,6 +18,8 @@ inline constexpr size_t kSelectedStation = 0x8d0, kGunMask = 0x8e8, kChaffTotal 
 inline constexpr size_t kRemoteFire = 0x918;
 inline constexpr size_t kInputCount = 16;  // AIRCRAFTCONTROLLIST.INI channels the census prints
 inline constexpr size_t kInputThrottle = 3, kInputThrottleLast = 7, kInputGun1 = 12, kInputGun2 = 13, kInputFire = 14;
+// AIRCRAFTCONTROLLIST.INI: PITCH, ROLL, YAW (control surfaces, nosewheel steering) and their trims.
+inline constexpr size_t kInputAxes[6] = {0, 1, 2, 9, 10, 11};
 
 // A list (ObjectComponentClass and the aircraft): +0x04 count, +0x10 array of pointers.
 inline constexpr size_t kListCount = 0x04, kListArray = 0x10;

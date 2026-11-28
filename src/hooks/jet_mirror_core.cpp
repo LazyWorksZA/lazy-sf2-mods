@@ -120,6 +120,32 @@ JetWriteResult jet_write_controls_at(void* obj, uintptr_t ao, const JetControls&
     return r;
 }
 
+bool jet_read_axes_at(const void* obj, uintptr_t ao, JetAxes* out) {
+    if (!ao || !obj) return false;
+    JetAxes a;
+    __try {
+        const float* in = *reinterpret_cast<const float* const*>(static_cast<const BYTE*>(obj) + jet::kInputs);
+        if (!in) return false;
+        for (size_t i = 0; i < 6; ++i) a.v[i] = in[jet::kInputAxes[i]];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    *out = a;
+    return true;
+}
+
+bool jet_write_axes_at(void* obj, uintptr_t ao, const JetAxes& a) {
+    if (!ao || !obj) return false;
+    __try {
+        float* in = *reinterpret_cast<float* const*>(static_cast<BYTE*>(obj) + jet::kInputs);
+        if (!in) return false;
+        for (size_t i = 0; i < 6; ++i) in[jet::kInputAxes[i]] = a.v[i];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 bool jet_takeover_at(void* obj, uintptr_t ao, JetControls* taken) {
     if (!jet_read_controls_at(obj, ao, taken)) return false;
     __try {

@@ -34,6 +34,10 @@ JetWriteResult jet_write_controls(void* obj, const JetControls& c) {
 
 bool jet_takeover(void* obj, JetControls* taken) { return jet_takeover_at(obj, ao_base(), taken); }
 
+bool jet_read_axes(const void* obj, JetAxes* out) { return jet_read_axes_at(obj, ao_base(), out); }
+
+bool jet_write_axes(void* obj, const JetAxes& a) { return jet_write_axes_at(obj, ao_base(), a); }
+
 void jet_clear_triggers(void* obj) {
     JetControls ignored;
     jet_takeover_at(obj, ao_base(), &ignored);  // the same clearing as at takeover

@@ -823,8 +823,10 @@ void on_step(void* aircraft, float /*dt*/, bool is_player) {
                 refresh_clock(wall);
                 pump(aircraft, wall);
                 pump_world();
-                if (g_session && world_client_tag())
+                if (g_session && world_client_tag()) {
                     world_avatar_tick(aircraft, g_id, [](const uint8_t* d, size_t n) { return g_core->send_world(d, n); });
+                    world_anim_tick(aircraft, g_id, [](const uint8_t* d, size_t n) { return g_core->send_world(d, n, false); });
+                }
                 if (g_session && world_client_tag()) {
                     stores_tick(aircraft);
                     damage_tick(aircraft);

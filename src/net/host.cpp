@@ -578,6 +578,15 @@ void handle_message(const HostEvent& e, void* player, double now) {
         }
         return;
     }
+    if (net::peek_world_type(e.data, e.len) == static_cast<uint8_t>(net::WorldType::JetAnim)) {
+        // A client's jet inputs: onto its avatar here (not while parked: the AI flies it), and on to the other clients.
+        if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
+            world_anim_apply(e.data, e.len, g_av[slot].parked ? nullptr : g_av[slot].h.obj);
+            for (int s = 0; s < net::kMaxClients; ++s)
+                if (s != slot && g_av[s].active) g_core->send_world(static_cast<uint8_t>(s), g_av[s].gen, e.data, e.len, false);
+        }
+        return;
+    }
     {
         const uint8_t wt = net::peek_world_type(e.data, e.len);
         if (wt == static_cast<uint8_t>(net::WorldType::Loadout) || wt == static_cast<uint8_t>(net::WorldType::Consumables) ||
@@ -798,6 +807,7 @@ void world_tick(void* player, double now) {
         return g_nclients == 0 || world_send(d, n, true);  // alone: kept for the first joiner
     });
     if (g_nclients > 0) {
+        world_anim_tick(player, 0, [](const uint8_t* d, size_t n) { return world_send(d, n, false); });
         stores_tick(player);
         damage_tick(player);
         mission_clock_tick();

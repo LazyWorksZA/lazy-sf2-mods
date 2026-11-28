@@ -14,6 +14,11 @@ struct JetControls {
     uint8_t guns = 0;          // bit 0: input 12 (primary gun) above 0, bit 1: input 13 (secondary)
 };
 
+/// <summary>The control axes the surfaces and the nosewheel read: pitch, roll, yaw, and their trims (-1..1).</summary>
+struct JetAxes {
+    float v[6] = {};
+};
+
 /// <summary>What a write changed, for log lines.</summary>
 struct JetWriteResult {
     bool ok = false;              // the input array was written
@@ -30,6 +35,11 @@ bool jet_read_controls(const void* obj, JetControls* out);
 /// restarted.
 /// </summary>
 JetWriteResult jet_write_controls(void* obj, const JetControls& c);
+/// <summary>The owner's control axes (input channels 0..2, 9..11). False if not readable.</summary>
+bool jet_read_axes(const void* obj, JetAxes* out);
+/// <summary>Writes the axes into the avatar's input channels; its control surfaces and nosewheel move toward them.</summary>
+bool jet_write_axes(void* obj, const JetAxes& a);
+
 /// <summary>A newly taken avatar: zeroes the gun and fire triggers the AI left in its input array, and returns the
 /// engines' running state as taken (for jet_restore_engines). False if not readable.</summary>
 bool jet_takeover(void* obj, JetControls* taken);
@@ -51,5 +61,7 @@ int jet_list_systems(void* obj, uintptr_t ao, SysRef* out, int max);
 bool jet_read_controls_at(const void* obj, uintptr_t ao, JetControls* out);
 JetWriteResult jet_write_controls_at(void* obj, uintptr_t ao, const JetControls& c, bool inputs);
 bool jet_takeover_at(void* obj, uintptr_t ao, JetControls* taken);
+bool jet_read_axes_at(const void* obj, uintptr_t ao, JetAxes* out);
+bool jet_write_axes_at(void* obj, uintptr_t ao, const JetAxes& a);
 
 }  // namespace LazyWorks::SF2Patch::hooks
