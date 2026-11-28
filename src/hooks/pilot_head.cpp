@@ -50,6 +50,15 @@ void* owner_of(void* self) {
     }
 }
 
+bool g_steer_pending = false;
+
+void log_after(void* self) {
+    if (!g_steer_pending) return;
+    g_steer_pending = false;
+    const float* st = reinterpret_cast<const float*>(static_cast<BYTE*>(self) + kStateOffset);
+    LOG("pilot head: %p after the step: head yaw %.1f pitch %.1f", self, st[1] * 57.29578f, st[0] * 57.29578f);
+}
+
 void log_steer(void* self, void* owner, float yaw, float pitch) {
     const float* st = reinterpret_cast<const float*>(static_cast<BYTE*>(self) + kStateOffset);
     for (const void*& t : g_taken) {
@@ -64,6 +73,7 @@ void log_steer(void* self, void* owner, float yaw, float pitch) {
     if (g_steer_logs >= kMaxSteerLogs || now < g_steer_next) return;
     g_steer_next = now + 1000;
     ++g_steer_logs;
+    g_steer_pending = true;
     LOG("pilot head: %p target yaw %.1f pitch %.1f | head yaw %.1f pitch %.1f (degrees, before this step)", self,
         yaw * 57.29578f, pitch * 57.29578f, st[1] * 57.29578f, st[0] * 57.29578f);
 }
@@ -76,6 +86,7 @@ void __fastcall h_Visual(void* self, void* edx) {
         log_steer(self, owner, yaw, pitch);
         o_Visual(self, edx);
         g_ov = {};
+        log_after(self);
         return;
     }
     o_Visual(self, edx);
@@ -89,7 +100,7 @@ int __fastcall h_SlewPitch(void* state, void* edx, float target, float step, flo
 }
 
 int __fastcall h_SlewYaw(void* state, void* edx, float target, float step, float lo, float hi, char wrap) {
-    if (g_ov.state && static_cast<const float*>(state) == g_ov.state + 1) target = g_ov.yaw;
+    if (g_ov.state && state == g_ov.state) target = g_ov.yaw;  // the yaw call gets the same state pointer; it works on state[1]
     return o_SlewYaw(state, edx, target, step, lo, hi, wrap);
 }
 
