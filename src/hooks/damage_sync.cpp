@@ -209,6 +209,11 @@ bool is_remote_copy(void* obj) {
 
 }  // namespace
 
+void damage_resend() {
+    g_tx.next_poll = 0;
+    g_tx.next_resend = 0;
+}
+
 void damage_tick(void* player) {
     const uintptr_t ao = ao_base();
     if (!player || !ao) return;

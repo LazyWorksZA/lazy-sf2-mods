@@ -102,6 +102,31 @@ struct Avatar {
 Avatar* g_av = nullptr;  // net::kMaxClients entries (see above)
 int g_nclients = 0;
 net::AvatarStateCache g_avatar_states;  // everyone's latest jet state, for joiners (T7/T8)
+// Each client's latest Loadout parts and DamageState, as received (peer set), for joiners: they resend only every 10 s.
+struct JoinCache {
+    uint8_t loadout[4][sizeof(net::LoadoutMsg)];
+    uint16_t loadout_len[4];
+    uint8_t damage[sizeof(net::DamageStateMsg)];
+    uint16_t damage_len;
+};
+JoinCache g_join_cache[net::kMaxClients] = {};
+
+void join_cache_note(int slot, const uint8_t* d, size_t n) {
+    if (slot < 0 || slot >= net::kMaxClients) return;
+    JoinCache& c = g_join_cache[slot];
+    const uint8_t wt = net::peek_world_type(d, n);
+    if (wt == static_cast<uint8_t>(net::WorldType::Loadout)) {
+        net::LoadoutMsg m;
+        if (net::decode(d, n, m) != net::Status::Ok || m.part >= 4 || n > sizeof(c.loadout[0])) return;
+        if (m.part == 0)
+            for (uint16_t& l : c.loadout_len) l = 0;  // a new loadout starts with part 0
+        std::memcpy(c.loadout[m.part], d, n);
+        c.loadout_len[m.part] = static_cast<uint16_t>(n);
+    } else if (wt == static_cast<uint8_t>(net::WorldType::DamageState) && n <= sizeof(c.damage)) {
+        std::memcpy(c.damage, d, n);
+        c.damage_len = static_cast<uint16_t>(n);
+    }
+}
 bool g_world_behind[net::kMaxClients] = {};  // a client whose world events could not be queued (ended after the tick)
 uint32_t g_newest_gen[net::kMaxClients] = {};  // per slot: the newest connection generation seen in a Connect event
 constexpr double kHoldTimeout = 5.0;  // game seconds from the Welcome to the first State, before the avatar is released
@@ -208,6 +233,7 @@ void release(int slot, const char* why, bool aircraft_live, uint8_t bye_reason, 
     Avatar& a = g_av[slot];
     if (!a.active) return;
     g_avatar_states.forget(slot + 1);
+    g_join_cache[slot] = JoinCache{};
     world_avatar_forget(slot + 1);
     hits_forget(slot);
     handover_host_forget(slot);
@@ -424,6 +450,20 @@ void handle_hello(int slot, uint32_t gen, const net::HelloMsg& h, void* player, 
             world_send_to(slot, ab, net::encode(st[i], ab, sizeof(ab)), true);
         }
         g_avatar_states.forget(slot + 1);  // its own comes from it again
+        // The other clients' loadouts and damage as last received, and ours again (to everyone) at the next tick.
+        int nl = 0, nd = 0;
+        for (int s = 0; s < net::kMaxClients; ++s) {
+            if (s == slot || !g_av[s].active) continue;
+            const JoinCache& c = g_join_cache[s];
+            for (int p = 0; p < 4; ++p)
+                if (c.loadout_len[p] && world_send_to(slot, c.loadout[p], c.loadout_len[p], true)) ++nl;
+            if (c.damage_len && world_send_to(slot, c.damage, c.damage_len, true)) ++nd;
+        }
+        world_avatar_resend();
+        stores_resend();
+        damage_resend();
+        LOG("net: client %d: sent it %zu jet state(s), %d loadout part(s) and %d damage state(s) of the others; ours go "
+            "out again now", slot + 1, ns, nl, nd);
         if (have_seat_state) seat_state_send(slot, seat_state);
     }
     LOG("net: client %d \"%s\" (%s) joined: avatar %p %s, spawn (%.0f, %.0f, %.0f) heading %.1f deg, theatre %s; "
@@ -594,6 +634,7 @@ void handle_message(const HostEvent& e, void* player, double now) {
             // A client's stores or consumables: onto its avatar here, and on to the other clients.
             if (slot < net::kMaxClients && g_av[slot].active && g_av[slot].gen == e.gen) {
                 const bool reliable = wt != static_cast<uint8_t>(net::WorldType::Consumables);
+                join_cache_note(slot, e.data, e.len);
                 if (!g_av[slot].parked) {
                     if (wt <= static_cast<uint8_t>(net::WorldType::Consumables)) stores_apply(e.data, e.len, g_av[slot].h.obj);
                     else damage_apply(e.data, e.len, g_av[slot].h.obj);
@@ -948,6 +989,7 @@ bool start_running() {
     for (int s = 0; s < net::kMaxClients; ++s) g_av[s] = Avatar{};
     set_clients(0);
     g_avatar_states.clear();
+    for (auto& c : g_join_cache) c = JoinCache{};
     std::memset(g_world_behind, 0, sizeof(g_world_behind));
     std::memset(g_newest_gen, 0, sizeof(g_newest_gen));
     g_order.reset();

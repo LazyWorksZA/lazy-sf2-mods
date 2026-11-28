@@ -405,6 +405,11 @@ void handle_welcome(void* player, const ClientEvent& e, double wall) {
     if (first) handover_client_welcomed();  // we ran the world until now: offer it, then follow
     for (int i = 0; i < kSources; ++i) g_rm[i].announced = false;
     if (first) {
+        // The host is ready for our jet now: what we sent before (or what changed little since) goes out again.
+        world_avatar_resend();
+        stores_resend();
+        damage_resend();
+        LOG("net: client: welcomed; our jet state, loadout and damage state go out again now");
         g_session = true;
         g_retry_quiet = false;
         g_attempts = 0;

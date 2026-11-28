@@ -418,6 +418,8 @@ void stores_set_fuel(void* obj, float internal, float external) {
     }
 }
 
+void stores_resend() { g_tx.next_loadout = 0; }
+
 void stores_tick(void* player) {
     const uintptr_t ao = ao_base();
     if (!player || !ao) return;

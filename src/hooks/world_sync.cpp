@@ -2457,6 +2457,8 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
     g_atx.sent_at = now;
 }
 
+void world_avatar_resend() { g_atx.have = false; }
+
 void world_avatar_forget(int peer) {
     if (peer >= 0 && peer < 5) {
         g_arx[peer] = net::AvatarStateMsg{};
@@ -2595,6 +2597,7 @@ void world_avatar_refresh(int peer, void* avatar) {
     }
     if (!g_arx_have[peer] || g_arx_epoch != sim_player_epoch()) return;
     jet_write_controls(avatar, controls_of(g_arx[peer]));
+    write_config(static_cast<BYTE*>(avatar), g_arx[peer].config);
 }
 
 void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
@@ -2607,12 +2610,28 @@ void world_avatar_apply(const uint8_t* data, size_t len, void* avatar) {
         return;
     }
     net::AvatarStateMsg m;
-    if (net::decode(data, len, m) != net::Status::Ok || m.peer > 4 || !avatar) return;
+    if (net::decode(data, len, m) != net::Status::Ok || m.peer > 4) return;
     if (g_arx_epoch != sim_player_epoch()) {  // a new flight: nothing applied yet
         g_arx_epoch = sim_player_epoch();
         for (auto& p : g_arx) p = net::AvatarStateMsg{};
         for (bool& h : g_arx_have) h = false;
         g_arx_ao = module_if(L"AircraftObject.dll", kAoStamp, kAoSize, "AircraftObject.dll");
+    }
+    if (!avatar) {  // its avatar is not taken yet: kept, and applied by the avatar's refresh once it is
+        static uint32_t logged = 0;  // bit per peer, per flight
+        static uint32_t logged_epoch = 0xffffffffu;
+        if (logged_epoch != sim_player_epoch()) {
+            logged_epoch = sim_player_epoch();
+            logged = 0;
+        }
+        if (!(logged & (1u << m.peer))) {
+            logged |= 1u << m.peer;
+            LOG("world: jet state of peer %u arrived before its avatar; kept until it is taken",
+                static_cast<unsigned>(m.peer));
+        }
+        g_arx[m.peer] = m;
+        g_arx_have[m.peer] = true;
+        return;
     }
     net::AvatarStateMsg& prev = g_arx[m.peer];
     HMODULE sm = GetModuleHandleW(L"SingleMission.dll");

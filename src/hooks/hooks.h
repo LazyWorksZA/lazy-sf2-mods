@@ -583,6 +583,11 @@ bool host_world_send_all(const uint8_t* data, size_t len, bool reliable = true);
 /// <summary>Stores and consumables (stores_sync.cpp), game thread: the player's step sends its loadout (every 10 s
 /// and on change) and consumables (every 2 s); a peer's message goes onto the avatar that shows that peer.</summary>
 void stores_tick(void* player);
+/// <summary>A peer became ready (our Welcome, or a client joined us): our loadout, damage state and jet state go out
+/// again at the next tick, whatever changed. Game thread.</summary>
+void stores_resend();
+void damage_resend();
+void world_avatar_resend();
 void stores_apply(const uint8_t* data, size_t len, void* avatar);
 /// <summary>Seat takeover helpers: an aircraft's loaded stations as wire entries; the same entries rebuilt on a local
 /// (not REMOTEOBJECT) jet through the game's rearm called directly; its internal and external fuel, read and set.</summary>
