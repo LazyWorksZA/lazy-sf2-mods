@@ -385,6 +385,20 @@ bool aircraft_side_masks(uint32_t* friendly, uint32_t* enemy, uint32_t* neutral)
     return true;
 }
 
+bool track_set_player(const void* obj, wchar_t* name, size_t cap) {
+    bool found = false;
+    AcquireSRWLockExclusive(&g_lock);
+    for (size_t i = 0; i < g_count && obj; ++i) {
+        if (g_table[i].obj != obj) continue;
+        g_player_seq = g_table[i].seq;
+        if (name && cap) wcsncpy_s(name, cap, g_table[i].name, _TRUNCATE);
+        found = true;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    return found;
+}
+
 void probe_with_aircraft(void (*callback)(const LiveAircraft* list, size_t count, void* ctx), void* ctx) {
     LiveAircraft list[kMaxTracked];  // a copy of the table, so the callback never sees Entry
     const SideMasks masks = read_side_masks();

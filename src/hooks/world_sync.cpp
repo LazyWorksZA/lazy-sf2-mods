@@ -1384,11 +1384,22 @@ void check_seat(void* msn) {
         LOG("world: seat check: the mission could not be read after the start");
         return;
     }
+    const bool ok = player_id == member_id && f.member == g_seat;
     LOG("world: seat check: member index %d, player object 0x%08lx, member %d of slot %d is 0x%08lx: %s", f.member,
         static_cast<unsigned long>(player_id), f.member, f.slot, static_cast<unsigned long>(member_id),
-        player_id == member_id && f.member == g_seat ? "ok" : "MISMATCH");
-    LOG("world: seat: note that the probe's aircraft tracker still takes the first aircraft built (member 0) as the "
-        "player");
+        ok ? "ok" : "MISMATCH");
+    if (!ok) return;
+    // The tracker took the first aircraft built (member 0) as the player; every feature that follows the player (our
+    // State, the avatar choice, the seat takeover) must use the member we fly.
+    void* obj = world_player_object();
+    wchar_t name[64] = {};
+    if (obj && track_set_player(obj, name, 64)) {
+        sim_player_retarget();
+        LOG("world: seat: the aircraft tracker takes member %d (%p \"%ls\") as the player", f.member, obj, name);
+    } else {
+        LOG("world: ERR seat: member %d's aircraft (%p) is not tracked; the tracker keeps the first aircraft built as "
+            "the player", f.member, obj);
+    }
 }
 
 void* g_remote_deferred = nullptr;  // the MSN whose mark pass waits for the host's session (game thread)

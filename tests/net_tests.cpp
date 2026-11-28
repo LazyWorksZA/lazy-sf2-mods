@@ -9763,9 +9763,12 @@ void seat_takeover_tests() {
     SeatStateMsg dead = m;
     dead.flags = kSeatAirborne;
     expect(seat_takeover_due(m, 8000.0) && !seat_takeover_due(m, 20.0) && !seat_takeover_due(parked, 8000.0) &&
-               !seat_takeover_due(dead, 8000.0) && !seat_takeover_due(m, 8000.0, true),
+               !seat_takeover_due(dead, 8000.0) && !seat_takeover_due(m, 8000.0, true) &&
+               seat_takeover_due(m, 8000.0, true, true) && seat_takeover_due(parked, 91.0, true, true) &&
+               !seat_takeover_due(parked, 20.0, true, true) && !seat_takeover_due(dead, 8000.0, true, true),
            "seat: a late joiner takes over a live, flying seat it is far from; not a parked or destroyed one, not when "
-           "already there (a reconnect), and never after it ran the world itself and offered it (the host's seat is stale)");
+           "already there (a reconnect), not after it ran the world and the host took it; after the host refused it, a parked "
+           "seat too");
     std::printf("    estimate: 139 B once per Welcome\n");
 
     ServeRun s;

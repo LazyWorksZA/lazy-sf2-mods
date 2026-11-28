@@ -906,12 +906,15 @@ Status decode(const uint8_t* data, size_t len, SeatStateMsg& out);
 /// <summary>Metres between the client's jet and the seat's state below which it is already there (a reconnect).</summary>
 inline constexpr double kSeatTakeoverMin = 50.0;
 /// <summary>
-/// Whether the client's jet takes the seat's state: the seat aircraft lives and flies on the host, the jet is not
-/// already there, and the client joined a world the host owns. A client that loaded first ran the world itself and
-/// offered it (handover): the host's seat is a stale copy then, and the client's own jet is the truth.
+/// Whether the client's jet takes the seat's state: the seat aircraft lives on the host and the jet is not already
+/// there. Joining a world the host owns, only a flying seat is taken over (a parked one is where the mission put ours).
+/// A client that loaded first ran the world itself and offered it (handover): when the host took it, the client's own
+/// jet is the truth; when the host refused it (it owns the world), the seat is taken over on the ground too.
 /// </summary>
-inline bool seat_takeover_due(const SeatStateMsg& m, double dist, bool we_owned_the_world = false) {
-    return !we_owned_the_world && (m.flags & kSeatAlive) && (m.flags & kSeatAirborne) && dist >= kSeatTakeoverMin;
+inline bool seat_takeover_due(const SeatStateMsg& m, double dist, bool we_owned_the_world = false,
+                              bool host_refused_our_world = false) {
+    if (we_owned_the_world && !host_refused_our_world) return false;
+    return (m.flags & kSeatAlive) && ((m.flags & kSeatAirborne) || host_refused_our_world) && dist >= kSeatTakeoverMin;
 }
 
 /// <summary>Reassembles a mission from an offer and its chunks (any order, duplicates ignored).</summary>

@@ -475,6 +475,7 @@ void handover_client_message(const uint8_t* data, size_t len) {
     if (net::decode(data, len, d) != net::Status::Ok) return;
     LOG("handover: the host %s our world (epoch 0x%08lx)",
         d.taken ? "took over" : "refused (it loaded first and owns the world)", static_cast<unsigned long>(d.epoch));
+    seat_state_offer_answered(d.taken != 0);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

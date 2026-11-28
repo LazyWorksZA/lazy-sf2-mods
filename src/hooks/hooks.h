@@ -273,6 +273,12 @@ inline void missile_spawn_on_present() {
 
 /// <summary>True while sim has a cached player aircraft.</summary>
 bool sim_player_known();
+/// <summary>Mission start, before the first step (game thread): forgets the cached player without counting a loss, so
+/// the next step takes the tracker's (re-designated) player.</summary>
+void sim_player_retarget();
+/// <summary>Makes obj the tracker's player (the first aircraft built is only a guess: a seat swap flies another member).
+/// False when obj is not tracked.</summary>
+bool track_set_player(const void* obj, wchar_t* name, size_t cap);
 /// <summary>The cached player aircraft, or null (game thread).</summary>
 void* sim_player_object();
 /// <summary>Incremented on every player loss and change of player. A run stores it at its start and ends when it differs.</summary>
@@ -584,6 +590,9 @@ void stores_set_fuel(void* obj, float internal, float external);
 bool seat_state_capture(int seat, void* obj, net::SeatStateMsg* out);
 void seat_state_send(int slot, const net::SeatStateMsg& m);
 void seat_state_apply(const uint8_t* data, size_t len, double host_now);
+/// <summary>Client, game thread: the host answered our world offer. Refused: our seat's state from the host is applied
+/// (the host's world is the truth); taken: our jet stays where it is.</summary>
+void seat_state_offer_answered(bool taken);
 void* world_player_object();
 /// <summary>Client: writes the player's pose (position, velocity, angles; the matrix, heading copy and speed follow),
 /// as the join move does.</summary>

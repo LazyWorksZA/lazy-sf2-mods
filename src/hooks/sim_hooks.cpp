@@ -172,6 +172,13 @@ void __fastcall h_Update(void* self, void* edx, float dt) {
 }  // namespace
 
 bool sim_player_known() { return g_player != nullptr; }
+
+void sim_player_retarget() {
+    g_player = nullptr;
+    g_player_seq = 0;
+    g_player_lost = false;
+    g_last_validate = 0;
+}
 uint32_t sim_player_epoch() { return g_player_epoch; }
 double sim_game_time() { return g_game_time; }
 uint64_t sim_step_count() { return g_steps; }

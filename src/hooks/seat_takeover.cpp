@@ -19,6 +19,10 @@ namespace {
 constexpr size_t kObjId = 0x08, kObjPos = 0x38, kObjVel = 0x50, kObjRates = 0xd0, kObjAngles = 0x100;
 constexpr uint32_t kStateAirborne = 0x800000u;
 uint32_t g_applied_epoch = 0xffffffffu;  // one takeover per flight (a re-Welcome repeats the state)
+// We ran the world and offered it: the seat's state waits for the host's answer (game thread).
+net::SeatStateMsg g_pending{};
+uint32_t g_pending_epoch = 0xffffffffu;
+uint32_t g_refused_epoch = 0xffffffffu;  // the host refused our offer in this player epoch
 
 struct Pose {
     double pos[3];
@@ -103,9 +107,36 @@ void seat_state_send(int slot, const net::SeatStateMsg& m) {
         net::fuel_from_wire(m.fuel), net::fuel_from_wire(m.fuel_ext));
 }
 
+void apply_state(const net::SeatStateMsg& m, bool refused);
+
 void seat_state_apply(const uint8_t* data, size_t len, double /*host_now*/) {
     net::SeatStateMsg m;
     if (net::decode(data, len, m) != net::Status::Ok) return;
+    if (g_applied_epoch == sim_player_epoch()) return;
+    const bool refused = g_refused_epoch == sim_player_epoch();
+    if (handover_we_owned_world() && !refused) {
+        g_pending = m;
+        g_pending_epoch = sim_player_epoch();
+        LOG("seat: our seat's state from the host is kept until the host answers our world offer");
+        return;
+    }
+    apply_state(m, refused);
+}
+
+void seat_state_offer_answered(bool taken) {
+    const uint32_t epoch = sim_player_epoch();
+    if (!taken) g_refused_epoch = epoch;
+    if (g_pending_epoch != epoch) return;
+    g_pending_epoch = 0xffffffffu;
+    if (taken) {
+        LOG("seat: the host took our world: our jet stays where it is");
+        g_applied_epoch = epoch;
+        return;
+    }
+    apply_state(g_pending, true);
+}
+
+void apply_state(const net::SeatStateMsg& m, bool refused) {
     void* player = world_player_object();
     if (!player || g_applied_epoch == sim_player_epoch()) return;
     Pose own;
@@ -120,10 +151,10 @@ void seat_state_apply(const uint8_t* data, size_t len, double /*host_now*/) {
     const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
     g_applied_epoch = sim_player_epoch();
     const bool owned = handover_we_owned_world();
-    if (!net::seat_takeover_due(m, dist, owned)) {
+    if (!net::seat_takeover_due(m, dist, owned, refused)) {
         LOG("seat: our seat's state from the host: %s, %.0f m away: no takeover%s",
             !(m.flags & net::kSeatAlive) ? "destroyed" : !(m.flags & net::kSeatAirborne) ? "on the ground" : "airborne",
-            dist, owned ? " (we ran the world and offered it: our jet is the truth)" : "");
+            dist, owned && !refused ? " (we ran the world and the host took it: our jet is the truth)" : "");
         return;
     }
     client_place_player(player, p.pos, p.vel, p.ang);
@@ -132,9 +163,9 @@ void seat_state_apply(const uint8_t* data, size_t len, double /*host_now*/) {
     if (read_state(player, &st)) write_state(player, (st & ~net::kSeatStateMask) | (m.state & net::kSeatStateMask));
     stores_set_fuel(player, net::fuel_from_wire(m.fuel), net::fuel_from_wire(m.fuel_ext));
     stores_apply_entries(player, m.e, m.n, "our seat's stores (takeover)");
-    LOG("seat: took over our seat in place: moved %.0f m to (%.0f, %.0f, %.0f), speed %.0f m/s, fuel %.0f + %.0f kg, "
+    LOG("seat: took over our seat in place%s: moved %.0f m to (%.0f, %.0f, %.0f), speed %.0f m/s, fuel %.0f + %.0f kg, "
         "%u stations; the host's damage level there is %u",
-        dist, p.pos[0], p.pos[1], p.pos[2],
+        refused ? " (the host refused our world and owns it)" : "", dist, p.pos[0], p.pos[1], p.pos[2],
         std::sqrt(p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]), net::fuel_from_wire(m.fuel),
         net::fuel_from_wire(m.fuel_ext), static_cast<unsigned>(m.n), static_cast<unsigned>(m.damage));
 }
