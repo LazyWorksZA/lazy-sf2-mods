@@ -807,6 +807,9 @@ void take_fetched_mission() {
         g_content_sidecar = sidecar;  // kept: a check that waits for this PC's type list runs again later
         if (g_content_diff.empty())
             LOG("world: join: this PC has everything the host's mission 0x%08lx uses", static_cast<unsigned long>(offer.mission_id));
+        else if (g_content_diff.size() == 1 && g_content_diff[0] == kContentNotReady)
+            LOG("world: join: the host's mission 0x%08lx is checked once this PC's type list is built",
+                static_cast<unsigned long>(offer.mission_id));
         else
             LOG("world: join: the host's mission 0x%08lx uses content this PC lacks or has otherwise: %s",
                 static_cast<unsigned long>(offer.mission_id), g_content_diff.c_str());
