@@ -76,18 +76,23 @@ inline constexpr int kHeader = 5;
 inline constexpr int kSummary = 7;        // three lines: 7, 8, 9
 inline constexpr int kStatus = 14;
 inline constexpr int kYouFly = 15;
-// kLobbyRows rows of three items: the seat and callsign as TEXT, a TEXTBUTTON over it with the same text (the stock
-// hover; a click takes a free seat), and the status as TEXT. The TEXT is what is known to show run-time text; the
-// button's text is set too, and its placeholder is wide so its click area covers the row whatever its text does.
+// kLobbyRows rows of seven items: the seat and callsign as three TEXT items in the three row colours (your seat, another
+// pilot's, a free one; one shows the text, the others a space), a TEXTBUTTON of spaces over them (the click area), and
+// the status as three TEXT items in the same colours. TEXT is the item kind known to show run-time text; a style
+// cannot be switched at run time, so each colour is its own item.
 inline constexpr int kRowFirst = 16;
-inline constexpr int row_label(int r) { return kRowFirst + 3 * r; }
-inline constexpr int row_button(int r) { return kRowFirst + 3 * r + 1; }
-inline constexpr int row_status(int r) { return kRowFirst + 3 * r + 2; }
+inline constexpr int kRowItems = 7;
+enum RowColour { kRowOwn = 0, kRowOther = 1, kRowOpen = 2 };
+inline constexpr int row_label(int r, int colour) { return kRowFirst + kRowItems * r + colour; }
+inline constexpr int row_button(int r) { return kRowFirst + kRowItems * r + 3; }
+inline constexpr int row_status(int r, int colour) { return kRowFirst + kRowItems * r + 4 + colour; }
 /// <summary>The row whose button is item, or -1.</summary>
 inline constexpr int row_of_button(int item) {
-    return item >= kRowFirst && item < kRowFirst + 3 * net::kLobbyRows && (item - kRowFirst) % 3 == 1 ? (item - kRowFirst) / 3 : -1;
+    return item >= kRowFirst && item < kRowFirst + kRowItems * net::kLobbyRows && (item - kRowFirst) % kRowItems == 3
+               ? (item - kRowFirst) / kRowItems
+               : -1;
 }
-inline constexpr int kCount = kRowFirst + 3 * net::kLobbyRows - 1;
+inline constexpr int kCount = kRowFirst + kRowItems * net::kLobbyRows - 1;
 /// <summary>The seat buttons' placeholder text: wide spaces, so the click area is a whole row.</summary>
 inline constexpr const wchar_t* kLobbyRowBlankKey = L"TXT_LAZY_LOBBY_ROW_BLANK";
 }  // namespace session_item

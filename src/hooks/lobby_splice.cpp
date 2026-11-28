@@ -138,9 +138,9 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
                                        n(L"StatusHead"),  n(L"Status"),       n(L"YouFly")};
     for (int r = 0; r < net::kLobbyRows; ++r) {
         const std::wstring k = std::to_wstring(r + 1);
-        names.push_back(n(L"RowLabel" + k));
+        for (const wchar_t* c : {L"Own", L"Other", L"Open"}) names.push_back(n(L"RowLabel" + k + c));
         names.push_back(n(L"RowButton" + k));
-        names.push_back(n(L"RowStatus" + k));
+        for (const wchar_t* c : {L"Own", L"Other", L"Open"}) names.push_back(n(L"RowStatus" + k + c));
     }
     ini.screen(host ? kLobbyHostScreen : kLobbyJoinScreen, L"RosterScreen.JPG", names, dll);
     auto at = [&](int item) { return names[item - 1].c_str(); };
@@ -168,9 +168,10 @@ void session_screen(Ini& ini, bool host, const std::wstring& dll) {
     // stock buttons do); its text is set at run time (lobby_screen.cpp, through the button's text object).
     for (int r = 0; r < net::kLobbyRows; ++r) {
         const int y = 214 + 22 * r;
-        ini.text(at(session_item::row_label(r)), L"MediumTextLeft", kLobbyBlankKey, 528, y);
+        static const wchar_t* const kStyles[3] = {L"LazyRowOwnText", L"LazyRowOtherText", L"LazyRowOpenText"};
+        for (int c = 0; c < 3; ++c) ini.text(at(session_item::row_label(r, c)), kStyles[c], kLobbyBlankKey, 528, y);
         ini.button(at(session_item::row_button(r)), L"", L"MediumTextLeft", session_item::kLobbyRowBlankKey, 528, y, L"TXT_LAZY_LOBBY_ROW_INFO");
-        ini.text(at(session_item::row_status(r)), L"MediumTextLeft", kLobbyBlankKey, 800, y);
+        for (int c = 0; c < 3; ++c) ini.text(at(session_item::row_status(r, c)), kStyles[c], kLobbyBlankKey, 800, y);
     }
 }
 
@@ -371,6 +372,22 @@ bool splice_lobby_screen(std::wstring& text, const std::wstring& menu_code_dll) 
              L"TransparentBackground=FALSE\r\n"
              L"BackgroundColor=0,0,0\r\n"
              L"Position=999,25\r\n";
+    // The seat rows' colours (MediumTextLeft otherwise): your seat green, another pilot's blue, a free one yellow, all
+    // light enough for the dark panel.
+    for (const auto& [name, colour] : {std::pair{L"LazyRowOwnText", L"110,230,110"}, std::pair{L"LazyRowOtherText", L"130,180,255"},
+                                       std::pair{L"LazyRowOpenText", L"235,215,90"}}) {
+        ini.t += L"[" + std::wstring(name) + L"]\r\n"
+                 L"TextFontName=Arial\r\n"
+                 L"TextSize=16\r\n"
+                 L"TextBold=FALSE\r\n"
+                 L"TextItalic=FALSE\r\n"
+                 L"TextUnderline=FALSE\r\n"
+                 L"TextStrikeOut=FALSE\r\n"
+                 L"TextShadow=FALSE\r\n"
+                 L"HorizontalAlignment=LEFT\r\n"
+                 L"VerticalAlignment=TOP\r\n"
+                 L"ForegroundColor=" + std::wstring(colour) + L"\r\n\r\n";
+    }
     text = std::move(ini.t);
     return true;
 }

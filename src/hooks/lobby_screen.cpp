@@ -141,11 +141,21 @@ void set_text(int item, const wchar_t* text) {
     if (void* t = item_iface(item, kIfaceText)) reinterpret_cast<SetText_t>(vtable_slot(t, kTextSet))(t, nullptr, text);
 }
 
+void set_button_text(int item, const wchar_t* text);
+
+/// <summary>The seat row's button keeps its placeholder of spaces (its click area): the coloured TEXT items under it
+/// show the row. Its text object is looked at once, for the log (a later version may draw the row with it).</summary>
+void note_button(int item) {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    set_button_text(item, nullptr);
+}
+
 /// <summary>Sets a TEXTBUTTON's text at run time, through the text object the button draws (MenuSystem: the button's
 /// interface 9 at +0x4f4 holds it at -0xc, a static text whose slot 13 is SetText; see lazy-sf2-recon: recon-notes
 /// §28.4). Checked against the static text's vtable; logs once and does nothing if not as expected.</summary>
 void set_button_text(int item, const wchar_t* text) {
-    if (!text || !*text) text = L" ";
     void* iface = item_iface(item, kIfaceTextButton);
     HMODULE mnu_dll = GetModuleHandleW(L"MenuSystem.dll");
     void* inner = nullptr;
@@ -157,13 +167,13 @@ void set_button_text(int item, const wchar_t* text) {
             inner = nullptr;
         }
     }
-    static bool traced = false;  // the first write, for the live check of this path
+    static bool traced = false;  // the first look, for the live check of this path
     if (!traced) {
         traced = true;
-        LOG("lobby: seat row button %d: interface %p, text object %p (%s), text \"%ls\"", item, iface, inner,
-            inner ? "as expected" : "not as expected: the row's TEXT shows it alone", text);
+        LOG("lobby: seat row button %d: interface %p, text object %p (%s)", item, iface, inner,
+            inner ? "as expected" : "not as expected");
     }
-    if (!inner) return;
+    if (!inner || !text) return;
     reinterpret_cast<SetText_t>(vtable_slot(inner, kStaticTextSetText))(inner, nullptr, text);
 }
 
@@ -540,20 +550,27 @@ void show_roster(const Roster& r) {
     std::memcpy(g_rows, r.rows, sizeof(g_rows));
     for (int i = 0; i < net::kLobbyRows; ++i) {
         std::wstring label, st;
+        int colour = session_item::kRowOpen;
         if (static_cast<size_t>(i) < r.count) {
             const net::LobbyRow& row = r.rows[i];
             label = seat_text(row.seat) + L"   ";
             if (row.callsign[0]) {
                 label += widen(row.callsign);
-                if (row.flags & net::kLobbyRowYou) label += L" (you)";
+                const bool you = (row.flags & net::kLobbyRowYou) != 0;
+                if (you) label += L" (you)";
+                colour = you ? session_item::kRowOwn : session_item::kRowOther;
                 st = (row.flags & net::kLobbyRowHost) ? L"Host" : (row.flags & net::kLobbyRowReady) ? L"Ready" : L"Not ready";
             } else {
                 label += L"free (AI)";
+                st = L"Open";
             }
         }
-        set_text(session_item::row_label(i), label.c_str());
-        set_button_text(session_item::row_button(i), label.c_str());
-        set_text(session_item::row_status(i), st.c_str());
+        // One colour's items carry the text; the other two hold a space.
+        for (int c = 0; c < 3; ++c) {
+            set_text(session_item::row_label(i, c), c == colour ? label.c_str() : L" ");
+            set_text(session_item::row_status(i, c), c == colour ? st.c_str() : L" ");
+        }
+        note_button(session_item::row_button(i));
     }
     const std::wstring players = std::to_wstring(r.clients) + (r.clients == 1 ? L" player joined" : L" players joined");
     if (host) {
