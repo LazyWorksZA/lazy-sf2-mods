@@ -590,9 +590,11 @@ void stores_set_fuel(void* obj, float internal, float external);
 bool seat_state_capture(int seat, void* obj, net::SeatStateMsg* out);
 void seat_state_send(int slot, const net::SeatStateMsg& m);
 void seat_state_apply(const uint8_t* data, size_t len, double host_now);
-/// <summary>Client, game thread: the host answered our world offer. Refused: our seat's state from the host is applied
-/// (the host's world is the truth); taken: our jet stays where it is.</summary>
-void seat_state_offer_answered(bool taken);
+/// <summary>Client, game thread: the host answered our world offer (net::kHandover*), in either order with our seat's
+/// state. Where the host's own world stands, that state is applied; otherwise our jet stays where it is.</summary>
+void seat_state_offer_answered(uint8_t answer);
+/// <summary>Client, game thread, per world message: retries a seat takeover our jet could not take yet.</summary>
+void seat_state_retry();
 void* world_player_object();
 /// <summary>Client: writes the player's pose (position, velocity, angles; the matrix, heading copy and speed follow),
 /// as the join move does.</summary>

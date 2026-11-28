@@ -283,10 +283,10 @@ net::OfferArbiter g_arbiter;
 uint32_t g_arbiter_epoch = 0xffffffffu;
 double wall_s() { return static_cast<double>(GetTickCount64()) / 1000.0; }
 
-void answer(int slot, uint32_t epoch, bool taken) {
+void answer(int slot, uint32_t epoch, uint8_t code) {
     net::HandoverDoneMsg d{};
     d.epoch = epoch;
-    d.taken = taken ? 1 : 0;
+    d.taken = code;
     uint8_t buf[sizeof(d)];
     const size_t n = net::encode(d, buf, sizeof(buf));
     if (n) host_world_send_to(slot, buf, n, true);
@@ -416,7 +416,10 @@ void handover_client_welcomed() {
     // We ran the world: offer it to the host, then follow (our copies coast until the host's stream drives them).
     g_owned_epoch = sim_player_epoch();
     g_out.clear();
-    if (!queue_offer(build_snapshot(new_epoch()))) LOG("handover: our world could not be packed; not offered");
+    if (!queue_offer(build_snapshot(new_epoch()))) {
+        LOG("handover: our world could not be packed; not offered");
+        seat_state_offer_answered(net::kHandoverNotOffered);
+    }
     world_remote_now();
 }
 
@@ -439,7 +442,11 @@ void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt
                 : v == net::OfferArbiter::Verdict::RefuseDone ? "refused, a world was taken over already this flight"
                                                               : "refused (bad offer)");
             g_in[slot].reset();
-            answer(slot, b.epoch, false);
+            answer(slot, b.epoch,
+                   v == net::OfferArbiter::Verdict::RefuseOwner  ? net::kHandoverRefusedOwner
+                   : v == net::OfferArbiter::Verdict::RefuseBusy ? net::kHandoverRefusedBusy
+                   : v == net::OfferArbiter::Verdict::RefuseDone ? net::kHandoverRefusedDone
+                                                                 : net::kHandoverRefusedBad);
             return;
         }
         LOG("handover: client %d loaded first (clock %.1f s, ours %.1f s): taking its world, %u chunks", slot + 1,
@@ -459,7 +466,7 @@ void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt
     if (!ok) {
         g_arbiter.on_complete(slot, false);
         LOG("handover: client %d's world did not unpack (CRC or sizes); refused", slot + 1);
-        answer(slot, b.epoch, false);
+        answer(slot, b.epoch, net::kHandoverRefusedBad);
         return;
     }
     const Applied a = apply_snapshot(s, rtt_s * 0.5);
@@ -467,15 +474,20 @@ void handover_host_message(int slot, const uint8_t* data, size_t len, double rtt
     LOG("handover: client %d's world taken over: %d aircraft, %d vehicles, %d flights written, %d destroyed as there "
         "(%d kills logged), %d not found or destroyed here, the mission clock set to %.1f s; we own the world and stream it",
         slot + 1, a.aircraft, a.vehicles, a.flights, a.destroyed, a.kills, a.missing, s.head.clock_ms / 1000.0);
-    answer(slot, b.epoch, true);
+    answer(slot, b.epoch, net::kHandoverTaken);
 }
 
 void handover_client_message(const uint8_t* data, size_t len) {
     net::HandoverDoneMsg d;
     if (net::decode(data, len, d) != net::Status::Ok) return;
     LOG("handover: the host %s our world (epoch 0x%08lx)",
-        d.taken ? "took over" : "refused (it loaded first and owns the world)", static_cast<unsigned long>(d.epoch));
-    seat_state_offer_answered(d.taken != 0);
+        d.taken == net::kHandoverTaken           ? "took over"
+        : d.taken == net::kHandoverRefusedOwner ? "refused (it loaded first and owns the world)"
+        : d.taken == net::kHandoverRefusedBusy  ? "refused (another client's world is being taken)"
+        : d.taken == net::kHandoverRefusedDone  ? "refused (a client's world was taken already this flight)"
+                                                : "refused (our offer was bad)",
+        static_cast<unsigned long>(d.epoch));
+    seat_state_offer_answered(d.taken);
 }
 
 }  // namespace LazyWorks::SF2Patch::hooks

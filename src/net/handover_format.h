@@ -93,13 +93,27 @@ struct HandoverChunkMsg {
     uint8_t len;
     uint8_t data[kHandoverChunkData];
 };
-/// <summary>The receiver's answer: taken (it applied the snapshot and owns the world) or refused (it owned it already:
-/// it loaded first).</summary>
+/// <summary>The receiver's answer: taken (1: it applied the snapshot) or why not (kHandover*).</summary>
 struct HandoverDoneMsg {
     Header h;
     uint32_t epoch;
     uint8_t taken;
 };
+
+/// <summary>HandoverDoneMsg::taken values.</summary>
+inline constexpr uint8_t kHandoverRefusedOwner = 0;  // the host loaded first and owns the world
+inline constexpr uint8_t kHandoverTaken = 1;
+inline constexpr uint8_t kHandoverRefusedBusy = 2;  // another client's offer is being taken
+inline constexpr uint8_t kHandoverRefusedDone = 3;  // a client's world was taken already this flight
+inline constexpr uint8_t kHandoverRefusedBad = 4;   // the offer did not decode or unpack
+inline constexpr uint8_t kHandoverNotOffered = 0xff;  // local only: our world could not be packed, so never offered
+
+/// <summary>Whether the host's own world stands after this answer (so our seat takes the host's state): it refused as
+/// the owner, the offer was bad, or none was sent. Busy and Done mean another client's world is (being) taken, so the
+/// host's seat state from the Welcome is stale.</summary>
+inline bool handover_host_world_stands(uint8_t answer) {
+    return answer == kHandoverRefusedOwner || answer == kHandoverRefusedBad || answer == kHandoverNotOffered;
+}
 #pragma pack(pop)
 static_assert(sizeof(HandoverBeginMsg) == 26);
 static_assert(sizeof(HandoverChunkMsg) == 91 && sizeof(HandoverChunkMsg) <= 96);

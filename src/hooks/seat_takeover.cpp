@@ -10,6 +10,7 @@
 #include "hooks/hooks.h"
 #include "hooks/jet_layout.h"
 #include "log.h"
+#include "net/handover_format.h"
 #include "net/world_proto.h"
 
 namespace LazyWorks::SF2Patch::hooks {
@@ -19,10 +20,17 @@ namespace {
 constexpr size_t kObjId = 0x08, kObjPos = 0x38, kObjVel = 0x50, kObjRates = 0xd0, kObjAngles = 0x100;
 constexpr uint32_t kStateAirborne = 0x800000u;
 uint32_t g_applied_epoch = 0xffffffffu;  // one takeover per flight (a re-Welcome repeats the state)
-// We ran the world and offered it: the seat's state waits for the host's answer (game thread).
+// We ran the world and offered it: the seat's state and the host's answer may come in either order (game thread).
 net::SeatStateMsg g_pending{};
-uint32_t g_pending_epoch = 0xffffffffu;
-uint32_t g_refused_epoch = 0xffffffffu;  // the host refused our offer in this player epoch
+uint32_t g_pending_epoch = 0xffffffffu;  // a state waits for the answer in this epoch
+uint32_t g_answer_epoch = 0xffffffffu;   // the host answered in this epoch
+uint8_t g_answer = 0;
+// A takeover our jet could not take yet (not resolved or unreadable): retried for a while.
+bool g_retry = false;
+bool g_retry_host_owns = false;
+uint32_t g_retry_epoch = 0xffffffffu;
+ULONGLONG g_retry_until = 0;
+constexpr ULONGLONG kRetryMs = 10000;
 
 struct Pose {
     double pos[3];
@@ -107,40 +115,87 @@ void seat_state_send(int slot, const net::SeatStateMsg& m) {
         net::fuel_from_wire(m.fuel), net::fuel_from_wire(m.fuel_ext));
 }
 
-void apply_state(const net::SeatStateMsg& m, bool refused);
+namespace {
+
+// We ran the world ourselves this flight: before the Welcome (the mark pass deferred) or after it (offered).
+bool we_ran_world() { return handover_we_owned_world() || world_remote_deferred(); }
+
+/// <summary>False when our jet cannot be read yet (the state is kept for a retry).</summary>
+bool apply_state(const net::SeatStateMsg& m, bool host_owns);
+
+void settle(const net::SeatStateMsg& m, bool answered, uint8_t answer) {
+    const uint32_t epoch = sim_player_epoch();
+    if (answered && !net::handover_host_world_stands(answer)) {
+        g_applied_epoch = epoch;
+        LOG("seat: %s: our jet stays where it is",
+            answer == net::kHandoverTaken ? "the host took our world"
+                                          : "the host refused our world, but its own is not the one that stands (another "
+                                            "client's world is or was taken)");
+        return;
+    }
+    const bool host_owns = answered;  // an answer that lets the host's world stand
+    if (apply_state(m, host_owns)) return;
+    g_pending = m;
+    g_retry = true;
+    g_retry_host_owns = host_owns;
+    g_retry_epoch = epoch;
+    g_retry_until = GetTickCount64() + kRetryMs;
+    LOG("seat: our jet cannot be read yet for the seat takeover; trying again for %llu s",
+        static_cast<unsigned long long>(kRetryMs / 1000));
+}
+
+}  // namespace
 
 void seat_state_apply(const uint8_t* data, size_t len, double /*host_now*/) {
     net::SeatStateMsg m;
     if (net::decode(data, len, m) != net::Status::Ok) return;
-    if (g_applied_epoch == sim_player_epoch()) return;
-    const bool refused = g_refused_epoch == sim_player_epoch();
-    if (handover_we_owned_world() && !refused) {
+    const uint32_t epoch = sim_player_epoch();
+    if (g_applied_epoch == epoch || (g_retry && g_retry_epoch == epoch)) return;
+    const bool answered = g_answer_epoch == epoch;
+    if (we_ran_world() && !answered) {
         g_pending = m;
-        g_pending_epoch = sim_player_epoch();
+        g_pending_epoch = epoch;
         LOG("seat: our seat's state from the host is kept until the host answers our world offer");
         return;
     }
-    apply_state(m, refused);
+    settle(m, answered, g_answer);
 }
 
-void seat_state_offer_answered(bool taken) {
+void seat_state_offer_answered(uint8_t answer) {
     const uint32_t epoch = sim_player_epoch();
-    if (!taken) g_refused_epoch = epoch;
+    g_answer_epoch = epoch;
+    g_answer = answer;
     if (g_pending_epoch != epoch) return;
     g_pending_epoch = 0xffffffffu;
-    if (taken) {
-        LOG("seat: the host took our world: our jet stays where it is");
-        g_applied_epoch = epoch;
-        return;
-    }
-    apply_state(g_pending, true);
+    settle(g_pending, true, answer);
 }
 
-void apply_state(const net::SeatStateMsg& m, bool refused) {
+void seat_state_retry() {
+    if (!g_retry) return;
+    if (g_retry_epoch != sim_player_epoch()) {
+        g_retry = false;
+        return;
+    }
+    if (apply_state(g_pending, g_retry_host_owns)) {
+        g_retry = false;
+        return;
+    }
+    if (GetTickCount64() >= g_retry_until) {
+        g_retry = false;
+        g_applied_epoch = g_retry_epoch;
+        LOG("seat: ERR our jet could not be read for %llu s; the seat takeover is dropped (our jet stays where it is)",
+            static_cast<unsigned long long>(kRetryMs / 1000));
+    }
+}
+
+namespace {
+
+bool apply_state(const net::SeatStateMsg& m, bool host_owns) {
+    const bool refused = host_owns;
     void* player = world_player_object();
-    if (!player || g_applied_epoch == sim_player_epoch()) return;
+    if (g_applied_epoch == sim_player_epoch()) return true;
     Pose own;
-    if (!read_pose(player, &own)) return;
+    if (!player || !read_pose(player, &own)) return false;
     net::ObjPose p{};
     net::dequantise(m.pose, &p);
     // The state was read on the host's game thread just before the Welcome went out: it is half a round trip old
@@ -150,12 +205,12 @@ void apply_state(const net::SeatStateMsg& m, bool refused) {
     const double dx = p.pos[0] - own.pos[0], dy = p.pos[1] - own.pos[1], dz = p.pos[2] - own.pos[2];
     const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
     g_applied_epoch = sim_player_epoch();
-    const bool owned = handover_we_owned_world();
+    const bool owned = we_ran_world();
     if (!net::seat_takeover_due(m, dist, owned, refused)) {
         LOG("seat: our seat's state from the host: %s, %.0f m away: no takeover%s",
             !(m.flags & net::kSeatAlive) ? "destroyed" : !(m.flags & net::kSeatAirborne) ? "on the ground" : "airborne",
             dist, owned && !refused ? " (we ran the world and the host took it: our jet is the truth)" : "");
-        return;
+        return true;
     }
     client_place_player(player, p.pos, p.vel, p.ang);
     // Airborne, gear, flaps and lights as the seat had them (a parked jet put in the air, or the reverse).
@@ -168,6 +223,9 @@ void apply_state(const net::SeatStateMsg& m, bool refused) {
         refused ? " (the host refused our world and owns it)" : "", dist, p.pos[0], p.pos[1], p.pos[2],
         std::sqrt(p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]), net::fuel_from_wire(m.fuel),
         net::fuel_from_wire(m.fuel_ext), static_cast<unsigned>(m.n), static_cast<unsigned>(m.damage));
+    return true;
 }
+
+}  // namespace
 
 }  // namespace LazyWorks::SF2Patch::hooks

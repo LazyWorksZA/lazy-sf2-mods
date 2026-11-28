@@ -9769,6 +9769,11 @@ void seat_takeover_tests() {
            "seat: a late joiner takes over a live, flying seat it is far from; not a parked or destroyed one, not when "
            "already there (a reconnect), not after it ran the world and the host took it; after the host refused it, a parked "
            "seat too");
+    expect(handover_host_world_stands(kHandoverRefusedOwner) && handover_host_world_stands(kHandoverRefusedBad) &&
+               handover_host_world_stands(kHandoverNotOffered) && !handover_host_world_stands(kHandoverTaken) &&
+               !handover_host_world_stands(kHandoverRefusedBusy) && !handover_host_world_stands(kHandoverRefusedDone),
+           "seat: the host's seat state is taken after an owner or bad-offer refusal or no offer; not after a take, or "
+           "a refusal while another client's world is (being) taken");
     std::printf("    estimate: 139 B once per Welcome\n");
 
     ServeRun s;

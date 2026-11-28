@@ -2091,6 +2091,7 @@ bool write_i16(BYTE* p, int16_t v) {
 
 void world_client_apply(const uint8_t* data, size_t len, double host_now) {
     if (!g_join || g_flying_id == 0) return;
+    seat_state_retry();
     if (!g_cs) g_cs = new (std::nothrow) ClientStream;
     if (!g_cs) return;
     ClientStream& cs = *g_cs;
