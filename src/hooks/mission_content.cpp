@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include "acmi/airfields.h"
 #include "config.h"
 #include "hooks/game_files.h"
+#include "hooks/gen_filter.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "hooks/mission_content.h"
@@ -220,6 +222,8 @@ int read_ground_pool(char* lines) {
 // The ground object types the game picks from (by category, at generate and at the flight's start): the type
 // records of the GroundObject class, read from ObjectManager's class table (see lazy-sf2-recon: recon-notes §20,
 // §28.7d). The pool hash covers each record's category and name. 0 when anything is not as expected (fails closed).
+thread_local const SharedTypes* g_pool_filter = nullptr;  // a filtered mission: only the shared types are in its pool
+
 uint32_t ground_pool_hash() {
     if (!is_expected_build(GetModuleHandleW(L"ObjectManager.dll"), 0x51d21fa8, 0x28000, "ObjectManager.dll")) return 0;
     std::vector<char> buf(static_cast<size_t>(kPoolMax) * kPoolLine, 0);
@@ -227,7 +231,12 @@ uint32_t ground_pool_hash() {
     if (n <= 0) return 0;
     std::vector<std::string> items;
     items.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) items.emplace_back(buf.data() + static_cast<size_t>(i) * kPoolLine);
+    for (int i = 0; i < n; ++i) {
+        const char* line = buf.data() + static_cast<size_t>(i) * kPoolLine;
+        const char* colon = std::strchr(line, ':');
+        if (g_pool_filter && (!colon || !shared_has(g_pool_filter->ground, colon + 1))) continue;
+        items.emplace_back(line);
+    }
     std::sort(items.begin(), items.end());
     uint32_t h = kSeed;
     for (const auto& s : items) h = content_fnv(h, reinterpret_cast<const uint8_t*>(s.c_str()), s.size() + 1);
@@ -263,7 +272,11 @@ uint32_t content_entry_hash(char kind, const std::string& name, const char** sou
     }
 }
 
-std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn) {
+std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn, const SharedTypes* shared) {
+    g_pool_filter = shared && !shared->empty() ? shared : nullptr;
+    struct ClearPool {
+        ~ClearPool() { g_pool_filter = nullptr; }
+    } clear_pool;
     WeaponIndex weapons_index;
     g_weapons = &weapons_index;
     struct Clear {
@@ -332,6 +345,11 @@ std::string mission_content_check(const std::string& sidecar_text) {
     } clear;
     std::vector<ContentEntry> host = parse_content(sidecar_text);
     if (host.empty()) return {};  // a host that sends no list: nothing to compare
+    const SharedTypes shared = parse_shared(sidecar_text);
+    g_pool_filter = shared.empty() ? nullptr : &shared;
+    struct ClearPool {
+        ~ClearPool() { g_pool_filter = nullptr; }
+    } clear_pool;
     if (host.size() > kMaxContentEntries)
         return "the host's list is too long to check (" + std::to_string(host.size()) + " entries)";
     std::vector<ContentEntry> mine;

@@ -410,6 +410,8 @@ bool host_session_start(const char* addr, uint16_t port, const char* callsign, c
 /// <summary>host.cpp, lobby sessions: the roster as the host sees it; the host's own seat wish (-1: keep; also applied
 /// to its flight through world_set_own_seat); the mission summary lines and Launch count sent to the clients.</summary>
 bool host_lobby_view(net::HostCore::LobbyView* out);
+/// <summary>host.cpp: the joined pilots' complete inventories, and the callsigns of those still sending one.</summary>
+bool host_lobby_inventories(std::vector<std::vector<net::InventoryEntry>>* complete, std::vector<std::string>* waiting);
 uint8_t host_lobby_seat(int want_seat);
 void host_lobby_info(const char* const lines[3]);
 void host_lobby_launch(uint32_t launch_seq);
@@ -424,7 +426,10 @@ uint32_t content_hash();
 /// <summary>mission_content.cpp: what a mission file uses, each entry hashed from this PC's files (host). Menu thread.
 /// </summary>
 struct ContentEntry;
-std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn);
+struct SharedTypes;
+/// <summary>shared: the set a filtered mission was generated with (its ground pool entry covers those types only).
+/// </summary>
+std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn, const SharedTypes* shared);
 /// <summary>mission_content.cpp: the host's list (sidecar content lines) checked against this PC: "missing: ...;
 /// differs: ..." or empty when all match. Menu thread.</summary>
 std::string mission_content_check(const std::string& sidecar_text);

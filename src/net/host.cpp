@@ -971,6 +971,12 @@ void host_on_modules_loaded() {
 
 bool host_configured() { return g_enabled.load(); }
 
+bool host_lobby_inventories(std::vector<std::vector<net::InventoryEntry>>* complete, std::vector<std::string>* waiting) {
+    if (!g_running.load() || !g_core || !g_lobby_hash) return false;
+    g_core->lobby_inventories(complete, waiting);
+    return true;
+}
+
 bool host_lobby_view(net::HostCore::LobbyView* out) {
     if (!g_running.load() || !g_core || !g_lobby_hash) return false;
     *out = g_core->lobby_view();

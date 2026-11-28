@@ -617,6 +617,51 @@ bool load_page_path(const void* page, wchar_t* out, size_t cap) {
 
 void publish_mission(const Armed& a);  // below, with the start
 
+std::string g_armed_shared;  // host: the shared= lines of the mission armed and published (empty: not filtered)
+SharedTypes g_host_shared;   // ... and the set itself
+
+// Host, before the New page generates while pilots are joined: the generator (and the load and start after it) may
+// pick only the types every joined pilot's inventory has with the same hash. Not ready or not as expected: the
+// mission is generated unfiltered, and the per-mission check keeps out any pilot it does not fit.
+void prepare_host_filter() {
+    g_armed_shared.clear();
+    g_host_shared = SharedTypes{};
+    gen_filter_clear();
+    net::HostCore::LobbyView v;
+    if (!host_lobby_view(&v) || v.clients == 0) return;
+    std::vector<ContentEntry> mine;
+    std::string why;
+    if (!gen_inventory(&mine, &why) || mine.empty()) {
+        LOG("world: shared content: this PC's inventory is not ready%s%s; the mission is generated unfiltered",
+            why.empty() ? "" : ": ", why.c_str());
+        return;
+    }
+    std::vector<std::vector<net::InventoryEntry>> theirs;
+    std::vector<std::string> waiting;
+    host_lobby_inventories(&theirs, &waiting);
+    if (!waiting.empty()) {
+        std::string names;
+        for (const auto& n : waiting) names += (names.empty() ? "" : ", ") + n;
+        LOG("world: shared content: no inventory yet from %s; they are not counted (the per-mission check decides)", names.c_str());
+    }
+    std::vector<std::vector<ContentEntry>> all{mine};
+    for (const auto& inv : theirs) {
+        std::vector<ContentEntry> e;
+        e.reserve(inv.size());
+        for (const auto& w : inv) e.push_back({static_cast<char>(w.kind), w.name, w.hash});
+        all.push_back(std::move(e));
+    }
+    SharedTypes shared = intersect_inventories(all);
+    if (!gen_filter_apply(shared, &why)) {
+        LOG("world: shared content: the filter is unavailable (%s); the mission is generated unfiltered", why.c_str());
+        return;
+    }
+    g_host_shared = shared;
+    g_armed_shared = format_shared(shared);
+    LOG("world: shared content: generating from %zu aircraft and %zu ground object types every PC has (%zu inventories)",
+        shared.aircraft.size(), shared.ground.size(), all.size());
+}
+
 // source: null for the generated mission (written by MSN Save); else the Load page's file, copied byte for byte (loose
 // or from a cat, through the exe's file manager) so hand-made keys survive.
 void accept_save(const Ctx& c, void* page, const wchar_t* source) {
@@ -832,6 +877,17 @@ void accept_load(const Ctx& c, void* page, bool new_page) {
             err.empty() ? "unreadable" : err.c_str());
         return;
     }
+    // A mission the host generated from shared content: this PC's load and start pick from the same set.
+    if (const SharedTypes shared = parse_shared(text); !shared.empty()) {
+        std::string why;
+        if (!gen_filter_apply(shared, &why)) {
+            LOG("world: load REFUSED: the host's mission was generated from shared content and the filter is unavailable "
+                "here (%s); flying the generated mission", why.c_str());
+            return;
+        }
+    } else {
+        gen_filter_clear();
+    }
     if (s.density < 0) {
         LOG("world: load refused (sidecar has no density: the saving launch never started that mission); flying "
             "the generated mission");
@@ -875,12 +931,21 @@ void accept_load(const Ctx& c, void* page, bool new_page) {
 }
 
 int __fastcall h_NewEvent(void* page, void* edx, int ev) {
+    if (g_mode == Mode::Save && (ev == kEventAccept || ev == kEventFly) && net_session_role() == NetRole::Host)
+        prepare_host_filter();  // before the page generates (inside the stock handler)
     const int r = o_NewEvent(page, edx, ev);
     if (g_mode == Mode::Off || (ev != kEventAccept && ev != kEventFly)) return r;  // Off: a lobby session has ended
     Ctx c{};
     if (!resolve(&c, "New page Accept")) return r;
-    if (g_mode == Mode::Save) accept_save(c, page, nullptr);
-    else if (g_mode == Mode::Load) accept_load(c, page, true);
+    if (g_mode == Mode::Save) {
+        accept_save(c, page, nullptr);
+        // The player's flight is the host's own choice, not the generator's: say so when a joined PC lacks its type.
+        if (!g_host_shared.empty() && !shared_has(g_host_shared.aircraft, g_armed.sidecar.aircraft))
+            LOG("world: shared content: the player flight's %s is not on every joined PC; those pilots will be told they "
+                "lack it (pick a shared aircraft to fly together)", g_armed.sidecar.aircraft.c_str());
+    } else if (g_mode == Mode::Load) {
+        accept_load(c, page, true);
+    }
     return r;
 }
 
@@ -893,6 +958,10 @@ int __fastcall h_LoadEvent(void* page, void* edx, int ev) {
     Ctx c{};
     if (!resolve(&c, "Load page Accept")) return r;
     if (g_mode == Mode::Save) {
+        // A Load-page mission is not generated: no filter, the per-mission check decides who can fly it.
+        g_armed_shared.clear();
+        g_host_shared = SharedTypes{};
+        gen_filter_clear();
         wchar_t src[MAX_PATH] = {};
         if (!load_page_path(page, src, MAX_PATH)) {
             LOG("world: Load page Accept: refused (the chosen file's path is not readable)");
@@ -1076,11 +1145,11 @@ void publish_mission(const Armed& a) {
     static size_t listed_size = 0;
     static std::string listed;
     if (a.msn_path != listed_path || msn.size() != listed_size) {
-        listed = format_content(mission_content(msn));
+        listed = format_content(mission_content(msn, g_host_shared.empty() ? nullptr : &g_host_shared));
         listed_path = a.msn_path;
         listed_size = msn.size();
     }
-    if (!net::pack_mission(format_sidecar(a.sidecar) + listed, msn, &packed, &id, &raw)) {
+    if (!net::pack_mission(format_sidecar(a.sidecar) + listed + g_armed_shared, msn, &packed, &id, &raw)) {
         LOG("world: the mission is too big to serve (%zu bytes)", msn.size());
         return;
     }
@@ -2946,6 +3015,9 @@ void world_session_end() {
     g_content_diff.clear();
     g_content_failed_id = 0;
     g_content_fail.clear();
+    g_armed_shared.clear();
+    g_host_shared = SharedTypes{};
+    gen_filter_clear();
     g_session_dir.clear();
     g_lobby_hash = 0;
     world_set_own_seat(-1);
