@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "hooks/aircraft_side.h"
+#include "hooks/pilot_head_logic.h"
 #include "hooks/hook_util.h"
 #include "hooks/gen_filter.h"
 #include "hooks/mission_content.h"
@@ -2495,12 +2496,14 @@ struct AnimRx {
     ULONGLONG at = 0;  // wall ms of the newest
 };
 AnimRx g_anim[5];
+const void* g_head_obj[5] = {};  // the aircraft that is each peer's avatar here, for the pilot head sync
 uint32_t g_anim_epoch = 0xffffffffu;
 struct AnimTx {
     uint16_t seq = 0;
     ULONGLONG next = 0;
     bool logged = false;
     uint32_t epoch = 0xffffffffu;
+    bool look_logged = false;
 };
 AnimTx g_anim_tx;
 constexpr ULONGLONG kAnimEveryMs = 50;   // 20 Hz, the State rate
@@ -2510,6 +2513,7 @@ void anim_epoch_check() {
     if (g_anim_epoch == sim_player_epoch()) return;
     g_anim_epoch = sim_player_epoch();
     for (auto& a : g_anim) a = AnimRx{};
+    for (auto& o : g_head_obj) o = nullptr;
 }
 
 void anim_write(void* avatar, const net::JetAnimMsg& m) {
@@ -2529,7 +2533,7 @@ void anim_write(void* avatar, const net::JetAnimMsg& m) {
 
 void world_anim_tick(void* player, uint16_t own_peer, AnimSendFn send) {
     if (!player || !send) return;
-    if (g_anim_tx.epoch != sim_player_epoch()) g_anim_tx = AnimTx{0, 0, false, sim_player_epoch()};
+    if (g_anim_tx.epoch != sim_player_epoch()) g_anim_tx = AnimTx{0, 0, false, sim_player_epoch(), false};
     const ULONGLONG now = GetTickCount64();
     if (now < g_anim_tx.next) return;
     g_anim_tx.next = now + kAnimEveryMs;
@@ -2548,6 +2552,18 @@ void world_anim_tick(void* player, uint16_t own_peer, AnimSendFn send) {
     m.engine_count = c.engine_count;
     m.flags = c.guns & (net::kAnimGun1 | net::kAnimGun2);
     m.config = static_cast<uint16_t>(j.word & net::kAvatarConfigMask);
+    pilot_look_request();
+    float ly = 0, lp = 0;
+    if (pilot_look_read(&ly, &lp)) {
+        m.flags |= net::kAnimLook;
+        m.look_yaw = net::look_to_wire(ly, net::kLookYawLimit);
+        m.look_pitch = net::look_to_wire(lp, net::kLookPitchLimit);
+        if (!g_anim_tx.look_logged) {
+            g_anim_tx.look_logged = true;
+            LOG("pilot head: our look sent (first: yaw %.1f, pitch %.1f degrees; none while in an external view)",
+                ly * 57.29578f, lp * 57.29578f);
+        }
+    }
     uint8_t buf[sizeof(m)];
     const size_t n = net::encode(m, buf, sizeof(buf));
     if (!n || !send(buf, n)) return;
@@ -2577,6 +2593,7 @@ void world_anim_apply(const uint8_t* data, size_t len, void* avatar) {
         }
         return;
     }
+    g_head_obj[m.peer] = avatar;
     anim_write(avatar, m);
     if (!r.logged) {
         r.logged = true;
@@ -2587,9 +2604,21 @@ void world_anim_apply(const uint8_t* data, size_t len, void* avatar) {
     }
 }
 
+bool world_head_target(const void* obj, float* yaw, float* pitch) {
+    if (!obj || g_anim_epoch != sim_player_epoch()) return false;
+    for (int p = 0; p < 5; ++p) {
+        if (g_head_obj[p] != obj) continue;
+        const AnimRx& r = g_anim[p];
+        if (!r.have || !pilot_head::look_fresh(GetTickCount64(), r.at, kAnimFreshMs)) return false;
+        return pilot_head::target_from_anim(r.m, yaw, pitch);
+    }
+    return false;
+}
+
 void world_avatar_refresh(int peer, void* avatar) {
     if (peer < 0 || peer >= 5 || !avatar) return;
     anim_epoch_check();
+    if (avatar != world_player_object()) g_head_obj[peer] = avatar;
     const AnimRx& r = g_anim[peer];
     if (r.have && GetTickCount64() - r.at <= kAnimFreshMs) {  // the newest inputs, again after the avatar's update
         anim_write(avatar, r.m);

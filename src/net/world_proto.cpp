@@ -158,7 +158,9 @@ Status decode(const uint8_t* d, size_t n, JetAnimMsg& out) {
     JetAnimMsg m;
     const Status s = decode_fixed(d, n, WorldType::JetAnim, m);
     if (s != Status::Ok) return s;
-    if (m.engine_count > 8 || (m.flags & ~(kAnimGun1 | kAnimGun2)) || (m.config & ~kAvatarConfigMask)) return Status::BadType;
+    if (m.engine_count > 8 || (m.flags & ~(kAnimGun1 | kAnimGun2 | kAnimLook)) ||
+        (m.config & ~kAvatarConfigMask) || (!(m.flags & kAnimLook) && (m.look_yaw || m.look_pitch)))
+        return Status::BadType;
     out = m;
     return Status::Ok;
 }

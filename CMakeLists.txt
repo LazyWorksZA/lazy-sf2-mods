@@ -49,6 +49,7 @@ add_library(lazysf2 SHARED
     src/hooks/dxgi_hooks.cpp
     src/hooks/input_hooks.cpp
     src/hooks/pilot_twist.cpp
+    src/hooks/pilot_head.cpp
     src/hooks/menu_hooks.cpp
     src/hooks/focus_hooks.cpp
     src/hooks/sound_hooks.cpp

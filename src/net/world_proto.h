@@ -662,15 +662,32 @@ struct JetAnimMsg {
     uint8_t engine_count;  // 0..8
     uint8_t flags;     // kAnimGun1, kAnimGun2
     uint16_t config;   // state word & kAvatarConfigMask
+    int8_t look_yaw;    // v8: where the pilot looks, seat-relative: -127..127 = -180..180 degrees (kAnimLook set)
+    int8_t look_pitch;  // v8: -127..127 = -90..90 degrees
 };
 #pragma pack(pop)
-static_assert(sizeof(JetAnimMsg) == 20);  // 4:2 peer, 6:2 seq, 8:6 axes, 14:1 throttle, 15:1 engines, 16:1 count,
-                                          // 17:1 flags, 18:2 config
+static_assert(sizeof(JetAnimMsg) == 22);  // 4:2 peer, 6:2 seq, 8:6 axes, 14:1 throttle, 15:1 engines, 16:1 count,
+                                          // 17:1 flags, 18:2 config, 20:1 look yaw, 21:1 look pitch
 inline constexpr uint8_t kAnimGun1 = 0x1, kAnimGun2 = 0x2;
+inline constexpr uint8_t kAnimLook = 0x4;  // the look bytes are valid (the player is in a cockpit view)
 inline constexpr size_t kAnimAxes = 6;
 size_t encode(const JetAnimMsg& m, uint8_t* out, size_t cap);
-/// <summary>Checks the size, engine count <= 8, no unknown flag or configuration bit.</summary>
+/// <summary>Checks the size, engine count <= 8, no unknown flag or configuration bit, and that look bytes come with
+/// kAnimLook (else both are 0).</summary>
 Status decode(const uint8_t* data, size_t len, JetAnimMsg& out);
+
+/// <summary>A look angle in radians as the wire's -127..127 over +-limit: clamped, rounded, not finite gives 0.</summary>
+inline int8_t look_to_wire(float rad, float limit) {
+    if (!(rad == rad) || !(limit > 0.0f)) return 0;
+    float v = rad / limit;
+    if (v > 1.0f) v = 1.0f;
+    if (v < -1.0f) v = -1.0f;
+    const float s = v * 127.0f;
+    return static_cast<int8_t>(s >= 0.0f ? s + 0.5f : s - 0.5f);
+}
+inline float look_from_wire(int8_t w, float limit) { return (w < -127 ? -127 : w) * limit / 127.0f; }
+inline constexpr float kLookYawLimit = 3.14159265f;      // wire yaw covers -180..180 degrees
+inline constexpr float kLookPitchLimit = 1.57079633f;    // wire pitch covers -90..90 degrees
 
 /// <summary>A control axis (-1..1) as the wire's -127..127: clamped, rounded, not finite gives 0.</summary>
 inline int8_t axis_to_wire(float v) {

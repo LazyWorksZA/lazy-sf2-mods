@@ -201,6 +201,7 @@ void remove_track_hooks(HMODULE base) {
         (void)s;  // MH_ERROR_NOT_CREATED is expected
     }
     sim_remove(base);
+    pilot_head_remove(base);
 }
 
 // True if base is still the loaded AircraftObject.dll image (not freed, not replaced by another DLL).
@@ -236,6 +237,7 @@ bool install_for(HMODULE m) {
     ok = ok && create_and_enable(at_rva(m, kDtorRva), reinterpret_cast<void*>(&h_Dtor),
                                  reinterpret_cast<void**>(&o_Dtor), "AircraftObject dtor");
     ok = ok && sim_install(m);
+    ok = ok && pilot_head_install(m);
     if (!ok) remove_track_hooks(m);
     return ok;
 }

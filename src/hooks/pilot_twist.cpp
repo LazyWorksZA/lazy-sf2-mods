@@ -67,6 +67,15 @@ std::atomic<bool> g_reset{false};          // set when the twist goes off: the n
 // Developer (probe hotkeys): -1 follow the setting, else 0/1 overrides it for this session; the head hold step.
 std::atomic<int> g_dev_twist{-1};
 std::atomic<int> g_hold{0};
+std::atomic<bool> g_look_wanted{false};  // a network session samples our own look (pilot head sync)
+// The player's own look from the last cockpit view update (game thread only): head yaw and pitch, radians.
+struct Look {
+    float yaw = 0, pitch = 0;
+    ULONGLONG at = 0;
+};
+Look g_look;
+constexpr ULONGLONG kLookFreshMs = 250;
+constexpr size_t kObjIdOffset = 0x08;  // aircraft object: its object id (the view's +0x1c names it)
 
 // View state. The three detours run on the one thread that updates the views (the game thread); nothing else
 // touches these while the hooks are enabled, so they are plain variables.
@@ -150,6 +159,22 @@ void hold_log(void* view) {
         g_twist.load() ? "on" : "off", g_diag.delta * r2d, g_diag.weight);
 }
 
+// Our own cockpit view only (the view's object is the player's), once per update.
+void sample_look(void* view) {
+    void* const player = world_player_object();
+    if (!player) return;
+    uint32_t id = 0;
+    __try {
+        id = *reinterpret_cast<const uint32_t*>(static_cast<const BYTE*>(player) + kObjIdOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (at<uint32_t>(view, kObjectId) != id) return;
+    const float yaw = at<float>(view, kYaw), pitch = at<float>(view, kYaw - 4);
+    if (!(std::fabs(yaw) < 7.0f) || !(std::fabs(pitch) < 7.0f)) return;
+    g_look = {yaw, pitch, GetTickCount64()};
+}
+
 void __fastcall h_Update(void* view, void* edx, float dt) {
     void* const outer = g_updating;  // survives a nested update
     const bool outer_flag = t_in_view_update;
@@ -158,6 +183,7 @@ void __fastcall h_Update(void* view, void* edx, float dt) {
     g_diag = {};
     t_in_view_update = g_updating != nullptr;
     o_Update(view, edx, dt);
+    if (g_updating && g_look_wanted.load(std::memory_order_relaxed)) sample_look(view);
     t_in_view_update = outer_flag;
     g_updating = outer;
     if (applies_to(view)) hold_log(view);
@@ -330,7 +356,7 @@ void set_enabled_locked(bool twist) {
         g_reset = true;
         LOG("pilot twist: %s", twist ? "on" : "off");
     }
-    set_hooks_locked(twist || pt::hold_active(g_hold.load()));
+    set_hooks_locked(twist || pt::hold_active(g_hold.load()) || g_look_wanted.load());
 }
 
 }  // namespace
@@ -341,7 +367,7 @@ void pilot_twist_on_modules_loaded() {
     if (!vm) return;
     const auto* entry = static_cast<const BYTE*>(at_rva(vm, kUpdateRva));
     const bool want = effective_twist(config::pilot_twist_peek() == 1);
-    const bool want_hooks = want || pt::hold_active(g_hold.load());
+    const bool want_hooks = want || pt::hold_active(g_hold.load()) || g_look_wanted.load();
     // Fast path: our hooks belong to this image (an enabled one shows its JMP) and match the setting.
     if (vm == g_view_dll.load() && (!g_enabled.load() || *entry == 0xE9) && want_hooks == g_enabled.load() &&
         want == g_twist.load())
@@ -379,6 +405,23 @@ void pilot_twist_apply_setting() {
     AcquireSRWLockExclusive(&g_install_lock);
     set_enabled_locked(effective_twist(config::pilot_twist()));
     ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+void pilot_look_request() {
+    if (g_look_wanted.load(std::memory_order_relaxed)) return;
+    AcquireSRWLockExclusive(&g_install_lock);
+    if (!g_look_wanted.exchange(true)) {
+        LOG("pilot head: sampling our own cockpit look for the other players");
+        set_enabled_locked(g_twist.load());  // the view hooks come on now if the view DLL is loaded, else on its load
+    }
+    ReleaseSRWLockExclusive(&g_install_lock);
+}
+
+bool pilot_look_read(float* yaw, float* pitch) {
+    if (!g_look.at || GetTickCount64() - g_look.at > kLookFreshMs) return false;
+    *yaw = g_look.yaw;
+    *pitch = g_look.pitch;
+    return true;
 }
 
 namespace {

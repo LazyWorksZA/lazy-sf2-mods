@@ -45,6 +45,7 @@
 #include "hooks/cursor_clip_logic.h"
 #include "hooks/focus_logic.h"
 #include "hooks/remote_avatar_logic.h"
+#include "hooks/pilot_head_logic.h"
 #include "hooks/pilot_twist_math.h"
 #include "config_parse.h"
 #include "bot_client.h"
@@ -1790,7 +1791,7 @@ void acmi_tests() {
         LazyWorks::SF2Patch::acmi::ReportOptions ro3;
         LazyWorks::SF2Patch::acmi::Report r3;
         expect(!LazyWorks::SF2Patch::acmi::make_report(g.data(), m, g.data(), m, ro3, r3) &&
-                   r3.error.find("protocol v3; this build reads v7") != std::string::npos,
+                   r3.error.find("protocol v3; this build reads v8") != std::string::npos,
                "a v3 recording: the report refuses it and names both versions");
     }
     {  // A client joins again while its object is still shown: the old one is removed first. Headings that print as 360 or -0 are 0.
@@ -9039,9 +9040,9 @@ void jet_controls_tests() {
 
 void jet_anim_tests() {
     std::printf("jet animation inputs (JetAnim, v7)\n");
-    expect(kVersion >= 7 && sizeof(JetAnimMsg) == 20 && static_cast<uint8_t>(WorldType::JetAnim) == 42 &&
+    expect(kVersion >= 7 && sizeof(JetAnimMsg) == 22 && static_cast<uint8_t>(WorldType::JetAnim) == 42 &&
                kWorldTypeLast == 42,
-           "protocol v7: JetAnim is world type 42, 20 bytes");
+           "protocol v8: JetAnim is world type 42, 22 bytes");
     const float nan = std::numeric_limits<float>::quiet_NaN();
     expect(axis_to_wire(0.0f) == 0 && axis_to_wire(1.0f) == 127 && axis_to_wire(-1.0f) == -127 &&
                axis_to_wire(0.5f) == 64 && axis_to_wire(-0.5f) == -64 && axis_to_wire(3.0f) == 127 &&
@@ -9071,7 +9072,7 @@ void jet_anim_tests() {
     uint8_t b[64];
     const size_t n = encode(m, b, sizeof(b));
     JetAnimMsg r{};
-    expect(n == 20 && peek_world_type(b, n) == 42 && decode(b, n, r) == Status::Ok && r.peer == 2 && r.seq == 0xbeef &&
+    expect(n == 22 && peek_world_type(b, n) == 42 && decode(b, n, r) == Status::Ok && r.peer == 2 && r.seq == 0xbeef &&
                r.axis[0] == 32 && r.axis[1] == -127 && r.axis[2] == 95 && r.axis[5] == -6 && r.throttle == 255 &&
                r.engines == 3 && r.engine_count == 2 && r.flags == kAnimGun1 && r.config == 0x0900 &&
                b[8] == 32 && b[14] == 255 && b[18] == 0x00 && b[19] == 0x09,
@@ -10803,7 +10804,7 @@ int main(int argc, char** argv) {
         expect(n == 60 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
-        expect(kVersion == 7 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7 &&
+        expect(kVersion == 8 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7 &&
                    sizeof(AuthChallengeMsg) == 40 && sizeof(AuthAnswerMsg) == 52 && sizeof(AuthProofMsg) == 36,
                "v7 sizes (v4's, plus the password challenge, answer and host proof; v6 and v7 change none of these)");
     }

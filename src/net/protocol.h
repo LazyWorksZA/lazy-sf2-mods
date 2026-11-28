@@ -11,8 +11,8 @@ inline constexpr uint16_t kMagic = 0x5A4C;  // bytes 'L','Z' on the wire (little
 // v3 adds the shared-world messages (world_proto.h); v4 the jet controls in AvatarState (Phase 5); v5 the session
 // password, proven both ways (AuthChallenge, AuthAnswer, AuthProof), and the lobby (world_proto.h: LobbyStatus,
 // LobbyRoster); v6 the reason in HandoverDone (handover_format.h: kHandover*); v7 JetAnim (world_proto.h: the jet's
-// control inputs for its animations). Each version is a clean break: an older peer is refused with BadVersion.
-inline constexpr uint8_t kVersion = 7;
+// control inputs for its animations); v8 the pilot's look direction in JetAnim. Each version is a clean break: an older peer is refused with BadVersion.
+inline constexpr uint8_t kVersion = 8;
 
 /// <summary>ENet channels.</summary>
 inline constexpr uint8_t kChannelReliable = 0;    // Hello, Welcome, PeerInfo, PeerLeft, Bye
