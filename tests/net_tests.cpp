@@ -1790,7 +1790,7 @@ void acmi_tests() {
         LazyWorks::SF2Patch::acmi::ReportOptions ro3;
         LazyWorks::SF2Patch::acmi::Report r3;
         expect(!LazyWorks::SF2Patch::acmi::make_report(g.data(), m, g.data(), m, ro3, r3) &&
-                   r3.error.find("protocol v3; this build reads v5") != std::string::npos,
+                   r3.error.find("protocol v3; this build reads v6") != std::string::npos,
                "a v3 recording: the report refuses it and names both versions");
     }
     {  // A client joins again while its object is still shown: the old one is removed first. Headings that print as 360 or -0 are 0.
@@ -10728,9 +10728,9 @@ int main(int argc, char** argv) {
         expect(n == 60 && decode(b, 52, v1) == Status::BadVersion && peek_type(b, 52, t) == Status::BadVersion &&
                    decode(b, n, v1) == Status::BadVersion,
                "a v1 Hello is rejected with BadVersion");
-        expect(kVersion == 5 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7 &&
+        expect(kVersion == 6 && sizeof(WelcomeMsg) == 64 && sizeof(PeerInfoMsg) == 55 && sizeof(PeerLeftMsg) == 7 &&
                    sizeof(AuthChallengeMsg) == 40 && sizeof(AuthAnswerMsg) == 52 && sizeof(AuthProofMsg) == 36,
-               "v5 sizes (v4's, plus the password challenge, answer and host proof)");
+               "v6 sizes (v4's, plus the password challenge, answer and host proof; v6 changes no size)");
     }
 
     loopback();

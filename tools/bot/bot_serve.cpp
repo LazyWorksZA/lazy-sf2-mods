@@ -229,10 +229,10 @@ struct Serve {
     HandoverAssembly ho;
     void handover(const HostEvent& e) {
         const uint8_t wt = peek_world_type(e.data, e.len);
-        auto answer = [&](uint32_t epoch, bool taken) {
+        auto answer = [&](uint32_t epoch, uint8_t code) {
             HandoverDoneMsg d{};
             d.epoch = epoch;
-            d.taken = taken ? 1 : 0;
+            d.taken = code;
             uint8_t buf[sizeof(d)];
             const size_t n = encode(d, buf, sizeof(buf));
             if (n) core.send_world(c.slot, c.gen, buf, n, true);
@@ -245,7 +245,7 @@ struct Serve {
                 ++res.handovers_refused;
                 say("bot serve: client %u offers its world (clock %.1f s, ours %.1f s): refused", static_cast<unsigned>(c.slot + 1),
                     b.clock_ms / 1000.0, own / 1000.0);
-                answer(b.epoch, false);
+                answer(b.epoch, kHandoverRefusedOwner);
             }
             return;
         }
@@ -263,7 +263,7 @@ struct Serve {
         }
         say("bot serve: client %u's world %s: %zu aircraft, %zu vehicles, %zu flights, clock %.1f s", static_cast<unsigned>(c.slot + 1),
             ok ? "taken" : "did NOT unpack", s.aircraft.size(), s.vehicles.size(), s.flights.size(), s.head.clock_ms / 1000.0);
-        answer(b.epoch, ok);
+        answer(b.epoch, ok ? kHandoverTaken : kHandoverRefusedBad);
     }
 
     // --clock: the mission clock.
