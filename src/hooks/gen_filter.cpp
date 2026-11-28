@@ -20,11 +20,12 @@ namespace LazyWorks::SF2Patch::hooks {
 namespace {
 
 constexpr DWORD kSmStamp = 0x51d220e5, kSmSize = 0xc1000;
-constexpr DWORD kAvail1 = 0x64ec0, kAvail2 = 0x65280, kAvail3 = 0x653e0, kGroundPick = 0x23d10;
+constexpr DWORD kAvail1 = 0x64ec0, kAvail2 = 0x65280, kAvail3 = 0x653e0, kGroundPick = 0x23d10, kGroundPick2 = 0x23b80;
 // Only bytes without relocations (the functions load a global's address right after the frame).
 constexpr BYTE kPro1[] = {0x55, 0x8b, 0xec, 0x8b, 0x0d};
 constexpr BYTE kPro23[] = {0x55, 0x8b, 0xec, 0x51, 0x8b, 0x0d};
 constexpr BYTE kProPick[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x14, 0x53, 0x8b, 0xd9, 0x8b, 0x83, 0xf8, 0x28, 0x00, 0x00, 0x56};
+constexpr BYTE kProPick2[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x18, 0x8b, 0x45, 0x10, 0x53, 0x56, 0x57, 0x8b, 0xf9, 0x33, 0xdb};
 constexpr size_t kAircraftSub = 0x6ec, kGroundSub = 0xb24;  // what the pickers pass the availability functions
 constexpr size_t kRecName = 0x04, kGroundCategory = 0xbe4;
 constexpr size_t kAircraftPath = 0x204, kGroundPath = 0x184;  // the type's data file / folder (260 wide characters)
@@ -34,6 +35,8 @@ using Avail1_t = int(__cdecl*)(int sub, int nation, int* date);
 using Avail2_t = int(__cdecl*)(wchar_t* sub, int nation, int* date);
 using Avail3_t = unsigned(__cdecl*)(wchar_t* sub, int nation);
 using Pick_t = int(__fastcall*)(void* self, void* edx, int category, int nation, int fallback, wchar_t* name);
+using Pick2_t = int(__fastcall*)(void* self, void* edx, int category, int mode, int side, int fallback);
+Pick2_t o_pick2 = nullptr;
 Avail1_t o_avail1 = nullptr;
 Avail2_t o_avail2 = nullptr;
 Avail3_t o_avail3 = nullptr;
@@ -44,6 +47,8 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 bool g_active = false;
 std::vector<uintptr_t> g_blocked_subs;     // sorted: record + kAircraftSub / kGroundSub of the unshared types
 std::vector<int> g_blocked_ground;         // sorted: ground record indices of the unshared types
+std::vector<uintptr_t> g_blocked_ground_recs;  // ... and their records (hidden from the ground pickers)
+thread_local int g_hidden = 0;             // nesting of the ground pickers (only the outer one hides)
 bool g_logged_pick = false;
 
 bool blocked_sub(uintptr_t sub) {
@@ -62,17 +67,71 @@ int __cdecl h_avail2(wchar_t* sub, int nation, int* date) {
 unsigned __cdecl h_avail3(wchar_t* sub, int nation) {
     return blocked_sub(reinterpret_cast<uintptr_t>(sub)) ? 0u : o_avail3(sub, nation);
 }
-// The ground picker may fall back to the closest-year candidate even when every weight is 0: an unshared result is
-// turned into "none".
+// SEH only: swaps the categories of the given records with `with` (a value no picker asks for), keeping the old ones.
+bool swap_categories(const uintptr_t* recs, short* saved, size_t n, bool hide) {
+    __try {
+        for (size_t i = 0; i < n; ++i) {
+            short* c = reinterpret_cast<short*>(recs[i] + kGroundCategory);
+            if (hide) {
+                saved[i] = *c;
+                *c = 0x7fff;
+            } else {
+                *c = saved[i];
+            }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The ground pickers (+0x23d10, +0x23b80) loop over the records of a category and, when no candidate has a weight,
+// fall back to the one with the closest service year. While they run, the unshared records' categories are hidden,
+// so both the weighted pick and the fallback see the shared records only, the same on every PC. Menu thread
+// (generate) or game thread (start); nothing else reads the categories then. See lazy-sf2-recon: recon-notes §28.7d.
+struct HideUnshared {
+    std::vector<uintptr_t> recs;  // a copy: the lock is not held while the picker runs (it calls the detours above)
+    std::vector<short> saved;
+    bool on = false;
+    HideUnshared() {
+        AcquireSRWLockShared(&g_lock);
+        const bool outer = g_active && g_hidden == 0;
+        if (outer) recs = g_blocked_ground_recs;
+        ReleaseSRWLockShared(&g_lock);
+        ++g_hidden;
+        if (!recs.empty()) {
+            saved.assign(recs.size(), 0);
+            on = swap_categories(recs.data(), saved.data(), recs.size(), true);
+        }
+    }
+    ~HideUnshared() {
+        if (on) swap_categories(recs.data(), saved.data(), recs.size(), false);
+        --g_hidden;
+    }
+};
+
+int __fastcall h_pick2(void* self, void* edx, int category, int mode, int side, int fallback) {
+    int r;
+    {
+        HideUnshared hide;
+        r = o_pick2(self, edx, category, mode, side, fallback);
+    }
+    return r;
+}
+
 int __fastcall h_pick(void* self, void* edx, int category, int nation, int fallback, wchar_t* name) {
-    const int r = o_pick(self, edx, category, nation, fallback, name);
+    int r;
+    {
+        HideUnshared hide;
+        r = o_pick(self, edx, category, nation, fallback, name);
+    }
     if (r < 0) return r;
     AcquireSRWLockShared(&g_lock);
     const bool b = g_active && std::binary_search(g_blocked_ground.begin(), g_blocked_ground.end(), r);
     const bool log = b && !g_logged_pick;
     if (log) g_logged_pick = true;
     ReleaseSRWLockShared(&g_lock);
-    if (log) LOG("gen filter: the ground picker's fallback chose an unshared type (category %d); none is placed", category);
+    if (log) LOG("gen filter: the ground picker still chose an unshared type (category %d); none is placed", category);
     return b ? -1 : r;
 }
 
@@ -244,7 +303,7 @@ bool gen_filter_apply(const SharedTypes& s, std::string* why) {
         return false;
     }
     std::vector<Rec> recs(kMaxRecs);
-    std::vector<uintptr_t> subs;
+    std::vector<uintptr_t> subs, ground_recs;
     std::vector<int> ground_idx;
     size_t aircraft_kept = 0, ground_kept = 0;
     const int na = read_class(L"AircraftObject", false, recs.data());
@@ -269,12 +328,14 @@ bool gen_filter_apply(const SharedTypes& s, std::string* why) {
         } else {
             subs.push_back(recs[i].ptr + kGroundSub);
             ground_idx.push_back(i);
+            ground_recs.push_back(recs[i].ptr);
         }
     }
     std::sort(subs.begin(), subs.end());
     AcquireSRWLockExclusive(&g_lock);
     g_blocked_subs = std::move(subs);
     g_blocked_ground = std::move(ground_idx);
+    g_blocked_ground_recs = std::move(ground_recs);
     g_active = true;
     g_logged_pick = false;
     ReleaseSRWLockExclusive(&g_lock);
@@ -289,6 +350,7 @@ void gen_filter_clear() {
     g_active = false;
     g_blocked_subs.clear();
     g_blocked_ground.clear();
+    g_blocked_ground_recs.clear();
     ReleaseSRWLockExclusive(&g_lock);
     if (was) LOG("gen filter: off (stock picking)");
 }
@@ -313,15 +375,16 @@ void gen_filter_on_modules_loaded() {
     const auto* t2 = static_cast<const BYTE*>(at_rva(m, kAvail2));
     const auto* t3 = static_cast<const BYTE*>(at_rva(m, kAvail3));
     const auto* tp = static_cast<const BYTE*>(at_rva(m, kGroundPick));
+    const auto* tp2 = static_cast<const BYTE*>(at_rva(m, kGroundPick2));
     if (!is_expected_build(m, kSmStamp, kSmSize, "SingleMission.dll") || std::memcmp(t1, kPro1, sizeof(kPro1)) != 0 ||
         std::memcmp(t2, kPro23, sizeof(kPro23)) != 0 || std::memcmp(t3, kPro23, sizeof(kPro23)) != 0 ||
-        std::memcmp(tp, kProPick, sizeof(kProPick)) != 0) {
+        std::memcmp(tp, kProPick, sizeof(kProPick)) != 0 || std::memcmp(tp2, kProPick2, sizeof(kProPick2)) != 0) {
         bad = m;
         LOG("gen filter: SingleMission.dll not hooked (build or prologues); shared-content generation unavailable");
         return;
     }
     bool ok = true;
-    for (DWORD rva : {kAvail1, kAvail2, kAvail3, kGroundPick}) (void)MH_RemoveHook(at_rva(m, rva));
+    for (DWORD rva : {kAvail1, kAvail2, kAvail3, kGroundPick, kGroundPick2}) (void)MH_RemoveHook(at_rva(m, rva));
     ok &= create_and_enable(at_rva(m, kAvail1), reinterpret_cast<void*>(&h_avail1), reinterpret_cast<void**>(&o_avail1),
                             "SingleMission availability 1");
     ok &= create_and_enable(at_rva(m, kAvail2), reinterpret_cast<void*>(&h_avail2), reinterpret_cast<void**>(&o_avail2),
@@ -330,6 +393,8 @@ void gen_filter_on_modules_loaded() {
                             "SingleMission availability 3");
     ok &= create_and_enable(at_rva(m, kGroundPick), reinterpret_cast<void*>(&h_pick), reinterpret_cast<void**>(&o_pick),
                             "SingleMission ground picker");
+    ok &= create_and_enable(at_rva(m, kGroundPick2), reinterpret_cast<void*>(&h_pick2), reinterpret_cast<void**>(&o_pick2),
+                            "SingleMission ground picker 2");
     if (ok) g_base = m;
 }
 

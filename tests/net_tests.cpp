@@ -10573,15 +10573,38 @@ void gen_filter_tests() {
     const std::vector<hk::ContentEntry> c1 = {{'A', "f-4e", 1}, {'A', "F-105D", 9}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4}, {'A', "MiG-21", 7}};
     const std::vector<hk::ContentEntry> c2 = {{'A', "F-4E", 1}, {'G', "SA-2", 3}};
     const hk::SharedTypes s = hk::intersect_inventories({host, c1, c2});
-    expect(s.aircraft == std::vector<std::string>{"f-4e"} && s.ground == std::vector<std::string>{"sa-2"},
+    expect(s.aircraft == std::vector<std::string>{"f-4e"} && s.ground == std::vector<std::string>{"sa-2"} && s.ordered.size() == 2,
            "filter: only types every inventory has with the same hash (case-insensitive; hash 0 is not had)");
     const hk::SharedTypes alone = hk::intersect_inventories({host});
-    expect(alone.aircraft.size() == 2 && alone.ground.size() == 2, "filter: the host alone keeps what it has");
-    const hk::SharedTypes back = hk::parse_shared("# x\nshared=A:f-4e\nshared=G:sa-2\nshared=X:bad\nshared=A:..\\evil\ncontent=A:F-4E:1\n");
-    expect(back.aircraft == s.aircraft && back.ground == s.ground && hk::format_shared(s) == "shared=A:f-4e\nshared=G:sa-2\n",
-           "filter: shared lines round trip; malformed and unsafe ones are skipped");
+    expect(alone.aircraft.size() == 2 && alone.ground.size() == 2 && alone.ordered[1].name == "f-105d",
+           "filter: the host alone keeps what it has, in its record order");
+    const std::string lines = hk::format_shared(alone);
+    const hk::SharedTypes back = hk::parse_shared("# x\n" + lines + "shared=X:bad:1\nshared=A:..\\evil:2\nshared=A:nohash:\ncontent=A:F-4E:1\n");
+    expect(lines == "shared=A:f-4e:00000001\nshared=A:f-105d:00000002\nshared=G:sa-2:00000003\nshared=G:zsu-23:00000004\n" &&
+               back.ordered.size() == 4 && back.ordered[1].hash == 2 && back.ground == alone.ground,
+           "filter: shared lines keep the order and the hashes; malformed and unsafe ones are skipped");
     expect(hk::shared_has(s.aircraft, "F-4E") && !hk::shared_has(s.aircraft, "F-105D") && hk::parse_shared("").empty(),
            "filter: lookups ignore case; no lines, no filter");
+    // Every PC's records must give the host's shared sequence.
+    const std::vector<hk::ContentEntry> same = {{'A', "MiG-21", 7}, {'A', "F-4E", 1}, {'A', "F-105D", 2}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4}};
+    const std::vector<hk::ContentEntry> swapped = {{'A', "F-105D", 2}, {'A', "F-4E", 1}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4}};
+    const std::vector<hk::ContentEntry> other = {{'A', "F-4E", 1}, {'A', "F-105D", 8}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4}};
+    const std::vector<hk::ContentEntry> lacks = {{'A', "F-4E", 1}, {'A', "F-105D", 2}, {'G', "SA-2", 3}};
+    expect(hk::verify_shared_order(alone, same).empty(), "order: other types of this PC's in between do not matter");
+    expect(hk::verify_shared_order(alone, swapped) == "the type order differs at f-4e", "order: the same types in another order are refused");
+    expect(hk::verify_shared_order(alone, other) == "f-105d differs" && hk::verify_shared_order(alone, lacks) == "zsu-23 is missing",
+           "order: a different version or a missing type is refused");
+    // The pickers' fallback with the unshared records hidden: the same on a PC that has the unshared type and one
+    // that does not.
+    std::vector<int> cand;
+    // PC A: records [X (unshared, year 1966), Y (shared, 1960)]; PC B: [Y]. Category 5, no weights, mission year 1967.
+    const int a = hk::model_ground_fallback({5, 5}, {0, 0}, {true, true}, {1966, 1960}, {true, false}, 5, 1967, true, &cand);
+    const int b = hk::model_ground_fallback({5}, {0}, {true}, {1960}, {false}, 5, 1967, true, &cand);
+    const int a_open = hk::model_ground_fallback({5, 5}, {0, 0}, {true, true}, {1966, 1960}, {false, false}, 5, 1967, true, &cand);
+    expect(a == 1 && b == 0 && a_open == 0, "fallback: with X hidden both PCs fall back to Y (unhidden, A would pick X)");
+    cand.clear();
+    const int w = hk::model_ground_fallback({5, 5, 6}, {0, 3, 9}, {true, true, true}, {1966, 1960, 1967}, {true, false, false}, 5, 1967, true, &cand);
+    expect(w == -1 && cand == std::vector<int>{1}, "fallback: weighted candidates of the category only; hidden ones never");
 }
 
 void lobby_flow_splice_tests() {

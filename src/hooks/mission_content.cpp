@@ -347,6 +347,18 @@ std::string mission_content_check(const std::string& sidecar_text) {
     if (host.empty()) return {};  // a host that sends no list: nothing to compare
     const SharedTypes shared = parse_shared(sidecar_text);
     g_pool_filter = shared.empty() ? nullptr : &shared;
+    if (!shared.empty()) {
+        // Generated from shared content: this PC's records must give the host's sequence (same names, hashes, order),
+        // or the generator's and the start's picks differ from one seed.
+        std::vector<ContentEntry> inv;
+        std::string why;
+        if (!gen_inventory(&inv, &why)) return std::string(1, kContentNotReady);
+        if (inv.empty()) return "this PC's types could not be listed (" + why + ")";
+        if (const std::string order = verify_shared_order(shared, inv); !order.empty()) {
+            LOG("lobby: the host's shared types do not match this PC's: %s", order.c_str());
+            return "shared types: " + order;
+        }
+    }
     struct ClearPool {
         ~ClearPool() { g_pool_filter = nullptr; }
     } clear_pool;

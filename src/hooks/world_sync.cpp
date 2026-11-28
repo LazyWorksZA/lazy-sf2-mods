@@ -741,6 +741,7 @@ void accept_save(const Ctx& c, void* page, const wchar_t* source) {
 
 uint32_t g_content_id = 0;      // join: the fetched mission whose content list was checked
 std::string g_content_diff;     // ... and what this PC lacks or has otherwise (empty: all there)
+std::string g_content_sidecar;  // ... and its sidecar
 uint32_t g_content_failed_id = 0;  // join: the mission that arrived but could not be unpacked or written here
 std::string g_content_fail;     // ... and why
 
@@ -803,6 +804,7 @@ void take_fetched_mission() {
     if (g_lobby_hash) {
         g_content_diff = mission_content_check(sidecar);
         g_content_id = offer.mission_id;
+        g_content_sidecar = sidecar;  // kept: a check that waits for this PC's type list runs again later
         if (g_content_diff.empty())
             LOG("world: join: this PC has everything the host's mission 0x%08lx uses", static_cast<unsigned long>(offer.mission_id));
         else
@@ -877,9 +879,21 @@ void accept_load(const Ctx& c, void* page, bool new_page) {
             err.empty() ? "unreadable" : err.c_str());
         return;
     }
-    // A mission the host generated from shared content: this PC's load and start pick from the same set.
+    // A mission the host generated from shared content: this PC's load and start pick from the same set, which
+    // this PC's records must give in the host's order (else the picks from one seed differ).
     if (const SharedTypes shared = parse_shared(text); !shared.empty()) {
         std::string why;
+        std::vector<ContentEntry> inv;
+        if (!gen_inventory(&inv, &why) || inv.empty()) {
+            LOG("world: load REFUSED: this PC's types are not listed yet%s%s; flying the generated mission",
+                why.empty() ? "" : ": ", why.c_str());
+            return;
+        }
+        if (const std::string order = verify_shared_order(shared, inv); !order.empty()) {
+            LOG("world: load REFUSED: the host's shared types do not match this PC's (%s); flying the generated mission",
+                order.c_str());
+            return;
+        }
         if (!gen_filter_apply(shared, &why)) {
             LOG("world: load REFUSED: the host's mission was generated from shared content and the filter is unavailable "
                 "here (%s); flying the generated mission", why.c_str());
@@ -3015,6 +3029,7 @@ void world_session_end() {
     g_content_diff.clear();
     g_content_failed_id = 0;
     g_content_fail.clear();
+    g_content_sidecar.clear();
     g_armed_shared.clear();
     g_host_shared = SharedTypes{};
     gen_filter_clear();
@@ -3034,6 +3049,12 @@ ContentCheck world_lobby_content(uint32_t mission_id, std::string* text) {
     if (!g_join || !mission_id) return ContentCheck::Pending;
     // A newer mission has arrived: take it now (files written, its content checked), not at the briefing.
     if (g_fetch && g_content_id != mission_id && g_fetch->has_fresh()) take_fetched_mission();
+    if (g_content_id == mission_id && g_content_diff.size() == 1 && g_content_diff[0] == kContentNotReady) {
+        g_content_diff = mission_content_check(g_content_sidecar);  // this PC's type list may be ready now
+        if (g_content_diff.size() == 1 && g_content_diff[0] == kContentNotReady) return ContentCheck::Pending;
+        LOG("world: join: content check of mission 0x%08lx done: %s", static_cast<unsigned long>(mission_id),
+            g_content_diff.empty() ? "this PC has everything it uses" : g_content_diff.c_str());
+    }
     if (g_content_id == mission_id) {
         *text = g_content_diff;
         return g_content_diff.empty() ? ContentCheck::Passed : ContentCheck::Lacks;

@@ -31,6 +31,10 @@ inline bool content_name_ok(const std::string& n) {
     return true;
 }
 
+/// <summary>mission_content_check's answer while this PC's own type list is still being built (ask again later).
+/// </summary>
+inline constexpr char kContentNotReady = '\x01';
+
 /// <summary>The most content lines a client checks; a longer list is refused (it would cost the menu thread too
 /// much).</summary>
 inline constexpr size_t kMaxContentEntries = 512;
