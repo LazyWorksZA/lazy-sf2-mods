@@ -58,6 +58,7 @@ add_library(lazysf2 SHARED
     src/hooks/net_session.cpp
     src/hooks/content_hash.cpp
     src/hooks/mission_content.cpp
+    src/hooks/gen_filter.cpp
     src/hooks/lobby_flow.cpp
     src/hooks/aircraft_track.cpp
     src/hooks/weapon_track.cpp

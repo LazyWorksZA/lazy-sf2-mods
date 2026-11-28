@@ -31,6 +31,7 @@
 #include "acmi/terrain_texture.h"
 #include "hooks/lobby_logic.h"
 #include "hooks/mission_content.h"
+#include "hooks/gen_filter.h"
 #include "hooks/lobby_splice.h"
 #include "hooks/options_gameplay_splice.h"
 #include "hooks/weapon_class.h"
@@ -10530,6 +10531,25 @@ void mission_content_tests() {
     expect(hk::content_diff(many, {}, 4) == "missing: W0, W1, W2, W3; and 3 more", "content: at most four named");
 }
 
+void gen_filter_tests() {
+    std::printf("generator filter (shared types)\n");
+    namespace hk = LazyWorks::SF2Patch::hooks;
+    const std::vector<hk::ContentEntry> host = {{'A', "F-4E", 1}, {'A', "F-105D", 2}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4},
+                                                {'W', "AIM-9B", 5}, {'A', "Mirage", 0}};
+    const std::vector<hk::ContentEntry> c1 = {{'A', "f-4e", 1}, {'A', "F-105D", 9}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4}, {'A', "MiG-21", 7}};
+    const std::vector<hk::ContentEntry> c2 = {{'A', "F-4E", 1}, {'G', "SA-2", 3}};
+    const hk::SharedTypes s = hk::intersect_inventories({host, c1, c2});
+    expect(s.aircraft == std::vector<std::string>{"f-4e"} && s.ground == std::vector<std::string>{"sa-2"},
+           "filter: only types every inventory has with the same hash (case-insensitive; hash 0 is not had)");
+    const hk::SharedTypes alone = hk::intersect_inventories({host});
+    expect(alone.aircraft.size() == 2 && alone.ground.size() == 2, "filter: the host alone keeps what it has");
+    const hk::SharedTypes back = hk::parse_shared("# x\nshared=A:f-4e\nshared=G:sa-2\nshared=X:bad\nshared=A:..\\evil\ncontent=A:F-4E:1\n");
+    expect(back.aircraft == s.aircraft && back.ground == s.ground && hk::format_shared(s) == "shared=A:f-4e\nshared=G:sa-2\n",
+           "filter: shared lines round trip; malformed and unsafe ones are skipped");
+    expect(hk::shared_has(s.aircraft, "F-4E") && !hk::shared_has(s.aircraft, "F-105D") && hk::parse_shared("").empty(),
+           "filter: lookups ignore case; no lines, no filter");
+}
+
 void lobby_flow_splice_tests() {
     std::printf("lobby flow splices (L5: Single Mission and Hangar in a session; L8: Debrief)\n");
     using namespace LazyWorks::SF2Patch::hooks;
@@ -10687,6 +10707,7 @@ int main(int argc, char** argv) {
     lobby_launch_tests();
     lobby_flow_splice_tests();
     mission_content_tests();
+    gen_filter_tests();
     fetch_lookup_tests();
     pilot_twist_tests();
     probe_snapshot_tests();

@@ -6,6 +6,7 @@
 
 #include <cstring>
 
+#include "hooks/gen_filter.h"
 #include "hooks/hook_util.h"
 #include "hooks/hooks.h"
 #include "hooks/lobby_splice.h"
@@ -107,7 +108,10 @@ bool still_module(HMODULE base, const wchar_t* file) {
 }  // namespace
 
 void lobby_flow_on_modules_loaded() {
-    if (!lobby_menu_code_path().empty()) hook_screen_open();  // only where the lobby can exist at all
+    if (!lobby_menu_code_path().empty()) {  // only where the lobby can exist at all
+        hook_screen_open();
+        gen_filter_on_modules_loaded();
+    }
     HMODULE m = GetModuleHandleW(L"HangarScreen.dll");
     if (!m) return;
     auto* target = static_cast<const BYTE*>(at_rva(m, kHangarEventRva));
