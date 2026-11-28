@@ -153,10 +153,44 @@ inline int model_ground_fallback(const std::vector<short>& category, const std::
 /// detours return "not available" for the others). False, with *why, when the type records are not as analysed:
 /// nothing is filtered then (fails closed: the caller must not fly the mission as filtered).</summary>
 bool gen_filter_apply(const SharedTypes& s, std::string* why);
-/// <summary>Any thread (slow: it reads every type's files): this PC's aircraft and ground object types, each hashed
-/// from the folder its type record names (as the game found it). Empty, with *why, when the records are not as
-/// analysed.</summary>
-std::vector<ContentEntry> gen_local_inventory(std::string* why);
+/// <summary>A type manager as analysed: the object the class factory hands out (factory slot +0x10 returns factory + 4;
+/// AircraftObject +0x49db0, GroundObject +0x7ad0), its vtable, and the two slots SingleMission calls on it (count at
+/// slot 0; get(index, &record) at +0x14 for aircraft (+0x3bc40, +0x242f0), +0x10 for ground objects (+0x23d10,
+/// +0x23eb0)). See lazy-sf2-recon: recon-notes §28.7d.</summary>
+struct TypeManagerSpec {
+    const wchar_t* module;
+    const char* module_name;
+    unsigned long stamp, size;
+    unsigned long object, vtable;
+    int count_slot;
+    unsigned long count_fn;
+    int get_slot;
+    unsigned long get_fn;
+};
+inline constexpr TypeManagerSpec kAircraftTypes{L"AircraftObject.dll", "AircraftObject.dll", 0x51d220bd, 0xc2000, 0xa7714,
+                                                0x94a8c, 0, 0x4a810, 0x14 / 4, 0x27e60};
+inline constexpr TypeManagerSpec kGroundTypes{L"GroundObject.dll", "GroundObject.dll", 0x51d220a7, 0x54000, 0x4b294,
+                                              0x3d9b8, 0, 0x7d10, 0x10 / 4, 0x4130};
+
+/// <summary>Whether the spec's type manager is in memory as analysed (build, object's vtable, the two slots' functions);
+/// *out is the manager then. Reads only: nothing is called.</summary>
+bool type_manager_verified(const TypeManagerSpec& s, void** out);
+
+/// <summary>A type record, copied: kind 'A'/'G', type name, the folder it was loaded from, the record's address
+/// (for the filter) and, for ground objects, its category.</summary>
+struct TypeRecord {
+    char kind = 0;
+    std::string name;
+    std::wstring dir;
+    uintptr_t ptr = 0;
+    short category = 0;
+};
+/// <summary>Menu thread only: every aircraft and ground object type record, in record order, read through the
+/// verified type managers. False, with *why, when they are not as analysed (nothing is called then).</summary>
+bool gen_walk_types(std::vector<TypeRecord>* out, std::string* why);
+/// <summary>Any thread (slow: it reads every type's files through the file manager): the content-list hash of each.
+/// </summary>
+std::vector<ContentEntry> gen_hash_types(const std::vector<TypeRecord>& types);
 /// <summary>Menu thread: builds this PC's inventory on a worker thread, once per game run (types do not change while
 /// the game runs). Later calls do nothing.</summary>
 void gen_inventory_start();

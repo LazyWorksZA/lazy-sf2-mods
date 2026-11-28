@@ -29,7 +29,7 @@ constexpr BYTE kProPick2[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x18, 0x8b, 0x45, 0x
 constexpr size_t kAircraftSub = 0x6ec, kGroundSub = 0xb24;  // what the pickers pass the availability functions
 constexpr size_t kRecName = 0x04, kGroundCategory = 0xbe4;
 constexpr size_t kAircraftPath = 0x204, kGroundPath = 0x184;  // the type's data file / folder (260 wide characters)
-constexpr DWORD kOmStamp = 0x51d21fa8, kOmSize = 0x28000, kOmManager = 0x234d0, kOmVtable = 0x1d55c;
+constexpr DWORD kOmStamp = 0x51d21fa8, kOmSize = 0x28000;
 
 using Avail1_t = int(__cdecl*)(int sub, int nation, int* date);
 using Avail2_t = int(__cdecl*)(wchar_t* sub, int nation, int* date);
@@ -135,6 +135,7 @@ int __fastcall h_pick(void* self, void* edx, int category, int nation, int fallb
     return b ? -1 : r;
 }
 
+// One type record, copied (names and folders): the menu thread walks, a worker may hash later.
 struct Rec {
     uintptr_t ptr;
     short category;
@@ -142,60 +143,83 @@ struct Rec {
     wchar_t path[260];
 };
 constexpr int kMaxRecs = 20000;
+// The calls below must match SingleMission's own: count() at slot 0, get(index, &record) at the spec's slot.
+static_assert(kAircraftTypes.count_slot == 0 && kAircraftTypes.get_slot == 5 && kGroundTypes.count_slot == 0 &&
+              kGroundTypes.get_slot == 4);
 
-// SEH only: the records of the class whose name starts with prefix, into out[kMaxRecs]. -1 when anything is not as
-// analysed (names printable, ground categories small).
-int read_class(const wchar_t* prefix, bool ground, Rec* out) {
-    HMODULE om = GetModuleHandleW(L"ObjectManager.dll");
-    if (!om) return -1;
-    const BYTE* mgr = static_cast<const BYTE*>(at_rva(om, kOmManager));
-    const size_t plen = wcslen(prefix);
+// SEH only, plain reads (no calls): one record's fields into o. False when they are not as analysed (names
+// printable, ground categories small).
+bool copy_record(const void* rec, bool ground, Rec* o) {
     __try {
-        if (*reinterpret_cast<void* const*>(mgr) != at_rva(om, kOmVtable)) return -1;
-        const uint32_t n = *reinterpret_cast<const uint32_t*>(mgr + 0x08);
-        const BYTE* arr = *reinterpret_cast<const BYTE* const*>(mgr + 0x0c);
-        if (!arr || n == 0 || n > 64) return -1;
-        void* cls = nullptr;
-        for (uint32_t i = 0; i < n && !cls; ++i) {
-            const wchar_t* name = *reinterpret_cast<const wchar_t* const*>(arr + 0x10 * i + 0x08);
-            if (name && _wcsnicmp(name, prefix, plen) == 0 && (name[plen] == 0 || name[plen] == L'.'))
-                cls = *reinterpret_cast<void* const*>(arr + 0x10 * i);
+        const BYTE* r = static_cast<const BYTE*>(rec);
+        o->ptr = reinterpret_cast<uintptr_t>(rec);
+        o->category = ground ? *reinterpret_cast<const short*>(r + kGroundCategory) : 0;
+        if (o->category < 0 || o->category > 255) return false;
+        const wchar_t* type = reinterpret_cast<const wchar_t*>(r + kRecName);
+        int k = 0;
+        for (; k < 63 && type[k]; ++k) {
+            if (type[k] < 0x20 || type[k] > 0x7e) return false;
+            o->name[k] = type[k];
         }
-        if (!cls) return -1;
-        using Count_t = int(__fastcall*)(void*, void*);
-        using Get_t = void(__fastcall*)(void*, void*, int, void**);
-        const int count = reinterpret_cast<Count_t>(vtable_slot(cls, 0))(cls, nullptr);
-        if (count <= 0 || count > kMaxRecs) return -1;
-        const int get_slot = ground ? 0x10 / 4 : 0x14 / 4;  // as SingleMission calls them (§28.7d)
-        for (int i = 0; i < count; ++i) {
-            void* rec = nullptr;
-            reinterpret_cast<Get_t>(vtable_slot(cls, get_slot))(cls, nullptr, i, &rec);
-            if (!rec) return -1;
-            const BYTE* r = static_cast<const BYTE*>(rec);
-            Rec& o = out[i];
-            o.ptr = reinterpret_cast<uintptr_t>(rec);
-            o.category = ground ? *reinterpret_cast<const short*>(r + kGroundCategory) : 0;
-            if (o.category < 0 || o.category > 255) return -1;
-            const wchar_t* type = reinterpret_cast<const wchar_t*>(r + kRecName);
-            int k = 0;
-            for (; k < 63 && type[k]; ++k) {
-                if (type[k] < 0x20 || type[k] > 0x7e) return -1;
-                o.name[k] = type[k];
-            }
-            o.name[k] = 0;
-            if (k == 0) return -1;
-            const wchar_t* path = reinterpret_cast<const wchar_t*>(r + (ground ? kGroundPath : kAircraftPath));
-            int p = 0;
-            for (; p < 259 && path[p]; ++p) {
-                if (path[p] < 0x20) return -1;
-                o.path[p] = path[p];
-            }
-            o.path[p] = 0;
+        o->name[k] = 0;
+        if (k == 0) return false;
+        const wchar_t* path = reinterpret_cast<const wchar_t*>(r + (ground ? kGroundPath : kAircraftPath));
+        int q = 0;
+        for (; q < 259 && path[q]; ++q) {
+            if (path[q] < 0x20) return false;
+            o->path[q] = path[q];
         }
-        return count;
+        o->path[q] = 0;
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return -1;
+        return false;
     }
+}
+
+// SEH only, plain reads: whether the word at p equals want.
+bool word_is(const void* p, const void* want) {
+    __try {
+        return *static_cast<void* const*>(p) == want;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+}  // namespace
+
+bool type_manager_verified(const TypeManagerSpec& s, void** out) {
+    *out = nullptr;
+    HMODULE m = GetModuleHandleW(s.module);
+    if (!m || !is_expected_build(m, s.stamp, s.size, s.module_name)) return false;
+    void* obj = at_rva(m, s.object);
+    void* vt = at_rva(m, s.vtable);
+    // The object is the type manager the class factory hands out (factory slot +0x10 returns factory + 4), its vtable
+    // is the analysed one, and the two slots we call are the analysed functions: nothing unverified is ever called.
+    if (!word_is(obj, vt) || !word_is(static_cast<BYTE*>(vt) + 4 * s.count_slot, at_rva(m, s.count_fn)) ||
+        !word_is(static_cast<BYTE*>(vt) + 4 * s.get_slot, at_rva(m, s.get_fn)))
+        return false;
+    *out = obj;
+    return true;
+}
+
+namespace {
+
+// Menu thread only (the get slot writes the manager's "current" field, as the game's own loops do): the records of
+// one type manager, verified before any call. -1 when not as analysed.
+int read_class(bool ground, Rec* out) {
+    const TypeManagerSpec& spec = ground ? kGroundTypes : kAircraftTypes;
+    void* mgr = nullptr;
+    if (!type_manager_verified(spec, &mgr)) return -1;
+    using Count_t = int(__fastcall*)(void* self, void* edx);                       // thiscall, no arguments
+    using Get_t = int(__fastcall*)(void* self, void* edx, int index, void** rec);  // thiscall (index, &rec)
+    const int count = reinterpret_cast<Count_t>(vtable_slot(mgr, spec.count_slot))(mgr, nullptr);
+    if (count <= 0 || count > kMaxRecs) return -1;
+    for (int i = 0; i < count; ++i) {
+        void* rec = nullptr;
+        if (!reinterpret_cast<Get_t>(vtable_slot(mgr, spec.get_slot))(mgr, nullptr, i, &rec) || !rec) return -1;
+        if (!copy_record(rec, ground, &out[i])) return -1;
+    }
+    return count;
 }
 
 std::string narrow_name(const wchar_t* w) {
@@ -217,25 +241,35 @@ std::wstring record_dir(const wchar_t* path) {
 
 }  // namespace
 
-std::vector<ContentEntry> gen_local_inventory(std::string* why) {
-    std::vector<ContentEntry> out;
-    if (!is_expected_build(GetModuleHandleW(L"ObjectManager.dll"), kOmStamp, kOmSize, "ObjectManager.dll")) {
-        *why = "ObjectManager.dll is not the expected build";
-        return out;
-    }
+bool gen_walk_types(std::vector<TypeRecord>* out, std::string* why) {
+    out->clear();
     std::vector<Rec> recs(kMaxRecs);
     for (const bool ground : {false, true}) {
-        const int n = read_class(ground ? L"GroundObject" : L"AircraftObject", ground, recs.data());
+        const int n = read_class(ground, recs.data());
         if (n < 0) {
             *why = ground ? "the ground object type records are not as expected" : "the aircraft type records are not as expected";
-            out.clear();
-            return out;
+            out->clear();
+            return false;
         }
         for (int i = 0; i < n; ++i) {
-            const std::string name = narrow_name(recs[i].name);
-            if (!content_name_ok(name)) continue;
-            out.push_back({ground ? 'G' : 'A', name, content_hash_in(ground ? 'G' : 'A', record_dir(recs[i].path), name)});
+            TypeRecord r;
+            r.kind = ground ? 'G' : 'A';
+            r.name = narrow_name(recs[i].name);
+            r.dir = record_dir(recs[i].path);
+            r.ptr = recs[i].ptr;
+            r.category = recs[i].category;
+            out->push_back(std::move(r));
         }
+    }
+    return true;
+}
+
+std::vector<ContentEntry> gen_hash_types(const std::vector<TypeRecord>& types) {
+    std::vector<ContentEntry> out;
+    out.reserve(types.size());
+    for (const TypeRecord& r : types) {
+        if (!content_name_ok(r.name)) continue;
+        out.push_back({r.kind, r.name, content_hash_in(r.kind, r.dir, r.name)});
     }
     return out;
 }
@@ -254,11 +288,22 @@ void gen_inventory_start() {
     if (g_job) return;
     g_job = std::make_shared<InventoryJob>();
     std::shared_ptr<InventoryJob> job = g_job;
+    // The record walk calls the type managers: here, on the menu thread. The worker only reads files (the file
+    // manager is safe from any thread).
+    std::vector<TypeRecord> types;
+    std::string walk_why;
+    if (!gen_walk_types(&types, &walk_why)) {
+        LOG("gen filter: this PC's inventory could not be built (%s)", walk_why.c_str());
+        std::lock_guard<std::mutex> lock(job->mx);
+        job->why = walk_why;
+        job->done = true;
+        return;
+    }
     try {
-        std::thread([job] {
+        std::thread([job, types = std::move(types)] {
             const ULONGLONG t0 = GetTickCount64();
             std::string why;
-            std::vector<ContentEntry> e = gen_local_inventory(&why);
+            std::vector<ContentEntry> e = gen_hash_types(types);
             size_t aircraft = 0, missing = 0;
             for (const auto& x : e) {
                 aircraft += x.kind == 'A';
@@ -302,33 +347,28 @@ bool gen_filter_apply(const SharedTypes& s, std::string* why) {
         *why = "ObjectManager.dll is not the expected build";
         return false;
     }
-    std::vector<Rec> recs(kMaxRecs);
+    std::vector<TypeRecord> types;
+    if (!gen_walk_types(&types, why)) return false;
     std::vector<uintptr_t> subs, ground_recs;
     std::vector<int> ground_idx;
     size_t aircraft_kept = 0, ground_kept = 0;
-    const int na = read_class(L"AircraftObject", false, recs.data());
-    if (na < 0) {
-        *why = "the aircraft type records are not as expected";
-        return false;
-    }
-    for (int i = 0; i < na; ++i) {
-        if (shared_has(s.aircraft, narrow_name(recs[i].name)))
-            ++aircraft_kept;
-        else
-            subs.push_back(recs[i].ptr + kAircraftSub);
-    }
-    const int ng = read_class(L"GroundObject", true, recs.data());
-    if (ng < 0) {
-        *why = "the ground object type records are not as expected";
-        return false;
-    }
-    for (int i = 0; i < ng; ++i) {
-        if (shared_has(s.ground, narrow_name(recs[i].name))) {
-            ++ground_kept;
+    int na = 0, ng = 0;
+    for (const TypeRecord& r : types) {
+        if (r.kind == 'A') {
+            ++na;
+            if (shared_has(s.aircraft, r.name))
+                ++aircraft_kept;
+            else
+                subs.push_back(r.ptr + kAircraftSub);
         } else {
-            subs.push_back(recs[i].ptr + kGroundSub);
-            ground_idx.push_back(i);
-            ground_recs.push_back(recs[i].ptr);
+            const int i = ng++;
+            if (shared_has(s.ground, r.name)) {
+                ++ground_kept;
+            } else {
+                subs.push_back(r.ptr + kGroundSub);
+                ground_idx.push_back(i);
+                ground_recs.push_back(r.ptr);
+            }
         }
     }
     std::sort(subs.begin(), subs.end());

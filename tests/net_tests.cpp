@@ -10568,6 +10568,11 @@ void mission_content_tests() {
 void gen_filter_tests() {
     std::printf("generator filter (shared types)\n");
     namespace hk = LazyWorks::SF2Patch::hooks;
+    // The type managers we call: the analysed slots, as SingleMission calls them (+0x3bc40 aircraft get at +0x14,
+    // +0x23d10 ground get at +0x10, count at slot 0), and objects that are factory + 4 (factory slot +0x10).
+    expect(hk::kAircraftTypes.get_slot * 4 == 0x14 && hk::kGroundTypes.get_slot * 4 == 0x10 && hk::kAircraftTypes.count_slot == 0 &&
+               hk::kGroundTypes.count_slot == 0 && hk::kAircraftTypes.object == 0xa7710 + 4 && hk::kGroundTypes.object == 0x4b290 + 4,
+           "filter: the type managers' slots and objects as analysed");
     const std::vector<hk::ContentEntry> host = {{'A', "F-4E", 1}, {'A', "F-105D", 2}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4},
                                                 {'W', "AIM-9B", 5}, {'A', "Mirage", 0}};
     const std::vector<hk::ContentEntry> c1 = {{'A', "f-4e", 1}, {'A', "F-105D", 9}, {'G', "SA-2", 3}, {'G', "ZSU-23", 4}, {'A', "MiG-21", 7}};

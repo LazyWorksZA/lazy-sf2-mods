@@ -172,71 +172,22 @@ uint32_t hash_weapon(const std::string& name) {
     return 0;
 }
 
-constexpr int kPoolLine = 80, kPoolMax = 20000;
-
-// SEH only (no C++ objects): the records as "category:name" lines into lines[kPoolMax][kPoolLine]. -1 when not as
-// expected.
-int read_ground_pool(char* lines) {
-    HMODULE om = GetModuleHandleW(L"ObjectManager.dll");
-    if (!om) return -1;
-    const BYTE* mgr = static_cast<const BYTE*>(at_rva(om, 0x234d0));
-    __try {
-        if (*reinterpret_cast<void* const*>(mgr) != at_rva(om, 0x1d55c)) return -1;
-        const uint32_t n = *reinterpret_cast<const uint32_t*>(mgr + 0x08);
-        const BYTE* arr = *reinterpret_cast<const BYTE* const*>(mgr + 0x0c);
-        if (!arr || n == 0 || n > 64) return -1;
-        void* cls = nullptr;
-        for (uint32_t i = 0; i < n && !cls; ++i) {
-            const wchar_t* name = *reinterpret_cast<const wchar_t* const*>(arr + 0x10 * i + 0x08);
-            if (name && _wcsnicmp(name, L"GroundObject", 12) == 0 && (name[12] == 0 || name[12] == L'.'))
-                cls = *reinterpret_cast<void* const*>(arr + 0x10 * i);
-        }
-        if (!cls) return -1;
-        using Count_t = int(__fastcall*)(void*, void*);
-        using Get_t = void(__fastcall*)(void*, void*, int, void**);
-        const int count = reinterpret_cast<Count_t>(vtable_slot(cls, 0))(cls, nullptr);
-        if (count <= 0 || count > kPoolMax) return -1;
-        for (int i = 0; i < count; ++i) {
-            void* rec = nullptr;
-            reinterpret_cast<Get_t>(vtable_slot(cls, 0x10 / 4))(cls, nullptr, i, &rec);
-            if (!rec) return -1;
-            const BYTE* r = static_cast<const BYTE*>(rec);
-            const short category = *reinterpret_cast<const short*>(r + 0xbe4);
-            const wchar_t* type = reinterpret_cast<const wchar_t*>(r + 0x04);
-            if (category < 0 || category > 255) return -1;
-            char* line = lines + static_cast<size_t>(i) * kPoolLine;
-            int k = std::snprintf(line, kPoolLine, "%d:", static_cast<int>(category));
-            for (int c = 0; c < 64 && type[c] && k < kPoolLine - 1; ++c) {
-                if (type[c] < 0x20 || type[c] > 0x7e) return -1;  // not a type record as analysed
-                line[k++] = static_cast<char>(type[c] >= 'A' && type[c] <= 'Z' ? type[c] + 32 : type[c]);
-            }
-            line[k] = 0;
-            if (k <= 2) return -1;
-        }
-        return count;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return -1;
-    }
-}
-
-// The ground object types the game picks from (by category, at generate and at the flight's start): the type
-// records of the GroundObject class, read from ObjectManager's class table (see lazy-sf2-recon: recon-notes §20,
-// §28.7d). The pool hash covers each record's category and name. 0 when anything is not as expected (fails closed).
+// The ground object types the game picks from (by category, at generate and at the flight's start): the records of
+// the verified GroundObject type manager (gen_filter.cpp; menu thread only). The pool hash covers each record's
+// category and name. 0 when they are not as analysed (fails closed: never a match).
 thread_local const SharedTypes* g_pool_filter = nullptr;  // a filtered mission: only the shared types are in its pool
 
 uint32_t ground_pool_hash() {
-    if (!is_expected_build(GetModuleHandleW(L"ObjectManager.dll"), 0x51d21fa8, 0x28000, "ObjectManager.dll")) return 0;
-    std::vector<char> buf(static_cast<size_t>(kPoolMax) * kPoolLine, 0);
-    const int n = read_ground_pool(buf.data());
-    if (n <= 0) return 0;
+    std::vector<TypeRecord> types;
+    std::string why;
+    if (!gen_walk_types(&types, &why)) return 0;
     std::vector<std::string> items;
-    items.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        const char* line = buf.data() + static_cast<size_t>(i) * kPoolLine;
-        const char* colon = std::strchr(line, ':');
-        if (g_pool_filter && (!colon || !shared_has(g_pool_filter->ground, colon + 1))) continue;
-        items.emplace_back(line);
+    for (const TypeRecord& r : types) {
+        if (r.kind != 'G') continue;
+        if (g_pool_filter && !shared_has(g_pool_filter->ground, r.name)) continue;
+        items.push_back(std::to_string(r.category) + ":" + acmi::to_lower_ascii(r.name));
     }
+    if (items.empty()) return 0;
     std::sort(items.begin(), items.end());
     uint32_t h = kSeed;
     for (const auto& s : items) h = content_fnv(h, reinterpret_cast<const uint8_t*>(s.c_str()), s.size() + 1);
