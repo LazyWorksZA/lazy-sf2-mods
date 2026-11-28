@@ -48,33 +48,51 @@ bool read_loose(const std::wstring& path, std::vector<uint8_t>* out) {
 // lazy-sf2-recon: recon-notes §21.4 and the start-up table (the player's folder overrides the game folder; the file
 // manager's Open +0x94e0 tries the loose file, then the mounted cats by bare name, newest cat first).
 thread_local const char* g_source = nullptr;  // per thread: the inventory is built on a worker
+thread_local bool g_trace = false;  // log every file read, its source, size and hash (the theatre entry)
 
-// rel: a path under the game folder, as "Objects\Aircraft\F-4E\F-4E.ini".
-bool read_content_file(const std::wstring& rel, std::vector<uint8_t>* out) {
-    if (rel.size() > 2 && rel[1] == L':') {  // a type record's own folder (absolute): that loose file, else the cats
+// Where rel was found (nullptr: nowhere); rel is a path under the game folder, as "Objects\Aircraft\F-4E\F-4E.ini",
+// or a type record's own (absolute) folder.
+const char* find_content_file(const std::wstring& rel, std::vector<uint8_t>* out) {
+    if (rel.size() > 2 && rel[1] == L':') {  // that loose file, else the cats
         const DWORD a = GetFileAttributesW(rel.c_str());
         const bool loose = a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-        if (!(loose ? read_loose(rel, out) : read_game_file(rel, *out))) return false;
-        if (!g_source) {
-            const std::wstring user = config::game_data_dir();
-            g_source = !loose ? "a cat"
-                       : !user.empty() && _wcsnicmp(rel.c_str(), user.c_str(), user.size()) == 0 ? "mod folder"
-                                                                                               : "game folder";
-        }
-        return true;
+        if (!(loose ? read_loose(rel, out) : read_game_file(rel, *out))) return nullptr;
+        const std::wstring user = config::game_data_dir();
+        return !loose ? "a cat"
+               : !user.empty() && _wcsnicmp(rel.c_str(), user.c_str(), user.size()) == 0 ? "mod folder"
+                                                                                       : "game folder";
     }
     const std::wstring user = config::game_data_dir();
-    if (!user.empty() && read_loose(user + L"\\" + rel, out)) {
-        if (!g_source) g_source = "mod folder";
-        return true;
-    }
+    if (!user.empty() && read_loose(user + L"\\" + rel, out)) return "mod folder";
     const std::wstring game = game_dir();
-    if (game.empty()) return false;
+    if (game.empty()) return nullptr;
     const std::wstring full = game + L"\\" + rel;
     const DWORD a = GetFileAttributesW(full.c_str());
-    if (!read_game_file(full, *out)) return false;
-    if (!g_source) g_source = a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) ? "game folder" : "a cat";
-    return true;
+    if (!read_game_file(full, *out)) return nullptr;
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) ? "game folder" : "a cat";
+}
+
+bool read_content_file(const std::wstring& rel, std::vector<uint8_t>* out) {
+    const char* from = find_content_file(rel, out);
+    if (g_trace) {
+        if (from)
+            LOG("lobby: content file %ls: %s, %zu bytes, hash 0x%08lx", rel.c_str(), from, out->size(),
+                static_cast<unsigned long>(content_fnv(0x811C9DC5u, out->data(), out->size())));
+        else
+            LOG("lobby: content file %ls: not found (mod folder, game folder, mounted cats)", rel.c_str());
+    }
+    if (from && !g_source) g_source = from;
+    return from != nullptr;
+}
+
+/// <summary>The theatre entry's hash with every file it reads logged (once per listing or check).</summary>
+uint32_t hash_theatre(const std::string& map, std::vector<std::string>* ground);
+uint32_t traced_theatre(const std::string& map) {
+    g_trace = true;
+    const uint32_t h = hash_theatre(map, nullptr);
+    g_trace = false;
+    LOG("lobby: theatre %s: entry hash 0x%08lx", map.c_str(), static_cast<unsigned long>(h));
+    return h;
 }
 
 uint32_t add_file(uint32_t h, const std::string& name, const std::vector<uint8_t>& bytes) {
@@ -242,7 +260,7 @@ std::vector<ContentEntry> mission_content(const std::vector<uint8_t>& msn, const
     };
     // The theatre's types file names ground object categories (SAMLauncher, AAA), not object folders: the objects are
     // picked at run time, so they are compared through the theatre entry (its types file) only.
-    if (!uses.theatre.empty()) out.push_back({'T', uses.theatre, hash_theatre(uses.theatre, nullptr)});
+    if (!uses.theatre.empty()) out.push_back({'T', uses.theatre, traced_theatre(uses.theatre)});
     std::vector<std::string> weapons, dropped = uses.dropped;
     for (const auto& [type, loadout] : uses.aircraft) {
         acmi::Ini main;
@@ -320,7 +338,13 @@ std::string mission_content_check(const std::string& sidecar_text) {
     std::string sources;  // where this PC's differing or missing entries came from, for tracing a mismatch to a mod
     for (const auto& e : host) {
         const char* from = nullptr;
+        if (e.kind == 'T') g_trace = true;
         mine.push_back({e.kind, e.name, content_entry_hash(e.kind, e.name, &from)});
+        if (e.kind == 'T') {
+            g_trace = false;
+            LOG("lobby: theatre %s: entry hash 0x%08lx here, 0x%08lx at the host", e.name.c_str(),
+                static_cast<unsigned long>(mine.back().hash), static_cast<unsigned long>(e.hash));
+        }
         if (e.hash != 0 && mine.back().hash != e.hash)
             sources += (sources.empty() ? "" : ", ") + std::string(1, e.kind) + ":" + e.name + " (" +
                        (mine.back().hash ? from : "not found") + ")";

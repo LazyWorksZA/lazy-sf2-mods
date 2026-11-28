@@ -769,7 +769,20 @@ std::string content_check_here(const std::string& sidecar) {
     static std::string logged;  // selected at every check (another theatre may have been selected since): logged on change
     WorldSidecar side;
     std::string err;
-    if (parse_sidecar(sidecar, &side, &err) && !side.theatre.empty() && theatre_installed(side.theatre)) {
+    const bool parsed = parse_sidecar(sidecar, &side, &err);
+    const bool installed = parsed && !side.theatre.empty() && theatre_installed(side.theatre);
+    if (!installed) {
+        const std::string note = "?" + side.theatre;
+        if (logged != note) {
+            logged = note;
+            LOG("world: join: no theatre selected for the content check: %s",
+                !parsed ? ("the sidecar did not parse (" + err + ")").c_str()
+                : side.theatre.empty() ? "the sidecar names no theatre"
+                                       : (side.theatre + " is not in Terrains (no folder, no cat, not in the player's "
+                                                         "folder)").c_str());
+        }
+    }
+    if (installed) {
         const bool ok = lobby_select_theatre(side.theatre);
         const std::string note = (ok ? "+" : "-") + side.theatre;
         if (logged != note) {
@@ -876,6 +889,10 @@ bool theatre_installed(const std::string& theatre) {
         const std::wstring game = dir + L"\\Terrains\\" + t;
         const DWORD a = GetFileAttributesW(game.c_str());
         if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) return true;
+        // A stock theatre is Terrains\<name>.cat, no folder; the game lists it from that cat and mounts it only when
+        // the theatre is selected. See lazy-sf2-recon: recon-notes, the terrain list manager.
+        const DWORD c = GetFileAttributesW((game + L".cat").c_str());
+        if (c != INVALID_FILE_ATTRIBUTES && !(c & FILE_ATTRIBUTE_DIRECTORY)) return true;
         if (read_game_file(game + L"\\" + t + L".ini", bytes)) return true;  // also finds a stock theatre in a cat
     }
     PWSTR saved = nullptr;
