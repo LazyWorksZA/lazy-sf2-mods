@@ -532,7 +532,7 @@ void world_avatar_refresh(int peer, void* avatar);
 /// <summary>world_sync.cpp, game thread, the player's step: sends our JetAnim (20 Hz, unreliable).</summary>
 using AnimSendFn = bool (*)(const uint8_t* data, size_t len);
 void world_anim_tick(void* player, uint16_t own_peer, AnimSendFn send);
-/// <summary>pilot_head.cpp: hooks the AircraftObject.dll pilot system (verified build) so a remote avatar's pilot head
+/// <summary>pilot_head.cpp: hooks the AircraftPilotClass head step in AircraftObject.dll (verified build) so a remote avatar's pilot head
 /// follows world_head_target. Called with the tracker's other AircraftObject hooks.</summary>
 bool pilot_head_install(HMODULE aircraft_dll);
 void pilot_head_remove(HMODULE aircraft_dll);

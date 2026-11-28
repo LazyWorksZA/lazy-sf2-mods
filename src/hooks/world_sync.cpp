@@ -2460,8 +2460,20 @@ void world_avatar_tick(void* player, uint16_t own_peer, AvatarSendFn send) {
 
 void world_avatar_resend() { g_atx.have = false; }
 
+namespace {
+// The aircraft that is each peer's avatar here, for the pilot head sync, and the aircraft generation it was bound
+// at: any aircraft destroyed since means the address may be another aircraft's, until the avatar's next step rebinds.
+const void* g_head_obj[5] = {};
+uint32_t g_head_gen[5] = {};
+void head_bind(int peer, const void* avatar) {
+    g_head_obj[peer] = avatar;
+    g_head_gen[peer] = g_aircraft_generation.load(std::memory_order_acquire);
+}
+}  // namespace
+
 void world_avatar_forget(int peer) {
     if (peer >= 0 && peer < 5) {
+        g_head_obj[peer] = nullptr;
         g_arx[peer] = net::AvatarStateMsg{};
         g_arx_have[peer] = false;
     }
@@ -2469,6 +2481,7 @@ void world_avatar_forget(int peer) {
 
 void world_avatar_session_reset() {
     g_atx = AvatarTx{{}, false, 0, sim_player_epoch(), 0};  // our state goes out again
+    for (auto& o : g_head_obj) o = nullptr;
     for (auto& p : g_arx) p = net::AvatarStateMsg{};
     for (bool& h : g_arx_have) h = false;
     hits_session_reset();
@@ -2496,7 +2509,6 @@ struct AnimRx {
     ULONGLONG at = 0;  // wall ms of the newest
 };
 AnimRx g_anim[5];
-const void* g_head_obj[5] = {};  // the aircraft that is each peer's avatar here, for the pilot head sync
 uint32_t g_anim_epoch = 0xffffffffu;
 struct AnimTx {
     uint16_t seq = 0;
@@ -2593,7 +2605,7 @@ void world_anim_apply(const uint8_t* data, size_t len, void* avatar) {
         }
         return;
     }
-    g_head_obj[m.peer] = avatar;
+    head_bind(m.peer, avatar);
     anim_write(avatar, m);
     if (!r.logged) {
         r.logged = true;
@@ -2608,6 +2620,7 @@ bool world_head_target(const void* obj, float* yaw, float* pitch) {
     if (!obj || g_anim_epoch != sim_player_epoch()) return false;
     for (int p = 0; p < 5; ++p) {
         if (g_head_obj[p] != obj) continue;
+        if (g_head_gen[p] != g_aircraft_generation.load(std::memory_order_acquire)) return false;
         const AnimRx& r = g_anim[p];
         if (!r.have || !pilot_head::look_fresh(GetTickCount64(), r.at, kAnimFreshMs)) return false;
         return pilot_head::target_from_anim(r.m, yaw, pitch);
@@ -2618,7 +2631,7 @@ bool world_head_target(const void* obj, float* yaw, float* pitch) {
 void world_avatar_refresh(int peer, void* avatar) {
     if (peer < 0 || peer >= 5 || !avatar) return;
     anim_epoch_check();
-    if (avatar != world_player_object()) g_head_obj[peer] = avatar;
+    if (avatar != world_player_object()) head_bind(peer, avatar);
     const AnimRx& r = g_anim[peer];
     if (r.have && GetTickCount64() - r.at <= kAnimFreshMs) {  // the newest inputs, again after the avatar's update
         anim_write(avatar, r.m);
